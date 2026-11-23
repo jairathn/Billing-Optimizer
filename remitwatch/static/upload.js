@@ -489,20 +489,27 @@
   const linesHtml = ls => (ls || []).length ? `<ul>${ls.map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : '';
 
   // ----------------------------------------------------------------------------------- the checklist of exports
+  // a row's chip and the colour of its state line, from the server's flag (older servers: from overdue and waiting)
+  const rowFlag = e => e.flag || (e.waiting ? 'waiting' : e.overdue ? 'overdue' : 'fresh');
+  const FLAG_TONE = {fresh: 'ok', waiting: 'warn', held: 'warn', unread: 'warn', overdue: 'no', stuck: 'no'};
+  const FLAG_CHIP = {fresh: 'fresh', waiting: 'waiting', held: 'held', unread: 'unread', overdue: 'overdue', stuck: 'stuck'};
+  const arrivedHtml = e => `<div>${esc(e.last_line)}</div><div class="status-line ${FLAG_TONE[rowFlag(e)] || ''}">${esc(e.state_line)}</div>`
+    + (e.host_line ? `<div class="small warn" data-host>${esc(e.host_line)}</div>` : '');
+
   function exportRow(e) {
     const cols = e.columns.map(c => `<li><b>${esc(c.column)}</b>${c.why ? ': ' + esc(c.why) : ''}</li>`).join('');
     const h = e.howto || {};
     const who = h.at ? `Saved ${esc(when(h.at))}${h.name ? ' by ' + esc(h.name) : ''}${h.by ? ' (signed in as ' + esc(h.by) + ')' : ''}.` : '';
     return `<div class="export" data-key="${esc(e.key)}">
       <div>
-        <div class="top"><h3>${esc(e.title)}</h3>${chip(e.waiting ? 'waiting' : e.overdue ? 'overdue' : 'fresh')}</div>
+        <div class="top"><h3>${esc(e.title)}</h3>${chip(FLAG_CHIP[rowFlag(e)] || 'fresh')}</div>
         <div class="big" style="margin-top:4px">${esc(e.purpose)}</div>
         <dl>
           <dt>Filters</dt><dd><ul>${e.filters.map(f => `<li>${esc(f)}</li>`).join('')}</ul></dd>
           <dt>Columns</dt><dd>${esc(e.columns_note || '')} <details><summary class="small">The ${e.columns.length} columns it must have (checked when you drop it)</summary><ul class="cols">${cols}</ul></details></dd>
           <dt>Format</dt><dd>${esc(e.format)}</dd>
           <dt>How often</dt><dd>${esc(e.cadence)}</dd>
-          <dt>Last arrived</dt><dd><div>${esc(e.last_line)}</div><div class="status-line ${e.waiting ? 'warn' : e.overdue ? 'no' : 'ok'}">${esc(e.state_line)}</div></dd>
+          <dt>Last arrived</dt><dd data-arrived>${arrivedHtml(e)}</dd>
         </dl>
       </div>
       <div>
@@ -512,11 +519,18 @@
           <div class="small muted">${who}${h.versions ? ` <a href="#" data-hist>${h.versions} earlier version${h.versions === 1 ? '' : 's'}</a>` : ''}</div>
           <div class="hist" hidden></div>
         </div>
-        <div class="row" style="margin-top:12px"><span class="attach"><button class="primary">Upload the ${esc(e.title)}</button>
-          <input type="file" data-upload="${esc(e.key)}" accept=".xlsx,.csv,.tsv,.txt,.zip" aria-label="Upload the ${esc(e.title)}"></span></div>
+        <div class="row" style="margin-top:12px"><span class="attach"><button type="button" class="primary" data-pick>Upload the ${esc(e.title)}</button>
+          <input type="file" tabindex="-1" data-upload="${esc(e.key)}" accept=".xlsx,.csv,.tsv,.txt,.zip" aria-label="Upload the ${esc(e.title)}"></span></div>
         <div class="row-now"></div>
       </div>
     </div>`;
+  }
+
+  // a button that opens its file input: the input lies over it for the mouse, and the button takes the keyboard (Enter or
+  // Space), so the chooser opens either way and the tab order holds one stop, not two
+  function bindPick(span) {
+    const b = span && span.querySelector('button'), inp = span && span.querySelector('input[type=file]');
+    if (b && inp) b.onclick = () => inp.click();
   }
 
   async function loadExports() {
@@ -524,10 +538,15 @@
     catch (e) { $('#exports').innerHTML = `<div class="no small" style="margin-top:10px">${esc(e.message)}</div>`; return; }
     info.show_phi = EX.show_phi;
     $('#exports').innerHTML = EX.exports.map(exportRow).join('');
-    const late = EX.exports.filter(e => e.overdue).length;           // a report received and waiting to be read is not late
-    $('#exportsNote').textContent = late ? `${late} of 5 overdue` : 'All five up to date';
+    exportsNote(EX.exports);
     if (EX.mode === 'serverless') $('#dropHint').textContent = "EMA's reports and exports (Excel or CSV, any size), remittance (835) and claim (837) files and a .zip of those. Visit notes are uploaded on the practice's own server.";
     $('#exports').querySelectorAll('.export').forEach(bindExportRow);
+  }
+
+  // the line beside the checklist's title: how many rows need a pull (a report received and waiting to be read is not late)
+  function exportsNote(rows) {
+    const late = rows.filter(e => e.overdue).length, stuck = rows.filter(e => !e.overdue && e.stuck).length;
+    $('#exportsNote').textContent = late ? `${late} of 5 overdue` : stuck ? `${stuck} upload${stuck === 1 ? '' : 's'} not read yet` : 'All five up to date';
   }
 
   // after an upload: each row's chip, last arrival and state again, leaving the rows (and the upload cards in them) in place
@@ -538,17 +557,16 @@
     ex.exports.forEach(e => {
       const el = document.querySelector(`.export[data-key="${e.key}"]`);
       if (!el) return;
-      el.querySelector('.top .chip').outerHTML = chip(e.waiting ? 'waiting' : e.overdue ? 'overdue' : 'fresh');
-      const dd = el.querySelector('.status-line').parentNode;
-      dd.innerHTML = `<div>${esc(e.last_line)}</div><div class="status-line ${e.waiting ? 'warn' : e.overdue ? 'no' : 'ok'}">${esc(e.state_line)}</div>`;
+      el.querySelector('.top .chip').outerHTML = chip(FLAG_CHIP[rowFlag(e)] || 'fresh');
+      el.querySelector('[data-arrived]').innerHTML = arrivedHtml(e);
     });
-    const late = ex.exports.filter(e => e.overdue).length;
-    $('#exportsNote').textContent = late ? `${late} of 5 overdue` : 'All five up to date';
+    exportsNote(ex.exports);
   }
 
   function bindExportRow(el) {
     const key = el.dataset.key;
     const e = EX.exports.find(x => x.key === key);
+    bindPick(el.querySelector('.attach'));
     el.querySelector('[data-upload]').onchange = ev => { const l = [...ev.target.files]; ev.target.value = ''; if (l.length) uploadAll(l, key, el.querySelector('.row-now')); };
     ['dragenter', 'dragover'].forEach(n => el.addEventListener(n, ev => { ev.preventDefault(); ev.stopPropagation(); el.classList.add('over'); }));
     ['dragleave', 'drop'].forEach(n => el.addEventListener(n, ev => { ev.preventDefault(); ev.stopPropagation(); el.classList.remove('over'); }));
@@ -574,23 +592,35 @@
     try { name = localStorage.getItem('remitwatch.howto.name') || ''; } catch (err) {}
     box.innerHTML = `<b class="small">How we pull this in our EMA</b>
       <div class="small muted" style="margin:4px 0">Write the steps the way the practice does them: where the report is in EMA, the filters, the columns, how it is saved. Anyone signed in can change it; earlier versions are kept.</div>
+      <div class="theirs" data-theirs hidden></div>
       <textarea maxlength="4000" aria-label="How we pull the ${esc(e.title)} in our EMA">${esc(h.text || '')}</textarea>
       <div class="row"><input placeholder="Your name (optional)" maxlength="60" value="${esc(name)}" aria-label="Your name">
         <button class="primary" data-save>Save</button><button data-cancel>Cancel</button></div>
       <div class="small" data-msg></div>`;
     box.querySelector('textarea').focus();
     box.querySelector('[data-cancel]').onclick = () => loadExports();
+    let base = h.at || '';
     box.querySelector('[data-save]').onclick = async () => {
       const text = box.querySelector('textarea').value, who = box.querySelector('input').value.trim();
       try { localStorage.setItem('remitwatch.howto.name', who); } catch (err) {}
       try {
-        await apiCall(`/api/ema/exports/${e.key}/howto`, {method: 'PUT', body: JSON.stringify({text, name: who, base_at: h.at || ''})});
+        await apiCall(`/api/ema/exports/${e.key}/howto`, {method: 'PUT', body: JSON.stringify({text, name: who, base_at: base})});
         loadExports();
       } catch (err) {
         const msg = box.querySelector('[data-msg]');
         msg.className = 'small no';
-        msg.textContent = 'Not saved: ' + err.message;
-        if (err.status === 409 && err.body && err.body.howto) { e.howto = err.body.howto; h.at = err.body.howto.at; }
+        if (err.status === 409 && err.body && err.body.howto) {
+          // someone saved the box after this person opened it: their text is shown above this person's draft, which is
+          // kept; the next Save replaces theirs with what is in the box now (the earlier versions stay in the history)
+          const t = err.body.howto;
+          e.howto = t; base = t.at || '';
+          const theirs = box.querySelector('[data-theirs]');
+          theirs.innerHTML = `<div class="small"><b>Saved meanwhile${t.at ? ' ' + esc(when(t.at)) : ''}${t.name ? ' by ' + esc(t.name) : ''}${t.by ? ' (signed in as ' + esc(t.by) + ')' : ''}:</b></div>`
+            + `<div class="text">${esc(t.text) || '<i>empty</i>'}</div>`;
+          theirs.hidden = false;
+          msg.textContent = 'Not saved: someone saved this box after you opened it. Their text is shown above, and yours is still in the box: '
+            + 'add what is missing from theirs, then press Save again.';
+        } else msg.textContent = 'Not saved: ' + err.message;
       }
     };
   }
@@ -692,10 +722,16 @@
   }
 
   class Rewind extends Error { constructor(index) { super('rewind'); this.index = index; } }
-  class Stop extends Error {}
+  class Fresh extends Error {}            // this upload cannot go on (its pieces were made by another browser, or are lost): send the file anew
+  class Stop extends Error {}             // stopped, and the card already says why
 
   async function sendInPieces(file, look, ui, warn) {
     const gz = !!(look.text && look.key && typeof CompressionStream !== 'undefined');
+    const stop = lines => { ui.buttons.innerHTML = ''; ui.set('stopped', lines.concat(warn)); };
+    const already = s => { ui.buttons.innerHTML = ''; ui.bar(1); ui.set('already', (s.lines || []).concat(warn), ''); ui.card.dataset.done = '1'; };
+    // a file this site's run could never read (Vercel reads at most cloud.MAX_FILE_BYTES of a file as it is sent) is not
+    // sent at all; one compressed on the way is checked by the server as its pieces arrive
+    if (!gz && EX && EX.read_max && file.size > EX.read_max) { stop([EX.read_max_line || 'This file is too big to read on this site.', 'Nothing was sent.']); return; }
     const gate = makeGate();
     const t0 = performance.now();
     const times = {};
@@ -710,62 +746,93 @@
     times.hash_ms = Math.round(performance.now() - t0);
     ui.card.dataset.sha256 = sha;
     // 2. start, or carry on, or "already have this"
+    const startBody = extra => JSON.stringify(Object.assign({name: file.name, size: file.size, gz, report_hint: look.hint || null, sha256: sha}, extra || {}));
     let st;
-    try { st = await apiCall('/api/uploads/start', {method: 'POST', body: JSON.stringify({name: file.name, size: file.size, gz, report_hint: look.hint || null, sha256: sha})}); }
-    catch (e) { ui.buttons.innerHTML = ''; ui.set('stopped', [e.message].concat(warn)); return; }
-    if (st.status === 'already') { ui.buttons.innerHTML = ''; ui.bar(1); ui.set('already', st.lines.concat(warn), ''); ui.card.dataset.done = '1'; return; }
-    const uid = st.upload_id;
+    try { st = await apiCall('/api/uploads/start', {method: 'POST', body: startBody()}); }
+    catch (e) { stop([e.message]); return; }
+    if (st.status === 'already') { already(st); return; }
+    let uid = st.upload_id;
     ui.card.dataset.uploadId = uid;
     let next = st.next_index || 0;
     let serverChunks = st.chunks || [];
-    if (st.status === 'resume') ui.what.textContent = (ui.what.textContent + ` Carrying on: ${next} piece${next === 1 ? '' : 's'} had arrived before.`).trim();
-    // 3. the pieces
-    let sentBytes = 0, pieces = 0, wire = 0, retries = 0;
-    for (let round = 0; ; round++) {
+    const what = ui.what.textContent;
+    if (st.status === 'resume') ui.what.textContent = (what + ` Carrying on: ${next} piece${next === 1 ? '' : 's'} had arrived before.`).trim();
+    // 3. the pieces, then 4. the server checks the whole file and hands it to the cycle. The server's own count of what
+    // arrived decides each time: pieces it lacks are sent, and an upload it cannot carry on is sent anew (at most twice)
+    let sentBytes = 0, pieces = 0, wire = 0, retries = 0, fresh = 0, fin = null;
+    for (let round = 0; round < 12 && !fin; round++) {
       try {
         ({sentBytes, pieces, wire} = await pump());
-        break;
+        times.send_ms = Math.round(performance.now() - t0 - times.hash_ms);
+        fin = await finish();
+        if (!fin) await reload();
       } catch (e) {
-        if (e instanceof Rewind && round < 3) {
-          const s = await apiCall(`/api/uploads/${uid}/status`).catch(() => null);
-          if (s) { next = s.next_index; serverChunks = s.chunks || []; }
+        if (e instanceof Stop) return;
+        if (e instanceof Rewind) { await reload(); continue; }
+        if (e instanceof Fresh && fresh < 2) {
+          fresh++;
+          let s;
+          try { s = await apiCall('/api/uploads/start', {method: 'POST', body: startBody({new: true})}); }
+          catch (err) { stop([err.message]); return; }
+          if (s.status === 'already') { already(s); return; }
+          uid = s.upload_id; ui.card.dataset.uploadId = uid; next = s.next_index || 0; serverChunks = s.chunks || [];
+          ui.what.textContent = (what + ' Sending it from the start: the upload of it that was cut off could not be carried on'
+            + (e.message ? ` (${e.message.replace(/[.\s]+$/, '')})` : '') + '.').trim();
+          pauseBtn();
           continue;
         }
-        ui.buttons.innerHTML = '';
-        ui.set('stopped', [e.message || String(e)].concat(warn));
+        stop([e.message || String(e)]);
         return;
       }
     }
-    times.send_ms = Math.round(performance.now() - t0 - times.hash_ms);
-    // 4. the server checks the whole file and hands it to the cycle
-    ui.buttons.innerHTML = '';
-    ui.set('verifying', warn, `Sent ${pieces} piece${pieces === 1 ? '' : 's'} (${mb(sentBytes)}${gz ? ', compressed from ' + mb(file.size) : ''}). The server is checking the whole file…`);
-    let fin;
-    for (let attempt = 0; ; attempt++) {
-      try { fin = await apiCall(`/api/uploads/${uid}/finish`, {method: 'POST', body: JSON.stringify({sha256: sha, chunks: pieces, bytes: sentBytes})}); break; }
-      catch (e) {
-        if (e.status === 422) { ui.set('refused', [(e.body && e.body.detail) || e.message].concat(warn)); return; }
-        if (e.status && e.status < 500 && e.status !== 409) { ui.set('stopped', [e.message].concat(warn)); return; }
-        if (attempt >= 3) { ui.set('stopped', [e.message, 'Choose the same file again to carry on.'].concat(warn)); return; }
-        await sleep(2000 * (attempt + 1));
-      }
-    }
+    if (!fin) { stop(['The upload could not be finished just now. Choose the same file again to carry on.']); return; }
     times.total_ms = Math.round(performance.now() - t0);
-    ui.card.dataset.times = JSON.stringify(Object.assign(times, {pieces, sent_bytes: sentBytes, size: file.size, gz, retries}));
+    ui.card.dataset.times = JSON.stringify(Object.assign(times, {pieces, sent_bytes: sentBytes, size: file.size, gz, retries, fresh}));
     ui.card.dataset.done = '1';
     showResult(ui, fin, warn);
     if (fin.state === 'finished' && !fin.applied) follow(ui, uid, warn);
 
+    // what the server holds of this upload now: the pieces to compare with, and the first one it lacks
+    async function reload() {
+      const s = await apiCall(`/api/uploads/${uid}/status`).catch(() => null);
+      if (s && s.state === 'receiving') { next = s.next_index; serverChunks = s.chunks || []; }
+    }
+
+    // the finish: the upload as the server now describes it, or null when it lacks pieces (sent next round)
+    async function finish() {
+      ui.buttons.innerHTML = '';
+      ui.set('verifying', warn, `Sent ${pieces} piece${pieces === 1 ? '' : 's'} (${mb(sentBytes)}${gz ? ', compressed from ' + mb(file.size) : ''}). The server is checking the whole file…`);
+      for (let attempt = 0; ; attempt++) {
+        try { return await apiCall(`/api/uploads/${uid}/finish`, {method: 'POST', body: JSON.stringify({sha256: sha, chunks: pieces, bytes: sentBytes})}); }
+        catch (e) {
+          if (e.status === 422) { ui.set('refused', [(e.body && e.body.detail) || e.message].concat(warn)); throw new Stop(); }
+          if (e.body && e.body.restart) throw new Fresh();
+          if (e.status === 409) {
+            // the server counts what arrived otherwise than this page: its count decides
+            const s = await apiCall(`/api/uploads/${uid}/status`).catch(() => null);
+            if (s && s.state && s.state !== 'receiving') return s;              // finished already: an answer that was lost
+            if (s && s.received < pieces) return null;                          // it lacks pieces: they are sent again
+            if (s && s.received === pieces && s.bytes !== sentBytes && attempt < 3) { sentBytes = s.bytes; continue; }
+          }
+          if (e.status && e.status < 500 && e.status !== 409) { stop([e.message]); throw new Stop(); }
+          if (attempt >= 3) { stop([e.message, 'Choose the same file again to carry on.']); throw new Stop(); }
+          await sleep(2000 * (attempt + 1));
+        }
+      }
+    }
+
     async function pump() {
       let index = 0, sent = 0, read = 0, wireBytes = 0;
-      const plainFrom = gz ? 0 : next * CHUNK;                 // a plain file is cut where the server stopped; a compressed one is made again
-      if (!gz) { index = next; sent = next * CHUNK; read = plainFrom; }
+      // a plain file is cut where the server stopped (every piece before the last is exactly CHUNK long, so that is
+      // next * CHUNK, never past the file's end); a compressed one is made again and compared piece by piece
+      const plainFrom = gz ? 0 : Math.min(next * CHUNK, file.size);
+      if (!gz) { index = next; sent = plainFrom; read = plainFrom; }
       const total = gz ? 0 : Math.ceil(file.size / CHUNK);
       ui.set('sending', warn);
       for await (const {data, last} of cutPieces(sourceStream(file, gz, plainFrom, n => { read += n; }))) {
         const hex = sha256Hex(data);
-        if (index < next) {                                    // already on the server: the same bytes, or start again
-          if (serverChunks[index] !== hex) throw new Error('This file is not the one whose upload was cut off (its compressed pieces differ). Choose it again to send it from the start.');
+        if (index < next) {                                    // on the server already: the same bytes, or the file is sent anew
+          if (serverChunks[index] !== hex) throw new Fresh('its pieces were compressed by another browser or computer');
           index++; sent += data.length; continue;
         }
         await gate.pass();
@@ -786,6 +853,7 @@
           try { j = await r.json(); } catch (e) {}
         } catch (e) { r = null; }
         if (r && r.ok) return j;
+        if (r && j && j.restart) throw new Fresh();           // the upload cannot go on: the file is sent anew
         if (r && r.status === 409 && j && j.next_index != null) {
           if (j.next_index > index) return j;                  // the server had it already: an answer that was lost
           if (j.next_index < index) throw new Rewind(j.next_index);
@@ -891,7 +959,8 @@
       <tbody>${n.items.map(i => `<tr><td>${esc(day(i.appeal_deadline)) || '<span class="muted">unknown</span>'}</td><td>${esc(day(i.service_date))}</td><td>${esc(i.claim_id || '')}</td>${phi ? `<td>${esc(i.patient || '')}</td>` : ''}
         <td class="hide-sm">${esc(i.payer_group || '')}</td><td class="hide-sm">${esc(i.code || '')}</td><td class="num">${money(i.cents)}</td>
         <td>${i.note === 'found' ? '<span class="ok">uploaded</span>' : i.note === 'ambiguous' ? '<span class="warn">uploaded: confirm or pick it in the item</span>'
-          : `<span class="attach"><button class="small">Attach note</button><input type="file" data-fid="${esc(i.finding_id)}" accept=".pdf,.docx,.txt,.rtf,.html,.htm" aria-label="Attach the visit note for claim ${esc(i.claim_id || '')}"></span>`}</td></tr>`).join('')}</tbody></table></div>`;
+          : `<span class="attach"><button type="button" class="small">Attach note</button><input type="file" tabindex="-1" data-fid="${esc(i.finding_id)}" accept=".pdf,.docx,.txt,.rtf,.html,.htm" aria-label="Attach the visit note for claim ${esc(i.claim_id || '')}"></span>`}</td></tr>`).join('')}</tbody></table></div>`;
+    $('#needed').querySelectorAll('.attach').forEach(bindPick);
     $('#needed').querySelectorAll('input[data-fid]').forEach(inp => inp.onchange = async () => {
       const f = inp.files[0]; if (!f) return;
       const cell = inp.closest('td'); cell.textContent = 'sending…';

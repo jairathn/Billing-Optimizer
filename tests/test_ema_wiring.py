@@ -1027,3 +1027,144 @@ def test_a_rejected_second_payer_claim_is_worth_its_balance(store, ledger, tmp_p
     protos = ec.rejected_claims(store.conn, today=TODAY, rate=lambda g, c, y: 9000)
     p = next(x for x in protos if x["key_parts"] == (F.claim_id(4),))
     assert p["expected_cents"] == 2000
+
+
+def test_unanswered_claims_whose_answer_cannot_be_seen_are_counted_with_their_dollars(store, monkeypatch):
+    """A weekly-export claim due only by EMA's postings whose own EMA claim cannot be found waits for the remittances; it is
+    never dropped silently: its count, billed dollars and due day go to meta ema:unanswered_unseen (416 claims, $84,168
+    billed on real data)."""
+    monkeypatch.setattr(ec, "claim_statuses", lambda conn, claim_ids=(), links=(): {})
+    monkeypatch.setattr(ec, "claim_answers", lambda conn, claims: {
+        "CLAIMZ": {"answered": False, "how": None, "on": None, "paid_cents": 0, "link": None, "bridge": None}})
+    det = Detector(store, run_id="rv", today=TODAY)
+    det.ema_on = True
+    cd = {"pcn": "CLAIMZ", "sent": "2026-03-01", "grp": BCBS, "kind": "commercial", "rejected": False,
+          "due": "2026-04-30", "k": {"status_at": ["2026-04-01"]}, "status": "Submitted", "unsent": False, "gave_up": False}
+    assert det._ema_check_open_claims([(cd, [("99213", "2026-02-27", 15000), ("17000", "2026-02-27", 9000)])]) == []
+    det._save_ema_wiring()
+    w = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:unanswered_unseen'").fetchone()[0])
+    assert w["n"] == 1 and w["billed_cents"] == 24000 and w["due_from"] == "2026-04-30" and w["by_group"][BCBS]["n"] == 1
+
+
+def _two_lines_of_one_code(store, ledger, tmp_path, paid, rate_history=False):
+    """Claim 26 carries 17311 twice on its date (two lesions), both denied CO-96; EMA posts one payment on the code after."""
+    if rate_history:
+        for n in range(6):                   # the payer's usual allowed for 17311: $300
+            remit(store, trace=f"7774{n:05d}", paid_on="2026-02-10",
+                  claims=[{"pcn": F.claim_id(400 + n), "last": f"MOHS{n}", "first": "HOTEL", "member": f"H{n:011d}",
+                           "lines": [("2026-02-02", "17311", 400, 300, [("CO", "45", 100)], {"allowed_cents": 30000})]}])
+    remit(store, trace=F.check_no(26), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(26), "lines": [(S, "17311", 400, 0, [("CO", "96", 400)]), (S, "17311", 400, 0, [("CO", "96", 400)])]}])
+    L = F.link_no(26)
+    rows = [charge(L, cpt="17311", amount=800, units=2), pay(L, F.check_no(26), 0, cpt="17311", posted=D(2026, 3, 31)),
+            adj(L, "CO-96", 800, cpt="17311", posted=D(2026, 3, 31)),
+            pay(L, "PAPER-26", paid, cpt="17311", posted=D(2026, 4, 20)),
+            adj(L, "CO-96", -800, cpt="17311", posted=D(2026, 4, 20)),
+            adj(L, "CO-45", 800 - paid, cpt="17311", posted=D(2026, 4, 20), contractual=True)]
+    ar = [F.ar_row(claim=F.claim_id(26), link=L, status="Payment Pending", current=0, aging=D(2026, 4, 25), svc=SVC, cpt="17311")]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    return run(store)
+
+
+def test_a_code_billed_twice_closes_both_items_when_emas_payment_on_the_code_covers_them(store, ledger, tmp_path):
+    """PM case C02: EMA's figures are by claim, code and date, so a code on the claim twice was never closed by EMA's
+    payment (80 work-now items on real data were paid). Read together: the same payer's payment on the code after the
+    denials covers what both items must reach, so both close, each with its part of the payment as recovered."""
+    det = _two_lines_of_one_code(store, ledger, tmp_path, 600, rate_history=True)
+    got = items(store, "patient_control_number=? AND signal='DENIED_NONCOVERED'", F.claim_id(26))
+    assert len(got) == 2 and all(g["status"] == "resolved" for g in got), [(g["status"], g["hint"]) for g in got]
+    assert sum(g["recovered_cents"] or 0 for g in got) == 60000 and det.ema_counts["c6_closed"] == 2
+
+
+def test_a_code_billed_twice_partly_paid_on_the_code_is_a_hint_on_each(store, ledger, tmp_path):
+    """Less than both items must reach ($200 against two $150 thresholds): neither closes, each gets the partly-paid hint."""
+    _two_lines_of_one_code(store, ledger, tmp_path, 200, rate_history=True)
+    got = items(store, "patient_control_number=? AND signal='DENIED_NONCOVERED'", F.claim_id(26))
+    assert len(got) == 2 and all(g["status"] == "open" and "Partly paid per EMA" in (g["hint"] or "") for g in got), \
+        [(g["status"], g["hint"]) for g in got]
+
+
+def _never_paid_world(store, ledger, tmp_path):
+    """21 EMA-only denials (CO-96, no 835) of 77600 by the VA's network, which paid the code on none of them: its policy."""
+    va = P["va"]
+    rows = []
+    for n in range(21):
+        kw = dict(patient=n % 4, payer=va, primary=va, svc=D(2026, 2, 2) + dt.timedelta(days=n))
+        rows += [charge(F.link_no(600 + n), cpt="77600", amount=300, **kw),
+                 adj(F.link_no(600 + n), "CO-96", 300, cpt="77600", posted=D(2026, 3, 10) + dt.timedelta(days=n), **kw)]
+    denial_world(store, ledger, tmp_path, rows)
+
+
+def test_ema_only_denials_of_a_code_the_payer_never_pays_are_its_policy_not_appeals(store, ledger, tmp_path):
+    """The VA's network paid 77600 on 3 of 245 answered lines (UHC MA G6001: 0 of 357): an appeal per line is wasted work
+    (65 work-now items, $27,240 on real data; the answer key's R9). The lines fold into one pattern for the owner's table,
+    counted with their dollars, and are listed line by line only once the owner chooses 'pursue'."""
+    _never_paid_world(store, ledger, tmp_path)
+    run(store)
+    assert items(store, "signal='EMA_DENIED'") == []
+    lo = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:c5_left_out'").fetchone()[0])
+    pat = lo["payer_policy"]["patterns"]["VA Community Care|77600||payer_policy"]
+    assert lo["payer_policy"]["n"] == 21 and pat["answered"] == 21 and pat["paid"] == 0 and pat["decision"] == "accept"
+    table = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:policy_summary'").fetchone()[0])["patterns"]
+    row = next(p for p in table if p["pattern"] == "VA Community Care|77600||payer_policy")
+    assert row["kind"] == "payer_policy" and row["items"] == 21 and row["decision"] == "accept" and row["default"] is True
+    ec.set_policy(store.conn, "VA Community Care|77600||payer_policy", "pursue", "owner")
+    run(store)
+    assert len(items(store, "signal='EMA_DENIED'")) == 21
+    table = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:policy_summary'").fetchone()[0])["patterns"]
+    assert next(p for p in table if p["pattern"] == "VA Community Care|77600||payer_policy")["decision"] == "pursue"
+
+
+def test_a_code_the_payer_pays_is_still_appealed_line_by_line(store, ledger, tmp_path):
+    """The same denials where the payer paid the code on most answered lines: every one is still its own EMA-only item."""
+    va = P["va"]
+    rows = []
+    for n in range(21):
+        kw = dict(patient=n % 4, payer=va, primary=va, svc=D(2026, 2, 2) + dt.timedelta(days=n))
+        rows.append(charge(F.link_no(700 + n), cpt="77600", amount=300, **kw))
+        if n < 3:
+            rows.append(adj(F.link_no(700 + n), "CO-96", 300, cpt="77600", posted=D(2026, 3, 10) + dt.timedelta(days=n), **kw))
+        else:
+            rows.append(pay(F.link_no(700 + n), f"PAPER-7{n:02d}", 200, cpt="77600", posted=D(2026, 3, 10) + dt.timedelta(days=n), **kw))
+    denial_world(store, ledger, tmp_path, rows)
+    run(store)
+    assert len(items(store, "signal='EMA_DENIED'")) == 3
+
+
+def _mohs_world(store, with_flap: bool, allowed=292.56):
+    """Humana MA's usual 17311 is $585.12 (22 clean first procedures). The patient's 17311 claim was allowed `allowed`; a
+    flap (14040) the same day and clinician, on another claim, was allowed $700."""
+    for n in range(22):
+        remit(store, trace=f"7775{n:05d}", paid_on="2026-02-10", payer="HUMANA CARE PLAN",
+              claims=[{"pcn": F.claim_id(500 + n), "last": f"MOHS{n}", "first": "INDIA", "member": f"I{n:011d}",
+                       "lines": [("2026-02-02", "17311", 900, 585.12, [("CO", "45", 314.88)], {"allowed_cents": 58512})]}])
+    remit(store, trace=F.check_no(51), paid_on="2026-03-28", payer="HUMANA CARE PLAN",
+          claims=[{"pcn": F.claim_id(51), "lines": [(S, "17311", 900, allowed, [("CO", "45", 900 - allowed)],
+                                                     {"allowed_cents": round(allowed * 100)})]}])
+    if with_flap:
+        remit(store, trace=F.check_no(52), paid_on="2026-03-28", payer="HUMANA CARE PLAN",
+              claims=[{"pcn": F.claim_id(52), "lines": [(S, "14040", 1500, 700, [("CO", "45", 800)], {"allowed_cents": 70000})]}])
+    return run(store)
+
+
+def test_mohs_at_half_after_a_flap_paid_more_that_day_on_another_claim_is_the_payers_reduction(store):
+    """17311 first on its own claim but second that day (a flap on the patient's other claim was allowed more), at exactly
+    the payer's share for a second procedure: the multiple-procedure reduction, not an underpayment (101 work-now items,
+    $28,805 on real data)."""
+    det = _mohs_world(store, with_flap=True)
+    assert items(store, "signal='UNDERPAID_VS_OWN_RATE' AND patient_control_number=?", F.claim_id(51)) == []
+    assert det.ema_counts["mppr_other_claim"] == 1
+
+
+def test_mohs_at_half_with_nothing_else_that_day_is_still_an_underpayment(store):
+    _mohs_world(store, with_flap=False)
+    f = one(store, "signal='UNDERPAID_VS_OWN_RATE' AND patient_control_number=?", F.claim_id(51))
+    assert f["shortfall_cents"] == 29256
+
+
+def test_a_second_procedure_cut_deeper_than_the_payers_share_is_mppr_excess(store):
+    """Second that day (after the flap on another claim) but allowed at 25%: deeper than the payer's 50% for a second
+    procedure, so it is a multiple-procedure reduction applied too deep."""
+    _mohs_world(store, with_flap=True, allowed=146.28)
+    f = one(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(51))
+    assert f["signal"] == "MPPR_EXCESS" and f["shortfall_cents"] == 29256 - 14628

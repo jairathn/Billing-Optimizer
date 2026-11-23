@@ -66,6 +66,7 @@ import json
 import re
 import sqlite3
 from collections import Counter, defaultdict
+from functools import lru_cache
 from statistics import median
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -558,6 +559,7 @@ def _net_payments(arch: Archive) -> None:
 MANY_PAYER_GROUPS = frozenset({"Medicare Supplement carriers", "Self-funded plan TPAs", "Unknown"})
 
 
+@lru_cache(maxsize=4096)
 def _name_key(name: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(name or "").upper())
 
@@ -1908,9 +1910,10 @@ def pr_group_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, arch
     cand = {lk: v for lk, v in cand.items() if lk not in listed}
     if not cand:
         return []
-    # the candidates' own bills: the run's archive view when it holds them (evaluate loads them with the items' bills)
-    own = archive is None or any(lk not in archive.lines for lk in cand)
-    arch = load_archive(conn, items, standing=standing, line_keys=cand) if own else archive
+    # the candidates' own bills (the items' open listings on them come with them): the run's archive view, which evaluate
+    # loads with the candidates' bills; a line it does not hold (on a superseded remittance) is no answer and is skipped
+    own = archive is None
+    arch = load_archive(conn, [], standing=standing, line_keys=cand) if own else archive
     try:
         return _pr_actions(conn, items, arch, cand, rate, worked)
     finally:

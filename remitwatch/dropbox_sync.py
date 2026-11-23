@@ -669,6 +669,7 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                     store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
                     store.record_export(n, sha, fam, export_created(p), len(rows))
                     out["ema"] += 1
+                    out.setdefault("ema_files", []).append(_export_summary(n, rows, acct, fam, int(r["inserted"])))
                 except IsReport as exc:
                     out["errors"] += 1
                     out["failed"].append(n)
@@ -721,6 +722,20 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
 
 
 REFIND_KEY = "ema:refind_v1"        # set once the first cycle that reads EMA's reports has looked for the ones it passed
+
+
+def _export_summary(name: str, rows: list[dict], acct: dict, family: str, added: int) -> dict:
+    """What one weekly export held and what of it was added, in the shape the Upload page words (uploads.describe): an
+    upload read through the intake hand-off says the same as one read in one piece. Counts and dates only."""
+    days = [r["service_date"] for r in rows if r.get("service_date")]
+    distinct = len({r.get("row_fingerprint") for r in rows}) if rows else 0
+    titles = {"charge_lines": "Encounter & Charge Lines", "era_lines": "ERA & Payment Lines", "claim_status": "Claim & Claim Status"}
+    return {"kind": "ema", "family": family, "report": titles.get(family, family), "format": acct.get("format"),
+            "rows": len(rows), "claims": len({r["claim_id"] for r in rows if r.get("claim_id")}),
+            "service_from": min(days) if days else None, "service_to": max(days) if days else None,
+            "added": added, "already": max(0, distinct - added), "repeats": len(rows) - distinct,
+            "left": {k: v for k, v in (acct.get("left") or {}).items() if v}, "above": acct.get("above", 0),
+            "read_at": time.strftime("%Y-%m-%d", time.gmtime()), "name": name}
 
 
 def unread_here(store, sha: str) -> bool:

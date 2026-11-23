@@ -2229,7 +2229,10 @@ def record_waiting(conn: sqlite3.Connection, *, file_id: str, report: str, sourc
 
 
 CANDIDATE_EXTS = (".xlsx", ".csv", ".tsv", ".txt", ".zip")      # the endings the router asks recognize() about first
-BIG_CSV_REASON = "Too big to read on Vercel: zip or gzip it, or upload it in the app (the app compresses it)."
+# what a raw report CSV too large for a serverless host says, wherever it shows (the catalog row, the Data tab, Today's
+# freshness line, the stale-report alert): exactly what to do about it
+BIG_CSV_REASON = ("Too big to read on this site as it is (over 60 MB). Upload it on the Upload page (it compresses it), or put "
+                  "a zipped copy in the same Dropbox folder.")
 
 
 def provisional_id(content_hash: str) -> str:
@@ -2246,6 +2249,17 @@ def supersede_waiting(conn: sqlite3.Connection, file_id: str, *, reason: str, re
         return False
     _catalog_put(conn, file_id, status="superseded", status_reason=reason, replaced_by=replaced_by, commit=True)
     return True
+
+
+def waiting_reason(conn: sqlite3.Connection, report: str) -> str | None:
+    """What the newest file of a report that waits to be read says about it (a raw CSV too large for this site: what to
+    do), for a freshness line or a stale-report alert; None when no file of that report waits."""
+    try:
+        r = conn.execute("SELECT status_reason FROM ema_report_files WHERE report=? AND status IN ('waiting','reread') "
+                         "ORDER BY received_at DESC, file_id LIMIT 1", (report,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return (r[0] or None) if r else None
 
 
 def waiting(conn: sqlite3.Connection, report: str | None = None) -> list[dict]:

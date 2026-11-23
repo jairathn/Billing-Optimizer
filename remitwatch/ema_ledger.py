@@ -371,6 +371,16 @@ def ledger_path(db_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(db_path)), LEDGER_FILE)
 
 
+def open_for_store(db_path: str) -> "Ledger":
+    """The server's ledger of the store at db_path (ledger_path), its retention archiving to the store's archive folder
+    (unit E's archive.sink_for: REMITWATCH_ARCHIVE_DIR, else archive/ beside the store), wherever the ledger itself is."""
+    from . import archive
+    lg = Ledger.open(ledger_path(db_path))
+    if db_path and db_path != ":memory:":
+        archive.attach_ledger(lg, archive.sink_for(db_path=db_path))
+    return lg
+
+
 # ------------------------------------------------------------------------------------------------------------ the ledger
 class Ledger:
     """The posting ledger: one SQLite file of Production postings (keys only), the files applied to it and their boxes.
@@ -386,6 +396,7 @@ class Ledger:
         self.scratch = scratch
         self.rev: str | None = None         # the state folder's revision this copy came from (serverless)
         self._stage_stats: dict | None = None
+        self.archive_error: str | None = None   # why the last retention deleted nothing: its archive could not be written
 
     # ------------------------------------------------------------------ opening
     @classmethod
@@ -827,6 +838,13 @@ class Ledger:
             self._meta_put("retain_held", json.dumps({"cutoff": cutoff, "rows": gone, "of": total, "days": days, "at": _now()},
                                                      sort_keys=True))
             return 0
+        from . import archive           # unit E: the postings are archived, read back and checked before they go
+        try:
+            archive.before_ledger_retain(self, cutoff)
+            self.archive_error = None
+        except (OSError, RuntimeError) as exc:   # ArchiveError, or the folder or Dropbox refused the write
+            self.archive_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            return 0                    # the archive could not be written: nothing is deleted; the next run tries again
         c.execute("BEGIN IMMEDIATE")
         try:
             n = c.execute("DELETE FROM postings WHERE svc < ?", (cutoff,)).rowcount
@@ -2082,6 +2100,9 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
         if bind:
             log(f"  EMA posting ledger: emptied (keyed for another store); {len(bind)} file(s) to read again")
         out["retained"] = ledger.retain()
+        if getattr(ledger, "archive_error", None):
+            out["retain_archive_error"] = ledger.archive_error
+            log(f"  EMA posting ledger: old postings kept this time: their archive could not be written ({ledger.archive_error})")
         held = ledger.retain_held()
         out["retain_held"] = held
         if held:
@@ -2277,6 +2298,8 @@ class LedgerHandle:
             self.rev = meta.get("rev")
         self.ledger = Ledger.open(self.path, scratch=True)
         self.ledger.rev = self.rev
+        from . import archive           # unit E: retention of this scratch copy archives to the state folder's archive/
+        archive.attach_ledger(self.ledger, archive.StateSink(self.state))
         return self.ledger
 
     def save(self, conn: sqlite3.Connection | None = None) -> str | None:

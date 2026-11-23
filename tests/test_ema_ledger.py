@@ -1093,3 +1093,82 @@ def test_a_file_too_large_for_the_temporary_folder_is_held_h8(store, ledger, tmp
     assert "temporary space" in res["reason"] and "slow" not in res["reason"]
     assert el.apply_production_file(store, p, rec, file_id=er.file_id_of(p), via="t", ledger=ledger, serverless=False,
                                     log=Log())["status"] == "current"
+
+
+# ================================================================== 10. retention archives before it deletes (unit E)
+def _across_the_cutoff(store, lg, tmp_path):
+    """Three postings of two claims past 1,100 days of service and five within: retention takes the three."""
+    on = D(2026, 11, 2)
+    old, keep = on - dt.timedelta(days=1101), on - dt.timedelta(days=1099)
+    rows_ = [F.production_row(link=F.link_no(1), svc=old, posted=on, charges=150),
+             F.production_row(link=F.link_no(1), svc=old, posted=on, ins_paid=5, check=F.check_no(1)),
+             F.production_row(link=F.link_no(2), svc=old, posted=on, ins_paid=7, check=F.check_no(1))]
+    rows_ += [F.production_row(link=F.link_no(3 + i), svc=keep, posted=on, ins_paid=6, check=F.check_no(1)) for i in range(5)]
+    assert apply(store, lg, prod_file(tmp_path, rows_))["status"] == "current"
+    return old.isoformat()
+
+
+def test_retention_archives_every_posting_it_deletes_where_the_store_keeps_its_archive(store, tmp_path, monkeypatch):
+    from remitwatch import archive
+    monkeypatch.setenv("REMITWATCH_ARCHIVE_DIR", str(tmp_path / "kept"))
+    lg = el.open_for_store(str(tmp_path / "store.sqlite"))      # the cycle's and the command line's ledger
+    try:
+        old = _across_the_cutoff(store, lg, tmp_path)
+        assert lg.retain() == 3 and one(lg.conn, "SELECT COUNT(*) FROM postings") == (5,)
+        sink = archive.DirSink(str(tmp_path / "kept"))
+        back = archive.ledger_postings(sink, [F.link_no(1), F.link_no(2)])
+        assert len(back) == 3 and {p["svc"] for p in back} == {old}
+        assert sorted(p["link"] for p in back) == [F.link_no(1), F.link_no(1), F.link_no(2)]
+        assert one(lg.conn, "SELECT SUM(rows) FROM archive_parts") == (3,)
+        assert not os.path.exists(tmp_path / "archive")         # not the folder beside the ledger: the store's archive
+        assert lg.archive_error is None
+    finally:
+        lg.close()
+
+
+def test_retention_deletes_nothing_when_its_archive_cannot_be_written_and_says_so(store, tmp_path):
+    from remitwatch import archive
+
+    class Refuses:
+        kind = "dir"
+
+        def put(self, name, data):
+            raise OSError(28, "No space left on device")
+
+        def get(self, name):
+            return None
+
+        def list(self, prefix=""):
+            return []
+
+    lg = el.open_for_store(str(tmp_path / "store.sqlite"))
+    try:
+        _across_the_cutoff(store, lg, tmp_path)
+        archive.attach_ledger(lg, Refuses())
+        seq = lg.seq()
+        assert lg.retain() == 0 and one(lg.conn, "SELECT COUNT(*) FROM postings") == (8,) and lg.seq() == seq
+        assert lg.archive_error.startswith("OSError")
+        log = Log()
+        out = el.refresh(store, lg, log=log)
+        assert out["retained"] == 0 and out["retain_archive_error"].startswith("OSError")
+        assert any("archive could not be written" in ln for ln in log)
+        archive.attach_ledger(lg, archive.DirSink(str(tmp_path / "fine")))     # the folder is writable again
+        assert lg.retain() == 3 and lg.archive_error is None
+        assert len(archive.ledger_postings(archive.DirSink(str(tmp_path / "fine")), [F.link_no(1), F.link_no(2)])) == 3
+    finally:
+        lg.close()
+
+
+def test_a_serverless_ledger_archives_what_retention_deletes_to_the_state_folder(tmp_path):
+    from remitwatch import archive
+    store = memory_store()
+    state = LocalState(str(tmp_path / "state"))
+    h = el.LedgerHandle(state, tmp_dir=str(tmp_path / "tmp"))
+    lg = h.open()
+    old = _across_the_cutoff(store, lg, tmp_path)
+    assert lg.retain(days=1100) == 3                            # the scratch copy: nowhere lasting but the state folder
+    back = archive.ledger_postings(archive.StateSink(state), [F.link_no(1), F.link_no(2)])
+    assert len(back) == 3 and {p["svc"] for p in back} == {old}
+    assert any(m["name"].startswith("archive/ledger/") for m in state.list("archive"))
+    h.discard()
+    store.close()

@@ -1004,7 +1004,10 @@ def test_a_raw_csv_too_large_for_this_site_waits_until_a_zipped_copy_is_read(sto
     pid = er.provisional_id("c" * 64)
     er.record_waiting(store.conn, file_id=pid, report=rec.report, source_name="2026 Production.csv", via="dropbox",
                       origin={"dropbox_id": "id:big", "content_hash": "c" * 64}, reason=er.BIG_CSV_REASON, size=len(data))
-    assert er.waiting(store.conn)[0]["status_reason"].startswith("Too big to read on Vercel: zip or gzip it")
+    assert er.waiting(store.conn)[0]["status_reason"] == er.BIG_CSV_REASON
+    # the sentence says exactly what to do, wherever it shows (the catalog row, the Data tab, Today, the alert)
+    assert "Upload it on the Upload page (it compresses it), or put a zipped copy in the same Dropbox folder" in er.BIG_CSV_REASON
+    assert er.waiting_reason(store.conn, "production") == er.BIG_CSV_REASON and er.waiting_reason(store.conn, "ar_report") is None
     z = put(tmp_path, "2026 Production.zip", F.zipped("2026 Production.csv", data))
     res = er.ingest_file(store, z, via="dropbox", ledger="L")
     assert res["members"][0]["status"] == "current"

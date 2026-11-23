@@ -328,6 +328,28 @@ def reread_waiting(store, *, ledger=None, data_dir: str | None = None, log=print
     return out
 
 
+def turnaround_is_current(conn) -> bool:
+    """Whether meta ema:turnaround already holds the answer times read from the posting ledger as it is now."""
+    from . import ema_checks as ec
+    try:
+        stored = json.loads(_meta_get(conn, getattr(ec, "TURNAROUND_KEY", "ema:turnaround")) or "{}")
+    except (TypeError, ValueError):
+        return False
+    rev = ec._ledger_rev(conn) if hasattr(ec, "_ledger_rev") else None
+    return isinstance(stored, dict) and stored.get("charge_basis") == "ledger" and rev is not None and stored.get("ledger_rev") == rev
+
+
+def ledger_turnaround(store, lg) -> dict | None:
+    """ema_checks.turnaround with the posting ledger (every claim's first charge to its first insurance posting), once
+    per change of the ledger; None when what is stored is already that. Detection reads meta ema:turnaround."""
+    from . import ema_checks as ec
+    if lg is None or turnaround_is_current(store.conn):
+        return None
+    t = time.time()
+    groups = ec.turnaround(store.conn, ledger=lg)
+    return {"groups": len(groups or {}), "seconds": round(time.time() - t, 1)}
+
+
 def sweep_uploads(db_path: str) -> dict:
     """The Upload page's leftovers on a server (remitwatch.uploads.ServerUploads.sweep): uploads unfinished for a day,
     records kept past their time, half pairs. Counts by kind; {} when there was nothing (or no Upload page here)."""
@@ -400,7 +422,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
 
     def ledger():                       # the posting ledger, opened once per cycle and only when a Production file comes
         if not lg_box:
-            lg_box.append(ema_ledger.Ledger.open(ema_ledger.ledger_path(db_path)))
+            lg_box.append(ema_ledger.open_for_store(db_path))
         return lg_box[0]
     try:
         # uploads cut off part-way (their pieces and records, after a day) go at every cycle, not only when someone opens
@@ -488,6 +510,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             if r and (r.get("part_a") or r.get("part_b")):
                 changed = True              # new EMA summaries: detection runs
                 out["ema_refresh"] = {"part_a": bool(r.get("part_a")), "part_b": bool(r.get("part_b")), "seconds": r.get("seconds")}
+            # the payers' answer times from every claim in the ledger (not only the kept lines, which leave out most claims
+            # paid cleanly and run long), when the ledger changed since they were last read from it: detection reads them
+            tat = _ema_step(out, "ema_turnaround", ledger_turnaround, store, ledger())
+            if tat:
+                out["ema_turnaround"] = tat
             if lg_box:
                 _ema_step(out, "ema_copies", drop_kept_copies, store, lg_box[0], db_path, log=beat_log)
             heartbeat(store.conn, token)

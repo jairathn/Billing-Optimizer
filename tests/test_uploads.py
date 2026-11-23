@@ -1131,11 +1131,14 @@ def test_the_page_and_its_guide_need_the_login(site, monkeypatch):
     assert js.status_code == 200 and '<script src="/static/upload.js"></script>' in page.text
     # one wait at a time while files are queued, however often the page refreshes
     assert "clearTimeout(refresh.t);" in js.text and "setTimeout(refresh, 15000);" not in js.text.replace("refresh.t = h.queued ? setTimeout(refresh, 15000)", "")
-    # the file's name goes in a header once the server says it reads one, never in the address a log keeps
-    assert "info.name_header ? {} : {name: file.name}" in js.text and "X-File-Name" in js.text
-    # the dashboard links the page only where uploads are taken
+    # the file's name always goes in a header, never in the address a log keeps (not even before GET /api/uploads answers)
+    assert "x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));" in js.text
+    assert "{name: file.name}" not in js.text and "q.set('name'" not in js.text and "?name=" not in js.text
+    # the dashboard links the page where uploads are taken: visit notes on a server, EMA's reports on both hosts
     index = open(os.path.join(os.path.dirname(api.__file__), "static", "index.html")).read()
-    assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !m.uploads;" in index
+    assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !(m.uploads || m.report_uploads);" in index
+    monkeypatch.setattr(api, "PASSWORD", "")
+    assert site.c.get("/api/meta").json()["report_uploads"] is True
 
 
 def test_the_guide_never_sends_anyone_to_download_remittances_in_the_portal(site):

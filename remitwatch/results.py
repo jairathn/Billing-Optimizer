@@ -637,17 +637,101 @@ def _own(item: dict, x: dict) -> bool:
     return bool((tk and x.get("tk") == tk) or (ck and x.get("claim_key") == ck))
 
 
+def _row_payer(x: dict) -> Any:
+    from . import states
+    try:
+        return states.row_group(x)[0]
+    except Exception:       # an older states module: the payer's group by name
+        from .codes import normalize_payer
+        return normalize_payer(x.get("payer") or "")[0]
+
+
+def _same_payer(a: Any, b: Any) -> bool:
+    from . import states
+    same = getattr(states, "_same_payer", None)
+    return bool(same(a, b)) if same else bool(a) and a == b
+
+
+def _same_name(a: dict, b: dict) -> bool:
+    """The same payer by its name alone (a payer that reprocessed a claim under another product, a Medicare Advantage
+    plan of the same company say, reverses the first answer under the new product's filing indicator)."""
+    from .codes import normalize_payer
+    na, nb = normalize_payer(a.get("payer") or "")[0], normalize_payer(b.get("payer") or "")[0]
+    return bool(a.get("payer")) and na == nb and na != "Unknown"
+
+
+def _pair_group(rows: dict) -> None:
+    """Which earlier answer each 835 reversal of one group cancels, read again over the group's rows (copies), by the
+    rules states.facts_of pairs a bill with (same payer, code and charge, answered on or before the reversal, never a line
+    the payer received after the reversal's received date; the same received date first, then the reasons it negates
+    exactly, then the opposite payment, then an earlier remittance, then the newest), with two more: a line of the
+    reversal's own remittance (often the new answer the payer sends with it) is its pair only when no line of an earlier
+    remittance fits, and the same payer by name counts when the filing indicator moved the claim to another of its
+    products (the same payer group is then preferred after the reasons and the amount). Sets 'reverses' and 'reversed_by'
+    on the rows."""
+    recs = list(rows.values())
+    for x in recs:
+        x["reversed_by"] = None
+        x["reverses"] = None
+    key = lambda r: r.get("line_key") or r.get("claim_key") or ""      # noqa: E731
+    for x in sorted((r for r in recs if r.get("status") == "22"), key=lambda r: (str(r.get("date") or ""), str(key(r)))):
+        rx = x.get("received")
+        gx = _row_payer(x)
+        cands = [o for o in recs if o is not x and o.get("status") != "22" and not o.get("reversed_by")
+                 and str(o.get("date") or "") <= str(x.get("date") or "") and o.get("code") == x.get("code")
+                 and abs(o.get("charge") or 0) == abs(x.get("charge") or 0) and (_same_payer(_row_payer(o), gx) or _same_name(o, x))
+                 and (o.get("pccn") == x.get("pccn") or not o.get("pccn") or not x.get("pccn") or o.get("pcn") == x.get("pcn"))
+                 and not (rx and o.get("received") and o["received"] > rx)]
+        if not cands:
+            continue
+        mirror = sorted((g, c, -a) for g, c, a in (x.get("adj") or []))
+
+        def score(o: dict) -> tuple:
+            return (bool(rx) and o.get("received") == rx, not (x.get("tk") and o.get("tk") == x.get("tk")),
+                    bool(mirror) and sorted(o.get("adj") or []) == mirror, _amount(o) == -_amount(x), _same_payer(_row_payer(o), gx),
+                    str(o.get("date") or "") < str(x.get("date") or ""), str(o.get("date") or ""), str(key(o)))
+        pick = max(cands, key=score)
+        pick["reversed_by"] = key(x)
+        x["reverses"] = key(pick)
+
+
 def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[str, list[dict]]:
     """The money on one group's records, each record given to the earliest item that covers it and was flagged before it
     (never the remittance that raised that item): standing 835 payments, less the 835 reversals after the line's first
     flag of payments made on or before it; and EMA's insurer postings that no 835 carries (a payment an 835 also
-    carries, the same amount within SAME_PAYMENT_DAYS, is that payment). {finding id: [event, ...]}."""
+    carries, the same amount within SAME_PAYMENT_DAYS, is that payment). A reversal of money no 835 here shows paid takes
+    back the check EMA posted for it (which then counts in its own right) or, with none, money paid before the flag.
+    {finding id: [event, ...]}."""
     out: dict[str, list[dict]] = defaultdict(list)
 
     def order(ids: Iterable[str]) -> list[str]:
         return sorted(set(ids), key=lambda m: (items[m]["F"], m))
     by_key = {(x.get("line_key") or x.get("claim_key")): x for x in rows.values()}
     standing_835 = [x for x in rows.values() if x.get("status") != "22" and not x.get("reversed_by") and _amount(x) > 0 and x.get("date")]
+    # a reversal of money no 835 here shows paid (its pair paid nothing, or it has none): the check EMA posted outside the
+    # 835s for that amount on the line, on or before the reversal, is the money it takes back; with no such posting the
+    # money is taken as paid before the flag (the archive does not hold that payment)
+    unseen: dict = {}
+    taken: set = set()
+    for rid, x in sorted(rows.items(), key=lambda kv: (str(kv[1].get("date") or ""), str(kv[0]))):
+        if x.get("status") != "22" or _amount(x) >= 0:
+            continue
+        o = by_key.get(x.get("reverses")) if x.get("reverses") else None
+        if o is not None and _amount(o) > 0:
+            continue
+        d = str(x.get("date") or "")[:10]
+        mine = set(claim_of.get(rid) or [])
+        cands = [pid for pid, p in pays.items() if pid not in taken and not p.get("in_835") and int(p.get("cents") or 0) == -_amount(x)
+                 and str(p.get("posted") or "")[:10] <= d and mine & set(claim_of.get(pid) or [])]
+        pid = max(cands, key=lambda q: (str(pays[q].get("posted") or ""), str(q))) if cands else None
+        if pid is not None:
+            taken.add(pid)
+        unseen[rid] = pid
+
+    def took_back(first: str, rid: tuple, x: dict, took: int, why: str) -> None:
+        d = str(x.get("date") or "")[:10]
+        out[first].append({"id": ("835r", rid[1]), "date": d, "cents": took, "kind": "takeback", "source": "835", "payer": x.get("payer") or "",
+                           "text": f"{x.get('payer') or 'The payer'} took back {usd(-took)}{_line_words(x)} on {d} ({why})"})
     for rid, x in sorted(rows.items(), key=lambda kv: (str(kv[1].get("date") or ""), str(kv[0]))):
         d = str(x.get("date") or "")[:10]
         cl = order(claim_of.get(rid) or [])
@@ -656,16 +740,20 @@ def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[
         if x.get("status") == "22":
             first = cl[0]
             F0 = items[first]["F"]
+            if d <= F0:
+                continue
+            if rid in unseen:
+                if unseen[rid] is None:
+                    took_back(first, rid, x, _amount(x), "paid before the flag; no 835 here shows that payment")
+                continue        # with EMA's posting of that check: settled with the posting below
             o = by_key.get(x.get("reverses")) if x.get("reverses") else None
-            if d <= F0 or o is None:
+            if o is None:
                 continue
             od = str(o.get("date") or "")[:10]
             amt = _amount(x)
             took = amt if amt < 0 else -_amount(o)
             if od and od <= F0 and took < 0:
-                out[first].append({"id": ("835r", rid[1]), "date": d, "cents": took, "kind": "takeback", "source": "835",
-                                   "payer": x.get("payer") or "",
-                                   "text": f"{x.get('payer') or 'The payer'} took back {usd(-took)}{_line_words(x)} on {d} (paid before the flag)"})
+                took_back(first, rid, x, took, "paid before the flag")
             continue
         amt = _amount(x)
         if x.get("reversed_by") or amt <= 0:
@@ -674,25 +762,35 @@ def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[
         if elig:
             out[elig[0]].append({"id": rid, "date": d, "cents": amt, "kind": "payment", "source": "835", "payer": x.get("payer") or "",
                                  "text": f"{x.get('payer') or 'The payer'} paid {usd(amt)}{_line_words(x)} on {d} (835 remittance)"})
+    rev_of = {pid: rid for rid, pid in unseen.items() if pid is not None}
     for pid, p in sorted(pays.items(), key=lambda kv: (str(kv[1].get("posted") or ""), str(kv[0]))):
         posted = str(p.get("posted") or "")[:10]
         cents = int(p.get("cents") or 0)
         cl = order(claim_of.get(pid) or [])
         if not posted or p.get("in_835") or not cents or not cl:
             continue
-        if cents > 0 and any(_amount(x) == cents and abs(_days(x.get("date"), posted) or 999) <= SAME_PAYMENT_DAYS for x in standing_835):
+        rid = rev_of.get(pid)       # an 835 reversal takes this check back: it is its own payment, not an 835's
+        if rid is None and cents > 0 and any(_amount(x) == cents and abs(_days(x.get("date"), posted) or 999) <= SAME_PAYMENT_DAYS for x in standing_835):
             continue
         if cents > 0:
             elig = [m for m in cl if posted > items[m]["F"]]
             winner = elig[0] if elig else None
         else:
             winner = cl[0] if posted > items[cl[0]]["F"] else None
+        if rid is not None and winner is None:
+            # EMA posted that check on or before the flag: money paid before the flag, taken back after it
+            first = order(claim_of.get(rid) or [])[0]
+            if str(rows[rid].get("date") or "")[:10] > items[first]["F"]:
+                took_back(first, rid, rows[rid], _amount(rows[rid]), "paid before the flag")
+            continue
         if winner is None:
             continue
         who = p.get("payer") or p.get("group") or "the payer"
         out[winner].append({"id": pid, "date": posted, "cents": cents, "kind": "payment" if cents > 0 else "takeback", "source": "production",
                             "payer": who, "text": (f"EMA posted {usd(cents)} from {who}{_line_words(p)} on {posted} (a check no 835 carries)"
                                                    if cents > 0 else f"EMA posted a takeback of {usd(-cents)} from {who}{_line_words(p)} on {posted}")})
+        if rid is not None:
+            took_back(winner, rid, rows[rid], _amount(rows[rid]), f"the check EMA posted on {posted}")
     for evs in out.values():
         evs.sort(key=lambda e: (e["date"], str(e["id"])))
     return out
@@ -869,10 +967,11 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             group_of[m] = rep
             fx = facts.get(m) or {}
             for x in fx.get("rows", []):
-                rows.setdefault(_row_id(x), x)
+                rows.setdefault(_row_id(x), dict(x))
             for p in fx.get("pays", []):
                 pays.setdefault(_pay_id(p), p)
         group_members[rep] = sorted(mem)
+        _pair_group(rows)
         per = _assign_events(rows, pays, claim_of, items)
         for m in mem:
             if m in found:

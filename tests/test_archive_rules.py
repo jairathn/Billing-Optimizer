@@ -1129,15 +1129,17 @@ def test_rule10_gives_no_amount_to_a_duplicate_copys_denial(store):
 
 
 def test_rule10_gives_no_amount_to_a_wrong_payers_denial_of_a_service_another_payer_answered(store):
+    """ACME said the claim is not its (OA-109) and BETA, the right payer, denied the service for missing information: the
+    service is valued once, on BETA's item. Both payers have prices of their own for the drug."""
     _paid_j7345(store, 3, 1.79)
-    wrong = remit(store, "2026-03-05", [cl("CB0003102C017", [ln("J7345", 358.00, 0, None, [("OA", "109", 358.00)], units=200)])],
-                  payer="MEDICARE OF KENTUCKY", payer_id="MCRKY")[0]
-    right = remit(store, "2026-03-20", [cl("CB0003102C017", [ln("J7345", 358.00, 0, None, [("CO", "16", 358.00)], units=200)])])[0]
+    for i in range(3):
+        remit(store, "2026-02-21", [cl(f"CB00031{60 + i}C017", [ln("J7345", 358.00, 350.00, 350.00, [("CO", "45", 8.00)], units=200)])], **BETA)
+    wrong = remit(store, "2026-03-05", [cl("CB0003102C017", [ln("J7345", 358.00, 0, None, [("OA", "109", 358.00)], units=200)])])[0]
+    right = remit(store, "2026-03-20", [cl("CB0003102C017", [ln("J7345", 358.00, 0, None, [("CO", "16", 358.00)], units=200)])], **BETA)[0]
     f_wrong, f_right = item(store, wrong, "DENIED_COB"), item(store, right, "DENIED_MISSING_INFO")
     assert {a["finding_id"] for a in ar.drug_expected(store.conn, [f_wrong, f_right])} == {f_right["finding_id"]}
     # with no other payer's answer, a 'not ours' denial is still the only listing of the service and gets its value
-    alone = remit(store, "2026-03-05", [cl("CB0003103C017", [ln("J7345", 358.00, 0, None, [("OA", "109", 358.00)], units=200)])],
-                  payer="MEDICARE OF KENTUCKY", payer_id="MCRKY")[0]
+    alone = remit(store, "2026-03-05", [cl("CB0003103C017", [ln("J7345", 358.00, 0, None, [("OA", "109", 358.00)], units=200)])])[0]
     assert len(ar.drug_expected(store.conn, [item(store, alone, "DENIED_COB")])) == 1
 
 

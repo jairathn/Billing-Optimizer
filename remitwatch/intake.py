@@ -220,7 +220,14 @@ def _router_lines(r: dict) -> list[str]:
     if r.get("claims_837"):
         lines.append(f"Read: {_n(int(r['claims_837']), 'claim file')}.")
     if r.get("ema"):
-        lines.append("Read as an EMA export.")
+        words: list[str] = []
+        try:
+            from .uploads import describe      # the one-piece route's words: the report, its visits, rows and claims
+            for f in r.get("ema_files") or []:
+                words += describe(f, "done")
+        except Exception:                       # noqa: BLE001  (the words only; what was read is already stored)
+            words = []
+        lines += words or ["Read as an EMA export."]
     if r.get("skipped") and not lines:
         lines.append("Nothing new: already read, or none of the files RemitWatch reads.")
     for f in r.get("failed") or []:

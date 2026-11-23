@@ -73,7 +73,7 @@ def cmd_ingest_ema(args: argparse.Namespace) -> int:
 
     def ledger():                       # opened only when a Production report comes
         if not lg_box:
-            lg_box.append(ema_ledger.Ledger.open(ema_ledger.ledger_path(args.db)))
+            lg_box.append(ema_ledger.open_for_store(args.db))
         return lg_box[0]
     try:
         for p in sorted(paths):
@@ -167,7 +167,7 @@ def cmd_ema_reports(args: argparse.Namespace) -> int:
                 print(json.dumps(out, indent=1, default=str))
                 return 0 if "error" not in out else 1
             if args.retain_force:
-                with ema_ledger.Ledger.open(lpath) as lg:
+                with ema_ledger.open_for_store(args.db) as lg:
                     held = lg.retain_held()
                     gone = lg.retain(force=True)
                     r = ema_ledger.refresh(store, lg, log=lambda *a: print(*a, file=sys.stderr))
@@ -182,17 +182,17 @@ def cmd_ema_reports(args: argparse.Namespace) -> int:
                                 os.remove(lpath + suffix)
                         os.replace(lpath, aside)
                         print(f"The ledger was moved aside to {aside}.")
-                    with ema_ledger.Ledger.open(lpath) as lg:
+                    with ema_ledger.open_for_store(args.db) as lg:
                         n = ema_ledger.sync_catalog(store, lg)
                     print(json.dumps({"marked_to_read_again": n}))
                     return 0
-                with ema_ledger.Ledger.open(lpath) as lg:
+                with ema_ledger.open_for_store(args.db) as lg:
                     gone = lg.forget(args.reread)
                     ema_ledger.sync_catalog(store, lg)
                 row = conn.execute("SELECT status FROM ema_report_files WHERE file_id=?", (args.reread,)).fetchone()
                 print(json.dumps({"postings_removed": gone, "status": row[0] if row else None}))
                 return 0
-            with ema_ledger.Ledger.open(lpath) as lg:
+            with ema_ledger.open_for_store(args.db) as lg:
                 r = ema_ledger.refresh(store, lg, parts="AB", log=lambda *a: print(*a, file=sys.stderr))
             print(json.dumps({k: r.get(k) for k in ("published", "retained", "seconds")}, indent=1, default=str))
             return 0

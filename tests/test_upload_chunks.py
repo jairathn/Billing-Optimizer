@@ -1047,3 +1047,500 @@ def test_the_upload_page_serves_its_script_and_says_what_happens_to_the_files(bu
     assert "a file that does not arrive whole is not kept" in words
     assert "RemitWatch knows a file by its checksum, the same way whether it was uploaded or found in the Dropbox folder" in words
     assert "\u2014" not in page and "\u2014" not in js                     # no em dashes in what people read
+
+
+# ================================================================================ fixes from the two reviews of the uploads
+# (the A2 security review and the A2 end-to-end review): each test below failed on the code they reviewed
+def _send_body(site: Site, name: str, body: bytes, sha: str, size: int, *, gz: bool, hint: str | None = "production"):
+    """Start, every piece in order (the last one gives the count, as the page does), finish: for bytes made in a test."""
+    r = site.c.post("/api/uploads/start", json={"name": name, "size": size, "gz": gz, "report_hint": hint, "sha256": sha}, headers=XHR)
+    assert r.status_code == 200 and r.json()["status"] == "started", r.text
+    uid = r.json()["upload_id"]
+    ch = uploads.CHUNK_BYTES
+    parts = [body[i:i + ch] for i in range(0, len(body), ch)]
+    for i, p in enumerate(parts):
+        r = site.c.post("/api/uploads/chunk", content=p, headers=XHR,
+                        params={"upload_id": uid, "index": i, "total": len(parts) if (not gz or i == len(parts) - 1) else 0,
+                                "sha256": hashlib.sha256(p).hexdigest()})
+        assert r.status_code == 200, (i, r.text)
+    return uid, site.c.post(f"/api/uploads/{uid}/finish", headers=XHR, json={"sha256": sha, "chunks": len(parts), "bytes": len(body)})
+
+
+def _bomb(zeros: int, head: bytes) -> tuple[bytes, str, int]:
+    """One gzip member of `head` then `zeros` zero bytes, made without holding them: (compressed, SHA-256 of the original,
+    original size). Zeros deflate about 1,000 to 1."""
+    co = zlib.compressobj(9, zlib.DEFLATED, 31)
+    h = hashlib.sha256(head)
+    out = [co.compress(head)]
+    block = bytes(1 << 20)
+    left = zeros
+    while left:
+        b = block[:min(left, len(block))]
+        out.append(co.compress(b))
+        h.update(b)
+        left -= len(b)
+    out.append(co.flush())
+    return b"".join(out), h.hexdigest(), len(head) + zeros
+
+
+def test_a_compressed_upload_that_unpacks_to_far_more_than_was_sent_is_refused(site):
+    """A gzip bomb: about 70 KB sent that unpacks to 70 MB (1,000 to 1; EMA's text compresses about 14 to 1). It is
+    refused at the finish, from its sizes alone, before anything is unpacked, and nothing reaches the intake folder: no
+    cycle and no run ever has to read it."""
+    from remitwatch import ema_reports
+    body, digest, size = _bomb(70 << 20, b"Payer,Amount\r\n")
+    assert size > ema_reports.unpack_limit(len(body))
+    uid, r = _send_body(site, "zeros.csv", body, digest, size, gz=True)
+    assert r.status_code == 422 and "far more than any export EMA makes" in r.json()["detail"], r.text
+    assert "did not arrive whole" not in r.json()["detail"]               # it arrived whole: it is refused for what it is
+    assert site.intake() == {} and status(site, uid)["state"] == "refused"
+    # an original larger than any host unpacks is refused at the start, before a byte is sent
+    r = site.c.post("/api/uploads/start", json={"name": "big.csv", "size": ema_reports.UNPACK_MAX + 1, "gz": True}, headers=XHR)
+    assert r.status_code == 413 and "at most 2 GB" in r.json()["detail"]
+    assert uploads.original_max(True) == ema_reports.UNPACK_MAX and uploads.original_max(False) == uploads.max_upload_bytes()
+
+
+@pytest.mark.parametrize("gz", [True, False])
+def test_a_text_export_with_a_line_longer_than_any_export_has_is_refused(site, monkeypatch, gz):
+    """One line longer than ema_reports.LINE_MAX (1 MB; EMA's lines are a few hundred bytes) in an export sent as
+    text: refused at the finish, compressed or not. A file that is no export (an 835 is often one long line) is not
+    held to it. LINE_MAX is made small here so the test sends a few KB."""
+    from remitwatch import ema_reports
+    monkeypatch.setattr(ema_reports, "LINE_MAX", 4096)
+    long = b"Payer,Amount\r\n" + b"x,1\r\n" * 50 + b"y" * 5000 + b"\r\n" + b"z,2\r\n" * 50
+    sha = hashlib.sha256(long).hexdigest()
+    body = gzip.compress(long) if gz else long
+    uid, r = _send_body(site, "long.csv", body, sha, len(long), gz=gz)
+    assert r.status_code == 422 and "One line of it is longer than 4 KB" in r.json()["detail"], r.text
+    assert site.intake() == {}
+    fine = b"Payer,Amount\r\n" + b"x,1\r\n" * 50 + b"y" * 4096 + b"\n" + b"z,2\r" * 50      # a line of exactly the limit
+    _uid, r = _send_body(site, "fine.csv", gzip.compress(fine) if gz else fine, hashlib.sha256(fine).hexdigest(), len(fine), gz=gz)
+    assert r.status_code == 200 and r.json()["state"] == "finished", r.text
+    isa = b"ISA*00*" + b"A" * 9000 + b"~"                                  # no line break at all, and no export
+    _uid, r = _send_body(site, "era.835", isa, hashlib.sha256(isa).hexdigest(), len(isa), gz=False, hint=None)
+    assert r.status_code == 200 and r.json()["state"] == "finished", r.text
+
+
+def test_the_line_watch_counts_every_line_as_the_readers_do():
+    """uploads.LineWatch, at the real limit, against a plain count of the longest line (CR, LF and CR LF each end a
+    line), whatever the pieces the bytes come in: a line of exactly the limit passes, one byte more does not; a zip
+    (an .xlsx) is not text and is not watched."""
+    from remitwatch import ema_reports
+    L = ema_reports.LINE_MAX
+    rnd = random.Random(11)
+
+    def longest(data: bytes) -> int:
+        return max(len(x) for x in re.split(rb"\r\n|\r|\n", data))
+
+    cases = [b"a,b\r\n" + b"x" * L + b"\r\n" + b"c\n", b"a,b\n" + b"x" * (L + 1) + b"\n", b"x" * L, b"x" * (L + 1),
+             b"\r" * 10 + b"y" * L + b"\r", b"q" * (L // 2) + b"\r\n" + b"w" * L + b"\n" + b"e" * (L - 1),
+             b"".join(b"k" * rnd.randrange(1, 900) + rnd.choice([b"\n", b"\r", b"\r\n"]) for _ in range(4000))]
+    for data in cases:
+        for _ in range(4):
+            w, at, ok = uploads.LineWatch(L), 0, True
+            while at < len(data):
+                step = rnd.choice([1, 7, 4096, 1 << 20, 3 << 20, 8 << 20])
+                ok = w.feed(data[at:at + step]) and ok
+                at += step
+            assert ok == (longest(data) <= L), (len(data), longest(data))
+    w = uploads.LineWatch(L)
+    assert w.feed(b"PK\x03\x04" + b"z" * (3 * L)) and w.feed(b"y" * (2 * L)) and w.off       # a zip: not watched
+
+
+def test_a_request_without_the_sign_in_is_refused_before_its_body_is_read(build, monkeypatch):
+    """A JSON body is read only after the sign-in (a Body() parameter is read and parsed before the route's checks):
+    without a login, a malformed body gets 401, not 422. Signed in, a body over 64 KB is refused unread past that
+    (413), and one that is not JSON is said so (400)."""
+    import remitwatch.api as api
+    site = build("server")
+    monkeypatch.setattr(api, "PASSWORD", "correct-horse-battery-7")
+    for method, path in (("post", "/api/uploads/start"), ("post", f"/api/uploads/{'a' * 32}/finish"), ("put", "/api/ema/exports/ar/howto")):
+        r = getattr(site.c, method)(path, content=b"{not json", headers=dict(XHR, **{"Content-Type": "application/json"}))
+        assert r.status_code == 401, (path, r.status_code, r.text[:120])
+    monkeypatch.setattr(api, "PASSWORD", "")
+    r = site.c.post("/api/uploads/start", content=b'{"name": "' + b"x" * (70 * 1024) + b'"}', headers=XHR)
+    assert r.status_code == 413
+    r = site.c.post("/api/uploads/start", content=b"{not json", headers=XHR)
+    assert r.status_code == 400 and "not valid JSON" in r.json()["detail"]
+    r = site.c.put("/api/ema/exports/ar/howto", content=b"[1, 2]", headers=XHR)      # JSON, but no object: an empty box
+    assert r.status_code == 200
+
+
+def test_an_upload_cannot_send_more_than_the_size_it_gave(site):
+    """The pieces an upload may send are bounded by the size it gave at its start (plus what compressing can add), not
+    by the 2 GB cap alone: a start that says 10 bytes cannot write megabytes before the finish refuses them."""
+    ch = uploads.CHUNK_BYTES
+    small = Up(site, b"0123456789", gz=False, hint=None)
+    small.start()
+    r = small.piece(0, data=os.urandom(ch), total=0)
+    assert r.status_code == 413 and "More has arrived than the file holds" in r.json()["detail"]
+    assert status(site, small.uid)["bytes"] == 0
+    if site.mode == "dropbox":
+        assert not getattr(site.fake, "sessions", {})                   # nothing was relayed
+    # compressed: the size given plus a thousandth plus 64 KB (bytes that do not shrink grow a little)
+    gz = Up(site, os.urandom(1000), gz=True, hint=None)
+    gz.start()
+    limit = uploads.sent_limit(store_rec := site.store().load(gz.uid)[0])
+    assert limit == 1000 + 1 + 65536 and store_rec["size"] == 1000
+    codes = [gz.piece(i, data=os.urandom(ch), total=0).status_code for i in range(limit // ch + 1)]
+    assert codes == [200] * (limit // ch) + [413]
+    assert gz.piece(limit // ch, data=os.urandom(ch), total=0).status_code == 413          # sent again: refused again
+
+
+def test_the_disk_is_measured_for_every_piece(build, monkeypatch):
+    """A server never lets an upload leave its disk with less than the margin free, whatever size the upload gave at
+    its start: the free space is measured again for every piece (here the disk fills as the pieces are written)."""
+    site = build("server")
+    ch = uploads.CHUNK_BYTES
+    room = 6 * ch
+    store = site.store()
+    up = Up(site, os.urandom(40 * ch), gz=False, hint=None)
+    assert up.start().status_code == 200
+    part = store.part_path(up.uid)
+
+    def disk(path):
+        free = uploads.DISK_MARGIN + room - os.path.getsize(part)
+        return shutil._ntuple_diskusage(10 ** 12, 10 ** 12 - free, free)
+    monkeypatch.setattr(uploads.shutil, "disk_usage", disk)
+    codes = [up.piece(i).status_code for i in range(7)]
+    assert codes == [200] * 6 + [507]
+    assert os.path.getsize(part) <= room
+    r = up.piece(6)
+    assert "too little room" in r.json()["detail"] and "carries on from here" in r.json()["detail"]
+
+
+def _put_pair(site: Site, pair: str, sidecar: dict, data: bytes = b"invented") -> None:
+    """A complete pair in this host's intake folder, as a finished upload leaves it."""
+    if site.mode == "server":
+        d = site.intake_dir()
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, pair), "wb") as fh:
+            fh.write(data)
+        with open(os.path.join(d, pair + ".json"), "wb") as fh:
+            fh.write(uploads.sidecar_bytes(sidecar))
+    else:
+        site.state.put(f"intake/{pair}", data)
+        site.state.put(f"intake/{pair}.json", uploads.sidecar_bytes(sidecar))
+
+
+def _ago(days: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
+def test_an_upload_no_cycle_has_read_for_days_does_not_hide_an_overdue_export(site):
+    """An upload counts as a fresh arrival for WAITING_FRESH_DAYS only. One no cycle has read in longer (a file the
+    intake keeps failing on) is stuck: the row says so, and is overdue by the data RemitWatch has read."""
+    word = "run" if site.mode != "server" else "cycle"
+    old = uploads.pair_name("c" * 32, "AR 2026.xlsx", False)
+    _put_pair(site, old, uploads.make_sidecar("AR 2026.xlsx", "anonymous", "d" * 64, 8, False, "ar_report", received_at=_ago(30)))
+    row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["ar"]
+    assert row["overdue"] is True and row["stuck"] is True and row["waiting"] is False and row["flag"] == "overdue"
+    assert f"An upload of it has waited 30 days and no {word} has read it: see the Data tab." in row["state_line"]
+    assert f"and no {word} has read it in 30 days" in row["last_line"]
+    # data read three days ago keeps the row up to date, and the stuck upload is still said
+    today = datetime.now(timezone.utc).date()
+    site.fill(lambda c: c.execute("INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, via) VALUES (?,?,?,?,?,?)",
+                                  ("a1", "ar_report", "current", (today - timedelta(days=3)).isoformat(), _ago(3), "upload")))
+    row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["ar"]
+    assert row["overdue"] is False and row["flag"] == "stuck" and "has waited 30 days" in row["state_line"]
+    # an upload received yesterday is waiting to be read, not stuck
+    new = uploads.pair_name("e" * 32, "2026 Production(Sheet1).csv", True)
+    _put_pair(site, new, uploads.make_sidecar(NAME, "anonymous", "f" * 64, 9, True, "production", received_at=_ago(1)))
+    prod = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]
+    assert prod["waiting"] is True and prod["overdue"] is False and prod["stuck"] is False and prod["flag"] == "waiting"
+
+
+def test_a_report_held_or_kept_unread_never_makes_its_export_up_to_date(site, monkeypatch):
+    """Only a file RemitWatch read makes an export fresh. A Production report that arrived and was held, or kept
+    without being read, leaves the row overdue and says why; beside a fresh read file it is said on the row too."""
+    today = datetime.now(timezone.utc).date()
+    why = "It has 40% of the claims the export of Oct 19, 2026 had for these dates: was it filtered by payer, provider or location?"
+    site.fill(lambda c: c.execute("""INSERT INTO ema_report_files (file_id, report, status, status_reason, received_at, via)
+                                     VALUES (?,?,?,?,?,?)""", ("h1", "production", "held", why, _ago(0), "upload")))
+    row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]
+    assert row["overdue"] is True and row["held"] is True and row["flag"] == "overdue" and row["age_days"] is None
+    assert row["last_line"].startswith(f"Last arrived {uploads._day(today.isoformat())} (uploaded here), and held: {why}")
+    assert "Apply or Discard it on the Data tab." in row["last_line"] and "None has been read yet." in row["last_line"]
+    assert row["state_line"].startswith("Overdue: RemitWatch has none yet.")
+
+    def read_and_held(c):
+        c.execute("DELETE FROM ema_report_files")
+        c.execute("INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, via) VALUES (?,?,?,?,?,?)",
+                  ("p1", "production", "current", (today - timedelta(days=3)).isoformat(), _ago(3), "dropbox"))
+        c.execute("INSERT INTO ema_report_files (file_id, report, status, status_reason, received_at, via) VALUES (?,?,?,?,?,?)",
+                  ("h1", "production", "held", why, _ago(0), "upload"))
+    site.fill(read_and_held)
+    row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]
+    assert row["overdue"] is False and row["flag"] == "held" and row["age_days"] == 3
+    assert "The newest file is held: Apply or Discard it on the Data tab." in row["state_line"]
+    assert f"The newest read runs to {uploads._day((today - timedelta(days=3)).isoformat())}." in row["last_line"]
+    # kept and not read because this site does not read Production: said before anything is uploaded
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "ar")
+
+    def kept(c):
+        c.execute("DELETE FROM ema_report_files")
+        c.execute("""INSERT INTO ema_report_files (file_id, report, status, status_reason, received_at, via) VALUES (?,?,?,?,?,?)""",
+                  ("w1", "production", "waiting", "This host does not read the Production report yet (REMITWATCH_EMA_REPORTS is "
+                   "'ar'). It is read as soon as that setting allows.", _ago(0), "upload"))
+    site.fill(kept)
+    rows = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}
+    assert rows["production"]["reads_here"] is False and rows["production"]["flag"] == "overdue"
+    assert rows["production"]["host_line"].startswith("This site does not read the Production (collections) report yet.")
+    assert "kept and not read yet: this site does not read the Production (collections) report yet" in rows["production"]["last_line"]
+    assert rows["ar"]["host_line"] is None and rows["charge_lines"]["host_line"] is None
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    assert {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]["host_line"] is None
+
+
+def test_a_report_kept_waiting_says_why_as_things_stand_now(site, monkeypatch):
+    """A report kept without being read because the site did not read it then: once the site reads it, choosing it
+    again says the next run reads it (not the old reason), and the outcome line says the same."""
+    raw = text_report(500)
+    sha = hashlib.sha256(raw).hexdigest()
+    stale = "This host does not read the Production report yet (REMITWATCH_EMA_REPORTS is 'ar'). It is read as soon as that setting allows."
+    site.fill(lambda c: c.execute("""INSERT INTO ema_report_files (file_id, report, status, status_reason, received_at, via)
+                                     VALUES (?,?,?,?,?,?)""", (sha, "production", "waiting", stale, _ago(1), "upload")))
+    word = "run" if site.mode != "server" else "cycle"
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    r = Up(site, raw).start()
+    assert r.json()["status"] == "already"
+    assert r.json()["lines"] == [f"Already have this; it is kept and read by the next {word}: this site reads the Production "
+                                 "(collections) report now."]
+    c = sqlite3.connect(":memory:")
+    from remitwatch import ema_reports
+    ema_reports.ensure_schema(c)
+    c.execute("INSERT INTO ema_report_files (file_id, report, status, status_reason) VALUES (?,?,?,?)", (sha, "production", "waiting", stale))
+    assert uploads.report_outcome(c, sha)["lines"] == [f"Recognised as the Production (collections) report, kept and read by the "
+                                                      f"next {word}: this site reads the Production (collections) report now."]
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "ar")
+    r = Up(site, raw).start()
+    assert r.json()["lines"][0].startswith("Already have this; it is kept and not read yet: this site does not read the "
+                                           "Production (collections) report yet.")
+    other = "Its Production slot in this run was used; it is read by the next run."
+    c.execute("UPDATE ema_report_files SET status_reason=?", (other,))
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    assert uploads.report_outcome(c, sha)["lines"] == [f"Recognised as the Production (collections) report, kept and not read yet: {other}"]
+
+
+def test_a_file_the_loader_set_aside_unread_is_never_called_read(site):
+    """A file the loader recorded and did not read (a layout it does not know) is not "already" RemitWatch's: it can
+    be sent again. A pair the router passed over because it had read the same bytes before is said to be already
+    there, not "not read"."""
+    raw = b"Foo,Bar,Baz\r\n1,2,3\r\n"
+    sha = hashlib.sha256(raw).hexdigest()
+
+    def unread(c):
+        if site.mode == "server":
+            c.execute("INSERT INTO files (sha256, source_path, source_name, kind, ingested_at, status) VALUES (?,?,?,?,?,?)",
+                      (sha, "/x/odd.csv", "odd.csv", "ema:unknown", _ago(2), "not_read"))
+        else:
+            c.execute("CREATE TABLE IF NOT EXISTS files (sha256 TEXT, kind TEXT, ingested_at TEXT)")
+            c.execute("INSERT INTO files (sha256, kind, ingested_at) VALUES (?,?,?)", (sha, "ema:unknown", _ago(2)))
+    site.fill(unread)
+    r = Up(site, raw, name="odd.csv", gz=False, hint=None).start()
+    assert r.status_code == 200 and r.json()["status"] == "started", r.text
+    # a weekly export read before by the Dropbox feed, uploaded again: the router passes it over ("nothing new")
+    up = Up(site, text_report(seed=21), gz=False, hint="claim_status")
+    assert up.send().status_code == 200
+    pair = f"{up.uid}__{NAME}"
+    site.done(pair, dict(json.loads(site.intake()[pair + ".json"]),
+                         result={"status": "not_read", "lines": ["Nothing new: already read, or none of the files RemitWatch reads."]}))
+
+    def read_before(c):
+        if site.mode == "server":
+            c.execute("INSERT INTO files (sha256, source_path, source_name, kind, ingested_at, status) VALUES (?,?,?,?,?,?)",
+                      (up.sha, "/x/cs.csv", "cs.csv", "ema:claim_status", "2026-11-01T10:00:00+00:00", "done"))
+        else:
+            c.execute("CREATE TABLE IF NOT EXISTS files (sha256 TEXT, kind TEXT, ingested_at TEXT)")
+            c.execute("INSERT INTO files (sha256, kind, ingested_at) VALUES (?,?,?)", (up.sha, "ema:claim_status", "2026-11-01T10:00:00+00:00"))
+    site.fill(read_before)
+    st = status(site, up.uid)
+    assert st["applied"] == "already" and st["lines"] == ["Already have this; nothing changed. RemitWatch read this exact file on Nov 1, 2026."]
+
+
+@pytest.mark.parametrize("mode", ["server", "local"])
+def test_a_finish_whose_pieces_are_gone_answers_410_and_the_file_starts_afresh(build, mode):
+    """The pieces of an upload are gone before its finish (a clean-up, a lost disk): the finish says so (410, never a
+    server error), the upload is closed, and choosing the file again starts a new upload instead of carrying on."""
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    site = build(mode)
+    up = Up(site, text_report(), gz=False)
+    up.start()
+    for i in range(len(up.pieces)):
+        assert up.piece(i).status_code == 200
+    os.remove(site.store().part_path(up.uid))
+    c = TestClient(api.app, raise_server_exceptions=False)
+    r = c.post(f"/api/uploads/{up.uid}/finish", headers=XHR, json={"sha256": up.sha, "chunks": len(up.pieces), "bytes": len(up.body)})
+    assert r.status_code == 410 and r.json().get("restart") is True and "gone" in r.json()["detail"], r.text
+    st = status(site, up.uid)
+    assert st["state"] == "refused" and st["lines"][0].startswith("Not finished: The pieces received")
+    again = Up(site, up.raw, gz=False).start()
+    assert again.json()["status"] == "started" and again.json()["upload_id"] != up.uid
+
+
+def test_pieces_lost_mid_upload_close_it_so_the_file_starts_afresh(site):
+    up = Up(site, text_report(), gz=False)
+    up.start()
+    assert up.piece(0).status_code == 200
+    if site.mode == "dropbox":
+        site.fake.sessions.clear()                                      # Dropbox let the session expire
+    else:
+        os.remove(site.store().part_path(up.uid))
+    r = up.piece(1)
+    assert r.status_code == 410 and r.json()["restart"] is True, r.text
+    assert status(site, up.uid)["state"] == "refused"
+    assert Up(site, up.raw, gz=False).start().json()["status"] == "started"
+
+
+def test_the_relay_never_records_a_piece_dropbox_does_not_hold(build):
+    """An earlier request relayed piece 2 and lost its answer; the page now sends a piece 2 of other bytes of the same
+    length (the same file compressed again by another browser). Dropbox's "I hold bytes past that offset" no longer
+    passes for "this very piece": the mark the earlier request saved names other bytes, so the piece is refused, the
+    upload is closed, and the page starts the file afresh."""
+    site = build("dropbox", chunk=1024)
+    store = site.store()
+    up = Up(site, os.urandom(4096), gz=False, hint=None)
+    up.start()
+    assert up.piece(0).status_code == 200
+    rec, v = store.load(up.uid)
+    lost = os.urandom(1024)
+    store.append(dict(rec, chunks=list(rec["chunks"])), lost, index=1, sha=hashlib.sha256(lost).hexdigest(), version=v)
+    r = up.piece(1)                                                     # the page's piece 2: other bytes, the same length
+    assert r.status_code == 409 and r.json()["restart"] is True, r.text
+    held = bytes(next(iter(site.fake.sessions.values()))["data"][1024:2048])
+    assert held == lost and status(site, up.uid)["state"] == "refused"
+    assert status(site, up.uid)["chunks"] == [hashlib.sha256(up.pieces[0]).hexdigest()]
+
+
+def test_a_save_that_crosses_another_request_relays_nothing(build, monkeypatch):
+    """Two requests for one piece at once: the one whose mark is saved second finds the record changed and relays
+    nothing; the page carries on from what the server holds."""
+    site = build("dropbox", chunk=1024)
+    up = Up(site, os.urandom(3000), gz=False, hint=None)
+    up.start()
+    assert up.piece(0).status_code == 200
+    real = uploads.DropboxStateUploads.save
+    calls = []
+
+    def crossed(self, rec, version=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise uploads.Stale(rec["upload_id"])
+        return real(self, rec, version)
+    monkeypatch.setattr(uploads.DropboxStateUploads, "save", crossed)
+    before = len(next(iter(site.fake.sessions.values()))["data"])
+    r = up.piece(1)
+    assert r.status_code == 409 and r.json()["next_index"] == 1 and "crossed" in r.json()["detail"]
+    assert len(next(iter(site.fake.sessions.values()))["data"]) == before
+
+
+@pytest.mark.parametrize("mode", ["server", "local"])
+@pytest.mark.parametrize("letter", ["Ж", "報"])                    # 2 and 3 bytes in UTF-8
+def test_a_long_name_in_another_alphabet_can_be_finished(build, mode, letter):
+    site = build(mode)
+    name = letter * 100 + ".csv"
+    up = Up(site, text_report(), name=name, gz=False, hint=None)
+    r = up.send()
+    pair = uploads.pair_name(up.uid, name, False)
+    assert r.status_code == 200 and r.json()["state"] == "finished", (len(pair.encode()), r.text[:160])
+    assert len(pair.encode()) <= 32 + 2 + 100 + 4 and json.loads(site.intake()[pair + ".json"])["name"] == name
+
+
+def test_a_data_file_named_like_a_sidecar_or_pieces_is_still_a_data_file(build):
+    """A file named *.json, *.part, *.tmp or *.lock keeps that ending in its name only: the pair's name never ends in
+    it, so the clean-up and the intake never take the data file for a sidecar or for pieces."""
+    for given, safe in (("export.json", "export_json"), ("data.PART", "data_part"), ("x.tmp", "x_tmp"), ("y.lock", "y_lock")):
+        assert uploads.intake_safe_name(given) == safe
+    site = build("server")
+    store = site.store()
+    pair = uploads.pair_name("e" * 32, "export.json", False)
+    os.makedirs(store.ready, exist_ok=True)
+    with open(store.ready_path(pair), "wb") as fh:
+        fh.write(b"cut off before its sidecar")
+    old = time.time() - 30 * 3600
+    os.utime(store.ready_path(pair), (old, old))
+    store.sweep()
+    assert not os.path.exists(store.ready_path(pair))
+
+
+def test_a_file_sent_afresh_lets_go_of_its_cut_off_uploads(site):
+    """The page asks for a fresh upload (new: true) when its pieces do not match those received (another browser
+    compressed the file): this person's cut-off uploads of the file, idle for a while, are let go, so choosing the file
+    again lands on the fresh upload, never on the one it cannot match. One still receiving pieces is left alone."""
+    raw = text_report(3000)
+    first = Up(site, raw, gz=True)
+    first.start()
+    assert first.piece(0).status_code == 200
+    rec = site.store().load(first.uid)[0]
+    _age(site, rec, 0.1)                                                # six minutes without a piece
+    fresh = Up(site, raw, gz=True)
+    r = fresh.start(new=True)
+    assert r.json()["status"] == "started" and fresh.uid != first.uid
+    assert site.store().load(first.uid)[0] is None                    # let go
+    assert fresh.piece(0).status_code == 200
+    r = Up(site, raw, gz=True).start()                                  # chosen again: the fresh one carries on
+    assert r.json()["status"] == "resume" and r.json()["upload_id"] == fresh.uid
+    busy = Up(site, raw, gz=True).start(new=True)                       # the fresh one got a piece just now: left alone
+    assert busy.json()["status"] == "started" and site.store().load(fresh.uid)[0] is not None
+    with open(UPLOAD_JS, encoding="utf-8") as fh:
+        js = fh.read()
+    assert "startBody({new: true})" in js and "throw new Fresh(" in js
+
+
+def test_a_site_that_cannot_read_a_file_says_so_before_it_is_sent(build, monkeypatch):
+    """A serverless run reads at most cloud.MAX_FILE_BYTES of a file as it is sent. A plain file larger than that is
+    refused at the start; a compressed one as soon as its pieces pass it; the page is told the limit beforehand. A
+    server has no such limit."""
+    from remitwatch import cloud
+    monkeypatch.setattr(cloud, "MAX_FILE_BYTES", 64 * 1024)
+    for mode in ("local", "dropbox"):
+        site = build(mode)
+        r = site.c.post("/api/uploads/start", json={"name": "big.xlsx", "size": 100 * 1024, "gz": False}, headers=XHR)
+        assert r.status_code == 413 and r.json()["detail"].startswith("Too big to read on this site")
+        ex = site.c.get("/api/ema/exports").json()
+        assert ex["read_max"] == 64 * 1024 and ex["read_max_line"].startswith("Too big to read on this site")
+        up = Up(site, os.urandom(200 * 1024), gz=True, hint=None)
+        assert up.start().status_code == 200
+        codes = [up.piece(i).status_code for i in range(5)]
+        assert codes == [200, 200, 200, 200, 413]
+        assert "Too big to read on this site" in up.piece(4).json()["detail"]
+    site = build("server")
+    assert site.c.get("/api/ema/exports").json()["read_max"] is None
+    assert site.c.post("/api/uploads/start", json={"name": "big.xlsx", "size": 100 * 1024, "gz": False}, headers=XHR).status_code == 200
+
+
+def test_a_run_going_now_is_said_when_an_upload_finishes(build):
+    """On a serverless host, an upload that finishes while a run holds the lock is read by the run that starts as that
+    one ends (it finds the pair in intake/): the answer says so, not that a run was started."""
+    from remitwatch import cloud
+    for mode in ("local", "dropbox"):
+        site = build(mode)
+        site.state.put(cloud.LOCK, json.dumps({"token": "t", "started": _ago(0)}).encode())
+        r = Up(site, text_report(seed=31)).send()
+        assert r.status_code == 200
+        assert "A run is going now. When it ends, the next run starts and reads this file first." in r.json()["lines"]
+        site.state.delete(cloud.LOCK)
+        r = Up(site, text_report(seed=32)).send()
+        assert "The next run was asked to start now; it reads the file first." in r.json()["lines"]
+
+
+def test_the_cycles_clean_up_needs_no_page_and_never_raises(build, monkeypatch):
+    """uploads.sweep_server and uploads.sweep_state are what a server's cycle and a serverless run call (unit SWEEP
+    wires them): an upload left a day ago goes without anyone opening the Upload page, and an error comes back as its
+    kind only."""
+    for mode in ("server", "local"):
+        site = build(mode)
+        up = Up(site, text_report(), gz=False)
+        up.start()
+        assert up.piece(0).status_code == 200
+        store = site.store()
+        _age(site, store.load(up.uid)[0], 25)
+        out = uploads.sweep_server(site.db) if mode == "server" else uploads.sweep_state(site.state)
+        assert out.get("abandoned") == 1 and store.load(up.uid)[0] is None and not os.path.exists(store.part_path(up.uid))
+
+    def broken(self, now=None):
+        raise RuntimeError("/data/incoming/Doe Jane visit.csv: cannot")
+    monkeypatch.setattr(uploads.ServerUploads, "sweep", broken)
+    assert uploads.sweep_server(site.db) == {"error": "RuntimeError"}

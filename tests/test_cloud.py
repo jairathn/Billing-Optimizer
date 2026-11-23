@@ -957,3 +957,38 @@ def test_secret_never_follows_a_redirect_off_the_site_and_packets_stay_in_the_pr
     monkeypatch.setenv("VERCEL_ENV", "preview")
     assert tc.get("/api/cron/cycle", headers={"Authorization": "Bearer s3cret-value-for-the-scheduler"}).status_code == 409
     assert tc.post("/api/sync/run", headers=dict(auth, **{"X-Requested-With": "remitwatch"})).status_code == 409
+
+
+def test_the_dashboard_copy_holds_every_claim_of_a_bill_that_has_an_item(tmp_path):
+    """needs_D: the copy used to keep only the item's own 835 claim, so the dashboard could not see another submission's
+    payment and showed the stored state instead of working it out. It now keeps every claim (with its lines, adjustments
+    and remarks) of each bill an item names, and no claim of any other bill."""
+    from remitwatch import cloud
+    from remitwatch.detect import ensure_schema
+    from remitwatch.store import Store
+    s = Store(str(tmp_path / "store.sqlite"))
+    c = s.conn
+    ensure_schema(c)
+    # bill ZZ00T0001: the item's claim (C001) and the corrected claim the payer paid (C002); bill ZZ00T0002: no item
+    for ck, pcn in (("k1", "ZZ00T0001C001"), ("k2", "ZZ00T0001C002"), ("k3", "ZZ00T0002C001")):
+        c.execute("INSERT INTO claims (claim_key, patient_control_number) VALUES (?, ?)", (ck, pcn))
+        c.execute("INSERT INTO lines (line_key, claim_key, procedure_code, paid_cents) VALUES (?, ?, '99213', 5000)", (ck + "L", ck))
+        c.execute("INSERT INTO adjustments (claim_key, line_key, group_code, reason_code, amount_cents) VALUES (?, ?, 'CO', '45', 10)",
+                  (ck, ck + "L"))
+        c.execute("INSERT INTO remarks (claim_key, line_key, code) VALUES (?, ?, 'N130')", (ck, ck + "L"))
+    cols = {r[1] for r in c.execute("PRAGMA table_info(findings)")}
+    row = {"finding_id": "f1", "claim_key": "k1", "line_key": "k1L", "patient_control_number": "ZZ00T0001C001", "signal": "DENIED",
+           "status": "open"}
+    row = {k: v for k, v in row.items() if k in cols}
+    c.execute(f"INSERT INTO findings ({','.join(row)}) VALUES ({','.join('?' * len(row))})", list(row.values()))
+    c.commit()
+    path = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(c, path)
+    s.close()
+    copy = sqlite3.connect(path)
+    try:
+        for table in ("claims", "lines", "adjustments", "remarks"):
+            keys = {r[0] for r in copy.execute(f"SELECT claim_key FROM {table}")}
+            assert keys == {"k1", "k2"}, table             # the whole bill, and nothing of the bill with no item
+    finally:
+        copy.close()

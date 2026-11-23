@@ -986,8 +986,7 @@ def _outcomes(conn: sqlite3.Connection, items: list[dict], today: str) -> dict:
         from . import ema_checks as ec
         if not _table(conn, "ema_lines") or not _table(conn, "ema_link_map"):
             return {}
-        rules = ec.store_rules(conn)
-        return ec.line_outcomes(conn, items, code_once=rules.code_once, today=today)
+        return ec.line_outcomes(conn, items, code_once=_code_once_rule(conn), today=today)
     except sqlite3.Error:
         return {}
 
@@ -1028,6 +1027,12 @@ def _evidence(fx: dict) -> list[dict]:
         if e["kind"] == "manual" and e["to"] in ("appealed", "in_progress"):
             kind = "sent" if e["to"] == "appealed" else "started"
             who = e["actor"] or "a person"
+            note = str(e.get("note") or "")
+            if kind == "sent" and note.startswith("Billed:"):
+                # the page's Mark billed: the claim went to the next payer (or the patient), not an appeal to this one
+                out.append({"date": str(e["at"])[:10], "kind": "billed", "source": "remitwatch", "dated_by": "event", "confirmed": True,
+                            "text": f"Marked billed by {who} on {day(e['at'])}" + (f": {note[len('Billed:'):].strip()}" if note[7:].strip() else "")})
+                continue
             text = f"Marked {'Sent' if kind == 'sent' else 'Started'} by {who} on {day(e['at'])}" + (f": {e['note']}" if e.get("note") else "")
             out.append({"date": str(e["at"])[:10], "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
                         "confirmed": kind == "sent"})
@@ -1063,7 +1068,7 @@ def _evidence(fx: dict) -> list[dict]:
                        else f", first seen on the Production report of {day(seen)}")})
     # the A/R: claim actions and billing notes about an appeal, a call or a resubmission
     first_ar = ctx.get("first_ar")
-    seen_notes = set()
+    seen_notes, seen_follow = set(), set()
     for a in fx["ar"]:
         hist_first = a.get("hist_first_seen") or a.get("as_of")
         k = action_kind(a.get("action"))
@@ -1073,31 +1078,43 @@ def _evidence(fx: dict) -> list[dict]:
                         "confirmed": False, "text": f"A/R claim action '{a['action']}'" + (
                             f", already on the first A/R ({day(hist_first)})" if first else f", first on the A/R of {day(hist_first)}")})
         if a.get("has_note"):
-            kinds = [x for x in str(a.get("note_kind") or "").split(",") if x]
+            # note_kind: what the A/R reader read in the note (classify_note), NULL where it read nothing (a reader that
+            # does not classify notes yet): such a note is work of a kind nobody knows, and a person reads it first
+            raw = a.get("note_kind")
+            known = raw is not None
+            kinds = [x for x in str(raw or "").split(",") if x]
             work = [x for x in kinds if x in _NOTE_WORK]
-            key = (a.get("item_key"), tuple(kinds))
-            if key in seen_notes:
-                continue
-            seen_notes.add(key)
-            changed = a.get("hist_note_changed")
-            when = a.get("note_date") or changed or hist_first
-            by = "note_date" if a.get("note_date") else ("first_seen" if changed else
-                                                        ("first_report" if first_ar and hist_first and hist_first <= first_ar else "first_seen"))
-            if work:
-                words = " and ".join(WORK_WORDS.get(x, x) for x in work)
-                out.append({"date": when, "kind": work[0], "kinds": work, "source": "ar", "dated_by": by, "confirmed": False,
-                            "wait_days": a.get("note_wait"),
-                            "text": f"A/R billing note about {words}" + (
-                                f", dated {day(when)} in the note" if by == "note_date" else
-                                f", already on the first A/R ({day(when)}): its own date is unknown" if by == "first_report" else
-                                f", first on the A/R of {day(when)}")
-                            + (f"; it says to allow {a['note_wait']} days" if a.get("note_wait") else "")})
-            elif "no_appeal" in kinds:
-                out.append({"date": when, "kind": "no_appeal", "source": "ar", "dated_by": by, "confirmed": False,
-                            "text": "A/R billing note records a decision not to appeal" + (f" (on the A/R of {day(when)})" if when else "")})
+            key = (a.get("item_key"), tuple(kinds), known)
+            if key not in seen_notes:
+                seen_notes.add(key)
+                changed = a.get("hist_note_changed")
+                when = a.get("note_date") or changed or hist_first
+                by = "note_date" if a.get("note_date") else ("first_seen" if changed else
+                                                            ("first_report" if first_ar and hist_first and hist_first <= first_ar else "first_seen"))
+                dated = (f", dated {day(when)} in the note" if by == "note_date" else
+                         f", already on the first A/R ({day(when)}): its own date is unknown" if by == "first_report" else
+                         f", first on the A/R of {day(when)}")
+                if work:
+                    words = " and ".join(WORK_WORDS.get(x, x) for x in work)
+                    out.append({"date": when, "kind": work[0], "kinds": work, "source": "ar", "dated_by": by, "confirmed": False,
+                                "wait_days": a.get("note_wait"),
+                                "text": f"A/R billing note about {words}" + dated
+                                + (f"; it says to allow {a['note_wait']} days" if a.get("note_wait") else "")})
+                if "no_appeal" in kinds or "write_off" in kinds:
+                    what = "no_appeal" if "no_appeal" in kinds else "write_off"
+                    out.append({"date": when, "kind": "no_appeal", "decided": what, "source": "ar", "dated_by": by, "confirmed": False,
+                                "text": f"A/R billing note records {WORK_WORDS[what]}" + dated})
+                if not known:
+                    out.append({"date": when, "kind": "note", "source": "ar", "dated_by": by, "confirmed": False,
+                                "text": "EMA has a billing note on this line" + dated})
         if a.get("follow_up"):
-            out.append({"date": a.get("as_of"), "kind": "follow_up", "source": "ar", "dated_by": "first_seen", "confirmed": False,
-                        "follow_up": a["follow_up"], "text": f"EMA follow-up date set for {day(a['follow_up'])} (A/R of {day(a.get('as_of'))})"})
+            # a follow-up date a person set in EMA: someone is working the claim and comes back to it that day
+            fkey = (a.get("item_key"), a.get("follow_up"))
+            if fkey not in seen_follow:
+                seen_follow.add(fkey)
+                out.append({"date": a.get("as_of"), "kind": "follow_up", "source": "ar", "dated_by": "first_seen", "confirmed": False,
+                            "follow_up": str(a["follow_up"])[:10],
+                            "text": f"EMA follow-up date set for {day(a['follow_up'])} (first on the A/R of {day(a.get('as_of'))})"})
     # the payer received a corrected or new claim for the same services after this item's remittance
     for x in fx["r835"]["rows"]:
         if not x.get("received") or not after or x["status"] == "22":
@@ -1159,22 +1176,46 @@ def own_rows(fx: dict) -> list[dict]:
 
 def code_once(fx: dict) -> bool:
     """The item's own claim carries its code once on its date, so a figure for that date and code (another submission's
-    payment, EMA's line) is this line's own; a second unit or lesion billed on its own line makes it not."""
+    payment, EMA's line) is this line's own; a second unit or lesion billed on its own line makes it not. A line of the
+    code billed at $0 (a placeholder or a piece the payer split off) is not a second service (C02, C27)."""
     own = own_rows(fx)
     if not own:
         return True
     ck, svc = own[0]["claim_key"], own[0]["svc"]
-    return len([x for x in fx["r835"]["rows"] if x["claim_key"] == ck and x.get("line_key") and x["svc"] == svc]) <= 1
+    return len([x for x in fx["r835"]["rows"] if x["claim_key"] == ck and x.get("line_key") and x["svc"] == svc
+                and (x.get("charge") or 0) != 0]) <= 1
 
 
-def _payer_answers_after(fx: dict, since: str | None, payers: Sequence[str] = ()) -> list[dict]:
+def _code_once_rule(conn: sqlite3.Connection, fallback: Any = None):
+    """ema_checks.line_outcomes' code_once for the outcomes this module works out itself: the claim carries the item's
+    code once on its date, lines billed at $0 left out (as code_once above). Unit B's detection run passes its own."""
+    cache: dict[str, Any] = {}
+
+    def once(f: dict) -> bool:
+        ck = f.get("claim_key")
+        if not ck or not _table(conn, "lines"):
+            return True
+        if ck not in cache:
+            if len(cache) > 20_000:
+                cache.clear()
+            from collections import Counter
+            cache[ck] = Counter((r[0], r[1]) for r in conn.execute(
+                "SELECT service_date, procedure_code FROM lines WHERE claim_key=? AND COALESCE(charge_cents, 0) <> 0", (ck,)))
+        return cache[ck][(f.get("service_date"), f.get("procedure_code"))] <= 1
+    return once
+
+
+def _payer_answers_after(fx: dict, since: str | None, payers: Sequence[str] = (), only: bool = False) -> list[dict]:
     """The payer's answers on the item's services after a date: 835 adjudications (a reversal included) and EMA's
     insurance postings ($0 answers included) and the payer's reasons. Only the item's payer's, and the payers named in
-    `payers` (a payer the claim was rebilled to): a second payer's processing is not an answer to the work."""
+    `payers` (a payer the claim was rebilled to): a second payer's processing is not an answer to the work. only: the
+    payers named alone (a claim billed to the second payer waits on that payer, never on the first one)."""
     if not since:
         return []
     f = fx["item"]
-    groups = [g for g in [f.get("payer_group")] + list(payers) if g]
+    groups = [g for g in ([] if only else [f.get("payer_group")]) + list(payers) if g]
+    if only and not groups:
+        return []
 
     def ours(group: Any) -> bool:
         return not groups or not group or any(_same_payer(group, g) for g in groups)
@@ -1268,13 +1309,104 @@ def _deadline(f: dict) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _last_window(f: dict, deadline: str | None) -> str | None:
-    """The last day any window is open: the item's safe deadline, or the payer's own limit when detection found a later
-    one (legal_deadline). An item expires only past this, plus the grace."""
+def _later(*dates: Any) -> str | None:
+    got = [str(d)[:10] for d in dates if d]
+    return max(got) if got else None
+
+
+def windows(f: dict, deadline: str | None = None, dbasis: str | None = None, fx: dict | None = None) -> list[dict]:
+    """Every window the item can still be worked in, by date: {'what', 'date', 'basis', 'process', 'own'}. process: what
+    the window is for ('appeal': a dispute or appeal to the payer, 'corrected': a corrected claim, 'reopening': a Medicare
+    reopening of a clerical error, 'first_filing': a claim no payer has). own: the item's own deadline, or the payer's own
+    limit for the same request (legal_deadline). The others:
+      the payer's dispute window from the remittance, with its own limit (codes.appeal_rule, codes.legal_deadline), for
+          every denial and short payment, a correct-and-resubmit item too (Humana's 18 months behind its 1-year corrected
+          claim, C21 and C25); never for a claim forwarded to another carrier (CO-B11: the first payer denied nothing).
+          A payer that counts from the original determination ("original", "initial" in its rule) counts from the first
+          denial of the same service with the same reason (fx: the item's facts), never from a later repeat of it
+      the corrected-claim clock (codes.corrected_rule) where the route can be a corrected claim: an authorization number,
+          a modifier, a code, missing information
+      a Medicare reopening, one year from the remittance, where the fix can be clerical: a code or modifier, a diagnosis
+          (a medical-necessity denial, C24), a remark naming a missing or invalid code (C59)
+      the first-filing limit of a claim no payer answered
+    The item expires the day after the latest of them (no grace in the work queue)."""
+    from . import codes
+    if deadline is None and dbasis is None:
+        deadline, dbasis = _deadline(f)
+    sig, cat = f.get("signal") or "", f.get("category") or ""
+    grp, kind = f.get("payer_group"), f.get("payer_kind")
+    carc = str(f.get("carc") or "")
+    rarcs = {x.strip() for x in str(f.get("rarc") or "").split(",") if x.strip()}
+    process = "first_filing" if sig in CLAIM_SIGNALS else ("corrected" if f.get("actionable") == "correct_and_resubmit" else "appeal")
+    out: list[dict] = []
+    if deadline:
+        out.append({"what": "the item's deadline", "date": str(deadline)[:10], "basis": dbasis, "process": process, "own": True})
     legal = str(f.get("legal_deadline") or "")[:10]
-    if legal and (not deadline or legal > str(deadline)):
-        return legal
-    return deadline
+    if legal and (not deadline or legal > str(deadline)[:10]):
+        out.append({"what": "the payer's own limit", "date": legal, "basis": "the payer's own limit for the same request",
+                    "process": process, "own": True})
+    pay = f.get("payment_date")
+    money = cat in MONEY or sig == "EMA_DENIED"
+    forwarded = carc == "B11" or sig == "FORWARDED_TO_CARRIER"
+    if pay and money and sig not in CLAIM_SIGNALS and sig not in OWN_RULES and not forwarded:
+        r = codes.appeal_rule(grp, kind)
+        start = first_denial(fx, r) if fx is not None else None
+        start = start if start and start < str(pay)[:10] else pay
+        d = _later(_add(start, r["days"]), codes.legal_deadline(start, r))
+        if d:
+            out.append({"what": "the payer's dispute window", "date": d, "basis": r["label"], "process": "appeal", "own": False})
+        if kind != "medicare" and (f.get("actionable") == "correct_and_resubmit" or sig in CORRECTABLE_SIGNALS or carc in AUTH_CARCS):
+            cr = codes.corrected_rule(grp, kind, f.get("rarc"), sig, carc)
+            if cr:
+                start = f.get("service_date") if cr["clock"] == "dos" else pay
+                d = _later(_add(start, cr["days"]), codes.legal_deadline(start, cr))
+                if d:
+                    out.append({"what": "the corrected-claim limit", "date": d, "basis": cr["label"], "process": "corrected", "own": False})
+        if kind == "medicare" and (sig in codes.MEDICARE_CLERICAL_SIGNALS or sig == "DENIED_MEDICAL_NECESSITY"
+                                   or carc in codes.MEDICARE_CLERICAL_CARCS or rarcs & CLERICAL_RARCS):
+            out.append({"what": "a Medicare reopening", "date": _add(pay, REOPENING_DAYS), "process": "reopening", "own": False,
+                        "basis": "Medicare reopening of a clerical error (a wrong code, modifier or diagnosis): within one year of the "
+                                 "remittance (42 CFR 405.980)"})
+    if sig in CLAIM_SIGNALS and f.get("service_date"):
+        r = codes.filing_rule(grp, kind)
+        out.append({"what": "the first-filing limit", "date": _add(f["service_date"], r["days"]), "basis": r["label"],
+                    "process": "first_filing", "own": False})
+    seen, uniq = set(), []
+    for w in sorted((w for w in out if w.get("date")), key=lambda w: (w["date"], not w["own"])):
+        if (w["what"], w["date"]) not in seen:
+            seen.add((w["what"], w["date"]))
+            uniq.append(w)
+    return uniq
+
+
+def first_denial(fx: dict | None, rule: dict) -> str | None:
+    """The first $0 answer of the item's service by the same payer with the same reason, when the payer's window runs from
+    the original determination (its rule says "original" or "initial"); else None."""
+    if not fx or not re.search(r"\b(original|initial)\b", str(rule.get("label") or ""), re.I):
+        return None
+    f = fx["item"]
+    carc = str(f.get("carc") or "")
+    pay = str(f.get("payment_date") or "")[:10]
+    days = sorted(x["date"] for x in standing_rows(fx["r835"]["rows"]) if x.get("line_key") and (x["paid"] or 0) <= 0 and x["date"]
+                  and x["date"] < pay and _same_payer(row_group(x)[0], f.get("payer_group"))
+                  and (not carc or any(c == carc for _g, c, _a in x["adj"])))
+    return days[0] if days else None
+
+
+def last_window(f: dict, deadline: str | None = None, dbasis: str | None = None, wins: list | None = None) -> dict | None:
+    """The window that closes last (windows()), or None when the item has no date at all. The item's own deadline wins a
+    tie, so the basis named is the one the item was dated by."""
+    wins = windows(f, deadline, dbasis) if wins is None else wins
+    if not wins:
+        return None
+    top = max(w["date"] for w in wins)
+    return next((w for w in wins if w["date"] == top and w["own"]), None) or next(w for w in wins if w["date"] == top)
+
+
+def _last_window(f: dict, deadline: str | None) -> str | None:
+    """The last day any window is open (last_window's date)."""
+    w = last_window(f, deadline, f.get("deadline_basis"))
+    return w["date"] if w else deadline
 
 
 def _archive_hint(f: dict) -> dict | None:
@@ -1327,12 +1459,15 @@ def paid_proof(fx: dict) -> dict | None:
         return {"rule": "paid_later_ema", "cents": o.get("paid_after_same") or 0, "date": fp.get("date"), "payer": fp.get("payer"),
                 "check_tail": fp.get("check_tail"), "source": "production",
                 "text": f"Paid later: {usd(o.get('paid_after_same'))} by {fp.get('payer') or 'the payer'} on a check with no 835 "
-                        f"({day(fp.get('date'))}, check ending {fp.get('check_tail') or '?'})"}
-    if oc == "paid_after_other" and tot["n"] and tot["balance"] <= 0:
+                        f"({day(fp.get('date'))}" + (f", check ending {fp['check_tail']})" if fp.get("check_tail") else ")")}
+    # another payer's later payment settles the line only when it paid as a payer that pays first (rebilled to the right
+    # one); the second payer on file paying its share (the coinsurance) leaves the primary's denial standing
+    later_roles = {p.get("role") for p in fx["ema"]["pays"] if (p["cents"] or 0) > 0 and (p["posted"] or "") > mine}
+    if oc == "paid_after_other" and tot["n"] and tot["balance"] <= 0 and later_roles != {"secondary"}:
         return {"rule": "rebilled_paid", "cents": o.get("paid_after_other") or 0, "date": fp.get("date"), "payer": fp.get("payer"),
                 "check_tail": fp.get("check_tail"), "source": "production",
                 "text": f"Rebilled to {fp.get('payer') or 'another payer'}, paid: {usd(o.get('paid_after_other'))} on {day(fp.get('date'))} "
-                        f"(check ending {fp.get('check_tail') or '?'}, no 835); EMA shows the line settled"}
+                        + (f"(check ending {fp['check_tail']}, no 835)" if fp.get("check_tail") else "(no 835)") + "; EMA shows the line settled"}
     rows = fx["r835"]["rows"]
     stand = standing_rows(rows)
     own = own_rows(fx)
@@ -1344,7 +1479,11 @@ def paid_proof(fx: dict) -> dict | None:
         lcns = {x["lcn"] for x in rows if x.get("lcn") and x["code"] == o0["code"] and x["status"] != "22" and (
             (bool(o0.get("pccn")) and x.get("pccn") == o0.get("pccn")) or
             (x["pcn"] == o0["pcn"] and bool(o0.get("received")) and x.get("received") == o0.get("received")))}
-    units = max([abs(x.get("ounits") or x.get("units") or 1) for x in own] or [1])
+    # the units the item is about: every unit billed on its line, or, when the payer paid part of the line, the units it
+    # denied (a frequency denial of a second fraction is settled by that fraction paid on a resubmission)
+    billed_u = max([abs(x.get("ounits") or x.get("units") or 1) for x in own] or [1])
+    paid_u = max([abs(x.get("units") or 0) for x in own if (x.get("paid") or 0) > 0 and x.get("ounits")] or [0])
+    units = billed_u - paid_u if 0 < paid_u < billed_u else billed_u
 
     def same_line(x: dict) -> bool:
         """This 835 line is the item's own line answered again: its line control number, or the code billed once on the
@@ -1370,18 +1509,36 @@ def paid_proof(fx: dict) -> dict | None:
                     "text": f"Paid as the second payer: {usd(sum(y['paid'] or 0 for y in second))} by {x['payer']} on {day(x['date'])}, after the "
                             f"primary payer's answer (OA-23); this denial was of the claim sent to {denier} as if it were primary"}
         if cat in SHORT:
-            # an underpayment or downcode is settled by a later payment of the shortfall (95%)
+            # an underpayment or downcode is settled when the payer that paid short paid the shortfall later (95%), net of
+            # its own payment a reversal took back (a reversal and the same amount paid again is no money), or when its
+            # newest answer allowed the usual amount. A second payer's payment (its share of the coinsurance) never counts.
+            mine_ = [x for x in later_paid if _same_payer(row_group(x)[0], denier) and x["status"] not in SECOND_STATUS]
+            taken = sum(x["paid"] or 0 for x in own if x.get("reversed_by") and (x["paid"] or 0) > 0)
+            net = sum(x["paid"] or 0 for x in mine_) - taken
             need = int(0.95 * (f.get("shortfall_cents") or 0))
-            if paid >= max(1, need):
-                x = later_paid[0]
+            newest = max(mine_, key=lambda r: (r["date"] or "", r.get("line_key") or "")) if mine_ else None
+            exp = f.get("expected_cents") or 0
+            at_rate = bool(newest) and exp > 0 and (newest.get("allowed") or 0) >= int(0.99 * exp)
+            if mine_ and (net >= max(1, need) or at_rate):
+                x = newest
+                got = (f"Paid again on a later remittance: {usd(net)} more by {x['payer']} on {day(x['date'])} (check ending "
+                       f"{x['check_tail']})" if net >= max(1, need) else
+                       f"Paid at the usual rate on a later remittance: {x['payer']} allowed {usd(x.get('allowed'))} on {day(x['date'])} "
+                       f"(check ending {x['check_tail']}), at least the usual {usd(exp)}")
+                return {"rule": "paid_later_835", "cents": max(0, net), "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
+                        "source": "835", "text": got}
+        else:
+            # a denial is settled by a later payment of the line as a payer that pays first; a second payer's payment of its
+            # share (claim status 2, 3, 20, 21 from another payer) never settles the primary's denial. With no expected
+            # amount, a payment must reach half of what the payer allowed (else half the charge less its reductions)
+            prim = [x for x in later_paid if not (x["status"] in SECOND_STATUS and not _same_payer(row_group(x)[0], denier))]
+            paid = sum(x["paid"] or 0 for x in prim)
+            floor = thr if thr > 1 else _close_floor(own, prim)
+            if prim and paid >= floor:
+                x = prim[0]
                 return {"rule": "paid_later_835", "cents": paid, "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
-                        "source": "835", "text": f"Paid again on a later remittance: {usd(paid)} by {x['payer']} on {day(x['date'])} "
+                        "source": "835", "text": f"Paid on a later remittance: {usd(paid)} by {x['payer']} on {day(x['date'])} "
                                                  f"(check ending {x['check_tail']})"}
-        elif paid >= thr:
-            x = later_paid[0]
-            return {"rule": "paid_later_835", "cents": paid, "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
-                    "source": "835", "text": f"Paid on a later remittance: {usd(paid)} by {x['payer']} on {day(x['date'])} "
-                                             f"(check ending {x['check_tail']})"}
     # reprocessed to the patient: a reversal of the denial and a new answer with the patient's share and no payment
     if cat in ("denial", "bundling"):
         reproc = [x for x in stand if (x["date"] or "") > mine and (x["paid"] or 0) == 0 and x["status"] in ("1", "19")
@@ -1486,11 +1643,14 @@ def paid_proof(fx: dict) -> dict | None:
         # the payer split the line across claims of one remittance (MA15): the pieces share the line control number
         pieces = [x for x in stand if x.get("line_key") and lcns and x.get("lcn") in lcns and (x["date"] or "") == mine]
         allowed = sum(x["allowed"] or 0 for x in pieces)
-        if len({x["claim_key"] for x in pieces}) > 1 and allowed >= int(0.99 * f["expected_cents"]):
+        nclaims = len({x["claim_key"] for x in pieces})
+        # the pieces: across claims of one remittance (MA15), or lines of one claim that share the line control number
+        # (a payer paying one service as two lines, C27)
+        if len(pieces) > 1 and allowed >= int(0.99 * f["expected_cents"]):
+            where = f"across {nclaims} claims" if nclaims > 1 else f"into {len(pieces)} lines of the claim"
             return {"rule": "paid_in_full_split", "cents": allowed, "date": mine, "payer": f.get("payer_name"),
-                    "source": "835", "text": f"Paid in full: the payer split {f.get('procedure_code')} across {len({x['claim_key'] for x in pieces})} "
-                                             f"claims on the remittance of {day(mine)}, and their allowed amounts add up to {usd(allowed)}, "
-                                             "the usual rate"}
+                    "source": "835", "text": f"Paid in full: the payer split {f.get('procedure_code')} {where} on the remittance of {day(mine)}, "
+                                             f"and their allowed amounts add up to {usd(allowed)}, the usual rate"}
         if once and tot["n"] and not tot["several"] and tot["balance"] <= 0 and tot["ins_paid"] + tot["pat_paid"] >= int(0.99 * f["expected_cents"]):
             return {"rule": "paid_in_full_ema", "cents": tot["ins_paid"], "date": None, "payer": None, "source": "production",
                     "text": f"Paid in full: EMA shows {usd(tot['ins_paid'])} from insurance and {usd(tot['pat_paid'])} from the patient on this "
@@ -1535,6 +1695,367 @@ def _forwarded(fx: dict) -> dict | None:
     return None
 
 
+def _close_floor(own: list[dict], pays: list[dict]) -> int:
+    """What a later payment must reach to settle a denial whose expected amount is unknown: half of what the paying answer
+    allowed, else half of the line's charge less its routine reductions. Never one cent: a second payer's coinsurance is
+    not the payer paying (M4)."""
+    allowed = max((x.get("allowed") or 0 for x in pays), default=0)
+    if allowed > 0:
+        return max(1, allowed // 2)
+    x = own[0] if own else None
+    if not x:
+        return 1
+    co = sum(a for g, c, a in x["adj"] if g == "CO" and c in CONTRACTUAL_CARCS)
+    return max(1, ((x["charge"] or 0) - co) // 2)
+
+
+CONTRACTUAL_CARCS = frozenset({"45", "253", "144", "59", "131", "94", "237", "2", "23"})
+COB_CARCS = frozenset({"22"})
+CHECK_HINTS = ("Possibly paid", "Processed on claim", "Partly paid")
+# appeal_block for a work-now item whose next step is not an appeal (unit B's bulk SQL reads appeal_block IS NULL): its
+# route's reason, in unit C's BLOCK_WORDS
+ROUTE_BLOCKS = {"decide": "check_first", "corrected": "corrected", "call": "call", "cob": "cob", "eob_first": "eob_first",
+                "bill_secondary": "bill", "bill_patient": "bill", "post": "post", "refund": "credit", "contract": "owner",
+                "policy": "owner", "fees": "fees"}
+
+
+def _same_check(a: Any, b: Any) -> bool:
+    """Two check or trace numbers are one: equal letters and digits (leading zeros dropped), or the longer ends with the
+    shorter of at least 8 (EMA keeps some check numbers cut short)."""
+    x = re.sub(r"[^A-Za-z0-9]", "", str(a or "")).upper().lstrip("0")
+    y = re.sub(r"[^A-Za-z0-9]", "", str(b or "")).upper().lstrip("0")
+    if not x or not y:
+        return False
+    if x == y:
+        return True
+    s, longer = sorted((x, y), key=len)
+    return len(s) >= 8 and longer.endswith(s)
+
+
+def check_money(fx: dict) -> list[dict]:
+    """The item's line check by check, the 835 against EMA: {'tk', 'trace_tail', 'date', 'payer', 'group', 'method',
+    'net_835' (every answer of the line on that 835, reversals included), 'ema' (EMA's money posted under the same check),
+    'ema_rows', 'reversal' (the 835 reverses an answer of the line)}. EMA's posting belongs to a check by the 835 the
+    checks table matched it to (trace_key), else by the check's whole number, never by its last four characters."""
+    by: dict = {}
+    for x in fx["r835"]["rows"]:
+        if not x.get("line_key"):
+            continue
+        d = by.setdefault(x.get("tk"), {"tk": x.get("tk"), "trace": x.get("trace"), "trace_tail": x.get("check_tail"),
+                                       "date": x.get("date"), "payer": x.get("payer"), "group": row_group(x)[0],
+                                       "method": x.get("method"), "net_835": 0, "ema": 0, "ema_rows": 0, "reversal": False})
+        d["net_835"] += x["paid"] or 0
+        d["reversal"] = d["reversal"] or x["status"] == "22"
+    for p in fx["ema"]["pays"]:
+        hit = by.get(p.get("trace_key")) if p.get("trace_key") else None
+        if hit is None and p.get("check"):
+            hit = next((d for d in by.values() if d.get("trace") and _same_check(p["check"], d["trace"])), None)
+        if hit is not None:
+            hit["ema"] += p["cents"] or 0
+            hit["ema_rows"] += 1
+    return sorted(by.values(), key=lambda d: (d["date"] or "", d["trace_tail"] or ""))
+
+
+def plb_unbooked(fx: dict) -> list[dict]:
+    """Takebacks (PLB WO or 72) whose reference names the item's claim that EMA shows no takeback for on the line."""
+    plb = [p for p in fx["r835"].get("plb") or [] if p["reason"] in ("WO", "72")]
+    if not plb:
+        return []
+    neg = [p for p in fx["ema"]["pays"] if (p["cents"] or 0) < 0]
+    return [p for p in plb if not any(abs(abs(n["cents"]) - abs(p["cents"])) <= 1 for n in neg)]
+
+
+def unposted_takebacks(fx: dict) -> dict:
+    """Takebacks on the payer's 835 that EMA never posted on the item's line (EMA then shows money the payer took back):
+    per check that carries a reversal of the line, EMA's money under that check less the 835's net under it; and, when no
+    reversal of the line is on file, each provider-level takeback (PLB WO or 72) naming the claim with no takeback in EMA
+    (a reversal and its PLB recoupment are one takeback, never counted twice). {'cents', 'rows': [{'cents', 'date',
+    'payer', 'check_tail', 'kind'}]}; nothing when EMA does not hold the line."""
+    if not fx["ema"]["lines"]:
+        return {"cents": 0, "rows": []}
+    rows = []
+    checks = check_money(fx)
+    for d in checks:
+        if d["reversal"] and d["ema"] - d["net_835"] > 0:
+            rows.append({"cents": d["ema"] - d["net_835"], "date": d["date"], "payer": d["payer"], "check_tail": d["trace_tail"],
+                         "kind": "reversal"})
+    if not any(d["reversal"] for d in checks):
+        for p in plb_unbooked(fx):
+            rows.append({"cents": abs(p["cents"] or 0), "date": p["date"], "payer": p["payer"], "check_tail": p["check_tail"], "kind": "plb"})
+    return {"cents": sum(r["cents"] for r in rows), "rows": rows}
+
+
+def _credit_left(fx: dict, credit: int) -> tuple[int, dict]:
+    """The part of a credit EMA shows that is money owed back, and the takebacks EMA never posted: a credit the unposted
+    takebacks cover (within $1) is no refund at all, only a posting to fix."""
+    tb = unposted_takebacks(fx)
+    if credit <= 0 or tb["cents"] <= 0:
+        return credit, tb
+    left = credit - tb["cents"]
+    return (0 if left <= 100 else left), tb
+
+
+def _takeback_words(tb: dict) -> str:
+    r = max(tb["rows"], key=lambda x: x["date"] or "") if tb["rows"] else {}
+    who = _grp_kind(r.get("payer"))[0] if r.get("payer") else "the payer"
+    return (f"{who}'s takeback of {usd(tb['cents'])}" + (f" (835 of {day(r.get('date'))}" + (f", check ending {r['check_tail']}" if r.get("check_tail") else "")
+                                                         + ")" if r.get("date") else ""))
+
+
+def _carc_group(fx: dict) -> str:
+    """The group of the item's own reason on its remittance (CO, PR, OA, PI), '' when it cannot be told."""
+    f = fx["item"]
+    carc = str(f.get("carc") or "")
+    if f.get("carc_group"):
+        return str(f["carc_group"])
+    for x in own_rows(fx):
+        for g, c, _a in list(x["adj"]) + list(x["cadj"]):
+            if c == carc:
+                return g
+    return ""
+
+
+def _owed(f: dict, fx: dict) -> int:
+    """What the item is about, in cents: its shortfall, else its expected amount, else the line's charge less its routine
+    reductions."""
+    for v in (f.get("shortfall_cents"), f.get("expected_cents")):
+        if v:
+            return int(v)
+    own = [x for x in own_rows(fx) if x.get("line_key")]
+    if own:
+        co = sum(a for g, c, a in own[0]["adj"] if g == "CO" and c in CONTRACTUAL_CARCS)
+        return max(0, (own[0]["charge"] or 0) - co)
+    return int(f.get("charge_cents") or 0)
+
+
+def settled_in_ema(fx: dict) -> dict | None:
+    """A denial that EMA shows settled with money on the line, while the denying payer paid nothing on its 835 and no rule
+    proves who paid: {'kind': 'insurer' (insurance money: find which payer paid), 'patient_pr' (the patient paid a share
+    the payer put on the patient), 'patient_co' (the patient paid what the payer put on the practice: refund or appeal),
+    'ins', 'pat', 'open', 'group'}, else None. EMA's line, never its claim status (C02, H6)."""
+    f = fx["item"]
+    if f.get("category") not in ("denial", "bundling") or f.get("signal") in OWN_RULES:
+        return None
+    tot = _ema_line_totals(fx)
+    if not tot["n"] or tot["balance"] > 0:
+        return None
+    if (f.get("paid_cents") or 0) > 0 or any((x["paid"] or 0) > 0 for x in own_rows(fx) if x["status"] != "22"):
+        return None
+    group = _carc_group(fx)
+    out = {"ins": tot["ins_paid"], "pat": tot["pat_paid"], "open": tot["balance"], "group": group}
+    if tot["ins_paid"] > 0:
+        return dict(out, kind="insurer")
+    if not tot["several"] and tot["pat_paid"] > 0 and tot["pat_paid"] * 2 >= _owed(f, fx):
+        return dict(out, kind="patient_pr" if group == "PR" else "patient_co")
+    return None
+
+
+def _pending_action(fx: dict) -> str | None:
+    """EMA's current claim action on the item's line when it shows work at the payer (an appeal, a corrected claim,
+    records, a reprocessing request): the newest Production report's, else the newest A/R row's."""
+    acts = [ln.get("action") for ln in fx["ema"]["lines"] if ln.get("action")]
+    if not acts and fx["ar"]:
+        newest = max(fx["ar"], key=lambda a: a.get("as_of") or "")
+        acts = [newest.get("action")] if newest.get("action") else []
+    return next((a for a in acts if action_kind(a) in PENDING_ACTIONS), None)
+
+
+def _short_label(basis: Any, n: int = 120) -> str:
+    """A window's basis cut to its first clause, for sentences that name it."""
+    b = str(basis or "").strip()
+    m = re.search(r"(?<=[a-z0-9)])[.;:] ", b)
+    b = b[:m.start()] if m else b.rstrip(".")
+    return b if len(b) <= n else b[:n].rsplit(" ", 1)[0] + "..."
+
+
+def _policy_words(key: str) -> str:
+    """An owner's write-off policy key in words: 'group|||reason' is the payer's reason on every code, 'group|code|mod|reason'
+    one code (and modifier)."""
+    parts = (str(key or "").split("|") + ["", "", "", ""])[:4]
+    grp, code, mod, reason = parts
+    who = f"{grp}'s" if grp and not grp.endswith("s") else (f"{grp}'" if grp else "the payer's")
+    what = f"{reason} denials" if reason else "write-offs"
+    return f"{who} {what} " + (f"of {code}{('-' + mod) if mod else ''}" if code else "on every code")
+
+
+def same_day_lines(conn: sqlite3.Connection, f: dict) -> list[dict]:
+    """The other procedures of the item's patient on its date of service, as the 835s answered them (the item's bill, and
+    the patient's other claims that day by the payer's member record; standing answers, the best allowed amount of each
+    code): what a multiple-procedure reduction ranks the item's code against. The member record is only matched, never
+    shown."""
+    svc, code = f.get("service_date"), f.get("procedure_code")
+    if not svc or not _table(conn, "claims") or not _table(conn, "lines"):
+        return []
+    lcols, ccols = _cols(conn, "lines"), _cols(conn, "claims")
+    allowed = "l.allowed_cents" if "allowed_cents" in lcols else "NULL"
+    rows = []
+    b = bill_of(f.get("patient_control_number"))
+    if b:
+        rows += conn.execute(
+            f"""SELECT c.patient_control_number, c.claim_status_code, l.procedure_code, {allowed}, l.paid_cents, l.charge_cents, 1
+                FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key JOIN lines l ON l.claim_key = c.claim_key
+                WHERE c.patient_control_number >= ? AND c.patient_control_number < ? AND COALESCE(l.service_date, c.statement_from) = ?
+                  AND COALESCE(t.superseded, 0) = 0""", (b, b + "~", svc)).fetchall()
+    if "patient_id" in ccols and f.get("claim_key") and "service_date" in lcols:
+        pid = conn.execute("SELECT patient_id FROM claims WHERE claim_key = ?", (f["claim_key"],)).fetchone()
+        if pid and pid[0]:
+            rows += conn.execute(
+                f"""SELECT c.patient_control_number, c.claim_status_code, l.procedure_code, {allowed}, l.paid_cents, l.charge_cents, 0
+                    FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = c.transaction_key
+                    WHERE l.service_date = ? AND c.patient_id = ? AND COALESCE(t.superseded, 0) = 0""", (svc, pid[0])).fetchall()
+    best: dict[str, dict] = {}
+    for pcn, st_, cd, al, paid, chg, same_bill in rows:
+        if (same_bill and bill_of(pcn) != b) or str(st_) == "22" or not cd or cd == code:
+            continue
+        cur = best.get(cd)
+        if cur is None or (al or 0) > (cur["allowed"] or 0):
+            best[cd] = {"code": cd, "allowed": al, "paid": paid, "charge": chg}
+    return sorted(best.values(), key=lambda d: -(d["allowed"] or 0))
+
+
+def short_check(conn: sqlite3.Connection | None, fx: dict) -> dict | None:
+    """Why a short payment may be right: a higher-valued procedure the same day (the payer pays the second procedure at a
+    reduced rate) or a surgery-center day (the payer pays its lower facility rate for the professional service), or why
+    it is not (the day's highest-valued procedure was cut as if it were a second one). {'kind': 'reduced' | 'top_cut',
+    'text'} or None. Memoized on the facts; the same-day lines are looked up only where a cut of about half, or a facility
+    day, makes a reduction possible."""
+    if "_short_check" in fx:
+        return fx["_short_check"]
+    f = fx["item"]
+    out = None
+    if f.get("category") in SHORT and (f.get("expected_cents") or 0) > 0:
+        exp, allowed = f.get("expected_cents") or 0, f.get("allowed_cents")
+        ratio = (allowed / exp) if allowed is not None and exp else None
+        tot = _ema_line_totals(fx)
+        facility = tot["several"] or bool(fx["ema"]["twins"]) or (f.get("pos_class") or "") == "facility"
+        visit = str(f.get("procedure_code") or "").startswith("99")
+        half = ratio is not None and 0.4 <= ratio <= 0.6
+        if visit:
+            # a visit is not reduced as a second procedure; on a surgery-center day the payer pays its lower facility rate
+            if facility:
+                out = {"kind": "reduced", "text": (f"this looks like a surgery-center day (EMA ties this patient, date and code to a second "
+                                                   f"claim, or the place of service is a facility), where {f.get('payer_group') or 'the payer'} "
+                                                   "pays its lower facility rate, so the difference may be smaller than shown")}
+        elif conn is not None and (facility or half):
+            others = same_day_lines(conn, f)
+            higher = [d for d in others if (d["allowed"] or 0) > exp]
+            if higher and (facility or half):
+                h = higher[0]
+                text = (f"{h['code']} was billed the same day and is valued higher (allowed {usd(h['allowed'])}), so the payer pays "
+                        f"{f.get('procedure_code')} as a second procedure, usually at half its rate")
+                if facility:
+                    text += ("; and this looks like a surgery-center day (EMA ties this patient, date and code to a second claim, or "
+                             "the place of service is a facility), where the payer pays its lower facility rate")
+                out = {"kind": "reduced", "text": text}
+            elif others and half and all((d["allowed"] or 0) < exp for d in others):
+                low = ", ".join(f"{d['code']} (allowed {usd(d['allowed'])})" for d in others[:3])
+                out = {"kind": "top_cut", "text": (f"{f.get('procedure_code')} was the highest-valued procedure of the day (the others: {low}) "
+                                                   "and was still paid at about half: only the lower-valued procedures take that reduction")}
+    fx["_short_check"] = out
+    return out
+
+
+def timely_proof(f: dict, fx: dict) -> dict:
+    """For a timely-filing denial: the first day the payer received any claim of this bill (the 835's received dates), the
+    first submission EMA's claim-status export shows, and the first-filing limit from the date of service."""
+    from .codes import filing_rule
+    recv = sorted(x["received"] for x in fx["r835"]["rows"] if x.get("received"))
+    sub = sorted(x["submitted"] for x in fx["exports"] if x.get("submitted"))
+    r = filing_rule(f.get("payer_group"), f.get("payer_kind"))
+    limit = _add(f.get("service_date"), r["days"]) if f.get("service_date") else None
+    first = min([d for d in (recv[:1] + sub[:1]) if d] or [None]) if (recv or sub) else None
+    return {"received": recv[0] if recv else None, "submitted": sub[0] if sub else None, "limit": limit, "label": r["label"],
+            "in_time": bool(first and limit and first <= limit)}
+
+
+def route_of(fx: dict, st: dict, conn: sqlite3.Connection | None = None) -> str:
+    """The kind of work the item takes, from its state and facts: appeal, corrected, call, post, bill_patient,
+    bill_secondary, refund, contract, policy, fees, eob_first, cob, rate, decide, wait, nothing. The one place it is
+    decided: the story's next step follows it, and a work-now item whose route is not an appeal carries an appeal_block
+    (ROUTE_BLOCKS) so a bulk appeal never takes it."""
+    f = fx["item"]
+    state = st.get("work_state")
+    sig, cat = f.get("signal") or "", f.get("category") or ""
+    rule = st.get("rule") or ""
+    if state in ("done", "accepted", "expired"):
+        return "nothing"
+    if state == "waiting":
+        return "wait"
+    if state == "cant_check":
+        return "call"
+    if rule == "credit_unposted_takeback":
+        return "post"
+    if rule in ("credit_refund", "possible_overpayment") or sig == "CREDIT_BALANCE" or cat == "refund":
+        return "refund"
+    if rule == "bill_patient":
+        return "bill_patient"
+    if sig == "SECONDARY_NOT_BILLED" and rule in ("open", "open_late", "stored"):
+        return "bill_secondary"         # a stored state on the dashboard's copy keeps the signal's own work
+    if rule in ("work_answered", "work_stale", "follow_up_due", "forwarded_late", "person_billed_paid", "stored_person"):
+        return "call"
+    if rule in ("check_first", "settled_in_ema", "patient_paid_co", "decided_no_appeal", "note_unread"):
+        return "decide"
+    if rule == "post_payment" or sig == "REMIT_NOT_POSTED":
+        return "post"
+    if sig == "EMA_DENIAL_AS_CONTRACTUAL":
+        return "policy"
+    if sig in CONTRACT:
+        return "contract"
+    if sig in FEES:
+        return "fees"
+    if sig in ("NO_ANSWER", "DENIED_DUPLICATE_UNPAID"):
+        return "call"
+    if sig in ("REJECTED_PRE_PAYER", "NOT_SENT"):
+        return "corrected"
+    if sig == "EMA_DENIED":
+        return "eob_first"
+    carc = str(f.get("carc") or "")
+    if carc in COB_CARCS:
+        return "cob"
+    o = fx.get("outcome") or {}
+    if o.get("outcome") in ("paid_before", "lost_to_timely_filing"):
+        return "decide"
+    if str(f.get("hint") or "").startswith(CHECK_HINTS):
+        return "decide"
+    late = st.get("late_window") or {}
+    auth = sig == "DENIED_AUTH" or carc in AUTH_CARCS
+    if late.get("process") == "reopening":
+        return "decide"                 # only a clerical error can be reopened: the step asks which it was
+    if late.get("process") == "corrected" and not auth:
+        return "corrected"
+    if late.get("process") == "appeal" and f.get("actionable") == "correct_and_resubmit":
+        return "appeal"                 # the corrected-claim limit passed; the payer's dispute window is still open
+    if cat in SHORT:
+        chk = short_check(conn, fx)
+        if chk and chk["kind"] == "reduced":
+            return "decide"
+    if sig == "DENIED_TIMELY_FILING" or carc == "29":
+        return "decide" if not timely_proof(f, fx)["in_time"] else "appeal"
+    if auth:
+        return "decide"                 # find the authorization first (amendment 8.2: these are 0-1% ever paid on a blind appeal)
+    if sig in ("DENIED_NONCOVERED", "DENIED_OTHER", "CODE_CHANGED", "CLAIM_DENIED_UNPAID", "DENIED_MISSING_PRIMARY", "DENIED_PROVIDER"):
+        return "decide"
+    if f.get("actionable") == "correct_and_resubmit" or sig == "DENIED_MISSING_MODIFIER":
+        return "corrected"
+    if sig in ("UNDERPAID_VS_OWN_RATE", "MPPR_EXCESS", "SECOND_RATE") or (cat in SHORT and not sig.startswith("DOWNCODE")):
+        return "rate"
+    return "appeal"
+
+
+def decide(fx: dict, today: str, conn: sqlite3.Connection | None = None) -> dict:
+    """The item's state (_decide) with the route its next step takes, and, for a work-now item whose route is not an
+    appeal, the appeal_block that keeps it out of a bulk appeal."""
+    res = _decide(fx, today)
+    if res.get("work_state") == "work_now":
+        route = route_of(fx, res, conn)
+        res["route"] = route
+        if res.get("appeal_block") is None and route in ROUTE_BLOCKS and not res.get("person"):
+            res["appeal_block"] = ROUTE_BLOCKS[route]
+    else:
+        res["route"] = route_of(fx, res, conn)
+    return res
+
+
 def _decide(fx: dict, today: str) -> dict:
     f = fx["item"]
     ctx = fx["ctx"]
@@ -1543,20 +2064,38 @@ def _decide(fx: dict, today: str) -> dict:
     ev = _evidence(fx)
     res: dict = {"work_state": None, "follow_up_on": None, "state_basis": None, "evidence": [], "rule": None, "person": False,
                  "proof": None, "deadline": None, "deadline_basis": None, "work": None, "answered": None, "appeal_block": None,
-                 "credit_cents": 0, "closed_on": None, "closed_basis": None}
+                 "credit_cents": 0, "closed_on": None, "closed_basis": None, "last_window": None, "late_window": None,
+                 "route": None, "takeback": None, "settled": None}
     deadline, dbasis = _deadline(f)
     res["deadline"], res["deadline_basis"] = deadline, dbasis
-    lastw = _last_window(f, deadline)       # expiry counts from the payer's own limit when it is later than the safe date
-    res["legal_deadline"] = lastw if lastw != deadline else None
+    wins = windows(f, deadline, dbasis, fx)
+    lastw_ = last_window(f, deadline, dbasis, wins)
+    lastw = lastw_["date"] if lastw_ else None
+    res["last_window"] = lastw_
+    legal = str(f.get("legal_deadline") or "")[:10]
+    res["legal_deadline"] = legal if legal and (not deadline or legal > str(deadline)[:10]) else None
+    own_last = _later(deadline, res["legal_deadline"])
+    if own_last and today > own_last and lastw and lastw >= today and not lastw_["own"]:
+        # past the item's own deadline and the payer's own limit, inside a later window: which one, and what it is for
+        res["late_window"] = next((w for w in wins if w["date"] >= today and not w["own"]), lastw_)
+    past_all = bool(lastw) and today > lastw
 
     def put(state: str, rule: str, basis: str, rows: list | None = None, follow: str | None = None) -> dict:
         res.update(work_state=state, rule=rule, state_basis=basis[:300], follow_up_on=follow)
         res["evidence"] = list(rows or [])
         return res
+
+    def expired(lead: str | None = None, rows: list | None = None) -> dict:
+        res["closed_on"] = lastw
+        res["closed_basis"] = (lastw_ or {}).get("basis") or dbasis
+        what = _short_label(res["closed_basis"])
+        return put("expired", "expired", (lead.rstrip(".") + ". " if lead else "") + f"The last window closed on {day(lastw)}"
+                   + (f" ({what})" if what else "") + ", with no work pending", rows)
     proof = paid_proof(fx) if (cat in MONEY or sig in EMA_ONLY) and sig not in OWN_RULES else None
     credit = credit_of(fx) if cat in MONEY and sig not in OWN_RULES else 0
     res["proof"], res["credit_cents"] = proof, credit
     reproc = any(x["status"] == "22" and (x["date"] or "") > (f.get("payment_date") or "") for x in fx["r835"]["rows"])
+    hint = _archive_hint(f)
     # ------------------------------------------------------------------ a person's status wins
     events = fx["rw"]["events"]
     manual = [e for e in events if e["kind"] == "manual"]
@@ -1564,8 +2103,6 @@ def _decide(fx: dict, today: str) -> dict:
     who = (last_manual or {}).get("actor") or "a person"
     when = (last_manual or {}).get("at") or f.get("status_changed_at")
     conflict = f" {proof['text']}: mark it Paid." if proof and proof.get("rule") not in ("moved_to_patient_open",) else ""
-    if f.get("stale") and st not in ("resolved", "dismissed", "lost"):
-        return put("done", "stale", "No longer listed: the rules that raised it no longer find it on the newest data; its notes are kept")
     if st == "resolved":
         res["person"] = not f.get("auto_note")
         if f.get("auto_note"):
@@ -1590,99 +2127,171 @@ def _decide(fx: dict, today: str) -> dict:
                    [e for e in ev if e["kind"] == "started"][-1:])
     if st == "appealed":
         res["person"] = True
-        sent = [e for e in ev if e["kind"] in ("sent", "fax") and e["source"] == "remitwatch"]
+        sent = [e for e in ev if e["kind"] in ("sent", "fax", "billed") and e["source"] == "remitwatch"]
         anchor = max((e["date"] for e in sent if e.get("date")), default=None) or str(f.get("appealed_at") or f.get("status_changed_at") or "")[:10]
+        if sig == "SECONDARY_NOT_BILLED":
+            return _billed_second(res, fx, ev, anchor, who, today, put)
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
         return _follow(res, fx, ev, anchor, work, f"Marked Sent by {who} on {day(anchor)}", today, deadline, confirmed=True,
                        conflict=conflict, person=True, put=put)
+    # ------------------------------------------------------------------ no longer listed (a person's status above wins)
+    if f.get("stale"):
+        return put("done", "stale", "No longer listed: the rules that raised it no longer find it on the newest data; its notes are kept")
     # ------------------------------------------------------------------ automatic states
     if sig in INFO_ONLY:
         return put("accepted", "info_only", "For information: nothing to recover")
     if sig == "EMA_DENIAL_AS_CONTRACTUAL":
-        pol, pats = _c7_policy(f, ctx)
+        pol, words = _c7_policy(f, ctx)
         if pol:
-            return put("accepted", "policy", f"The owner's write-off policy accepts {pats}" + (f" (set by {pol.get('by')} on {day(pol.get('at'))})"
-                                                                                             if pol.get("by") else ""))
+            return put("accepted", "policy", f"The owner's write-off policy accepts {words}" + (
+                f" (set by {pol.get('by')} on {day(pol.get('at'))})" if pol.get("by") else ""))
     if sig in CONTRACT:
+        res["appeal_block"] = "owner"
         return put("work_now", "owner_decision", "A contract or billing-policy question for the owner, not a claim to appeal")
     if sig in FEES:
-        if lastw and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"):
-            res["closed_on"], res["closed_basis"] = lastw, dbasis
-            return put("expired", "expired", f"The payer's window to dispute it closed on {day(lastw)}, more than {EXPIRE_GRACE_DAYS} days ago")
+        if past_all:
+            return expired()
+        res["appeal_block"] = "fees"
         return put("work_now", "fees", "A takeback to match to the payer's overpayment letter, and to dispute if it was not owed"
                    if sig == "TAKEBACK" else "A payment fee the payer's vendor took: ask for standard EFT with no fee")
     if sig == "REMIT_NOT_POSTED":
-        return put("work_now", "post_payment", "The 835 paid this and EMA has not posted it: post it in EMA")
+        res["appeal_block"] = "post"
+        return put("work_now", "post_payment", "The 835 paid this and EMA never posted it")
     if sig == "CREDIT_BALANCE":
         e = _ev(f)
         res["appeal_block"] = "credit"
-        res["credit_cents"] = int(e.get("credit_cents") or f.get("shortfall_cents") or 0)
+        whole = int(e.get("credit_cents") or f.get("shortfall_cents") or 0)
+        left, tb = _credit_left(fx, whole)
+        if tb["cents"] and not left:
+            res["takeback"], res["credit_cents"] = tb, 0
+            return put("work_now", "credit_unposted_takeback", f"EMA shows a credit of {usd(whole)} on this claim only because it never "
+                       f"posted {_takeback_words(tb)}: post the takeback; nothing is owed back")
+        res["credit_cents"] = left
+        payer = e.get("overpaid_by")
         due = f" Medicare expects it back by {day(deadline)}." if deadline and f.get("payer_kind") == "medicare" else ""
-        return put("work_now", "credit_refund", f"EMA shows a credit of {usd(res['credit_cents'])} on this claim: {e.get('overpaid_by') or 'someone'} "
-                                                f"paid more than it was owed; decide refund or recoupment (owner).{due}")
+        part = f" {_takeback_words(tb)} of it is a takeback EMA never posted; the rest was overpaid." if tb["cents"] else ""
+        return put("work_now", "credit_refund", f"EMA shows a credit of {usd(whole)} on this claim: "
+                   + (f"{payer} paid more than it was owed" if payer else "a payer or the patient paid more than the claim was owed")
+                   + f"; decide refund or recoupment (owner).{part}{due}".rstrip())
     if sig == "SECONDARY_NOT_BILLED":
         got = _second_payer_paid(fx)
         if got:
             res["proof"] = got
             return put("done", got["rule"], got["text"], [{"source": got["source"], "kind": "proof", "date": got.get("date"), "text": got["text"]}])
+    # the archive rules found the payer paid this line twice: a possible overpayment to settle, never more to ask for (C05)
+    if hint and (hint.get("reclass") == "overpaid" or (hint.get("possible_overpayment_cents") or 0) > 0):
+        res["appeal_block"] = "credit"
+        res["credit_cents"] = int(hint.get("possible_overpayment_cents") or 0)
+        return put("work_now", "possible_overpayment", _hint_text(hint) or "Paid twice by this payer: a possible overpayment")
     if proof and not credit and proof["rule"] != "moved_to_patient_open":
         res["appeal_block"] = "paid"
         rows = [{"source": proof["source"], "kind": "proof", "date": proof.get("date"), "text": proof["text"]}]
         return put("done", proof["rule"], proof["text"], rows)
     if credit:
         res["appeal_block"] = "credit"
-        return put("work_now", "credit_refund", f"EMA shows a credit of {usd(credit)} on this line: insurance paid more than the line "
-                                                "was owed; decide refund or recoupment (owner)")
+        left, tb = _credit_left(fx, credit)
+        if tb["cents"] and not left:
+            res["takeback"], res["credit_cents"] = tb, 0
+            return put("work_now", "credit_unposted_takeback", f"EMA shows a credit of {usd(credit)} on this line only because it never "
+                       f"posted {_takeback_words(tb)}: post the takeback; nothing is owed back")
+        res["credit_cents"], res["takeback"] = left, (tb if tb["cents"] else None)
+        part = f" {_takeback_words(tb)} of it is a takeback EMA never posted." if tb["cents"] else ""
+        return put("work_now", "credit_refund", f"EMA shows a credit of {usd(credit)} on this line: insurance paid {usd(left)} more than the "
+                   f"line was owed; decide refund or recoupment (owner).{part}")
     o = fx.get("outcome") or {}
     if o.get("outcome") == "written_off_by_policy":
         pol = (ctx.get("policy") or {}).get(o.get("pattern") or "") or {}
-        return put("accepted", "policy", f"The owner's write-off policy accepts {o.get('pattern') or 'this pattern'}"
+        return put("accepted", "policy", f"The owner's write-off policy accepts {_policy_words(o.get('pattern') or '')}"
                    + (f" (set by {pol.get('by')} on {day(pol.get('at'))})" if pol.get("by") else ""))
     if reproc:
         res["appeal_block"] = "reprocessed"
     if proof and proof["rule"] == "moved_to_patient_open":
         res["appeal_block"] = "reprocessed"
-        return put("work_now", "bill_patient", proof["text"] + ": bill the patient", [{"source": "835", "kind": "proof", "text": proof["text"]}])
+        share = f" ({usd(proof.get('patient_cents'))})" if proof.get("patient_cents") else ""
+        return put("work_now", "bill_patient", f"{proof['text']}: bill the patient their share{share}",
+                   [{"source": "835", "kind": "proof", "text": proof["text"]}])
     fwd = _forwarded(fx)
     if fwd and cat in MONEY:
         follow = _add(fwd["date"], FORWARD_WAIT_DAYS)
-        basis = f"Forwarded to {fwd['carrier']} on {day(fwd['date'])}: expect its payment"
+        basis = f"Forwarded to {fwd['carrier']} on {day(fwd['date'])}"
         if follow and follow >= today:
             res["appeal_block"] = "waiting"
-            return put("waiting", "forwarded", basis + f"; check on {day(follow)} if none comes", follow=follow)
-        return put("work_now", "forwarded_late", basis + f"; nothing has come by {day(follow)}: ask {fwd['carrier']} for it", follow=follow)
+            return put("waiting", "forwarded", basis + f": expect its payment; check on {day(follow)} if none comes", follow=follow)
+        if past_all:
+            return expired(basis + "; nothing came from it")
+        tot = _ema_line_totals(fx)
+        carrier_835 = (ctx.get("group_last_835") or {}).get(_grp_kind(fwd["carrier"])[0]) if fwd.get("carrier") else None
+        if not carrier_835 and not (tot["n"] and _covered(ctx, f.get("service_date"))):
+            why = ("EMA's Production reports do not cover this date of service" if ctx.get("prod_as_of") else "no EMA Production report is on file")
+            return put("cant_check", "cant_check_carrier", f"{basis}: no 835 from {fwd['carrier']} is on file and {why}, so no source can "
+                       f"show whether it paid. Check {fwd['carrier']}'s portal or EMA by hand", follow=follow)
+        return put("work_now", "forwarded_late", basis + f": nothing has come by {day(follow)}; ask {fwd['carrier']} for it", follow=follow)
+    # EMA shows the line settled with money on it while the denying payer paid nothing and no rule proves who paid
+    se = settled_in_ema(fx)
+    if se:
+        res["settled"] = se
+        if se["kind"] == "patient_pr":
+            pr = {"rule": "moved_to_patient", "cents": 0, "date": None, "payer": None, "source": "production",
+                  "text": f"Settled by the patient: EMA shows {usd(se['pat'])} paid by the patient and the line closed, and the payer put this "
+                          f"service on the patient ({_carcs_text(fx)})"}
+            res["proof"], res["appeal_block"] = pr, "paid"
+            return put("done", "moved_to_patient", pr["text"], [{"source": "production", "kind": "proof", "text": pr["text"]}])
+        if se["kind"] == "patient_co":
+            res["appeal_block"] = "patient_paid"
+            return put("work_now", "patient_paid_co", f"EMA shows the patient paid {usd(se['pat'])} and the line settled, but the payer's denial "
+                       f"({_carcs_text(fx)}) puts this service on the practice, not the patient: appeal it, or refund the patient")
+        if past_all:
+            return expired(f"EMA shows this line settled: insurance paid {usd(se['ins'])}, {usd(se['open'])} open")
+        res["appeal_block"] = "settled_in_ema"
+        return put("work_now", "settled_in_ema", f"EMA shows this line settled: insurance paid {usd(se['ins'])}, the patient paid "
+                   f"{usd(se['pat'])}, {usd(se['open'])} open: find which payer paid and whether it settles this service")
     # the work seen on the item (RemitWatch's own marks only when no person set the item back to To do since)
     reopened = max((str(e["at"])[:10] for e in manual if e["to"] == "open"), default="")
-    work_ev = [e for e in ev if e["kind"] in ("sent", "fax", "appeal", "corrected", "records", "reprocess", "secondary", "call",
-                                               "resubmitted") and (e.get("date") or "") >= (f.get("payment_date") or "")
-               or (e["kind"] in ("appeal", "corrected", "records", "reprocess", "secondary", "call", "resubmitted")
-                   and e.get("dated_by") == "first_report")]
+    pay_day = f.get("payment_date") or ""
+    # work on or after the item's remittance; EMA's work already on the first report counts whatever its date (its own
+    # date is unknown), but a billing note or follow-up date first seen before the remittance is about something earlier
+    work_ev = [e for e in ev if e["kind"] in WORK_KINDS and ((e.get("date") or "") >= pay_day
+                                                            or (e["kind"] in ("appeal", "corrected", "records", "reprocess", "secondary",
+                                                                              "call", "resubmitted") and e.get("dated_by") == "first_report"))]
     work_ev = [e for e in work_ev if not (e["source"] == "remitwatch" and reopened and (e.get("date") or "") <= reopened)]
+    decided = [e for e in ev if e["kind"] == "no_appeal" and (e.get("date") or "") >= pay_day]
     if sig == "SECONDARY_NOT_BILLED":
         # only work that reached the second payer counts: the first payer answering again is not that work
         second = _ev(f).get("second_payer")
-        work_ev = [e for e in work_ev if e["kind"] in ("secondary", "sent", "fax", "call")
+        work_ev = [e for e in work_ev if e["kind"] in ("secondary", "sent", "fax", "call", "billed", "note", "follow_up")
                    or (e["kind"] == "resubmitted" and second and _same_payer(e.get("payer_group"), second))]
+    if decided and (cat in MONEY or sig in EMA_ONLY):
+        d = max(decided, key=lambda e: e.get("date") or "")
+        if not [e for e in work_ev if (e.get("date") or "") > (d.get("date") or "") and e["kind"] not in ("note", "follow_up")]:
+            res["appeal_block"] = "decided"
+            return put("work_now", "decided_no_appeal", f"EMA's billing note records {WORK_WORDS[d.get('decided') or 'no_appeal']}"
+                       + (f" (first on the A/R of {day(d['date'])})" if d.get("date") else ""), [d])
     if work_ev and (cat in MONEY or sig in EMA_ONLY):
+        known = [e for e in work_ev if e["kind"] not in ("note", "follow_up")]
+        fus = [e for e in work_ev if e["kind"] == "follow_up"]
+        ema_follow = max((e.get("follow_up") or "" for e in fus), default="") or None
+        if not known:
+            return _note_or_follow(res, fx, work_ev, today, put, expired, past_all)
         # work with a known date first: an undated note or action (dated only by the first report that showed it) most
         # often records the same work a payer's received date or a person's mark dates exactly
-        dated = [e for e in work_ev if e.get("dated_by") != "first_report"]
-        last = max(dated or work_ev, key=lambda e: (e.get("date") or "", e["source"]))
+        dated = [e for e in known if e.get("dated_by") != "first_report"]
+        last = max(dated or known, key=lambda e: (e.get("date") or "", e["source"]))
         work = {"appeal": "appeal", "records": "records", "reprocess": "reprocess", "corrected": "corrected", "resubmitted": "resubmitted",
-                "secondary": "secondary", "call": "call", "sent": "sent", "fax": "fax"}.get(last["kind"], "appeal")
-        # work whose own date nobody knows (already in the first report) cannot hold an item past every window: nothing
-        # shows it was done in time, or that anything is still pending (C59)
-        if all(e.get("dated_by") == "first_report" for e in work_ev) and lastw \
-                and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"):
-            res["closed_on"], res["closed_basis"] = lastw, (dbasis if lastw == deadline else "the payer's own limit")
-            return put("expired", "expired", f"Every window closed (the last on {day(lastw)}) more than {EXPIRE_GRACE_DAYS} days ago. "
-                                             f"{last['text']}; nothing shows that work was done in time or is still pending", [last])
-        return _follow(res, fx, ev, last.get("date"), work, last["text"], today, deadline, confirmed=bool(last.get("confirmed")),
-                       conflict="", person=False, put=put, ev_row=last)
-    hint = _archive_hint(f)
+                "secondary": "secondary", "call": "call", "sent": "sent", "fax": "fax", "billed": "secondary"}.get(last["kind"], "appeal")
+        text = last["text"]
+        if all(e.get("dated_by") == "first_report" for e in known) and past_all:
+            pending = _pending_action(fx)
+            if not pending:
+                return expired(f"{last['text']}; nothing shows that work was done in time or is still pending", [last])
+            # EMA's claim action still shows the work at the payer, and no answer to it is on file: follow it up, never
+            # expire it while it may be pending
+            text = f"{last['text']}; EMA's claim action still shows '{pending}' and every window has closed (the last on {day(lastw)})"
+        return _follow(res, fx, ev, last.get("date"), work, text, today, deadline, confirmed=bool(last.get("confirmed")),
+                       conflict="", person=False, put=put, ev_row=last, ema_follow=ema_follow)
     if hint and hint["state_hint"] == "done" and hint.get("strength") == "proven" and not credit:
         rows = [{"source": r.get("source") or "835", "kind": r.get("kind") or "proof", "date": r.get("date"), "text": r.get("text")}
                 for r in hint.get("proof") or [] if r.get("decisive")]
+        res["appeal_block"] = "paid"
         return put("done", "archive_" + str(hint.get("reclass") or hint.get("rule") or "rule"),
                    _hint_text(hint) or "The 835 archive shows it settled", rows)
     if hint and hint["state_hint"] == "waiting":
@@ -1693,25 +2302,109 @@ def _decide(fx: dict, today: str) -> dict:
             res["appeal_block"] = "waiting"
             return put("waiting", "archive_waiting", basis + f"; check on {day(follow)} if no new answer comes", follow=follow)
         return put("work_now", "follow_up_due", basis + f"; no new answer by {day(follow)}: ask the payer where it stands", follow=follow)
-    # past every window
-    if lastw and (cat in MONEY or sig in EMA_ONLY) and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"):
-        res["closed_on"], res["closed_basis"] = lastw, (dbasis if lastw == deadline else "the payer's own limit")
-        return put("expired", "expired", f"Every window closed (the last on {day(lastw)}) more than {EXPIRE_GRACE_DAYS} days ago, "
-                                         "with no work pending")
+    # past every window: nothing can be recovered (no grace in the work queue)
+    if past_all and (cat in MONEY or sig in EMA_ONLY):
+        return expired()
+    # the archive rules found a payment the archive cannot prove pays this service: check it before anything else
+    # (orchestrator decision 4: a 'likely' done never closes an item, and it is never appealed in bulk)
+    if hint and ((hint["state_hint"] == "done" and hint.get("strength") != "proven") or hint.get("reclass") == "secondary_paid"):
+        res["appeal_block"] = "likely_paid"
+        return put("work_now", "check_first", _hint_text(hint) or "The 835 archive shows it was probably paid already")
     # no source can show the answer
     cc = _cant_check(fx, today)
     if cc:
         return put("cant_check", cc[0], cc[1])
+    late = res.get("late_window")
+    if late:
+        return put("work_now", "open_late", f"Past its deadline of {day(own_last)}, but {late['what']} is open until {day(late['date'])} "
+                   f"({_short_label(late['basis'])}): " + _lower(_open_basis(fx, late=True)))
     return put("work_now", "open", _open_basis(fx))
 
 
+def _note_or_follow(res: dict, fx: dict, work_ev: list, today: str, put, expired, past_all: bool) -> dict:
+    """An item whose only work is a billing note RemitWatch cannot read (an A/R reader that does not classify notes) or
+    a follow-up date a person set in EMA: never 'nobody has worked it'. A follow-up date still ahead holds the item until
+    that day; one that passed is a follow-up due; a note alone is read first, and never appealed in bulk."""
+    notes = [e for e in work_ev if e["kind"] == "note"]
+    fus = [e for e in work_ev if e["kind"] == "follow_up"]
+    note = max(notes, key=lambda e: e.get("date") or "") if notes else None
+    fu = max(fus, key=lambda e: (e.get("follow_up") or "", e.get("date") or "")) if fus else None
+    bits = []
+    if note:
+        bits.append(note["text"])
+    if fu:
+        bits.append(f"a follow-up date of {day(fu['follow_up'])} set in EMA" if note else f"EMA has a follow-up date of {day(fu['follow_up'])} on it")
+    lead = " and ".join(bits)
+    rows = [e for e in (note, fu) if e]
+    anchor = max((e.get("date") or "" for e in rows), default="") or None
+    answers = _payer_answers_after(fx, anchor) if anchor else []
+    if answers:
+        a = answers[-1]
+        res["answered"] = a
+        res["appeal_block"] = "answered"
+        what = (f"paid {usd(a['paid'])}" if a["paid"] > 0 else ("reversed its answer" if a.get("status") == "22" else
+                                                                 ("answered " + (", ".join(a["codes"]) if a["codes"] else "with $0.00"))))
+        return put("work_now", "work_answered", f"{lead}; the payer answered on {day(a['date'])} ({what}): read the note, then work its answer",
+                   rows + [{"source": a["source"], "kind": "answer", "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
+    if fu and fu["follow_up"] >= today:
+        res["appeal_block"] = "waiting"
+        res["work"] = fu
+        return put("waiting", "ema_follow_up", f"{lead}: a person is working it in EMA; it waits until that day", rows, follow=fu["follow_up"])
+    if past_all:
+        return expired(lead, rows)
+    res["work"] = fu or note
+    if fu:
+        res["appeal_block"] = "note" if note else "follow_up"
+        return put("work_now", "follow_up_due", f"{lead}; that day passed with no answer from the payer on file: read the claim's notes in "
+                   "EMA, then follow up", rows, follow=fu["follow_up"])
+    res["appeal_block"] = "note"
+    return put("work_now", "note_unread", f"{lead}: read it before working (RemitWatch cannot read what it says)", rows)
+
+
+def _billed_second(res: dict, fx: dict, ev: list, anchor: str | None, who: str, today: str, put) -> dict:
+    """A SECONDARY_NOT_BILLED item a person marked billed (the page's Mark billed sets Sent): the second payer's payment
+    closes the loop (the person's status stands, the item says to mark it Paid), else it waits on the SECOND payer's
+    answer, never the first payer's (H4)."""
+    f = fx["item"]
+    e = _ev(f)
+    second = e.get("second_payer") or "the second payer"
+    owed = int(f.get("shortfall_cents") or 0)
+    billed = next((x for x in reversed(ev) if x["kind"] in ("billed", "sent") and x["source"] == "remitwatch"), None)
+    lead = f"Billed to {second} by {who} on {day(anchor)}"
+    rows = [billed] if billed else []
+    got = _second_payer_paid(fx)
+    if got:
+        res["proof"], res["appeal_block"] = got, "paid"
+        return put("work_now", "person_billed_paid", f"{lead}; {got['text']}: mark it Paid",
+                   rows + [{"source": got["source"], "kind": "proof", "date": got.get("date"), "text": got["text"]}])
+    res["work"] = billed or {"date": anchor, "kind": "billed", "text": lead}
+    res["appeal_block"] = "waiting"
+    answers = [a for a in _payer_answers_after(fx, anchor, [second], only=True)] if anchor and second else []
+    if answers:
+        a = answers[-1]
+        res["answered"], res["appeal_block"] = a, "answered"
+        what = (f"paid {usd(a['paid'])}" if a["paid"] > 0 else ("answered " + (", ".join(a["codes"]) if a["codes"] else "with $0.00")))
+        return put("work_now", "work_answered", f"{lead}; {second} answered on {day(a['date'])} ({what}): work its answer",
+                   rows + [{"source": a["source"], "kind": "answer", "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
+    from .codes import normalize_payer
+    wait = response_days(fx["_conn"], normalize_payer(second)[0], "secondary") if fx.get("_conn") is not None else \
+        DEFAULT_RESPONSE_DAYS + CLAIM_TRANSIT_DAYS
+    follow = _add(anchor, wait) if anchor else None
+    share = f" ({usd(owed)})" if owed else ""
+    if follow and follow >= today:
+        return put("waiting", "work_waiting", f"{lead}; follow up with {second} on {day(follow)} if it has not paid{share}", rows, follow=follow)
+    res["appeal_block"] = "call"
+    return put("work_now", "follow_up_due", f"{lead}; nothing from {second} by {day(follow)}{share}: ask {second} whether it received "
+               "the claim", rows, follow=follow)
+
+
 def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: str, today: str, deadline: str | None, *,
-            confirmed: bool, conflict: str, person: bool, put, ev_row: dict | None = None) -> dict:
+            confirmed: bool, conflict: str, person: bool, put, ev_row: dict | None = None, ema_follow: str | None = None) -> dict:
     """Waiting on work seen on `anchor`: until the payer's answer time has passed (the note's own "allow N days" when
-    it says), then work now; at once when the payer answered since (paid: done; anything else: the answer to work); and
-    when the work's own date is unknown (it was already in the first report) and nothing came from the payer for longer
-    than its answer time before that report, the follow-up is due now. Work nobody can confirm falls due at least two
-    weeks before the deadline."""
+    it says; a later follow-up date a person set in EMA when there is one), then work now; at once when the payer
+    answered since (paid: the answer to close on; anything else: the answer to work); and when the work's own date is
+    unknown (it was already in the first report) and nothing came from the payer for longer than its answer time before
+    that report, the follow-up is due now. Work nobody can confirm falls due at least two weeks before the deadline."""
     f = fx["item"]
     grp, kind = f.get("payer_group"), f.get("payer_kind")
     conn_free_wait = _wait_of(fx, work, ev_row)
@@ -1729,46 +2422,52 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
     if answers:
         a = answers[-1]
         res["answered"] = a
-        res["appeal_block"] = None
+        # the payer answered the work already done: its answer is worked from the item's panel (a second level, the new
+        # reason), never sent again as a first-level appeal in bulk
+        res["appeal_block"] = "answered"
         what = (f"paid {usd(a['paid'])}" if a["paid"] > 0 else
                 ("reversed its answer" if a.get("status") == "22" else
                  ("answered " + (", ".join(a["codes"]) if a["codes"] else "with $0.00"))))
         lead = (f"{text}. The payer answered the same claim again on {day(a['date'])} with the same reason ({', '.join(a['codes'])}): most "
                 "likely its answer to that work, upheld" if a.get("inferred") else f"{text}; the payer answered on {day(a['date'])} ({what})")
-        # the newest answer to the work is a denial whose own window closed more than 30 days ago: expired, when the
-        # item's own window has closed too or the answer came from another payer (the claim was rebilled to the right
-        # one: the first denial no longer matters), C60. A person's Sent status keeps it for that person to read.
-        if not person and a.get("status") != "22":
+        # the answer's own window: the newest answer to the work is a denial; a person works it from that answer's date
+        if a.get("status") != "22":
             ag = a.get("group") or (_grp_kind(a["payer"])[0] if a.get("payer") else None) or grp
             ak = a.get("kind") or (_grp_kind(a["payer"])[1] if a.get("payer") else None) or kind
-            from .codes import appeal_rule
+            from .codes import appeal_rule, legal_deadline
             ar_ = appeal_rule(ag, ak)
-            closes = _add(a["date"], ar_["days"])
+            closes = _later(_add(a["date"], ar_["days"]), legal_deadline(a["date"], ar_))
+            res["answer_window"] = {"date": closes, "basis": ar_["label"], "what": f"the window to dispute {ag or 'the payer'}'s answer"}
             other = bool(ag) and bool(grp) and not _same_payer(ag, grp)
             lastw = _last_window(f, deadline)
-            if closes and today > (_add(closes, EXPIRE_GRACE_DAYS) or "9999") and (
-                    other or (lastw and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"))):
+            # expired when that window closed and the item's own windows have too, or the answer came from another payer (the
+            # claim was rebilled to the right one: the first denial no longer matters), C60. A person's Sent keeps it.
+            if not person and closes and today > closes and (other or (lastw and today > lastw)):
                 res["appeal_block"] = None
                 res["closed_on"], res["closed_basis"] = closes, ar_["label"]
-                return put("expired", "expired", f"{lead}. {ag or 'The payer'}'s window to dispute that answer closed on {day(closes)}, more "
-                                                 f"than {EXPIRE_GRACE_DAYS} days ago", rows + [{"source": a["source"], "kind": "answer",
-                                                                                               "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
+                return put("expired", "expired", f"{lead}. {ag or 'The payer'}'s window to dispute that answer closed on {day(closes)}, with no "
+                                                 "work pending", rows + [{"source": a["source"], "kind": "answer", "date": a["date"],
+                                                                          "text": f"answer of {day(a['date'])}: {what}"}])
         return put("work_now", "work_answered", f"{lead}: work its answer" + (f".{conflict}" if conflict else ""),
                    rows + [{"source": a["source"], "kind": "answer", "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
     follow = _add(anchor, conn_free_wait) if anchor else None
+    if ema_follow and (not follow or ema_follow > follow):
+        follow = ema_follow             # a later follow-up date a person set in EMA
     if not confirmed and deadline:
         cap = _add(deadline, -FOLLOW_UP_MARGIN)
-        if follow and cap and cap < follow:
+        if follow and cap and cap < follow and not (ema_follow and follow == ema_follow):
             follow = max(cap, anchor or cap)
     if first and not person:
         last_act = _last_payer_activity(fx, anchor)
         quiet = _days(last_act, anchor) if last_act and anchor else None
         if quiet is not None and quiet > conn_free_wait:
+            res["appeal_block"] = "call"
             return put("work_now", "work_stale", f"{text}. Nothing has come from the payer since {day(last_act)}, {quiet} days before that "
                                                  "report: check where it stands before doing more", rows, follow=anchor)
     if follow and follow >= today:
         return put("waiting", "work_waiting", f"{text}; follow up on {day(follow)} if the payer has not answered" + (f".{conflict}" if conflict else ""),
                    rows, follow=follow)
+    res["appeal_block"] = "call"
     return put("work_now", "follow_up_due", f"{text}; no answer from the payer by {day(follow)}: follow up" + (f".{conflict}" if conflict else ""),
                rows, follow=follow)
 
@@ -1832,14 +2531,27 @@ def _covered(ctx: dict, svc: Any) -> bool:
     return any(b.get("scope") == "posted" for b in ctx.get("boxes") or [])
 
 
-def _hint_text(hint: dict) -> str:
-    """The archive rule's label and sentence as one basis ("Already paid by this payer, denied again: ...")."""
-    label, text = str(hint.get("label") or "").strip(), str(hint.get("hint") or "").strip().rstrip(".")
-    return (f"{label}: {_lower(text)}" if label and text else (label or text))[:240]
+def _hint_text(hint: dict, n: int = 240) -> str:
+    """The archive rule's label and sentence as one basis ("Already paid by this payer, denied again: ..."), cut at the
+    last sentence end before n characters (never mid-sentence), the payer's name kept as written."""
+    label, text = str(hint.get("label") or "").strip(), str(hint.get("hint") or "").strip()
+    out = f"{label}: {_lower(text)}" if label and text else (label or text)
+    if len(out) > n:
+        cut = max(out.rfind(". ", 0, n), out.rfind("; ", 0, n))
+        out = out[:cut] if cut > len(label) else out[:n].rsplit(" ", 1)[0]
+    return out.rstrip(" .;")
+
+
+# the words that start a sentence the states continue after a colon: only these lose their capital (a payer's name never)
+_SENTENCE_WORDS = ("The", "This", "That", "A", "An", "Not", "No", "Nothing", "Paid", "Already", "Settled", "Forwarded", "Moved",
+                   "Marked", "Every", "Past", "Its", "It", "EMA's")
 
 
 def _lower(t: str) -> str:
-    return t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t
+    w = str(t or "").split(" ", 1)[0]
+    if w in _SENTENCE_WORDS and w != "EMA's":
+        return t[:1].lower() + t[1:]
+    return t
 
 
 def _second_payer_paid(fx: dict) -> dict | None:
@@ -1875,15 +2587,28 @@ def _c7_policy(f: dict, ctx: dict) -> tuple[dict | None, str]:
     grp, reason = f.get("payer_group") or "", str(e.get("reason") or f.get("carc") or "")
     wide = pol.get(f"{grp}|||{reason}")
     if wide and wide.get("decision") == "accept":
-        return wide, f"{grp}|||{reason}"
+        return wide, _policy_words(f"{grp}|||{reason}")
     codes = [c for c, _v in e.get("top_codes") or []]
     got = [pol.get(f"{grp}|{c}||{reason}") for c in codes]
     if codes and all(g and g.get("decision") == "accept" for g in got):
-        return got[0], ", ".join(f"{grp}|{c}||{reason}" for c in codes)
+        return got[0], (f"{grp}'s" if not grp.endswith("s") else f"{grp}'") + f" {reason} denials of " + ", ".join(codes)
     return None, ""
 
 
-def _open_basis(fx: dict) -> str:
+def _carcs_text(fx: dict) -> str:
+    """The item's reasons with their groups, as its own remittance gives them (CO-97, not 97)."""
+    f = fx["item"]
+    o = fx.get("outcome") or {}
+    if o.get("carcs"):
+        return ", ".join(o["carcs"])
+    carc = str(f.get("carc") or "")
+    g = _carc_group(fx)
+    return f"{g}-{carc}" if g and carc else (f"reason {carc}" if carc else "the denial")
+
+
+def _open_basis(fx: dict, late: bool = False) -> str:
+    """The basis of an automatic Work now: what the item is and what EMA did with it, and the date to act by (not when
+    the item is open only under a later window: that window's date leads the basis then)."""
     f = fx["item"]
     o = fx.get("outcome") or {}
     deadline, _b = _deadline(f)
@@ -1909,7 +2634,7 @@ def _open_basis(fx: dict) -> str:
     if hint and f.get("signal") not in CLAIM_SIGNALS and _hint_text(hint):
         # the 835 archive's reading of the item (a likely 'done' is never done without a person: check it first)
         tail_ = "; " + _hint_text(hint) + ("; check it before working the item" if hint["state_hint"] == "done" else "") + tail_
-    return head + tail_ + (f"; act by {day(deadline)}" if deadline else "")
+    return head + tail_ + (f"; act by {day(deadline)}" if deadline and not late else "")
 
 
 # --------------------------------------------------------------------------------------------------------- public API
@@ -1930,7 +2655,7 @@ def states_of(conn: sqlite3.Connection, items: Iterable[dict], *, outcomes: dict
                 continue
             fx["_conn"] = conn
             try:
-                out[f["finding_id"]] = _public(_decide(fx, t))
+                out[f["finding_id"]] = _public(decide(fx, t, conn))
             finally:
                 fx.pop("_conn", None)
     return out

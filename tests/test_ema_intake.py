@@ -1450,3 +1450,117 @@ def test_a_first_production_file_saves_the_stores_key_salt_before_the_ledger_on_
         assert h.open().conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 12       # never emptied, never twice
     finally:
         h.discard()
+
+
+# ======================================================================= done/ retention, turnaround from the ledger
+def _done_pair(folder, name: str, data: bytes, *, days_old: float, now: float) -> tuple[str, str]:
+    """A read pair in a done folder: the data file and its sidecar, received `days_old` days before `now`."""
+    os.makedirs(folder, exist_ok=True)
+    uid = hashlib.md5(name.encode() + data[:32]).hexdigest()
+    pair = f"{uid}__{name}"
+    when = dt.datetime.fromtimestamp(now - days_old * 86400, dt.timezone.utc).isoformat(timespec="seconds")
+    with open(os.path.join(folder, pair), "wb") as fh:
+        fh.write(data)
+    with open(os.path.join(folder, pair + ".json"), "w") as fh:
+        json.dump({"name": name, "origin": "upload", "user": "staff", "sha256": sha(data), "size": len(data), "gz": False,
+                   "received_at": when, "report_hint": None, "result": {"status": "applied"}}, fh)
+    for p in (os.path.join(folder, pair), os.path.join(folder, pair + ".json")):
+        os.utime(p, (now - days_old * 86400, now - days_old * 86400))
+    return pair, sha(data)
+
+
+def _catalog_row(conn, fid: str, report: str, status: str, received: str, **origin) -> None:
+    er.ensure_schema(conn)
+    er._catalog_put(conn, fid, commit=True, report=report, source_name="x", via="upload", origin=origin, status=status,
+                    received_at=received)
+
+
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_read_uploads_go_after_180_days_but_never_a_held_waiting_live_or_newest_reports_copy(tmp_path, host):
+    from remitwatch.state import LocalState
+    now = time.time()
+    store = open_store(tmp_path / "data" / "remitwatch.sqlite")
+    data_dir = str(tmp_path / "data")
+    folder = intake.done_dir(data_dir) if host == "server" else str(tmp_path / "state" / "intake" / "done")
+    pairs = {}
+    for key, days in (("old_export", 200), ("old_ar", 220), ("newest_ar", 200), ("held", 300), ("live_prod", 250), ("recent", 10)):
+        pairs[key] = _done_pair(folder, f"{key}.xlsx", key.encode() * 50, days_old=days, now=now)
+    def where(key):
+        p = pairs[key][0]
+        return {"path": os.path.join(folder, p)} if host == "server" else {"state_path": f"intake/done/{p}"}
+    old = dt.datetime.fromtimestamp(now - 200 * 86400, dt.timezone.utc).isoformat()
+    _catalog_row(store.conn, pairs["old_ar"][1], "ar_report", "replaced", "2026-01-01T00:00:00+00:00", **where("old_ar"))
+    _catalog_row(store.conn, pairs["newest_ar"][1], "ar_report", "replaced", old, **where("newest_ar"))
+    _catalog_row(store.conn, pairs["held"][1], "production", "held", "2025-12-01T00:00:00+00:00", **where("held"))
+    _catalog_row(store.conn, pairs["live_prod"][1], "production", "current", "2025-11-01T00:00:00+00:00", **where("live_prod"))
+    if host == "server":
+        os.makedirs(os.path.join(folder, "read-" + pairs["old_export"][0].split("__")[0]))
+        out = intake.retain_done_server(store, data_dir, now=now, log=lambda *a: None)
+    else:
+        out = intake.retain_done_state(store, LocalState(str(tmp_path / "state")), now=now, log=lambda *a: None)
+    left = set(os.listdir(folder))
+    gone = {k for k, (p, _s) in pairs.items() if p not in left and p + ".json" not in left}
+    assert gone == {"old_export", "old_ar"} and out["removed"] == 2
+    assert {k for k, (p, _s) in pairs.items() if p in left} == {"newest_ar", "held", "live_prod", "recent"}
+    assert not [f for f in left if f.startswith("read-")]
+    # the catalog keeps its rows: the Upload page still says when each file was read
+    assert catalog(store.conn)[pairs["old_ar"][1]] == "replaced"
+    store.close()
+
+
+def test_the_server_cycle_reads_the_payers_answer_times_from_the_whole_ledger_once_per_change(tmp_path):
+    from remitwatch import ema_checks as ec
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    local = tmp_path / "in"
+    write(local / "2026 Production.csv", F.production_csv(prod_rows()))
+    first = run(db, sync=False, local=str(local))
+    s = open_store(db)
+    try:
+        stored = json.loads(s.conn.execute("SELECT value FROM meta WHERE key='ema:turnaround'").fetchone()[0])
+        assert stored["charge_basis"] == "ledger" and stored["ledger_rev"] == ec._ledger_rev(s.conn)
+    finally:
+        s.close()
+    assert first["ema_turnaround"]["groups"] >= 0
+    again = run(db, sync=False)
+    assert "ema_turnaround" not in again                        # the ledger did not change: nothing read again
+
+
+def test_a_serverless_apply_run_reads_the_answer_times_from_the_ledger_and_the_next_run_keeps_them(vercel, monkeypatch):
+    from remitwatch import ema_checks as ec
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    write(root / DATA / "Reports" / "2026 Production.zip", F.zipped("2026 Production.csv", F.production_csv(prod_rows())))
+    first = cycle(state, client)
+    assert first["ema_apply"]["files"] == 1
+    conn = state_store(state)
+    stored = json.loads(conn.execute("SELECT value FROM meta WHERE key='ema:turnaround'").fetchone()[0])
+    assert stored["charge_basis"] == "ledger" and stored["ledger_rev"] == ec._ledger_rev(conn)
+    cycle(state, client)                                        # detection: the stored times are kept, not read from the lines
+    conn = state_store(state)
+    assert json.loads(conn.execute("SELECT value FROM meta WHERE key='ema:turnaround'").fetchone()[0])["charge_basis"] == "ledger"
+
+
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_a_weekly_export_read_through_the_hand_off_says_what_it_held_like_the_upload_page(host, tmp_path, monkeypatch):
+    """The same export read in one piece or through the intake hand-off (every upload on Vercel) says the same: the
+    report, its visits, its rows and claims, and what was added."""
+    data = F.genuine_status_export()
+    name = "Claim Status 9-1-26.xlsx"
+    if host == "server":
+        db = str(tmp_path / "data" / "remitwatch.sqlite")
+        pair = _pair(intake.ready_dir(os.path.dirname(db)), name, data)
+        run(db, sync=False)
+        res = json.load(open(os.path.join(intake.done_dir(os.path.dirname(db)), pair + ".json")))["result"]
+    else:
+        monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+        root = tmp_path / "dbx"
+        client = Dbx(str(root))
+        (root / DATA).mkdir(parents=True)
+        state = DropboxState(client, "/RemitWatch-state")
+        pair = _pair(root / "RemitWatch-state" / "intake", name, data, gz=True)
+        cycle(state, client)
+        res = json.loads(state.get(f"intake/done/{pair}.json"))["result"]
+    lines = res["lines"]
+    assert lines[0].startswith("Claim & Claim Status export (Excel)") and "23 rows" in lines[0], lines
+    assert lines[1].startswith("Added 23 rows on") and "Already in RemitWatch: 0." in lines[1], lines
+    assert "Read as an EMA export." not in lines

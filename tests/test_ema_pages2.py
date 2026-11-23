@@ -918,6 +918,7 @@ ctx.dataChecks = async () => {}; ctx.feedPanel = async () => {};
 const out = {};
 const click = async el => { if (!el) throw new Error('nothing to click'); await el.onclick({ preventDefault() {} }); await new Promise(r => setImmediate(r)); };
 (async () => {
+  out.kind_styles = JSON.parse(JSON.stringify(vm.runInContext('KIND_STYLE', ctx)));
   let v = new El('main');
   await ctx.todayTab(v);
   out.today_html = v.innerHTML;
@@ -1037,6 +1038,10 @@ def test_today_draws_the_counts_the_routes_give_and_each_opens_its_list(page_run
     assert "$1,234" in h and h.count(">–</span>") >= 2
     assert out["score_click"][-1]["tab"] == "results" and out["results_open"] == "lost"
     assert "Blind spot" not in h                       # the feeds are current
+    # every work type has its colour, the two unit B added included (index.html holds the classes)
+    index = open(os.path.join(os.path.dirname(cloud.__file__), "static", "index.html"), encoding="utf-8").read()
+    assert {k: out["kind_styles"].get(k) for k in ("bill", "post")} == {"bill": "k-bill", "post": "k-post"}
+    assert all(f".{c}{{" in index for c in out["kind_styles"].values())
     assert "—" not in h and "false positive" not in h.lower()
 
 
@@ -1053,6 +1058,19 @@ def test_today_says_the_blind_spot_in_dollars_and_says_no_all_clear(page_run):
     assert "Blind spot: $80 the site cannot check." in h and "No remittance after" in h
     assert "Nothing closes this week in the payments on file" in h and "is-done" not in h
     assert "No payment newer than" not in h          # the health banner does not say the blind spot a second time
+
+
+def test_today_gives_no_all_clear_while_the_self_check_holds(page_run):
+    """Nothing closes this week and the feeds are current: step 1 is done. While the self-check's line is up (safe mode
+    while it checks its last run, given in /api/meta as selfcheck_banner), Today does not say all clear."""
+    out, ans = page_run()
+    brief = json.loads(json.dumps(ans["/api/brief"]))
+    brief["work"]["total"]["due7_n"] = 0
+    out, _ = page_run({"/api/brief": brief})
+    assert "step is-done" in out["today_html"] and "Nothing closes this week<" in out["today_html"]
+    meta = dict(ans["/api/meta"], selfcheck_banner={"level": "safe_mode", "text": "Safe mode: the worklist is the one from before the last run."})
+    out, _ = page_run({"/api/brief": brief, "/api/meta": meta})
+    assert "is-done" not in out["today_html"] and "Nothing closes this week<" in out["today_html"]
 
 
 def test_the_data_tab_draws_each_panel_and_its_lists(page_run):

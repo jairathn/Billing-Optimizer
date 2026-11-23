@@ -3,9 +3,9 @@
 // desk.js. Loaded after features.js and before the page's own script; uses its helpers (api, esc, money, money2, state,
 // render, openDetail, setFindingStatus).
 
-const KIND_STYLE = {fix:'k-fix', auth:'k-auth', note:'k-note', rule:'k-rule', rate:'k-rate', chase:'k-chase', check:'k-check'};
+const KIND_STYLE = {fix:'k-fix', auth:'k-auth', note:'k-note', rule:'k-rule', rate:'k-rate', chase:'k-chase', check:'k-check', bill:'k-bill', post:'k-post'};
 const STATUS_WORDS = {open:'To do', in_progress:'Started', appealed:'Sent', resolved:'Paid', lost:'Lost', dismissed:'Let go'};
-const OWNER_OF = {fix:'Billing', auth:'Front desk', note:'Clinicians and coder', rule:'Billing', rate:'Billing', check:'Front desk and billing'};
+const OWNER_OF = {fix:'Billing', auth:'Front desk', note:'Clinicians and coder', rule:'Billing', rate:'Billing', check:'Front desk and billing', bill:'Billing', post:'Payment posting'};
 const GUIDE_KEY = 'rw:guide:v1';
 
 function guideSeen(){ try { return localStorage.getItem(GUIDE_KEY) === '1'; } catch(e){ return false; } }
@@ -80,6 +80,8 @@ async function todayTab(v){
     api('/api/ema/exports').catch(()=>null)]);
   if(!b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
   const blind = !!(td && td.blind && td.blind.blind);
+  // the self-check's line (selfcheck.banner via /api/meta: blind, or safe mode while it checks its last run): no all clear
+  const held = blind || !!((state.meta || {}).selfcheck_banner);
   // while a feed is behind, the blind-spot banner says so in dollars: the health banner does not say it a second time
   const bad = (b.health||[]).filter(h=>!h.ok && !(blind && TD_BLIND_KEYS.has(h.key)));
   const w = b.work.total;
@@ -90,7 +92,7 @@ async function todayTab(v){
   // never "all clear" while blind: what closes is what the files on hand show
   steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${Number(w.due7_n).toLocaleString()} items worth ${money(w.due7_cents)} have a filing window that closes within 7 days.`,
       chips: byKind7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' '), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
-    : {n:1, title: blind ? 'Nothing closes this week in the payments on file' : 'Nothing closes this week', line: w.due30_n ? `${w.due30_n} items worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:!blind, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
+    : {n:1, title: blind ? 'Nothing closes this week in the payments on file' : 'Nothing closes this week', line: w.due30_n ? `${w.due30_n} items worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:!held, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
   // money the biller wrote off in EMA while the payer can still be asked for it: the quiet loss
   const wo = b.written_off || {};
   if(wo.n) steps.push({n:steps.length+1, title:'Work what EMA wrote off', line:`${pl(wo.n, 'item')} worth ${money(wo.cents)} ${wo.n===1?'was':'were'} written off in EMA but ${wo.n===1?'is':'are'} still inside the filing window${(wo.payers||[])[0] ? ` (most: ${esc(wo.payers[0].payer_group)}, ${money(wo.payers[0].cents)})` : ''}. Work ${wo.n===1?'it':'them'}, and reverse the write-off in EMA when the payer pays.`,

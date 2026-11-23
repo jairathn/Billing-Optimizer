@@ -214,6 +214,7 @@ AUTO_NOTE_PREFIX = "Paid on a later remittance"
 EMA_NATIVE_SIGNALS = ("NOT_SENT", "REMIT_NOT_POSTED", "EMA_DENIAL_AS_CONTRACTUAL", "SECONDARY_NOT_BILLED",
                       "CREDIT_BALANCE")
 EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's reports (counts by step, failed steps)
+UNSEEN_KEY = "ema:unanswered_unseen"        # meta: unanswered claims no source can check yet (count, billed $, due days)
 POLICY_SUMMARY_KEY = "ema:policy_summary"   # meta: the write-off pattern table for the owner's policy (O11), from the run
 PAYMENT_OUTCOMES = ("paid_after", "paid_after_other")   # the line outcomes an EMA closure (C6, rebilled) rests on
 
@@ -2059,12 +2060,70 @@ class Detector:
                     one_off = ("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal",
                                f"{code} allowed ${allowed/100:.2f} vs usual ${rate/100:.2f} ({l['payer_group']})", l, rate, rate - allowed, top, rarc,
                                {"basis": basis, "usual_share": round(r["share"], 3), "usual_n": r["n"], "rank": rank})
-                    own = (l["payer_group"], l["year"], code, l["provider_tier"], l["pos_class"])
-                    if l["line_key"] not in self.worked_underpaid and r.get("key") == own \
-                            and self.rate_counts.get(own, {}).get(allowed, 0) >= SECOND_RATE_MIN_LINES:
-                        self.second_rates[(own, allowed)].append((l, one_off))       # grouped if a reason is found, else emitted as is
+                    if is_surgical(code) and code not in ADD_ON_CODES:
+                        # first on its own claim, but perhaps not that day: a reducible procedure paid more on another claim of the
+                        # same patient and clinician makes this one the payer's second procedure (settled after the line rules)
+                        self.__dict__.setdefault("_mppr_cands", []).append((l, rate, basis, one_off, r))
                         continue
-                    self._emit(*one_off)
+                    self._emit_underpaid(l, allowed, r, one_off)
+        self._settle_mppr_candidates()
+
+    def _emit_underpaid(self, l, allowed: int, r: dict, one_off: tuple) -> None:
+        """A one-off underpayment, or a line of a payer's routine lower amount (grouped by emit_second_rates)."""
+        code = l["procedure_code"]
+        own = (l["payer_group"], l["year"], code, l["provider_tier"], l["pos_class"])
+        if l["line_key"] not in self.worked_underpaid and r.get("key") == own \
+                and self.rate_counts.get(own, {}).get(allowed, 0) >= SECOND_RATE_MIN_LINES:
+            self.second_rates[(own, allowed)].append((l, one_off))       # grouped if a reason is found, else emitted as is
+            return
+        self._emit(*one_off)
+
+    def _settle_mppr_candidates(self) -> None:
+        """Reducible procedures first on their own claim and paid below the payer's usual rate: when another reducible
+        procedure of the same patient and clinician that day (on another claim, a split one included) was allowed more,
+        this one was the payer's second procedure. At the payer's own multiple-procedure share of its rate (within $1) it
+        is that reduction, not an underpayment (Mohs 17311 at exactly half: 101 items on real data); deeper than that share
+        it is MPPR_EXCESS; otherwise it stays an underpayment."""
+        cands = self.__dict__.pop("_mppr_cands", None) or []
+        if not cands:
+            return
+        want = {(l.get("service_date"), l.get("rendering_provider_npi")) for l, *_x in cands}
+        same_day: dict[tuple, list] = defaultdict(list)
+        for x in self.lines:
+            k = (x.get("service_date"), x.get("rendering_provider_npi"))
+            if k in want and (x.get("allowed_cents") or 0) > 0 and is_surgical(x.get("procedure_code")) \
+                    and x.get("claim_status_code") in ("1", "2", "3", "19", "20", "21"):
+                same_day[k].append(x)
+        keys = sorted({x["claim_key"] for v in same_day.values() for x in v} | {l["claim_key"] for l, *_x in cands})
+        who: dict[str, str | None] = {}
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            for ck, pid, last, first in self.conn.execute(f"SELECT claim_key, patient_id, patient_last, patient_first FROM claims "
+                                                          f"WHERE claim_key IN ({','.join('?' * len(part))})", part):
+                ks = patient_keys(pid, last, first)
+                who[ck] = ks[0] or ks[1]
+        for l, rate, basis, one_off, r in cands:
+            me = who.get(l["claim_key"])
+            allowed = l.get("allowed_cents") or 0
+            above = [x for x in same_day.get((l.get("service_date"), l.get("rendering_provider_npi")), [])
+                     if x["line_key"] != l["line_key"] and me and who.get(x["claim_key"]) == me and (x.get("allowed_cents") or 0) > allowed]
+            if above:
+                rank = 2 if len(above) == 1 else 3
+                pct, learned = self.mppr_pct({"payer_group": l["payer_group"], "surg_rank": rank})
+                if abs(allowed - rate * pct) <= 100:
+                    self.ema_counts["mppr_other_claim"] += 1
+                    continue                    # the payer's multiple-procedure share, as for any second procedure
+                if allowed / rate < pct - 0.07:
+                    exp = int(round(rate * pct))
+                    code = l["procedure_code"]
+                    self._emit("MPPR_EXCESS", "underpayment", "medium", "appeal",
+                               f"{code} paid at {allowed / rate:.0%} of the usual rate as procedure #{rank} that day "
+                               f"({'this payer normally allows' if learned else 'standard policy'} {pct:.0%})",
+                               l, exp, exp - allowed, one_off[8], one_off[9],
+                               {"basis": basis, "rank": rank, "pct_of_usual": round(allowed / rate, 3), "policy_pct": pct,
+                                "policy_learned": learned, "ranked_with": "another claim of the same patient and clinician that day"})
+                    continue
+            self._emit_underpaid(l, allowed, r, one_off)
 
     # ------------------------------------------------------------------ claim rules
     def run_claim_rules(self) -> None:
@@ -2820,6 +2879,29 @@ class Detector:
             self._ratios = {k: max(0.0, min(1.0, v[0] / v[1])) for k, v in agg.items() if v[2] >= 10 and v[1] > 0}
         return self._ratios.get((payer_group, code))
 
+    def _paid_share(self, payer_group: str | None, code: str | None) -> tuple[int, int] | None:
+        """(lines paid, lines answered) for a payer group and code on the 835s of services since 2025 (a payment still
+        standing counts as paid), or None when fewer than 20 are on file. EMA's vocabulary names some groups apart
+        ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group of the same family and kind counts."""
+        if self.__dict__.get("_share") is None:
+            from . import ema_checks as ec
+            share: dict[tuple, list] = defaultdict(lambda: [0, 0])
+            for l in self.lines:
+                if (l.get("service_date") or "") < ec.POLICY_SINCE or not l.get("procedure_code"):
+                    continue
+                a = share[(l["payer_group"], l["procedure_code"])]
+                a[1] += 1
+                a[0] += 1 if (self.standing.get(l["line_key"]) or 0) > 0 else 0
+            self._share = dict(share)
+        got = self._share.get((payer_group, code))
+        if not got:
+            from . import ema_checks as ec
+            fam = ec._family(payer_group)
+            kinds = lambda g: ("Medicare Advantage" in (g or ""), "Medicaid" in (g or ""))      # noqa: E731
+            hits = [v for (g, c), v in self._share.items() if c == code and ec._family(g) == fam and kinds(g) == kinds(payer_group)]
+            got = [sum(v[0] for v in hits), sum(v[1] for v in hits)] if hits else None
+        return tuple(got) if got and got[1] >= 20 else None
+
     def _has_835_finding(self, bill: str | None, svc: str | None, code: str | None) -> bool:
         """The run already holds an item from the remittances for this bill, date and code (or the whole claim that day)."""
         if self.__dict__.get("_f835") is None:
@@ -2886,8 +2968,22 @@ class Detector:
                 continue
             if not cd["rejected"] and (cd.get("due") or "") > newest and a.get("link") is None:
                 # due only by EMA's postings, and EMA's own claim for it was not found: its answer cannot be seen, so the
-                # claim waits until the remittances reach its due day
+                # claim waits until the remittances reach its due day. Never a silent drop: counted with its billed dollars
+                # and due day (meta ema:unanswered_unseen), which the Data tab and Today show as money no source can check
                 self.ema_counts["export_waits_unfound"] += 1
+                w = self.__dict__.setdefault("_unseen", {"n": 0, "billed_cents": 0, "due_from": None, "due_to": None,
+                                                         "overdue_30": 0, "overdue_30_cents": 0, "by_group": {}})
+                billed = sum(x[2] or 0 for x in items)
+                w["n"] += 1
+                w["billed_cents"] += billed
+                w["due_from"] = min(w["due_from"] or cd["due"], cd["due"])
+                w["due_to"] = max(w["due_to"] or cd["due"], cd["due"])
+                g = w["by_group"].setdefault(cd.get("grp") or "Unknown", {"n": 0, "billed_cents": 0})
+                g["n"] += 1
+                g["billed_cents"] += billed
+                if (_days_between(cd["due"], self.today) or 0) > 30:
+                    w["overdue_30"] += 1
+                    w["overdue_30_cents"] += billed
                 continue
             st = statuses.get(cd["pcn"])
             export_at = str((cd["k"].get("status_at") or ("",))[0] or "")[:10]
@@ -2979,7 +3075,7 @@ class Detector:
         from . import ema_checks as ec
         self.__dict__.pop("_f835", None)        # the run's 835 items as they stand now
         protos = self._ema_step("ema_denials", ec.ema_denials, self.conn, today=self.today, rate=self._rate, ratio=self._ratio,
-                                has_835_finding=self._has_835_finding) or []
+                                has_835_finding=self._has_835_finding, paid_share=self._paid_share) or []
         self._emit_protos("ema_denials", protos)
         # a claim listed as unanswered whose denial EMA posted: C5's item is the claim's answer (it inherits the chase's work
         # through its heir keys), so the chase is not listed beside it
@@ -3488,6 +3584,18 @@ class Detector:
         items = [f for f in self.findings.values() if f["finding_id"] in self.ema_outcomes]
         pol = self._ema_step("policy_summary", ec.policy_summary, self.conn, items, self.ema_outcomes, today=self.today)
         if pol is not None:
+            # the payers' policies EMA-only denials were folded into (a code the payer pays on 5% or less of its answered
+            # lines): one row each in the owner's table, 'accept' until the owner chooses 'pursue'
+            try:
+                lo = json.loads((self.conn.execute("SELECT value FROM meta WHERE key=?", (ec.C5_LEFT_OUT_KEY,)).fetchone() or ["{}"])[0])
+            except (ValueError, TypeError, sqlite3.Error):
+                lo = {}
+            extra = [{"pattern": key, "kind": "payer_policy", "items": p.get("n"), "cents": p.get("cents"), "appealable": None,
+                      "appealable_cents": None, "at_posting": None, "auto": None, "rule_proven": None,
+                      "later_paid_share": round(p["paid"] / p["answered"], 3) if p.get("answered") else None,
+                      "paid": p.get("paid"), "answered": p.get("answered"), "decision": p.get("decision"), "default": p.get("default")}
+                     for key, p in ((lo.get("payer_policy") or {}).get("patterns") or {}).items()]
+            pol = list(pol) + sorted(extra, key=lambda x: (-(x["cents"] or 0), x["pattern"]))
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                               (POLICY_SUMMARY_KEY, json.dumps({"at": self.now, "patterns": pol[:500]}, default=str)))
             self.conn.commit()
@@ -3526,11 +3634,19 @@ class Detector:
             self.ema_counts["state_" + str(st.get("work_state"))] += 1
 
     def _save_ema_wiring(self) -> None:
-        """What the run did with EMA's reports, for the Data tab and the maintainers: counts by step, and any step that failed."""
+        """What the run did with EMA's reports, for the Data tab and the maintainers: counts by step, and any step that failed;
+        and the unanswered claims no source can show the answer to yet (meta ema:unanswered_unseen, with their dollars)."""
         try:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                               (EMA_WIRING_KEY, json.dumps({"at": self.now, "on": self.ema_on, "counts": dict(self.ema_counts),
                                                            "errors": self.ema_errors[:20]}, sort_keys=True)))
+            unseen = dict(self.__dict__.get("_unseen") or {"n": 0, "billed_cents": 0})
+            newest = self.conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+            unseen.update(at=self.now, newest_835=newest,
+                          why=("Due only by EMA's postings, and EMA's own claim for each cannot be told apart from others with the "
+                               "same date, code and charge: no 835 since the newest remittance shows its answer. Check the payer "
+                               "portal for these claims."))
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (UNSEEN_KEY, json.dumps(unseen, sort_keys=True)))
             self.conn.commit()
         except sqlite3.Error:
             pass

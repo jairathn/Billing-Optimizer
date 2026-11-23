@@ -410,8 +410,8 @@ def ingest_zip(store, client, root: str, deadline: float, out: dict, log) -> Non
 PRODUCTION_LATER = ("This site reads one Production file per run; this one is read in a following run, which starts by "
                     "itself.")
 from .ema_reports import BIG_CSV_REASON as BIG_REPORT_REASON      # noqa: E402  (one wording: a raw CSV too big for this site)
-BIG_GZ_REASON = ("Too big to read on Vercel even compressed: upload it in the app, or export a shorter date range (a "
-                 "Production export by posted date, the last five weeks, is about 20 MB).")
+BIG_GZ_REASON = ("Too big to read on this site even compressed (over 60 MB): let the server read it, or export a shorter date "
+                 "range (a Production export by posted date, the last five weeks, is about 20 MB).")
 APPLY_PENDING = "ema:apply_pending"     # a Production file was being applied when the run stopped: the next run repairs
 REPORT_FIRST_TEXT = (".csv", ".tsv", ".txt")
 
@@ -589,14 +589,29 @@ class ProductionSlot:
             drop = list(h.ledger.copies_to_drop())
         except Exception:       # noqa: BLE001  (a kept copy stays: nothing depends on its going)
             drop = []
+        tat: dict = {}
+
+        def release():
+            # the payers' answer times from every claim in the ledger, read while it is still open (detection, in the next
+            # run, reads meta ema:turnaround; the ledger is not opened there)
+            try:
+                from . import ema_checks
+                t = time.time()
+                ema_checks.turnaround(conn, ledger=h.ledger)
+                tat["seconds"] = round(time.time() - t, 1)
+            except Exception as exc:       # noqa: BLE001  (the kept lines' answer times stand in)
+                tat["error"] = type(exc).__name__
+            return h.save()
         try:
-            r = ema_ledger.refresh(self.store, h.ledger, log=self.log, release=lambda: h.save())
+            r = ema_ledger.refresh(self.store, h.ledger, log=self.log, release=release)
             if h.ledger is not None:        # nothing to recompute: the ledger is saved all the same (it changed)
                 h.save(conn)
         except Exception as exc:       # noqa: BLE001
             h.discard()
             out["ema_apply"] = {"error": type(exc).__name__}
             return False                    # APPLY_PENDING stays: the next run brings the catalog in line (repair_ledger)
+        if tat.get("seconds") is not None:
+            _stamp_turnaround(conn)         # read from the ledger the refresh has just recorded
         conn.execute("DELETE FROM meta WHERE key=?", (APPLY_PENDING,))
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
         conn.commit()
@@ -637,6 +652,23 @@ class ProductionSlot:
         if n:
             self.log(f"  {n} kept upload cop{'y' if n == 1 else 'ies'} of replaced Production files removed")
         return n
+
+
+def _stamp_turnaround(conn) -> None:
+    """The answer times read from the ledger before the refresh recorded its new revision belong to that revision: they
+    are stamped with it, so the next run keeps them (ema_checks reads them again from the kept lines otherwise)."""
+    from . import ema_checks
+    key = getattr(ema_checks, "TURNAROUND_KEY", "ema:turnaround")
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    try:
+        stored = json.loads(r[0]) if r and r[0] else None
+    except ValueError:
+        stored = None
+    if not isinstance(stored, dict) or stored.get("charge_basis") != "ledger" or not hasattr(ema_checks, "_ledger_rev"):
+        return
+    stored["ledger_rev"] = ema_checks._ledger_rev(conn)
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(stored)))
+    conn.commit()
 
 
 def _takes(fn, arg: str) -> bool:

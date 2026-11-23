@@ -124,6 +124,8 @@ MANY_PAYER_GROUPS = ("Medicare Supplement carriers", "Self-funded plan TPAs")   
 
 # C5
 DENIAL_MIN = 500
+# a payer's policy, not a denial to appeal line by line: the code paid on this share or less of this many answered lines
+POLICY_SINCE, POLICY_MIN_ANSWERED, POLICY_MAX_PAID_SHARE = "2025-01-01", 20, 0.05
 PAID_SINCE_SHARE = 0.50
 FALLBACK_SHARE = 0.45
 HIGH_DAYS, HIGH_EXPECTED = 30, 10_000
@@ -2047,9 +2049,9 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         except Exception:       # noqa: BLE001  (a rule that cannot tell leaves the line as its own)
             once = True
         if not once:
+            # the line's figures are the code's on that date, not this line's own: the payments are still read (paid_in_ema
+            # closes every item of the code together when they cover all of them), its outcome stays 'shared_line'
             res["shared_line"] = True
-            res["outcome"] = "shared_line"
-            return res
     grp = f.get("payer_group")
     own_carc = _carc_key(f.get("carc"))[1] if f.get("carc") else None
     thr = _threshold(f)
@@ -2259,6 +2261,13 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         out, on = "closed_unexplained", ln0.get("last_posted")
     else:
         out = "open"
+    if res["shared_line"]:
+        # EMA's line holds this code more than once: no outcome of this line's own (its payments are read together, by
+        # paid_in_ema); what was paid or written off before is the code's, perhaps another line's, never this line's proof
+        res["outcome"], res["outcome_on"] = "shared_line", None
+        res["paid_before"], res["paid_before_first"] = 0, None
+        res.update(written_off=0, written_off_kind=None, written_off_when=None, written_off_on=None, evidence_level=None, pattern=None)
+        return res
     if out in WRITE_OFF_OUTCOMES:
         # the reason that took the most; a line closed by the routine reduction alone is named by that reason (CO-45)
         top = max(counted, key=lambda z: z["cents"], default=None) or max(routine_co, key=lambda z: z["contr"] or 0, default=None)
@@ -2354,10 +2363,14 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
     'check_tail', 'payer', 'note', 'hint', 'used': (check, posted, link, date of service, code)}}. The wiring calls _mark_paid for 'close' when
     REMITWATCH_EMA_CLOSES is on, else sets the hint; with closes=False the note is worded as a hint."""
     out: dict[str, dict] = {}
+    shared: dict[tuple, list] = defaultdict(list)
     for f in findings:
         fid = f.get("finding_id")
         o = outcomes.get(fid)
         if not o or f.get("auto_status") or f.get("signal") in CLAIM_SIGNALS or not _wanted(f):
+            continue
+        if o.get("covered") and o.get("shared_line") and o.get("link") and o.get("lines") and not o.get("facility"):
+            shared[tuple(o["lines"][0])].append(f)
             continue
         if not o.get("covered") or o.get("shared_line") or not o.get("link"):
             continue
@@ -2402,6 +2415,53 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
                     "check whether the denial is a duplicate or a second payer's answer")
             out[fid] = {"action": "hint_paid_before", "paid_cents": o["paid_before"], "date": b.get("date"),
                         "check_tail": b.get("check_tail"), "payer": payer, "note": hint, "hint": hint, "used": None}
+    out.update(_paid_in_ema_shared(shared, outcomes, closes))
+    return out
+
+
+def _paid_in_ema_shared(shared: dict[tuple, list], outcomes: dict, closes: bool) -> dict[str, dict]:
+    """C6 for a code the claim carries more than once on the date (EMA's line holds them together): what the payer paid on
+    the code after the latest of the items' denials is compared with the sum of what each item must reach. Covering them
+    all closes each one with its part of the payment (split by what each was expected to bring); less is a partly-paid hint
+    on each; another payer's payment covering them all is the rebilled hint the wiring judges (PM case C02)."""
+    out: dict[str, dict] = {}
+    for _key, group in shared.items():
+        os_ = [outcomes[f["finding_id"]] for f in group]
+        need = sum(_threshold(f) for f in group)
+        same = min(o.get("paid_after_same") or 0 for o in os_)          # after the latest denial of the code
+        other = min(o.get("paid_after_other") or 0 for o in os_)
+        rows = [p for o in os_ for p in o.get("payments") or [] if p["kind"] == "ema"]
+        weights = [max(1, f.get("expected_cents") or f.get("shortfall_cents") or 0) for f in group]
+        total_w = sum(weights)
+        n = len(group)
+        for f, o, w in zip(group, os_, weights):
+            fid = f["finding_id"]
+            if same > 0 and same >= need and any(p["same"] for p in rows):
+                first = min((p for p in rows if p["same"]), key=lambda p: (p["posted"] or "", p["check"] or ""))
+                payer = first["payer"] or first["group"]
+                part = int(round(same * w / total_w))
+                note = (f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} for the {n} listed line(s) of {f.get('procedure_code')} "
+                        f"on this date (check ending {_tail(first['check'])}, postings through {o.get('as_of')}); this line's part is "
+                        f"{_usd(part)}. Reopen it if that payment is for something else.")
+                hint = f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} for this code and date (no 835): check before marking it paid"
+                out[fid] = {"action": "close", "paid_cents": part, "date": first["posted"], "check_tail": _tail(first["check"]),
+                            "payer": payer, "note": note if closes else hint, "hint": hint, "used": _used(first) + (fid,),
+                            "shared": n}
+            elif other > 0 and other >= need and any(not p["same"] for p in rows):
+                first = min((p for p in rows if not p["same"]), key=lambda p: (p["posted"] or "", p["check"] or ""))
+                payer = first["payer"] or first["group"]
+                part = int(round(other * w / total_w))
+                hint = (f"EMA shows {_usd(other)} paid by {payer}, another payer, on {first['posted']} for the {n} listed line(s) of this code "
+                        f"(check ending {_tail(first['check'])}): a second payer may have paid it; confirm before marking it paid")
+                out[fid] = {"action": "hint_other_payer", "paid_cents": part, "date": first["posted"], "check_tail": _tail(first["check"]),
+                            "payer": payer, "note": hint, "hint": hint, "used": _used(first) + (fid,), "shared": n}
+            elif same + other > 0 and rows:
+                first = min(rows, key=lambda p: (p["posted"] or "", p["check"] or ""))
+                hint = (f"Partly paid per EMA: {_usd(same + other)} posted for {f.get('procedure_code')} on this date ({first['posted']}, check "
+                        f"ending {_tail(first['check'])}), for {n} listed line(s) of the code: less than they are expected to bring; check "
+                        "which line it paid")
+                out[fid] = {"action": "hint_partial", "paid_cents": same + other, "date": first["posted"], "check_tail": _tail(first["check"]),
+                            "payer": first["payer"] or first["group"], "note": hint, "hint": hint, "used": None, "shared": n}
     return out
 
 
@@ -2551,7 +2611,8 @@ _CLASS_WORDS = {"auth": "no authorization", "medical_necessity": "medical necess
 
 
 def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Callable | None = None,
-                ratio: Callable | None = None, has_835_finding: Callable | None = None) -> list[dict]:
+                ratio: Callable | None = None, has_835_finding: Callable | None = None,
+                paid_share: Callable | None = None) -> list[dict]:
     """C5: denials only EMA saw. Per EMA line (claim, date, code), all of:
       1. a denial: the payer's non-routine adjustments (group not PR) net to at least $5, or an A/R Denied row carries a
          denial amount and no reason was posted;
@@ -2568,7 +2629,12 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     One EMA_DENIED item per (claim number, reason class). Expected: the usual rate x units, else EMA's allowed amount,
     else the charge x the group's paid/charge ratio, else 45% of the charge, capped at the charge; when another payer
     paid the line before the denial, the balance left at the denial (E17). Deadline: the first denial posting less the
-    group's p95 posting lag, plus the appeal window. The ASC's facility claims are titled "ASC facility claim"."""
+    group's p95 posting lag, plus the appeal window. The ASC's facility claims are titled "ASC facility claim".
+    Left out and counted (meta ema:c5_left_out): a second payer's denial when Medicaid is that payer or the first payer
+    has not paid; and a code the denying payer pays on 5% or less of at least 20 answered 2025-2026 lines (its 835s via
+    `paid_share(group, code) -> (paid, answered)`, else EMA's lines): its policy, folded into one pattern per payer and
+    code for the owner's table (pattern 'group|code||payer_policy'), listed line by line only once the owner chooses
+    'pursue'."""
     _prepare(conn)
     fr = freshness(conn, today)
     t = fr["today"]
@@ -2630,6 +2696,28 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     items: dict[tuple, dict] = {}
     sec_groups: dict[str, tuple] = {}
     left_out: dict[str, dict] = {}          # lines a rule leaves out, counted (meta ema:c5_left_out): never a silent drop
+    decisions = _meta(conn, POLICY_KEY, {}) or {}
+    ema_share: dict[tuple, list] = {}
+
+    def never_paid(grp: str, cpt: str) -> tuple | None:
+        """(paid, answered) when this payer pays the code on 5% or less of at least 20 answered 2025-2026 lines."""
+        got = None
+        if paid_share is not None:
+            try:
+                got = paid_share(grp, cpt)
+            except Exception:       # noqa: BLE001  (a rule that cannot tell decides nothing)
+                got = None
+        if not got:
+            if not ema_share:
+                for g, c, n, paid in conn.execute("""SELECT payer_group, cpt, COUNT(*), SUM(COALESCE(ins_paid, 0) > 0) FROM ema_lines
+                                                     WHERE svc >= ? AND (COALESCE(ins_answer_rows, 0) > 0 OR denial_first_posted IS NOT NULL)
+                                                     GROUP BY 1, 2""", (POLICY_SINCE,)):
+                    ema_share[(g, c)] = [paid or 0, n or 0]
+                ema_share[("", "")] = [0, 0]
+            got = ema_share.get((grp, cpt))
+        if got and got[1] >= POLICY_MIN_ANSWERED and got[0] <= POLICY_MAX_PAID_SHARE * got[1]:
+            return tuple(got)
+        return None
     for ln in lines:
         key = (ln["link"], ln["svc"], ln["cpt"])
         rs = [r for r in reasons.get(key, []) if r[0] not in ("", "PR") and r[2] not in ROUTINE_CLASSES and r[1] not in C5_SKIP_CODES]
@@ -2735,6 +2823,21 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         if not (ln["facility"] or 0) and ln["name_key"] is not None:
             got = sum(v for lk2, v in paid_elsewhere.get((ln["name_key"], ln["svc"], ln["cpt"]), {}).items() if lk2 != ln["link"])
             if got >= PAID_SINCE_SHARE * expected:
+                continue
+        pol = never_paid(dgrp, ln["cpt"])
+        if pol:
+            # the owner's table shows the pattern whatever the decision (so it can be changed back); its lines are left out
+            # unless the owner chose to pursue them
+            key_p = f"{dgrp}|{ln['cpt']}||payer_policy"
+            decision = (decisions.get(key_p) or {}).get("decision") or "accept"
+            lo = left_out.setdefault("payer_policy", {"n": 0, "cents": 0, "patterns": {}})
+            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": pol[0], "answered": pol[1], "n": 0,
+                                                   "cents": 0, "decision": decision, "default": key_p not in decisions})
+            pt["n"] += 1
+            pt["cents"] += expected or 0
+            if decision != "pursue":
+                lo["n"] += 1
+                lo["cents"] += expected or 0
                 continue
         ik = (ln["link"], cls)
         it = items.setdefault(ik, {"lines": [], "group": dgrp, "kind": dkind, "payer": top[3], "facility": ln["facility"] or 0,
