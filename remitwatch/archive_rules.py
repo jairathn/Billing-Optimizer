@@ -373,7 +373,8 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
             a = Ans(line_key=lk, claim_key=ck, txn=cl.txn, pcn=cl.pcn, bill=cl.bill, code=code, orig=orig if orig != code else None,
                     mods=ml, charge=charge or 0, paid=paid or 0, allowed=allowed, units=units, orig_units=ounits, dos=dos,
                     status=st or cl.status, payer=_payer_key(pid, pname) or cl.payer, payer_name=pname or cl.payer_name,
-                    group=cl.group, paid_on=pay or cl.paid_on, trace=cl.trace, lcn=lcn, adj=[], rem=[], standing=0, claim=cl)
+                    group=cl.group, kind=cl.kind, paid_on=pay or cl.paid_on, trace=cl.trace, lcn=lcn, adj=[], rem=[], standing=0,
+                    claim=cl, restated=False)
             arch.lines[lk] = a
             cl.lines.append(a)
         # a line with no date of its own takes its claim's one-day statement period (as detect.py's load does)
@@ -411,14 +412,41 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
                 arch.by_service[(a.bill, a.orig, a.dos)].append(a)
     for v in arch.by_service.values():
         v.sort(key=lambda a: (a.paid_on or "", a.trace or "", a.line_key))
+    for cl in arch.claims.values():
+        # the payer's word that the practice's adjustment request was processed (CO-129 with N770): what follows on the
+        # claim id is the practice's corrected claim, though this payer leaves the frequency code blank
+        if cl.status != REVERSAL_STATUS and cl.pcn and "N770" in set(cl.rem).union(*(x.rem for x in cl.lines)) \
+                and any(r == "129" and c for adj in [cl.adj] + [x.adj for x in cl.lines] for _g, r, c in adj):
+            arch.adj_requests[cl.pcn].append(cl)
     _link_submissions(arch)
     if standing is not None:
         for a in arch.lines.values():
             a.standing = max(0, standing.get(a.line_key, 0) or 0)
         _missed_takebacks(arch)
+        _restated_claims(arch)
     else:
         _net_payments(arch)
     return arch
+
+
+def _restated_claims(arch: Archive) -> None:
+    """Claims that pay less than their lines list, the gap taken by claim-level adjustments: a payer's reprocessing that
+    repeats an earlier payment on the lines and cancels it at the claim level (OA-23 the prior payment, CO-B13 or PI-B13
+    previously paid, PI-22), or a secondary that lists the primary's part on its lines and takes it off the claim (OA-23,
+    OA-253, PR-2). The money is the claim's own payment (CLP04): each paid line keeps at most its share of it, so a
+    restatement is never read as a second payment. A gap no claim-level adjustment accounts for is left as the lines say."""
+    for cl in arch.claims.values():
+        if cl.status == REVERSAL_STATUS:
+            continue
+        paid_lines = [x for x in cl.lines if (x.paid or 0) > 0]
+        listed = sum(x.paid for x in paid_lines)
+        net = cl.paid or 0
+        if not paid_lines or net < 0 or listed - net <= 100 or abs(sum(c for _g, _r, c in cl.adj) - (listed - net)) > 100:
+            continue
+        cl.restated, cl.net = True, net
+        for x in paid_lines:
+            x.restated = True
+            x.standing = min(x.standing or 0, int(round(x.paid * net / listed)))
 
 
 def _freq_family(freq: Any) -> str:
