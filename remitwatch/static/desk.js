@@ -120,9 +120,10 @@ function badgeOpen(key){ state.filt[key] = {deadline:'week', status:'open,in_pro
 // ---------------------------------------------------------------- one category page
 async function deskTab(v, key){
   const run = state.run;              // a newer render may start while this one waits; then this one writes nothing shared
-  const D = DESKS[key], b = await brief();
-  if(run !== state.run) return;
-  if(!b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
+  const D = DESKS[key];
+  // the brief (labels, kinds of work) and the page's own answers are asked together: the first rows wait on none of them
+  // in turn. The brief the page's first load already asked for is reused (state.briefP), never asked twice
+  const briefNow = (state.briefP || Promise.resolve(null)).then(x => x || brief());
   const f = deskFilter(key);
   state.lim = state.lim || {}; const lim = state.lim[key] || ROWS;
   const typed = String(f.q||'').slice(0,200);
@@ -131,12 +132,13 @@ async function deskTab(v, key){
   const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min, year:f.year, handling:f.handling, state:f.state, ema:f.ema};
   const listUrl = n => '/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit:n, offset:0}));
   // the tiles count under the chosen kind of work and reason; the kinds of work under the chosen tile, payment window and search
-  const [dk, res, why, payers] = await Promise.all([
+  const [b, dk, res, why, payers] = await Promise.all([briefNow,
     api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal, year:f.year, handling:f.handling, state:f.state, ema:f.ema, tileset:'state'}), find),
     api(listUrl(lim), find),
     f.kind ? api('/api/worklist/counts?'+qs(Object.assign({}, scope, {signal:'', kind:f.kind})), find) : Promise.resolve(null),
     payerList()]);
   if(run !== state.run) return;
+  if(!b || !b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
   // the drawer walks this list, and fetches the next rows by itself at the end of it
   state.worklist = res.items.map(r=>r.finding_id); state.wlTotal = res.total; state.wlKey = key;
   state.wlNext = async () => {

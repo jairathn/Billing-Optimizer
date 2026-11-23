@@ -608,7 +608,10 @@ function closeDetail(){
     render().then(()=>{ const r = document.querySelector('#view tr.row') || document.querySelector('#view button'); if(r) r.focus(); }); return; } }
   if(back && back.isConnected) back.focus();
 }
-document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
+// Escape closes what is on top: a window (the shortcuts, a fax preview, a letter, a bulk send) first, then the item's panel
+document.addEventListener('keydown', e=>{ if(e.key!=='Escape') return;
+  if($('#modal').classList.contains('open')){ $('#modal').classList.remove('open'); return; }
+  if($('#drawer').classList.contains('open')) closeDetail(); });
 // Keyboard shortcuts for working a list (shown by ? and the ? button): j and k move through the list, or through the items
 // with an item open; Enter or o opens one; s marks it sent; l lets it go (it asks why); / goes to the search box.
 const KEYS = [['j','Next item'],['k','Previous item'],['Enter or o','Open the item'],['s','Mark it sent'],['l','Let it go (asks why)'],['/','Search the list'],['Esc','Close the item'],['?','These shortcuts']];
@@ -626,10 +629,12 @@ document.addEventListener('keydown', e=>{
   if(e.key === '?'){ e.preventDefault(); keysSheet(); return; }
   if(e.key === '/'){ const q = [...document.querySelectorAll('#view input[data-f="q"]')].find(x=>x.offsetParent!==null) || $('#claimFind'); if(q){ e.preventDefault(); q.focus(); } return; }
   if(open){
+    // s and l use the next step's own button, else the status bar's (each asks what it needs: Let go always asks why)
+    const hint = text => { const el = d.querySelector('#xpErr') || d.querySelector('.st-err'); if(el) el.textContent = text; };
     if(e.key === 'j'){ e.preventDefault(); press('#nextItem'); }
     else if(e.key === 'k'){ e.preventDefault(); press('#prevItem'); }
-    else if(e.key === 's'){ e.preventDefault(); press('[data-xp="mark_sent"]') || press('#sentNext'); }
-    else if(e.key === 'l'){ e.preventDefault(); press('[data-xp="let_go"]') || press('#letGoNext'); }
+    else if(e.key === 's'){ e.preventDefault(); press('[data-xp="mark_sent"]') || press('#sentNext') || press('[data-st="appealed"]') || hint('Nothing to mark sent here.'); }
+    else if(e.key === 'l'){ e.preventDefault(); press('[data-xp="let_go"]') || press('#letGoNext') || press('[data-st="dismissed"]') || hint('This item cannot be let go from here.'); }
     return;
   }
   const rows = [...document.querySelectorAll('#view tr.row[data-id]')]; if(!rows.length) return;
@@ -656,21 +661,21 @@ async function openDetail(id){
   // the story, verdict and next step come in their own answer, so the item's own facts show at once
   const told = api('/api/findings/'+encodeURIComponent(id)+'/explain').catch(e=>({explain_error: 'What to do could not be worked out just now ('+(e.message||'no answer')+').'}));
   let r; try { r = await api('/api/findings/'+encodeURIComponent(id)); }
-  catch(e){ if(state.detailId === id) d.innerHTML = `<div class="dr-head"><div><h2>Item not found</h2><div class="small muted">${esc(e.message||'')}</div></div><button id="closeD" aria-label="Close">✕</button></div><div class="note">It may have been closed and removed by a newer run. Find a claim (top of the page) finds it by its claim ID.</div>`; const c = d.querySelector('#closeD'); if(c) c.onclick = closeDetail; return; }
+  catch(e){ if(state.detailId === id) d.innerHTML = `<div class="dr-head"><div><h2>Item not found</h2><div class="small muted">${e.status === 404 ? 'This item is no longer on the lists.' : 'The site did not answer just now: try again in a moment.'}</div></div><button id="closeD" aria-label="Close">✕</button></div><div class="note">It may have been closed and removed by a newer run. Find a claim (top of the page) finds it by its claim ID.</div>`; const c = d.querySelector('#closeD'); if(c) c.onclick = closeDetail; return; }
   if(state.detailId !== id) return;          // another item was opened meanwhile
   const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
-  if(!state.brief){ try { await brief(); } catch(e){} }        // the plain labels and the kinds of work
+  state.detailR = r; state.detailF = f; state.detailX = null;      // the panel's answers: a packet built here redraws its box
+  if(!state.brief){ try { await (state.briefP || brief()); } catch(e){} }        // the plain labels and the kinds of work
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
   const ex = drawerExtras(f, r), plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : f.title;
   const letter = f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal) ? `<button id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>` : '';
-  const noteWork = !!state.brief && kindFor(state.brief, f) === 'note' && ['open','in_progress'].includes(f.status);
   d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')} <span id="xpChips">${typeof xpChips === 'function' ? xpChips(f, f.work_state) : ''}</span></div></div><button id="closeD" aria-label="Close">✕</button></div>
     <div id="xpSlot"><div class="todo-box"><span class="muted small">Working out what to do…</span></div></div>
     ${letter ? `<div class="actions" id="letterRow">${letter}</div>` : ''}
     ${typeof faxDrawerHtml === 'function' ? faxDrawerHtml(f, r) : ''}
     ${typeof hideDrawerHtml === 'function' ? hideDrawerHtml(f) : ''}
-    <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
+    <div class="statusbar"><span class="small muted">Status: <b>${esc(STATUS_WORDS[f.status]||f.status)}</b> · change to</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].filter(([s])=>s!==f.status).map(([s,l])=>`<button class="ghost small" data-st="${s}">${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
     ${!f.claim_key && !f.line_key && f.patient_control_number ? `<div class="small" style="margin:6px 0">EMA claim ID <b>${esc(f.patient_control_number)}</b>${f.service_date ? ' · date of service ' + esc(f.service_date) : ''}${(f.evidence||{}).sent ? ' · sent ' + esc(f.evidence.sent) : ''} · no remittance from the payer for it</div>` : ''}
@@ -699,7 +704,7 @@ async function openDetail(id){
     ${(r.ema||[]).length?`<h3 class="small">ModMed EMA rows for this claim</h3><table class="small"><thead><tr><th>Family</th><th>DOS</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adj</th><th>Status / handling</th></tr></thead><tbody>${r.ema.slice(0,40).map(e=>`<tr><td>${esc(e.family)}${e.activity_type?' · '+esc(e.activity_type):''}</td><td>${esc(e.service_date)}</td><td>${esc(e.cpt)}${mods(e.modifiers)}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc(e.claim_status||'')} ${e.carc?'· '+esc(e.carc):''} ${e.adjustment_status?'· '+esc(e.adjustment_status):''} ${e.denial_category?'· '+esc(e.denial_category):''}</td></tr>`).join('')}</tbody></table>`:'<div class="small muted">No EMA export rows for this claim (annual exports not loaded).</div>'}`:''}
     </details>
     <div id="xpStorySlot"></div><div id="xpEmaSlot"></div><div id="xpWhy" hidden></div>
-    ${ex.builder ? `<details class="dfold" id="builderFold" ${noteWork?'open':''}><summary>Build the appeal from the visit note</summary>${ex.builder}</details>` : ''}
+    ${ex.builder ? `<details class="dfold" id="builderFold"><summary>Build the appeal from the visit note</summary>${ex.builder}</details>` : ''}
     <details class="dfold"><summary>Technical details</summary><div class="small muted">${esc(f.title)} · ${esc(f.signal)} · ${esc(f.severity)} · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
     <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre></details>`;
   d.querySelector('#closeD').onclick=closeDetail;
@@ -737,23 +742,38 @@ async function openDetail(id){
 // item again with its new state.
 function xpFill(f, r, x, d, id){
   const slot = d.querySelector('#xpSlot');
+  if(!x.explain || typeof xpBoxHtml !== 'function'){
+    slot.innerHTML = whatToDoHtml(f, '') + (x.explain_error ? `<div class="small muted">${esc(x.explain_error)}</div>` : '');
+    bindWhatToDo(f, d);
+    const kind = state.brief ? kindFor(state.brief, f) : '', b = d.querySelector('#builderFold');
+    if(b && kind === 'note' && ['open','in_progress'].includes(f.status)) b.open = true;      // no next step to open it: open as before
+  } else {
+    state.detailX = x;
+    xpRedrawBox(id, d);
+    d.querySelector('#xpStorySlot').innerHTML = xpStoryHtml(x.explain.story, (x.explain.verdict || {}).rows);
+  }
+  d.querySelector('#xpEmaSlot').innerHTML = xpEmaHtml(x.ema_block) + (x.ema_block_error ? `<div class="small muted">${esc(x.ema_block_error)}</div>` : '');
+  if(state.meta && state.meta.decisions) xpDecisions(id, d.querySelector('#xpWhy'));      // the run's decision log, where this build keeps one
+}
+// The next step's box, drawn again with the panel's answers as they are now (a packet built in the panel moves its main
+// button on to the fax). Where the box offers the appeal itself (its packet, its fax), the panel's other ways to the same
+// appeal (the letter button, the fax box's own button) step aside: one main button per item.
+function xpRedrawBox(id, d){
+  const f = state.detailF, r = state.detailR, x = state.detailX, slot = d.querySelector('#xpSlot');
+  if(!f || !r || !x || !x.explain || !slot || state.detailId !== id) return;
   const walk = async () => { const ids = state.worklist || [], i = ids.indexOf(id);
     if(i >= 0 && i < ids.length - 1) return openDetail(ids[i + 1]);
     if(i >= 0 && state.wlNext){ try { await state.wlNext(); } catch(e){} const nx = (state.worklist || [])[i + 1]; if(nx) return openDetail(nx); }
     openDetail(id); };
-  if(!x.explain || typeof xpBoxHtml !== 'function'){
-    slot.innerHTML = whatToDoHtml(f, '') + (x.explain_error ? `<div class="small muted">${esc(x.explain_error)}</div>` : '');
-    bindWhatToDo(f, d);
-  } else {
-    slot.innerHTML = xpBoxHtml(f, x, r);
-    const ch = d.querySelector('#xpChips'); if(ch) ch.innerHTML = xpChips(f, (x.explain.verdict || {}).state || f.work_state);
-    d.querySelector('#xpStorySlot').innerHTML = xpStoryHtml(x.explain.story, (x.explain.verdict || {}).rows);
-    xpBind(f, x, r, d, st => (['appealed','dismissed','resolved','lost'].includes(st) ? walk() : openDetail(id)));
-    const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { const i = (state.worklist||[]).indexOf(id); if(i > 0) openDetail(state.worklist[i-1]); };
-    const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => walk();
-  }
-  d.querySelector('#xpEmaSlot').innerHTML = xpEmaHtml(x.ema_block) + (x.ema_block_error ? `<div class="small muted">${esc(x.ema_block_error)}</div>` : '');
-  if(state.meta && state.meta.decisions) xpDecisions(id, d.querySelector('#xpWhy'));      // the run's decision log, where this build keeps one
+  slot.innerHTML = xpBoxHtml(f, x, r);
+  const shown = xpEffective(f, x).explain;
+  const ch = d.querySelector('#xpChips'); if(ch) ch.innerHTML = xpChips(f, (shown.verdict || {}).state || f.work_state);
+  const offers = ((shown.next_step || {}).buttons || []).some(k => k === 'build_packet' || k === 'fax_payer');
+  const lr = d.querySelector('#letterRow'); if(lr) lr.hidden = offers;
+  const fr = d.querySelector('#fxOneRow'); if(fr && f.status !== 'appealed') fr.hidden = offers;
+  xpBind(f, x, r, d, st => (['appealed','dismissed','resolved','lost'].includes(st) ? walk() : openDetail(id)));
+  const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { const i = (state.worklist||[]).indexOf(id); if(i > 0) openDetail(state.worklist[i-1]); };
+  const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => walk();
 }
 // #item=<finding id>: the item's panel, over whatever page is open (a finding id in a message is one click away)
 function itemFromHash(){ const m = /^#item=([A-Za-z0-9_-]{1,80})$/.exec(location.hash); return m ? m[1] : null; }
@@ -786,8 +806,10 @@ window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
   try { await loadMeta(); } catch(e){ if(!state.meta) $('#fresh').textContent='no data loaded yet'; }
-  brief().catch(()=>{});        // the 7-day badges on the category tabs
-  await refreshHeader();
+  // the brief (the 7-day badges on the category tabs, the labels) is asked once: the first page and the panel wait on this
+  // same answer. The bell and the feed chip fill in when theirs come; the first rows never wait for them
+  state.briefP = brief().catch(()=>null).finally(()=>{ state.briefP = null; });
+  refreshHeader();
   const item = itemFromHash();
   if(!state.run) render();       // a click while the first answer was slow has drawn the page already
   if(item) openDetail(item);     // a link to one item: its panel over Today
