@@ -257,11 +257,12 @@ def test_status_changes_show_at_once_survive_and_reach_the_next_run(box, monkeyp
     events = here.connection().execute("SELECT COUNT(*) FROM finding_events WHERE finding_id=? AND kind='manual'", (fid,)).fetchone()[0]
     assert events == 1
 
-    # the next run folds the journal into the store, publishes a new copy and clears the journal
+    # the next run folds the journal into the store, publishes a new copy and clears the journal; a person's status set
+    # since the last analysis has the run analyse again, so the stored work states catch up (the review of unit C1)
     rev = state.meta(cloud.SERVING)["rev"]
     time.sleep(0.01)
     out = cycle(state, client)
-    assert out["actions_folded"] == 1 and "detect" not in out and state.list(cloud.ACTIONS) == []
+    assert out["actions_folded"] == 1 and out.get("people_changed") and "detect" in out and state.list(cloud.ACTIONS) == []
     assert state.meta(cloud.SERVING)["rev"] != rev
     conn = raw_conn(state)
     assert conn.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "appealed"

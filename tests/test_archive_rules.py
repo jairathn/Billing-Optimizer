@@ -1334,6 +1334,22 @@ def test_rule4_a_restated_short_payment_topped_up_later_closes(store):
     assert (a["action"], a["paid_cents"]) == ("close_with_proof", 1054)
 
 
+def test_rule4_a_restatement_that_raises_another_line_pays_this_one_nothing(store):
+    """The payer restated a two-line claim: the claim pays $5.35 (OA-23 the earlier $131.08), one line lists the same $81.08
+    as before and the other $5.35 more. The new money is the raised line's, not a share of it: the unchanged line was not
+    paid again (no possible overpayment), and the raised line's short payment was topped up by $5.35."""
+    first = remit(store, "2026-02-02", [cl("CB0002014C017", [ln("11102", 90.95, 81.08, 82.42, [("CO", "45", 8.53), ("CO", "253", 1.34)], lcn="1"),
+                                                             ln("17000", 61.11, 50.00, 51.02, [("CO", "45", 10.09), ("CO", "253", 1.02)], lcn="2")])])
+    remit(store, "2026-03-30", [cl("CB0002014C017", [ln("11102", 90.95, 81.08, 82.42, [("CO", "45", 8.53), ("CO", "253", 1.34)], lcn="1"),
+                                                     ln("17000", 61.11, 55.35, 56.48, [("CO", "45", 4.63), ("CO", "253", 1.13)], lcn="2")],
+                                   claim_paid=5.35, adj=[("OA", "23", 131.08)])])
+    same = item(store, first[0], "UNDERPAID_VS_OWN_RATE", "underpayment", expected=9095, shortfall=853)
+    raised = item(store, first[1], "UNDERPAID_VS_OWN_RATE", "underpayment", expected=5648, shortfall=546)
+    acts = {a["finding_id"]: a for a in ar.short_pay_topped_up(store.conn, [same, raised])}
+    assert same["finding_id"] not in acts
+    assert (acts[raised["finding_id"]]["action"], acts[raised["finding_id"]]["paid_cents"]) == ("close_with_proof", 535)
+
+
 def test_rule1_a_repeat_unit_resubmitted_alone_is_not_a_second_payment_of_the_first(store):
     """The first claim billed 17313-79 and its repeat 17313-79-76: the payer paid the first unit and denied the repeat. The
     repeat, resubmitted alone, is paid: that pays the second unit, it is no second payment of the first."""

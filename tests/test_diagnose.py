@@ -218,6 +218,57 @@ def test_the_module_runs_from_the_command_line_on_a_server(server_world, tmp_pat
     assert r.returncode == 2 and "No store" in r.stderr
 
 
+def _long_run(tmp_path, n_lines=150, n_errors=0):
+    """One server run with many progress lines and contained errors, whose decisive error comes last."""
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    store = Store(db)
+    rl = runlog.start_run("cycle", trigger="test", db_path=db, conn=store.conn, host="server")
+    for i in range(n_lines):
+        rl.log(f"  downloaded {i} files")
+    for i in range(n_errors):
+        try:
+            raise ValueError(f"bad row for {FIRST} {LAST}")
+        except ValueError as exc:
+            runlog.caught(exc, f"step_{i}")
+    with rl.step("detect", contain=True):
+        raise KeyError("work_state")
+    rl.finish(conn=store.conn)
+    store.close()
+    return db, rl.run_id
+
+
+def test_the_bundle_keeps_every_event_of_a_long_run_as_one_json_object_per_line(tmp_path):
+    """events/<run_id>.jsonl is the run's event log, one JSON object per line, all of it: the late events of a long run
+    (its decisive error) included."""
+    db, run_id = _long_run(tmp_path)
+    files = diagnose.unpack(diagnose.build_bundle(db_path=db, days=2)["bytes"])
+    parsed = [json.loads(ln) for ln in files[f"events/{run_id}.jsonl"].decode().splitlines()]
+    assert len(parsed) >= 153 and all(isinstance(e, dict) for e in parsed)
+    assert any(e.get("level") == "error" and e.get("step") == "detect" for e in parsed)
+    m = json.loads(files[f"runs/{run_id}.json"])
+    assert m["events"]["kept"] == len(parsed)
+
+
+def test_errors_json_holds_every_error_of_the_runs_and_the_first_of_each_when_it_must_cut(tmp_path, monkeypatch):
+    db, run_id = _long_run(tmp_path, n_lines=0, n_errors=150)
+    files = diagnose.unpack(diagnose.build_bundle(db_path=db, days=2)["bytes"])
+    errs = json.loads(files["errors.json"])
+    assert errs["count"] == 151 and len(errs["errors"]) == 151 and errs["errors"][-1]["step"] == "detect"
+    assert not any(LAST in json.dumps(e) for e in errs["errors"])
+    monkeypatch.setattr(diagnose, "ERRORS_KEPT", 40)                # past the cap: each run's first error, then the newest
+    res = diagnose.build_bundle(db_path=db, days=2)
+    errs = json.loads(diagnose.unpack(res["bytes"])["errors.json"])
+    assert errs["count"] == 151 and len(errs["errors"]) == 40 and errs["left_out"] == 111 and res["scan"]["left_out"] == 111
+    assert errs["errors"][0]["step"] == "step_0" and errs["errors"][-1]["step"] == "detect"
+
+
+def test_a_clean_long_run_reports_nothing_masked_on_the_second_pass(tmp_path):
+    """scan.masked_on_second_pass counts what the second pass had to mask: a clean bundle says 0, however long its runs."""
+    db, _run_id = _long_run(tmp_path, n_lines=300, n_errors=120)
+    res = diagnose.build_bundle(db_path=db, days=2)
+    assert res["scan"]["masked_on_second_pass"] == 0 and res["scan"]["left_out"] == 0
+
+
 def test_the_default_place_is_beside_the_store_never_the_repository(tmp_path):
     p = diagnose.default_out(str(tmp_path / "data" / "remitwatch.sqlite"), None)
     assert p.startswith(str(tmp_path / "data" / "diagnostics")) and p.endswith(".zip")

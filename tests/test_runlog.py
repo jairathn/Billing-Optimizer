@@ -502,7 +502,7 @@ def test_the_panel_counts_the_errors_of_a_partial_run_from_its_lines_too(tmp_pat
     rl.finish(conn=store.conn)
     p = runlog.panel(store.conn, runlog.logs_dir_for(store.db_path))
     assert p["last_run"]["outcome"] == "partial" and p["last_run"]["logged_errors"] == 2
-    assert "2 error(s)" in p["sentence"] and "0 " not in p["sentence"], p["sentence"]
+    assert "2 error(s)" in p["sentence"] and "0 step(s)" not in p["sentence"], p["sentence"]
     store.close()
 
 
