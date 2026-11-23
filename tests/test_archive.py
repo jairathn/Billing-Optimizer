@@ -127,10 +127,13 @@ def crafted(kind: str, tmp_path) -> Store:
 
 
 def put_claim(store: Store, bill: str, dos: str, *, n_lines: int = 1, paid_on: str | None = None, payer_ref: str | None = None,
-              name: str = "PATIENT") -> list[str]:
+              name: str | None = None) -> list[str]:
+    """One claim of its own bill. Each bill is its own invented patient unless `name` says otherwise: bills of one patient's
+    service day leave and come back together (section 16)."""
     c = store.conn
     tk = f"T-{bill}-{dos}"
     paid_on = paid_on or dos
+    name = name if name is not None else f"PATIENT{bill}"
     c.execute("INSERT OR IGNORE INTO transactions (transaction_key, payment_date, payer_name, superseded) VALUES (?,?,?,0)",
               (tk, paid_on, "ACME HEALTH"))
     ck = f"C-{bill}-{dos}"
@@ -1546,3 +1549,133 @@ def test_an_old_claim_id_pair_from_the_ar_alone_holds_nothing(tmp_path):
     assert archive.run(store.conn, sink=sink, today=TODAY)["bills"] == 1
     assert archive.restore_touched(store.conn, sink=sink, today=TODAY)["restored"] == 0    # and it does not bounce back
     store.close()
+
+
+# =========================================================================== 16. one patient's day travels together
+# (found by the real-data re-check of the fixes: two new items after the archive. A Mohs 17311 the payer cut to half as
+# its second procedure that day stayed in the store while the flap it allowed more, on the patient's other bill that day,
+# left; the next analysis saw the 17311 alone, first on its claim, and listed it as underpaid. Detection weighs one
+# patient's claims of one service day together, so their bills leave together, stay together and come back together.)
+from tests.test_ema_wiring import remit as day_remit  # noqa: E402
+
+DAY = "2022-03-02"
+HUMANA = "HUMANA CARE PLAN"
+
+
+def _mohs_day(kind: str, tmp_path, *, mohs_paid_on: str = "2022-03-28") -> Store:
+    """The payer's usual 17311 is $585.12 (22 clean first procedures of other patients in 2022). One patient's 17311 claim
+    (bill DA01AAAAA) was allowed half of that; a flap (14040) the same day, by the same clinician, on the patient's other
+    bill (DB01AAAAA) was allowed $700: the 17311 was the payer's second procedure that day, its reduction, so no item.
+    A payment of the 17311 inside the horizon (`mohs_paid_on`) keeps its bill in the store."""
+    store = Store(str(tmp_path / "day.sqlite")) if kind == "file" else Store(":memory:", compact=True)
+    for n in range(22):
+        day_remit(store, trace=f"DT{n:05d}", paid_on="2022-02-10", payer=HUMANA,
+                  claims=[{"pcn": f"DM{n:03d}XXXXC017", "last": f"MOHS{n}", "first": "INDIA", "member": f"I{n:011d}",
+                           "lines": [("2022-02-02", "17311", 900, 585.12, [("CO", "45", 314.88)], {"allowed_cents": 58512})]}])
+    day_remit(store, trace="DT90001", paid_on=mohs_paid_on, payer=HUMANA,
+              claims=[{"pcn": "DA01AAAAAC017", "lines": [(DAY, "17311", 900, 292.56, [("CO", "45", 607.44)],
+                                                          {"allowed_cents": 29256})]}])
+    day_remit(store, trace="DT90002", paid_on="2022-03-28", payer=HUMANA,
+              claims=[{"pcn": "DB01AAAAAC017", "lines": [(DAY, "14040", 1500, 700, [("CO", "45", 800)], {"allowed_cents": 70000})]}])
+    return store
+
+
+def _mohs_item(conn) -> list:
+    return conn.execute("""SELECT signal FROM findings WHERE patient_control_number='DA01AAAAAC017' AND procedure_code='17311'
+                           AND COALESCE(stale,0)=0""").fetchall()
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_a_bill_of_one_patients_day_stays_while_another_bill_of_that_day_does(tmp_path, frozen_hook, kind):
+    store = _mohs_day(kind, tmp_path, mohs_paid_on="2026-06-01")
+    detect(store)
+    conn = store.conn
+    assert _mohs_item(conn) == []                                  # the payer's second procedure that day: no item
+    before = items(conn)
+    p = archive.plan(conn, today=TODAY)
+    assert [b for b, *_ in p["bills"]] == [f"DM{n:03d}XXXX" for n in range(22)]
+    assert p["held"] == {archive.HELD_DAY: 1}                      # the flap's bill stays with the 17311's
+    res = archive.run(conn, sink=sink_of(tmp_path, kind), today=TODAY)
+    assert res["bills"] == 22 and not res["errors"] and res["held"] == {archive.HELD_DAY: 1}
+    left = {pcn for (pcn,) in conn.execute("SELECT patient_control_number FROM claims")}
+    assert left == {"DA01AAAAAC017", "DB01AAAAAC017"}
+    detect(store, "r2")
+    assert _mohs_item(conn) == []                                  # the analysis still sees the whole day
+    assert items(conn) == {k: v for k, v in before.items() if v[0] in left}
+    store.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_a_bill_brought_back_brings_back_the_other_bills_of_its_patients_day(tmp_path, frozen_hook, kind):
+    store = _mohs_day(kind, tmp_path)                              # both bills old and settled: they leave together
+    detect(store)
+    conn = store.conn
+    sink = sink_of(tmp_path, kind)
+    first = archive.run(conn, sink=sink, today=TODAY)
+    assert first["bills"] == 24
+    # a person reopens the 17311's bill: the flap's bill comes back with it, in the same transaction
+    out = archive.restore(conn, "DA01AAAAAC017", sink=sink, actor="biller", reason="reopened", today=TODAY)
+    assert out["bills"] == 2 and out["rows"]["claims"] == 2 and out["rows"]["lines"] == 2
+    pins = dict(conn.execute("SELECT bill, why FROM archive_pins").fetchall())
+    assert pins == {"DA01AAAAA": "reopened", "DB01AAAAA": archive.WHY_DAY_BACK}
+    assert conn.execute("SELECT COUNT(*) FROM archive_days WHERE bill IN ('DA01AAAAA','DB01AAAAA')").fetchone()[0] == 0
+    detect(store, "r2")
+    assert _mohs_item(conn) == []
+    # the pins run out and the day leaves again, whole; then the payer reprocesses the 17311's claim: both come back
+    again = archive.run(conn, sink=sink, today="2027-03-01")
+    assert again["bills"] == 2
+    day_remit(store, trace="DT90003", paid_on="2027-02-01", payer=HUMANA,
+              claims=[{"pcn": "DA01AAAAAC017", "lines": [(DAY, "17311", 900, 292.56, [("CO", "45", 607.44)],
+                                                          {"allowed_cents": 29256})]}])
+    back = archive.restore_touched(conn, sink=sink, today="2027-03-01")
+    assert back["restored"] == 2 and back["why"] == {"new remittance": 1, archive.WHY_DAY_BACK: 1}
+    assert conn.execute("SELECT COUNT(*) FROM claims WHERE patient_control_number='DB01AAAAAC017'").fetchone()[0] == 1
+    store.close()
+
+
+def test_a_new_bill_for_an_archived_patients_day_brings_that_day_back(tmp_path, frozen_hook):
+    """A late claim of the same patient and day under a bill the archive never had (a corrected claim under a new
+    number, a late filing): the archived bills of that day come back before the analysis, so it sees the day whole."""
+    store = _mohs_day("file", tmp_path)
+    detect(store)
+    conn = store.conn
+    sink = sink_of(tmp_path, "file")
+    assert archive.run(conn, sink=sink, today=TODAY)["bills"] == 24
+    assert archive.restore_touched(conn, sink=sink, today=TODAY)["restored"] == 0
+    day_remit(store, trace="DT90004", paid_on="2026-11-01", payer=HUMANA,
+              claims=[{"pcn": "DC01AAAAAC017", "lines": [(DAY, "17312", 400, 0, [("CO", "29", 400)], {"allowed_cents": 0})]}])
+    back = archive.restore_touched(conn, sink=sink, today=TODAY)
+    assert back["restored"] == 2 and back["why"] == {archive.WHY_DAY_HOT: 1, archive.WHY_DAY_BACK: 1}
+    assert {b for (b,) in conn.execute("SELECT bill FROM archive_pins")} == {"DA01AAAAA", "DB01AAAAA"}
+    # another patient's claim that day brings nothing back
+    assert archive.run(conn, sink=sink, today="2027-03-01")["bills"] == 0      # DC01 is new: the day stays whole in the store
+    store.close()
+
+
+def test_a_patients_day_is_never_split_between_files_runs_or_a_change_made_meanwhile(tmp_path, frozen_hook, monkeypatch):
+    store = _mohs_day("file", tmp_path)
+    detect(store)
+    conn = store.conn
+    sink = sink_of(tmp_path, "file")
+    # one bill per file and 23 bills a run: the cut falls inside the patient's day, so the day goes whole, in one file
+    res = archive.run(conn, sink=sink, today=TODAY, batch_bills=1, max_bills=23)
+    assert res["bills"] == 24 and not res["more"] and len(res["files"]) == 23
+    assert conn.execute("SELECT COUNT(DISTINCT file) FROM archive_bills WHERE bill IN ('DA01AAAAA','DB01AAAAA')").fetchone()[0] == 1
+    # a reopening asked for one bill of the day while the run works keeps the whole day in the store
+    store2 = _mohs_day("file", tmp_path / "two")
+    detect(store2)
+    real = archive._build_records
+
+    def meanwhile(c, bills):
+        out = real(c, bills)
+        if any(b[0] == "DB01AAAAA" for b in bills):
+            c.execute("INSERT INTO archive_requests (bill, finding_id, status, actor, reason, at) VALUES (?,?,?,?,?,?)",
+                      ("DB01AAAAA", None, None, "biller", "look again", "2026-11-22T10:00:00+00:00"))
+            c.commit()
+        return out
+    monkeypatch.setattr(archive, "_build_records", meanwhile)
+    res = archive.run(store2.conn, sink=sink_of(tmp_path / "two", "file"), today=TODAY)
+    assert res["bills"] == 22 and res["changed_meanwhile"] == 2
+    assert {b for (b,) in store2.conn.execute("SELECT bill FROM archive_bills")} == {f"DM{n:03d}XXXX" for n in range(22)}
+    store.close()
+    store2.close()

@@ -39,7 +39,8 @@ person); nothing is closed by EMA's claim status alone; a person's decision is n
   any other way. Never put a value read from a file into an exception message. A key does not make free text safe:
   only keys with a strict shape (timestamps, run and finding ids, the store's keys, codes, versions, repair targets:
   runlog.KEY_SHAPES) keep a value as it is; under any other key (status, source, how, rule...) it is scrubbed like any
-  text. The scrubber learns the names the store holds, two-letter ones too (Le, Ng, Wu).
+  text. The scrubber learns the names the store holds, two-letter ones too (Le, Ng, Wu), and a name made only of words
+  the code uses as well (PRICE, WILL) as its pairs of words; a word of the code's own beside a name it holds is masked.
 - Tests use invented data only (tests/ema_fixtures.py, tests/fakes.py, the builders in tests/test_features.py and
   tests/test_remitwatch.py). tests/test_runlog.py plants invented names, birth dates, member ids and record numbers in
   a full cycle on each host and checks that no byte of any log, manifest or bundle holds them; keep it green.
