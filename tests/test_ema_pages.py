@@ -128,6 +128,13 @@ def build_world(path: str, tmp) -> None:
         det = Detector(store, run_id="c1", today=TODAY)
         det.run()
         assert det.ema_errors == [], det.ema_errors
+        # the run happened a minute ago: a status a person sets in a test is later than the run's start, as it always is on
+        # a site (statuses carry their time to the second, and a test can follow the run within one)
+        c, ago = store.conn, (dt.datetime.fromisoformat(det.now) - dt.timedelta(minutes=1)).isoformat(timespec="seconds")
+        c.execute("UPDATE findings SET status_changed_at=? WHERE status_changed_at=?", (ago, det.now))
+        c.execute("UPDATE findings SET last_seen=? WHERE last_seen=?", (ago, det.now))
+        c.execute("UPDATE detection_runs SET started_at=? WHERE started_at=?", (ago, det.now))
+        c.commit()
     finally:
         lg.close()
         store.close()
@@ -274,6 +281,80 @@ def test_follow_ups_due_and_todo_take_the_sites_day(site):
     assert fid in {i["finding_id"] for i in _items(site, state="todo")["items"]}
     assert fid in {i["finding_id"] for i in _items(site, state="work_now,followup_due")["items"]}
     assert _items(site, state="no_such_state")["total"] == 0
+
+
+CATS = "denial,bundling,downcoding,underpayment"
+
+
+@pytest.mark.parametrize("status,state", [("dismissed", "accepted"), ("lost", "accepted"), ("appealed", "waiting"), ("resolved", "done")])
+def test_a_status_a_person_sets_takes_the_item_off_work_now_at_once(site, status, state):
+    """Review C1 (high, both reviews): the Worklist opens on Work now (state=todo, any status) and the state is the one the
+    newest run stored. A person's Let go, Lost, Sent or Paid must take the item off that list, its tile and its count at
+    once, not at the next run (the page's own prompt says "It leaves the list"); its panel says the state its status gives
+    it; the next run's stored state takes over again."""
+    before = _items(site, category=CATS, live=1, state="todo")
+    fid = before["items"][0]["finding_id"]
+    r = site.c.post(f"/api/findings/{fid}/status", json={"status": status, "notes": "worked by a person"}, headers=XHR)
+    assert r.status_code == 200, r.text
+    after = _items(site, category=CATS, live=1, state="todo")
+    assert fid not in {i["finding_id"] for i in after["items"]} and after["total"] == before["total"] - 1
+    desk = site.c.get("/api/desk", params={"category": CATS, "tileset": "state", "status": "all", "state": "todo"}).json()
+    assert desk["tiles"]["todo"]["n"] == after["total"]
+    row = next(i for i in _items(site, category=CATS, live=1, state=state)["items"] if i["finding_id"] == fid)
+    assert row["work_state"] == state and row["follow_up_on"] is None
+    f = site.c.get(f"/api/findings/{fid}").json()["finding"]
+    assert f["work_state"] == state and f["state_by_status"] is True
+    assert site.c.get("/api/worklist/counts", params={"category": CATS, "live": 1, "state": "todo", "status": "all"}).json()["n"] == after["total"]
+    # the next run works the state out again from the status: its stored state stands from then on (a follow-up it dates
+    # comes due as any other)
+    if site.mode == "server":
+        conn = _store(site)
+        later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat(timespec="seconds")
+        conn.execute("INSERT INTO detection_runs (run_id, started_at, finished_at) VALUES ('c2', ?, ?)", (later, later))
+        conn.execute("UPDATE findings SET work_state='waiting', follow_up_on=? WHERE finding_id=?", (TODAY, fid))
+        conn.commit()
+        conn.close()
+        assert fid in {i["finding_id"] for i in _items(site, category=CATS, live=1, state="todo")["items"]}
+        assert "state_by_status" not in site.c.get(f"/api/findings/{fid}").json()["finding"]
+
+
+def test_a_reopened_item_is_work_now_again_at_once_and_a_sent_follow_up_is_not_due(site):
+    """The other way round: an item a person let go and then reopened is back on Work now before any run; a waiting item
+    whose follow-up had come due leaves the list when the person marks the follow-up sent."""
+    fid = _items(site, category=CATS, live=1, state="todo")["items"][0]["finding_id"]
+    assert site.c.post(f"/api/findings/{fid}/status", json={"status": "dismissed", "notes": "the payer was right"}, headers=XHR).status_code == 200
+    assert fid not in {i["finding_id"] for i in _items(site, category=CATS, live=1, state="todo")["items"]}
+    assert site.c.post(f"/api/findings/{fid}/status", json={"status": "open"}, headers=XHR).status_code == 200
+    assert fid in {i["finding_id"] for i in _items(site, category=CATS, live=1, state="todo")["items"]}
+    conn = _store(site)
+    wid = conn.execute("SELECT finding_id FROM findings WHERE signal='FORWARDED_TO_CARRIER'").fetchone()[0]
+    follow = conn.execute("SELECT follow_up_on FROM findings WHERE finding_id=?", (wid,)).fetchone()[0]
+    conn.close()
+    site.api._day = lambda off: (D.fromisoformat(follow) + dt.timedelta(days=off)).isoformat()
+    assert wid in {i["finding_id"] for i in _items(site, state="todo")["items"]}
+    assert site.c.post(f"/api/findings/{wid}/status", json={"status": "appealed", "notes": "follow-up faxed"}, headers=XHR).status_code == 200
+    assert wid not in {i["finding_id"] for i in _items(site, state="todo")["items"]}
+    assert wid in {i["finding_id"] for i in _items(site, state="waiting")["items"]}
+
+
+def test_letting_money_go_needs_a_persons_reason_on_every_item(site):
+    """Brief C (shared rules): write-offs only through the owner's policy table or a person with a reason; C1.3: let_go
+    (note required). Every Let go and Lost, one item or many, is refused without a reason; with one it goes."""
+    fid = next(i["finding_id"] for i in _items(site, category=CATS, live=1, state="todo")["items"] if i["signal"] == "EMA_DENIED")
+    for status in ("dismissed", "lost"):
+        for notes in (None, "", "   "):
+            body = {"status": status} if notes is None else {"status": status, "notes": notes}
+            r = site.c.post(f"/api/findings/{fid}/status", json=body, headers=XHR)
+            assert r.status_code == 400 and "needs a reason" in r.json()["detail"], (status, notes, r.text)
+        r = site.c.post("/api/findings/bulk-status", json={"ids": [fid], "status": status}, headers=XHR)
+        assert r.status_code == 400 and "needs a reason" in r.json()["detail"], r.text
+    assert site.c.post("/api/findings/no-such-item/status", json={"status": "dismissed"}, headers=XHR).status_code == 404
+    assert next(i for i in _items(site)["items"] if i["finding_id"] == fid)["status"] == "open"        # nothing changed
+    r = site.c.post("/api/findings/bulk-status", json={"ids": [fid], "status": "lost", "notes": "the payer upheld it twice"}, headers=XHR)
+    assert r.status_code == 200 and r.json()["updated"] == 1
+    assert site.c.post(f"/api/findings/{fid}/status", json={"status": "dismissed", "notes": "billed to the patient"}, headers=XHR).status_code == 200
+    # every other status needs none
+    assert site.c.post(f"/api/findings/{fid}/status", json={"status": "in_progress"}, headers=XHR).status_code == 200
 
 
 def test_each_ema_filter_is_the_rule_on_the_items_own_columns(site):
@@ -440,6 +521,67 @@ def test_a_bulk_send_checks_the_items_own_next_step_too(server, monkeypatch):
     monkeypatch.setattr(story, "next_step", lambda *a, **k: {"appeal_ok": False, "appeal_block": "reprocessed", "action": "x"})
     r = server.c.post("/api/appeals/send", json={"finding_id": fid, "bulk": True}, headers=XHR).json()
     assert r["status"] == "held" and r["code"] == "left_out" and "reprocessed" in r["reason"]
+
+
+def _twin(conn, fid, **kw):
+    row = conn.execute("SELECT * FROM findings WHERE finding_id=?", (fid,)).fetchone()
+    cols = [d[0] for d in conn.execute("SELECT * FROM findings LIMIT 0").description]
+    twin = dict(zip(cols, row), **kw)
+    conn.execute(f"INSERT INTO findings ({','.join(twin)}) VALUES ({','.join('?' * len(twin))})", tuple(twin.values()))
+
+
+def test_every_open_item_a_letter_settles_is_on_the_bulk_list_or_on_the_left_out_list(server, monkeypatch):
+    """Review C1 (low): an undated item, or one whose state the run did not work out, made the bulk rule NULL, and NOT NULL
+    is NULL: it was on neither list and the "Left out: N" line missed it. Settled, likely paid and undated lines are named
+    as such, not 'other'."""
+    monkeypatch.setenv("REMITWATCH_BULK_APPEAL", "1")
+    fid = _bulk_world(server)
+    conn = _store(server)
+    _twin(conn, fid, finding_id="undatedtwin00000000000aaa", appeal_deadline=None)
+    _twin(conn, fid, finding_id="nostatetwin00000000000aaa", work_state=None)
+    _twin(conn, fid, finding_id="settledtwin00000000000aaa", appeal_block="settled_in_ema")
+    _twin(conn, fid, finding_id="likelytwin000000000000aaa", appeal_block="likely_paid")
+    conn.commit()
+    conn.close()
+    a = server.c.get("/api/appeals/appealable").json()
+    listed = {i["finding_id"] for i in a["items"]}
+    lo = a["left_out"]
+    reasons = {x["finding_id"]: x["reason"] for x in lo["items"]}
+    assert listed == {fid}
+    assert reasons["undatedtwin00000000000aaa"] == "no_date" and reasons["nostatetwin00000000000aaa"] == "no_state"
+    assert reasons["settledtwin00000000000aaa"] == "settled" and reasons["likelytwin000000000000aaa"] == "likely_paid"
+    assert lo["n"] == len(lo["items"]) and sum(lo[k] for k, _w in server.api.LEFT_OUT) == lo["n"]
+    for words in ("no filing date 1", "state not worked out yet 1", "settled in EMA 1", "likely paid 1"):
+        assert words in lo["line"], lo["line"]
+
+
+def test_fax_them_anyway_in_bulk_never_skips_emas_own_sign_of_a_payment(server, monkeypatch):
+    """Review C1 (high): after a bulk batch held as 'stale', "Fax them anyway" sent every item again with stale_ok, and the
+    send skipped W5 altogether: an item EMA shows paid after its denial (paid_after), or with no balance left (no_balance),
+    went out. In bulk W5 is asked whatever the answer, and EMA's own sign of a payment holds the item; one EMA only
+    cannot vouch for (no report, an old one, a line not tied to its claim) goes on the person's word, as before. One item a
+    person sends with "Still unpaid in EMA" is not asked again."""
+    from remitwatch import ema_checks as ec
+    monkeypatch.setenv("REMITWATCH_BULK_APPEAL", "1")
+    fid = _bulk_world(server)
+    monkeypatch.setattr(server.api, "STALE_APPEAL_DAYS", 1)
+    monkeypatch.setattr(server.api, "_appeal_ok_now", lambda f: (True, None))
+    says = {}
+    monkeypatch.setattr(ec, "fax_vouch", lambda conn, fs, oc, today=None: {f["finding_id"]: {"vouched": False, "code": says["code"],
+                                                                                             "message": "EMA says so."} for f in fs})
+    for code in ("paid_after", "no_balance"):
+        says["code"] = code
+        first = server.c.post("/api/appeals/send", json={"finding_id": fid, "bulk": True}, headers=XHR).json()
+        assert first["code"] == "stale" and first["vouch"] == code
+        again = server.c.post("/api/appeals/send", json={"finding_id": fid, "bulk": True, "stale_ok": True}, headers=XHR).json()
+        assert again["status"] == "held" and again["code"] == code and again["vouch"] == code, again
+    for code in ("not_mapped", "production_old"):
+        says["code"] = code
+        again = server.c.post("/api/appeals/send", json={"finding_id": fid, "bulk": True, "stale_ok": True}, headers=XHR).json()
+        assert again["code"] not in ("stale", code), again            # on to the next check (the practice's details here)
+    says["code"] = "paid_after"
+    one = server.c.post("/api/appeals/send", json={"finding_id": fid, "stale_ok": True}, headers=XHR).json()
+    assert one["code"] not in ("stale", "paid_after"), one
 
 
 def test_a_denial_only_ema_shows_is_held_until_its_eob_is_in_hand(site):
@@ -616,6 +758,77 @@ def test_a_rule_by_code_hides_that_code_only_and_removing_it_reopens_only_what_n
     actions.apply(conn, {"kind": "hide_rule", "op": "add", "payer_group": "Plan A", "signal": "DENIED_NONCOVERED", "modifier": "25", "reason": "CO-96",
                          "actor": "b", "at": "2026-02-03T00:00:00+00:00"})
     assert dict(conn.execute("SELECT finding_id, status FROM findings")) == {"a1": "open", "a2": "dismissed", "a3": "dismissed", "a4": "open"}
+
+
+def test_removing_a_rule_reopens_what_it_hid_when_another_rule_of_the_payer_names_a_code_or_a_reason(tmp_path):
+    """Review C1 (high): the "still covered by another rule" test was NOT (<the other rules>), and a rule's code test is
+    `procedure_code IN (?) OR original_procedure_code IN (?) OR billed_code IN (?)`: on an item with no original or billed
+    code that is NULL, not FALSE, and NOT NULL is NULL, so the item stayed let go with no rule over it. The same with a
+    rule by the payer's reason code on an item with no reason code."""
+    from remitwatch import actions
+    for other, blank in (({"code": "99213"}, None), ({"reason": "CO-96"}, "carc")):
+        d = tmp_path / ("code" if "code" in other else "reason")
+        d.mkdir()
+        conn = _hide_store(d)
+        if blank:
+            conn.execute(f"UPDATE findings SET {blank}=NULL WHERE finding_id='a3'")
+            conn.commit()
+        assert actions.apply_hide_rules(conn) == 1                       # the old payer x reason rule hides a3
+        actions.apply(conn, dict({"kind": "hide_rule", "op": "add", "payer_group": "Plan A", "signal": "*", "actor": "b",
+                                  "note": "x", "at": "2099-01-01T00:00:00+00:00"}, **other))
+        actions.apply(conn, {"kind": "hide_rule", "op": "remove", "payer_group": "Plan A", "signal": "DENIED_AUTH", "actor": "b",
+                             "at": "2099-01-02T00:00:00+00:00"})
+        got = dict(conn.execute("SELECT finding_id, status FROM findings"))
+        assert got["a3"] == "open", (other, got)                         # nothing hides it any more
+        assert got["a2"] == ("dismissed" if "code" in other else "open"), (other, got)      # still under the code rule
+        conn.close()
+
+
+def _show_again(c, rule):
+    """What the Hidden list's Show again sends (static/desk.js hiddenManage): the rule as GET /api/hide lists it."""
+    return c.post("/api/hide", json={"payer_group": rule["payer_group"], "signal": rule["signal"], "code": rule.get("code"),
+                                     "modifier": rule.get("modifier"), "reason": rule.get("reason"), "remove": True}, headers=XHR)
+
+
+def test_show_again_removes_the_rule_it_lists_at_any_grain_on_both_hosts(site):
+    """Review C1 (medium, both reviews): Show again posted payer and reason only, so a rule by code, modifier or the payer's
+    reason code answered 404, and a rule for any reason by a code hit the whole-payer refusal (400). Its items stayed let go
+    with no way back from the page."""
+    c = site.c
+    item = next(i for i in _items(site)["items"] if i["signal"] == "DENIED_AUTH")
+    pg, code = item["payer_group"], item["procedure_code"]
+    for made in ({"signal": "DENIED_AUTH", "code": code, "reason": "CO-197"}, {"code": code}, {"signal": "DENIED_AUTH", "modifier": "none"}):
+        assert c.post("/api/hide", json=dict(made, payer_group=pg, note="never pays"), headers=XHR).status_code == 200, made
+        rules = c.get("/api/hide").json()["rules"]
+        assert len(rules) == 1, rules
+        got = _show_again(c, rules[0])
+        assert got.status_code == 200, (made, got.status_code, got.text)
+        assert c.get("/api/hide").json()["rules"] == [], made
+        assert next(i for i in _items(site)["items"] if i["finding_id"] == item["finding_id"])["status"] == "open", made
+    assert _show_again(c, {"payer_group": pg, "signal": "DENIED_AUTH", "code": code}).status_code == 404        # gone: nothing to remove
+
+
+def test_show_again_answers_on_a_copy_whose_hide_table_is_still_at_the_old_grain(world, tmp_path, monkeypatch):
+    """Review C1 (low): a serverless host runs no start-up migration, and the copy saved by the previous release keeps the
+    two-part hide_rules table until this release's first run: GET /api/hide copes, and Show again must too (it was a 500,
+    'no such column: code')."""
+    s = _site(world, tmp_path, monkeypatch, "server")
+    c = sqlite3.connect(s.db)
+    c.executescript("""DROP TABLE hide_rules;
+        CREATE TABLE hide_rules (payer_group TEXT, signal TEXT, actor TEXT, at TEXT, note TEXT, removed_at TEXT, PRIMARY KEY (payer_group, signal));
+        INSERT INTO hide_rules VALUES ('Anthem / BCBS', 'DENIED_AUTH', 'biller', '2026-01-01T00:00:00+00:00', 'never pays', NULL);""")
+    c.commit()
+    c.close()
+    rules = s.c.get("/api/hide").json()["rules"]
+    assert rules and rules[0]["signal"] == "DENIED_AUTH"
+    from fastapi.testclient import TestClient
+    loose = TestClient(s.api.app, raise_server_exceptions=False)
+    assert loose.post("/api/hide", json={"payer_group": "Anthem / BCBS", "signal": "DENIED_AUTH", "code": "99213", "remove": True},
+                      headers=XHR).status_code == 404                  # a finer rule cannot be in a table at the old grain
+    r = loose.post("/api/hide", json={"payer_group": rules[0]["payer_group"], "signal": "DENIED_AUTH", "code": "*", "modifier": "*",
+                                      "reason": "*", "remove": True}, headers=XHR)
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    assert s.c.get("/api/hide").json()["rules"] == []
 
 
 def test_the_hide_page_takes_and_lists_the_finer_grain_and_refuses_a_whole_payer(site):

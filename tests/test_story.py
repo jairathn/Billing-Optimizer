@@ -1135,6 +1135,7 @@ def test_a_secondary_billed_through_mark_billed_closes_on_the_second_payers_paym
     load(store, ledger, tmp_path, [pay(F.link_no(1), "SEC01", 20, posted=D(2026, 4, 20), payer=P["commercial"]), later(posted=D(2026, 5, 2))])
     out = story.explain(store.conn, "F1", ledger=ledger, today="2026-07-10")
     v, n = out["verdict"], out["next_step"]
+    assert out["state"]["rule"] == "person_billed_paid" and n["action"].startswith("Mark it Paid"), n["action"]
     assert "$20.00" in v["sentence"] and second in v["sentence"], v["sentence"]
     assert not n["action"].startswith(f"Follow up with {BCBS}"), n["action"]
 
@@ -1392,8 +1393,10 @@ def test_an_unposted_835_payment_reads_plainly(store):
                "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
     item(store, signal="REMIT_NOT_POSTED", category="posting", actionable="review", carc=None, paid_cents=9000, shortfall_cents=9000,
          title="Paid on the 835, not posted in EMA", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
-    s_ = story.item_verdict(store.conn, "F1", today=TODAY)["sentence"]
+    out = story.explain(store.conn, "F1", today=TODAY)
+    s_ = out["verdict"]["sentence"]
     assert s_.startswith("The 835 paid $90.00") and "but EMA never posted it" in s_, s_
+    assert (out["state"]["rule"], out["state"]["appeal_block"], out["next_step"]["route"]) == ("post_payment", "post", "post")
 
 
 def test_small_wording_and_button_rules(store):
@@ -1460,3 +1463,36 @@ def test_the_copy_never_says_it_reconciles_where_the_server_shows_a_gap(store, l
     assert copy["reconciles"] is None and "It reconciles to the cent" not in copy["balance"]["text"]
     assert "It cannot be checked to the cent on this site: patient money for this date and code is listed on the server" in copy["balance"]["text"]
     mem.close()
+
+
+def test_a_patient_who_paid_a_denial_the_payer_put_on_the_practice_is_appealed_or_refunded(store, ledger, tmp_path):
+    """Money review 7: EMA shows the line settled by the patient's $150.00 while the payer's CO-50 puts the service on the
+    practice: never 'unpaid and nobody worked it', never done; appeal it and refund the patient, or refund the patient."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Resolved/Paid"), pay(F.link_no(1), F.check_no(1), 0, status="Resolved/Paid"),
+                                   patient_pay(150, posted=D(2026, 4, 10)), later()])
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert (out["verdict"]["state"], out["state"]["rule"], out["state"]["appeal_block"]) == ("work_now", "patient_paid_co", "patient_paid")
+    assert out["verdict"]["sentence"].startswith("EMA shows the patient paid $150.00 and the line settled")
+    assert "refund the patient" in out["next_step"]["action"] and not out["next_step"]["appeal_ok"]
+    assert "nobody has worked it" not in out["verdict"]["sentence"]
+
+
+def test_an_ema_follow_up_date_waits_until_that_day_then_asks_to_follow_up_once(store, ledger, tmp_path):
+    """Money review 3: a follow-up date a person set in EMA holds the item in Waiting until that day; after it, the step
+    says to read the notes and follow up, once (practice-manager M4: plain words)."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), svc=SVC, cpt="99213", current=150, denial=150, status="Denied",
+                   follow=D(2026, 5, 20), aging=D(2026, 4, 28))]
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Denied"), pay(F.link_no(1), F.check_no(1), 0, status="Denied"), later()], ar_rows=ar)
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert (out["verdict"]["state"], out["state"]["rule"], out["state"]["follow_up_on"]) == ("waiting", "ema_follow_up", "2026-05-20")
+    assert out["next_step"]["route"] == "wait" and not out["next_step"]["appeal_ok"]
+    out = story.explain(store.conn, "F1", ledger=ledger, today="2026-05-25")
+    n = out["next_step"]
+    assert (out["state"]["rule"], out["state"]["appeal_block"], n["route"]) == ("follow_up_due", "follow_up", "call")
+    assert n["action"] == ("Read the claim's notes in EMA, then follow up with Anthem / BCBS: EMA has a follow-up date of May 20, 2026 on it; "
+                           "that day passed with no answer from the payer on file.")
+    assert n["action"].count("read the claim's notes") + n["action"].count("Read the claim's notes") == 1

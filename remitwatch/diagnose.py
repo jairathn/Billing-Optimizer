@@ -20,7 +20,11 @@ What is in it (BUNDLE_PARTS):
   store.json           the store's tables (columns, indexes, row counts) and meta keys (values only where safe)
   settings.json        the names of the settings in force (never their values)
 Every part is built from scrubbed data (runlog.Scrubber), dates of single items are cut to their month, and the
-finished bundle is scanned again before it is written; scan.found counts anything the second pass had to mask.
+finished bundle is scanned again before it is written. Records are never cut short on the way: a run's events and
+errors go in whole (the run log already keeps at most MAX_EVENTS events and MAX_ERRORS errors per run). Only
+errors.json has a cap of its own (ERRORS_KEPT across the chosen runs): past it, each run's first error and the newest
+ones stay, and the count left out is said (errors.json left_out, bundle.json scan.left_out).
+scan.masked_on_second_pass counts only what the second pass had to mask: on a clean bundle it is 0.
 """
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ from . import runlog
 
 MAX_RUNS = 60
 EXAMPLES_PER_CHECK = 20
+ERRORS_KEPT = 2000              # errors in errors.json; past it each run's first error and the newest ones stay
 BUNDLE_PARTS = ("README.md", "REPRODUCE.md", "bundle.json", "runs/", "events/", "errors.json", "invariants.json", "repairs.json",
                 "decisions.json", "examples/", "store.json", "settings.json")
 # meta keys whose values go into the bundle (scrubbed): figures and states, never a key, a cursor or a patient's data
@@ -182,8 +187,27 @@ def _examples(conn: sqlite3.Connection, ids: list[str]) -> list[dict]:
         row = cur.execute(f"SELECT {', '.join(cols)} FROM findings WHERE finding_id=?", (fid,)).fetchone() if cols else None
         item = dict(zip(cols, row)) if row else {"finding_id": fid, "missing": True}
         item["decisions"] = runlog.decisions_for(conn, fid, limit=30)["items"]
-        out.append(runlog.scrub(runlog.coarse_dates(item)))         # days become months first: a month survives the scrub
+        out.append(runlog.scrub(runlog.coarse_dates(item), cap=None))     # days become months first: a month survives the scrub
     return out
+
+
+def _pick_errors(errors: list[dict], cap: int) -> tuple[list[dict], int]:
+    """The errors of the chosen runs, in order: all of them up to `cap`; past it, each run's first error (where the
+    reading starts) and then the newest, the rest left out and counted."""
+    if len(errors) <= cap:
+        return errors, 0
+    keep: set[int] = set()
+    seen: set = set()
+    for i, e in enumerate(errors):
+        if e.get("run_id") not in seen:
+            seen.add(e.get("run_id"))
+            keep.add(i)
+    for i in range(len(errors) - 1, -1, -1):
+        if len(keep) >= cap:
+            break
+        keep.add(i)
+    kept = [e for i, e in enumerate(errors) if i in keep][:max(cap, 1)]
+    return kept, len(errors) - len(kept)
 
 
 def _failing_checks(manifests: list[dict]) -> dict[str, list[str]]:
@@ -324,37 +348,40 @@ def build_bundle(*, conn: sqlite3.Connection | None = None, db_path: str | None 
             m, events = got.get(r["run_id"], (None, []))
             m = m or dict(r, note="only the index line was found")
             manifests.append(m)
-            parts[f"runs/{r['run_id']}.json"] = runlog.scrub(m)
+            parts[f"runs/{r['run_id']}.json"] = runlog.scrub(m, cap=None)
             if events:
-                parts[f"events/{r['run_id']}.jsonl"] = [runlog.scrub(e) for e in events]
+                parts[f"events/{r['run_id']}.jsonl"] = [runlog.scrub(e, cap=None) for e in events]
             for e in m.get("errors") or []:
-                errors.append(dict(e, run_id=r["run_id"]))
+                if isinstance(e, dict):
+                    errors.append(dict(e, run_id=r["run_id"]))
             for e in events:
-                if e.get("level") == "error" and e.get("error") and not any(x.get("at") == e.get("ts") and x.get("type") == e["error"].get("type")
-                                                                              for x in m.get("errors") or []):
+                if e.get("level") == "error" and isinstance(e.get("error"), dict) and not any(
+                        isinstance(x, dict) and x.get("at") == e.get("ts") and x.get("type") == e["error"].get("type") for x in m.get("errors") or []):
                     errors.append(dict(e["error"], run_id=r["run_id"], step=e.get("step"), at=e.get("ts")))
-        parts["errors.json"] = runlog.scrub({"count": len(errors), "errors": errors[-500:]})
+        picked, left_out = _pick_errors(errors, ERRORS_KEPT)
+        parts["errors.json"] = runlog.scrub({"count": len(errors), "left_out": left_out, "errors": picked}, cap=None)
         inv = [{"run_id": m.get("run_id"), "started_at": m.get("started_at"), "outcome": m.get("outcome"),
                 "invariants": m.get("invariants"), "self_regulation": m.get("self_regulation"),
                 "self_audit": (m.get("sections") or {}).get("self_audit")} for m in manifests]
-        parts["invariants.json"] = runlog.coarse_dates(runlog.scrub({"by_run": inv, "tables": _selfcheck_tables(conn) if conn is not None else {}}))
+        parts["invariants.json"] = runlog.coarse_dates(runlog.scrub({"by_run": inv, "tables": _selfcheck_tables(conn) if conn is not None else {}},
+                                                                    cap=None))
         if conn is not None:
             from . import repair
             parts["repairs.json"] = runlog.coarse_dates(runlog.scrub({"recent": repair.recent(conn, limit=200),
-                                                                      "open_problems": repair.open_problems(conn=conn, sink=sink)}))
-            parts["decisions.json"] = runlog.scrub(_decision_counts(conn, runlog._iso(t - timedelta(days=days))))
+                                                                      "open_problems": repair.open_problems(conn=conn, sink=sink)}, cap=None))
+            parts["decisions.json"] = runlog.scrub(_decision_counts(conn, runlog._iso(t - timedelta(days=days))), cap=None)
             for name, ids in _failing_checks(manifests).items():
                 parts[f"examples/{re.sub(r'[^a-z0-9_]+', '_', name.lower())[:60]}.json"] = {"check": runlog.scrub(name, "rule"),
                                                                                          "items": _examples(conn, ids)}
-            parts["store.json"] = runlog.scrub(store_layout(conn))
+            parts["store.json"] = runlog.scrub(store_layout(conn), cap=None)
             for name, fn in PARTS.items():
                 try:
-                    parts[f"{re.sub(r'[^a-z0-9_]+', '_', name.lower())}.json"] = runlog.coarse_dates(runlog.scrub(fn(conn)))
+                    parts[f"{re.sub(r'[^a-z0-9_]+', '_', name.lower())}.json"] = runlog.coarse_dates(runlog.scrub(fn(conn), cap=None))
                 except Exception as exc:        # noqa: BLE001  (a part that fails is named in the bundle with its error)
                     parts[f"{re.sub(r'[^a-z0-9_]+', '_', name.lower())}.json"] = {"error": runlog.error_info(exc)}
         else:
             from . import repair
-            parts["repairs.json"] = runlog.scrub({"open_problems": repair.open_problems(sink=sink)})
+            parts["repairs.json"] = runlog.scrub({"open_problems": repair.open_problems(sink=sink)}, cap=None)
         latest = manifests[-1] if manifests else {}
         here = runlog.versions()
         parts["settings.json"] = {"in_force_at_last_run": (latest.get("settings") or []), "here": runlog.settings_names()}
@@ -366,16 +393,17 @@ def build_bundle(*, conn: sqlite3.Connection | None = None, db_path: str | None 
         texts = {"README.md": README.format(built=info["built"], source=info["source"]),
                  "REPRODUCE.md": REPRODUCE.format(commit=code.get("commit") or "<the commit on /api/health>",
                                                   rules=code.get("rules_version") or "unknown")}
-        # the second pass: anything a part still holds that the scrubber would mask is masked now, and counted
+        # the second pass: anything a part still holds that the scrubber would mask is masked now, and counted (nothing
+        # is cut on this pass, so the count is only of masking)
         found = 0
         clean: dict[str, Any] = {}
         for name, value in parts.items():
-            again = runlog.scrub(value)
+            again = runlog.scrub(value, cap=None)
             if again != value:
                 found += _count_diff(value, again)
             clean[name] = again
-        info["scan"] = {"masked_on_second_pass": found, "known_words_checked": len(known or [])}
-        blobs = {n: _dump(v) for n, v in clean.items()}
+        info["scan"] = {"masked_on_second_pass": found, "left_out": left_out, "known_words_checked": len(known or [])}
+        blobs = {n: _dump(v, jsonl=n.startswith("events/")) for n, v in clean.items()}
         blobs["bundle.json"] = json.dumps(runlog.scrub(info), indent=1, ensure_ascii=False, default=str)
         blobs.update(texts)
         if known:
@@ -416,9 +444,11 @@ def _count_diff(a: Any, b: Any) -> int:
     return 0 if a == b else 1
 
 
-def _dump(v: Any) -> str:
-    if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
-        return "\n".join(json.dumps(x, ensure_ascii=False, default=str, separators=(",", ":")) for x in v) + "\n"
+def _dump(v: Any, jsonl: bool = False) -> str:
+    """A part as text: an event log as JSON lines (one object per line, whatever the objects are), any other list of
+    objects the same way, everything else as indented JSON."""
+    if isinstance(v, list) and (jsonl or (v and all(isinstance(x, dict) for x in v))):
+        return "".join(json.dumps(x, ensure_ascii=False, default=str, separators=(",", ":")) + "\n" for x in v)
     return json.dumps(v, indent=1, ensure_ascii=False, default=str)
 
 

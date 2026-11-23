@@ -2418,7 +2418,9 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
         return (f"{grp} answered {wkind} on {day(a.get('date'))} without paying ({codes_}): work that answer.", steps, "A/R follow-up biller")
     if rule in ("work_stale", "follow_up_due"):
         if work.get("kind") in ("follow_up", "note"):
-            return (f"Read the claim's notes in EMA, then follow up with {grp}: {_lower(st.get('state_basis') or '')}.",
+            # the state's basis ends with the same instruction: said once
+            said = re.sub(r"[:;] read the claim's notes in EMA, then follow up\.?$", "", (st.get("state_basis") or "").strip())
+            return (f"Read the claim's notes in EMA, then follow up with {grp}: {_lower(said)}.",
                     [facts, "Paid or reprocessed: post it and close the item. Not on file: send it again now."], "A/R follow-up biller")
         follow = st.get("follow_up_on")
         steps = [f"Ask {grp} whether it received {wkind} ({verb} {when}) and what it decided.", facts,

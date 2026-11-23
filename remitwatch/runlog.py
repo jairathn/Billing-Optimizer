@@ -67,7 +67,8 @@ MAX_ERRORS = 200                # errors kept per run (each with its stack)
 MAX_INPUTS = 2000               # input files listed one by one in a manifest; past it they are counted by kind and result
 STACK_FRAMES = 40
 TEXT_CAP = 600                  # characters kept of one free-text value (after scrubbing)
-LIST_CAP = 100                  # items kept of one list inside an event or a manifest section
+LIST_CAP = 100                  # items kept of one list inside an event or a manifest section (a bundle keeps them all)
+TRAIL_EVENTS = 20               # the last events an open marker carries, so a run the platform kills keeps its trail
 SERVER_KEEP_DAYS = 180
 SERVERLESS_KEEP_DAYS = 90
 SERVER_BUDGET_BYTES = 512 << 20
@@ -153,6 +154,11 @@ _GROUPED = re.compile(r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b")            # 1,234,56
 _ALNUM = re.compile(r"\b(?=[A-Za-z0-9-]*\d)(?=[A-Za-z0-9-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9-]{4,}[A-Za-z0-9]\b")
 _DIGITS = re.compile(r"(?<![\w.$])\d[\d-]{3,}\d(?![\w])")
 _WORD = re.compile(r"[^\W\d_](?:[^\W\d_]|['\-]){2,}")      # a word of letters in any script (a name with accents too)
+_WORD2 = re.compile(r"(?<![\w'\-])[^\W\d_]{2}(?![\w'\-])")  # a word of exactly two letters (Le, Ng, Wu, Vu, Do: surnames)
+_NAME_WORD = re.compile(r"[^\W\d_](?:[^\W\d_]|['\-])+")    # a word of a name as the store holds it, two letters or more
+# two-letter words a store's name never adds to the names masked: English words every message starts with, and
+# RemitWatch's own codes (claim adjustment groups, A/R): masking them would leave the logs unreadable
+_TWO_LETTER_KEEP = frozenset("of to in is it on at by or as an be we he me my no so up us if go am ok id co pr oa pi cr ar".split())
 _ALNUM_OK = frozenset({"sha256", "x86-64", "utf-16", "utf-32", "base64", "py313", "py312", "py311"})
 _ID_QUOTED = re.compile(r"^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+|"
                         r"%[-A-Za-z%/ :.]*|[A-Z][a-z]+(?:[A-Z][a-z]+)+(?:Error|Exception|Warning))$")
@@ -208,7 +214,9 @@ class Scrubber:
         return self._code_words
 
     def learn(self, conn: sqlite3.Connection, limit: int = 400_000) -> int:
-        """Add the patient and subscriber names the store holds (the 835's names). Returns how many words it knows."""
+        """Add the patient and subscriber names the store holds (the 835's names): words of three letters or more that
+        are not RemitWatch's own words, and words of two letters (Le, Ng, Wu) but the few in _TWO_LETTER_KEEP. Returns
+        how many words it knows."""
         cols = ("patient_last", "patient_first", "insured_last", "insured_first", "corrected_patient_last", "corrected_patient_first")
         try:
             have = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
@@ -223,19 +231,21 @@ class Scrubber:
         cur.row_factory = None
         try:
             for (v,) in cur.execute(sql):
-                for w in _WORD.findall(str(v)):
+                for w in _NAME_WORD.findall(str(v)):
                     w = w.lower().strip("'-")
-                    if len(w) >= 3 and w not in stop:
+                    if (len(w) >= 3 and w not in stop) or (len(w) == 2 and w.isalpha() and w not in _TWO_LETTER_KEEP):
                         self.names.add(w)
         except sqlite3.Error as exc:
             _note_internal("learn", exc)
         return len(self.names)
 
     def add_names(self, words: Iterable[str]) -> None:
+        """Words that are names, whatever else they are (a test's planted names, a bundle's `known` words)."""
         for v in words:
-            for w in _WORD.findall(str(v)):
-                if len(w) >= 3:
-                    self.names.add(w.lower().strip("'-"))
+            for w in _NAME_WORD.findall(str(v)):
+                w = w.lower().strip("'-")
+                if len(w) >= 2:
+                    self.names.add(w)
 
     # ---------------------------------------------------------------- free text
     def text(self, value: Any, cap: int = TEXT_CAP) -> str:
@@ -269,14 +279,16 @@ class Scrubber:
         return s[:cap] + ("..." if len(s) > cap else "")
 
     def _names(self, s: str) -> str:
-        """Names that reached the text unquoted: a word the store's patients carry (learn), an ALL-CAPS word of four
-        letters or more (an 835 name), or two capitalized words side by side ("Last, First" or "First Last"), unless the
-        word is one of RemitWatch's own (code_words)."""
+        """Names that reached the text unquoted: a word the store's patients carry (learn; one of two letters only when
+        it is written with a capital, so "to do" stays), an ALL-CAPS word of four letters or more (an 835 name), or two
+        capitalized words side by side ("Last, First" or "First Last"), unless the word is one of RemitWatch's own
+        (code_words)."""
         toks = list(_WORD.finditer(s))
-        if not toks:
+        names = self.names
+        short = [m for m in _WORD2.finditer(s) if not m.group(0).islower() and m.group(0).lower() in names] if names else []
+        if not toks and not short:
             return s
         code = self.code_words()
-        names = self.names
 
         def known(w: str) -> bool:
             return w.lower().strip("'-") in code
@@ -300,14 +312,16 @@ class Scrubber:
                     for j, x in ((i, w), (i + 1, nxt)):
                         if not known(x) or not x.isupper():
                             mask[j] = True
-        if not any(mask):
+        spans = sorted([(m.start(), m.end()) for m, hide in zip(toks, mask) if hide] + [(m.start(), m.end()) for m in short])
+        if not spans:
             return s
         out, at = [], 0
-        for m, hide in zip(toks, mask):
-            if hide:
-                out.append(s[at:m.start()])
-                out.append("<name>")
-                at = m.end()
+        for start, end in spans:
+            if start < at:
+                continue
+            out.append(s[at:start])
+            out.append("<name>")
+            at = end
         out.append(s[at:])
         return "".join(out)
 
@@ -326,32 +340,35 @@ class Scrubber:
         return "<path>"
 
     # ---------------------------------------------------------------- structured values
-    def value(self, v: Any, key: str | None = None, depth: int = 0) -> Any:
-        """A structured value made safe: dicts and lists walked (lists cut at LIST_CAP), numbers kept, strings kept only
-        when their key says what they are and their shape agrees (a run id, a finding id, a code, a timestamp...),
-        otherwise scrubbed as free text."""
+    def value(self, v: Any, key: str | None = None, depth: int = 0, cap: int | None = LIST_CAP) -> Any:
+        """A structured value made safe: dicts and lists walked (lists cut at `cap` items with a note of how many more,
+        dicts at twice that; cap=None keeps them whole, as a bundle does), numbers kept, strings kept as they are only
+        when their key has a strict shape and the string fits it (a timestamp, a run or finding id, a code, a version,
+        a target), otherwise scrubbed as free text: a key that only names a kind of word (status, source, how) does not
+        make free text safe."""
         if v is None or isinstance(v, (bool, int, float)):
             return v
-        if depth > 8:
+        if depth > (8 if cap is not None else 40):
             return "<deep>"
         if isinstance(v, dict):
             out = {}
-            for k, x in list(v.items())[:LIST_CAP * 2]:
+            for k, x in (list(v.items()) if cap is None else list(v.items())[:cap * 2]):
                 sk = self.key(k)
-                out[sk] = self.value(x, str(k), depth + 1)
+                out[sk] = self.value(x, str(k), depth + 1, cap)
             return out
         if isinstance(v, (list, tuple, set, frozenset)):
             seq = list(v)
-            out_l = [self.value(x, key, depth + 1) for x in seq[:LIST_CAP]]
-            if len(seq) > LIST_CAP:
-                out_l.append(f"... {len(seq) - LIST_CAP} more")
+            out_l = [self.value(x, key, depth + 1, cap) for x in (seq if cap is None else seq[:cap])]
+            if cap is not None and len(seq) > cap:
+                out_l.append(f"... {len(seq) - cap} more")
             return out_l
         if isinstance(v, (bytes, bytearray)):
             return f"<{len(v)} bytes>"
         s = str(v)
         if key is not None:
             shape = KEY_SHAPES.get(key)
-            if shape is not None and shape.fullmatch(s) and not (self.names and _has_name(s, self.names)):
+            if (shape is not None and shape.fullmatch(s) and not (self.names and _has_name(s, self.names))
+                    and not (key in _PAYER_KEYS and _ID_LIKE.search(s))):
                 return s
         return self.text(s)
 
@@ -363,14 +380,20 @@ class Scrubber:
 
 
 def _has_name(s: str, names: set[str]) -> bool:
-    return any(w.lower().strip("'-") in names for w in _WORD.findall(s))
+    return (any(w.lower().strip("'-") in names for w in _WORD.findall(s))
+            or any(not w.islower() and w.lower() in names for w in _WORD2.findall(s)))
 
 
 _TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?")
-_IDENT = re.compile(r"[A-Za-z][A-Za-z0-9_:.|/ ()&'+,-]{0,119}")
 _PAYER = re.compile(r"[A-Za-z][A-Za-z0-9 .,&'()/+-]{0,79}")
+_PAYER_KEYS = frozenset({"payer_group", "payer", "payer_kind"})
+_ID_LIKE = re.compile(r"\d{4,}|\d[/.\-]\d")             # a payer's name holds no date and no long number
 _FID = re.compile(r"(?=[0-9a-f]*[a-f])[0-9a-f]{8,64}")
 _SHA = re.compile(r"(?:dropbox:|sha256:)?[0-9a-f]{8,64}")
+# a version of the code, Python or SQLite (3.11.10, 2.11-b9ce3828): never a date, which the free-text rules would see in it
+_VERSION = re.compile(r"\d{1,2}(?:\.\d{1,3}){0,3}(?:[-+][0-9A-Za-z.]{1,40})?")
+# what a self-repair acts on: a feed, a step, a lock, a table, or a file's kind and content hash (never a name)
+_TARGET = re.compile(r"(?:[a-z_]{1,30}:)?(?:[0-9a-f]{8,64}|[a-z_][a-z0-9_.\-]{0,60})")
 KEY_SHAPES: dict[str, re.Pattern] = {}
 for _k in ("ts", "at", "started", "finished", "started_at", "finished_at", "first_seen", "last_seen", "heartbeat", "created_at",
            "saved_at", "taken_at", "since", "last_change", "built", "modified", "next_at", "last_at", "first_at"):
@@ -387,11 +410,12 @@ for _k in ("code", "cpt", "procedure_code", "billed_code"):
     KEY_SHAPES[_k] = re.compile(r"[A-Z0-9]{5}")
 for _k in ("carc", "rarc", "reason", "carc_group"):
     KEY_SHAPES[_k] = re.compile(r"(?:[A-Z]{2}-)?[A-Z]{0,2}\d{1,4}[A-Z]?|[A-Z]{2}")
-for _k in ("step", "event", "level", "rule", "rule_version", "kind", "signal", "category", "status", "work_state", "outcome",
-           "host_mode", "mode", "trigger", "report", "via", "source", "remedy", "target", "state", "action", "strength",
-           "how", "type", "detect_rules", "version", "python", "sqlite", "ema_outcome", "origin", "result",
-           "section", "unit", "decision"):
-    KEY_SHAPES[_k] = _IDENT
+for _k in ("rule_version", "rules_version", "detect_rules", "version", "python", "sqlite", "remitwatch"):
+    KEY_SHAPES[_k] = _VERSION
+KEY_SHAPES["target"] = _TARGET
+# step, event, level, rule, kind, signal, status, source, how, action, type... are scrubbed as free text: what they
+# really hold ("detect:no_answer", "in_progress", "rebilled to another payer") comes through unchanged, and a name,
+# a date or an id that a bug puts there does not
 for _k in ("payer_group", "payer", "payer_kind"):
     KEY_SHAPES[_k] = _PAYER
 # a stack frame's place in the code (error_info): a file of the repository or a library, a function, file:line in function
@@ -414,8 +438,9 @@ def scrub_text(value: Any, cap: int = TEXT_CAP) -> str:
     return SCRUB.text(value, cap)
 
 
-def scrub(value: Any, key: str | None = None) -> Any:
-    return SCRUB.value(value, key)
+def scrub(value: Any, key: str | None = None, *, cap: int | None = LIST_CAP) -> Any:
+    """A structured value made safe (Scrubber.value). cap=None: no list or dict is cut (a bundle's whole records)."""
+    return SCRUB.value(value, key, cap=cap)
 
 
 def safe_id(value: Any) -> str | None:
@@ -769,6 +794,30 @@ def sink_for(*, db_path: str | None = None, state: Any = None, logs_dir: Any = N
 
 # ------------------------------------------------------------------------------------------------------------- the run
 _CURRENT: contextvars.ContextVar = contextvars.ContextVar("remitwatch_runlog", default=None)
+_ERROR_WORD = re.compile(r"\bERROR\b")                  # how the code marks a progress line about a failure
+_WARN_WORD = re.compile(r"\bWARN(?:ING)?\b", re.I)
+_LOGGED_FLAG = "_remitwatch_logged"                     # (run id, record number) on an exception already logged
+
+
+def _shape_of(exc: BaseException) -> tuple:
+    """An exception's type, message and innermost place: what tells it apart from another whose memory took its id."""
+    tb = exc.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    return (type(exc).__name__, str(exc)[:200], (tb.tb_frame.f_code.co_filename, tb.tb_lineno) if tb is not None else None)
+
+
+def _trail(events: list[dict]) -> list[dict]:
+    """The last events of a run, small enough for its open marker: what a run the platform kills leaves behind."""
+    out = []
+    for e in events[-TRAIL_EVENTS:]:
+        d = e.get("detail")
+        if d is not None and len(_jl(d)) > 300:
+            d = {"truncated": True, "text": _jl(d)[:300]}
+        err = e.get("error")
+        out.append({**{k: e.get(k) for k in ("ts", "step", "level", "event", "rule", "item", "counts", "ms", "mem_mb")},
+                    "detail": d, "error": {k: err.get(k) for k in ("type", "message", "where")} if isinstance(err, dict) else None})
+    return out
 
 
 def current() -> "RunLog | None":
@@ -806,6 +855,10 @@ class _Step:
             self.failed = exc
             self.rl.error(self.name, exc, inputs=self.inputs, contained=True if self.contain else None)
             self.rl.event(self.name, "step_end", level="error", ms=ms, counts=self.counts or None)
+            if self.contain:
+                # contained: never raised again, its stack is in the log. Its frames (and the data they held: a
+                # downloaded report, a reader's buffers) must not live on through the rest of the run in `.failed`
+                exc.__traceback__ = None
             return self.contain
         self.rl.event(self.name, "step_end", ms=ms, counts=self.counts or None)
         return False
@@ -826,12 +879,18 @@ class RunLog:
         self.dropped = 0
         self.errors = 0
         self.warnings = 0
+        self.log_errors = 0             # progress lines the code marked ERROR (a file that failed, contained)
         self.uncontained = False
         self._step = "run"
         self._last_checkpoint = 0.0
+        self._marker_step: str | None = None
         self._token = None
         self._finished: str | None = None
-        self._logged: dict[int, tuple] = {}
+        # the errors logged so far, by a serial number the exception carries (never the exception itself: it holds its
+        # frames, and their data, for as long as it is referenced)
+        self._records: dict[int, dict] = {}
+        self._fallback: dict[int, tuple] = {}
+        self._serial = 0
         self._marker = False
         self._t0 = time.monotonic()
         self.manifest: dict = {
@@ -865,18 +924,23 @@ class RunLog:
                 _note_internal("append_event", exc)
         else:
             self.dropped += 1
+        if self._marker and getattr(self.sink, "remote", False) and time.monotonic() - self._last_checkpoint >= CHECKPOINT_SECONDS_REMOTE:
+            self.checkpoint(self._step)         # a long step on a serverless host: its marker carries the newest trail
         return ev
 
     def log(self, *args: Any, **_kw: Any) -> None:
-        """A drop-in for the existing code's `log=print`: each progress line becomes an event, scrubbed. On a server the
-        line is also printed to the console's error stream when echo is on; on Vercel nothing is printed."""
-        text = " ".join(str(a) for a in args)
-        up = text.upper()
-        level = "error" if "ERROR" in up else ("warning" if "WARN" in up else "info")
+        """A drop-in for the existing code's `log=print`: each progress line becomes an event, scrubbed. Its level comes
+        from the scrubbed line, by whole words: ERROR (how the code marks a file or step that failed) or WARN/WARNING;
+        a file whose name holds "errors" is not one. On a server the line is also printed to the console's error stream
+        when echo is on; on Vercel nothing is printed."""
+        text = scrub_text(" ".join(str(a) for a in args))
+        level = "error" if _ERROR_WORD.search(text) else ("warning" if _WARN_WORD.search(text) else "info")
+        if level == "error":
+            self.log_errors += 1
         self.event(None, "log", level=level, detail={"text": text})
         if self._echo is not None:
             try:
-                self._echo(scrub_text(text))
+                self._echo(text)
             except Exception as exc:        # noqa: BLE001
                 _note_internal("echo", exc)
 
@@ -892,10 +956,10 @@ class RunLog:
         """An exception caught at a step boundary: its full stack, the step's inputs (ids only) and whether the run
         carried on (contained True: the run went on; None: raised to the caller; False: it ended the run). Kept in the
         manifest's errors too (up to MAX_ERRORS). The same exception logged again (a step logged it, then the caller's
-        except block caught it) only updates the first record."""
-        prev = self._logged.get(id(exc))
-        if prev is not None and prev[0] is exc:
-            rec = prev[1]
+        except block caught it) only updates the first record: the exception carries a mark naming its record, and
+        the run log keeps no reference to it, so its frames go when the caller lets it go."""
+        rec = self._record_of(exc)
+        if rec is not None:
             if contained is not None:
                 rec["contained"] = bool(contained)
             if contained is False:
@@ -908,9 +972,27 @@ class RunLog:
         rec = dict(info, step=scrub(step or self._step, "step"), at=_iso(), inputs=scrub(inputs) if inputs is not None else None)
         if len(self.manifest["errors"]) < MAX_ERRORS:
             self.manifest["errors"].append(rec)
-        if len(self._logged) < 500:
-            self._logged[id(exc)] = (exc, rec)
+        self._remember(exc, rec)
         return self.event(step, "error", level=level, detail={"inputs": inputs} if inputs is not None else None, error=info)
+
+    def _remember(self, exc: BaseException, rec: dict) -> None:
+        if len(self._records) >= 500:
+            return                      # past that, a repeat is logged twice rather than kept in memory
+        self._serial += 1
+        self._records[self._serial] = rec
+        try:
+            setattr(exc, _LOGGED_FLAG, (self.run_id, self._serial))
+        except (AttributeError, TypeError):         # an exception that takes no attribute: known by its id and shape
+            self._fallback[id(exc)] = (_shape_of(exc), self._serial)
+
+    def _record_of(self, exc: BaseException) -> dict | None:
+        mark = getattr(exc, _LOGGED_FLAG, None)
+        if isinstance(mark, tuple) and len(mark) == 2 and mark[0] == self.run_id:
+            return self._records.get(mark[1])
+        fb = self._fallback.get(id(exc))
+        if fb is not None and fb[0] == _shape_of(exc):
+            return self._records.get(fb[1])
+        return None
 
     def fail(self, exc: BaseException, step: str | None = None) -> dict:
         """The exception that ended the run (the cycle's own except block)."""
@@ -954,20 +1036,24 @@ class RunLog:
 
     # ---------------------------------------------------------------- a run in progress
     def checkpoint(self, step: str, force: bool = False) -> None:
-        """Mark how far the run got (the open marker), so a run killed by the platform is found by the next one. On a
-        serverless host at most every CHECKPOINT_SECONDS_REMOTE seconds unless forced."""
+        """Mark how far the run got (the open marker: the step it is in, its memory, its last events), so a run killed
+        by the platform is found by the next one and blamed on the step it was in. Written whenever a step starts; on
+        a serverless host (each write is a Dropbox call) rewritten within one step at most every
+        CHECKPOINT_SECONDS_REMOTE seconds unless forced."""
         now = time.monotonic()
-        if getattr(self.sink, "remote", False) and not force and now - self._last_checkpoint < CHECKPOINT_SECONDS_REMOTE:
+        if (getattr(self.sink, "remote", False) and not force and step == self._marker_step
+                and now - self._last_checkpoint < CHECKPOINT_SECONDS_REMOTE):
             return
         self._last_checkpoint = now
         mem = memory()
         body = {"run_id": self.run_id, "kind": self.kind, "host_mode": self.host, "trigger": self.manifest["trigger"],
                 "started_at": self.manifest["started_at"], "last_step": scrub(step, "step"), "last_at": _iso(),
-                "pid": os.getpid(), "host": _host_tag(), "peak_mb": mem.get("peak_mb"),
-                "steps_done": [s["step"] for s in self.manifest["steps"]][-30:]}
+                "pid": os.getpid(), "host": _host_tag(), "rss_mb": mem.get("rss_mb"), "peak_mb": mem.get("peak_mb"),
+                "steps_done": [s["step"] for s in self.manifest["steps"]][-30:], "trail": _trail(self.events)}
         try:
             self.sink.write_json(f"open/{self.run_id}.json", body)
             self._marker = True
+            self._marker_step = step
         except Exception as exc:        # noqa: BLE001
             _note_internal("checkpoint", exc)
 
@@ -1015,6 +1101,7 @@ class RunLog:
             except Exception as exc:        # noqa: BLE001
                 _note_internal("finish_store", exc)
         m["outcome"] = outcome or self.outcome(out)
+        m["logged_errors"] = self.log_errors
         # the index first (it remembers the day logs were last pruned), then the pruning (its note is one of this run's
         # events), then the run's own file with every event, then the open marker goes
         idx = None
@@ -1026,7 +1113,8 @@ class RunLog:
             prune_logs(self.sink, now=t, run=self, index=idx)
         except Exception as exc:        # noqa: BLE001
             _note_internal("prune", exc)
-        m["events"] = {"kept": len(self.events), "dropped": self.dropped, "errors": self.errors, "warnings": self.warnings}
+        m["events"] = {"kept": len(self.events), "dropped": self.dropped, "errors": self.errors, "warnings": self.warnings,
+                       "logged_errors": self.log_errors}
         if _INTERNAL:
             m["logging_problems"] = list(_INTERNAL)
             _INTERNAL.clear()
@@ -1125,7 +1213,8 @@ def start_run(kind: str = "cycle", *, trigger: str = "manual", conn: sqlite3.Con
                      detail={"killed_run": k.get("run_id"), "last_step": k.get("last_step"), "last_at": k.get("last_at"),
                              "peak_mb": k.get("peak_mb")})
         if killed:
-            rl.manifest["sections"]["killed_runs"] = scrub([{k: v for k, v in x.items() if k in ("run_id", "last_step", "last_at", "peak_mb", "trigger")} for x in killed])
+            rl.manifest["sections"]["killed_runs"] = scrub([{k: v for k, v in x.items() if k in ("run_id", "started_at", "last_step", "last_at",
+                                                                                                    "peak_mb", "trigger")} for x in killed])
     except Exception as exc:        # noqa: BLE001
         _note_internal("killed_runs", exc)
     if conn is not None:
@@ -1299,14 +1388,17 @@ def _origin_of(path: str | None) -> str:
 
 # -------------------------------------------------------------------------------------------------- index and pruning
 def summary_of(m: dict) -> dict:
-    """A run's line in the index: what the Data tab's panel lists."""
+    """A run's line in the index: what the Data tab's panel lists, and the steps that went well (a later run's
+    registry reads them to clear the count of runs killed at one of those steps)."""
     errs = m.get("errors") or []
+    steps_ok = list(dict.fromkeys(str(s.get("step")) for s in (m.get("steps") or []) if isinstance(s, dict) and s.get("ok") and s.get("step")))
     return {"run_id": m.get("run_id"), "kind": m.get("kind"), "host_mode": m.get("host_mode"), "trigger": m.get("trigger"),
             "started_at": m.get("started_at"), "finished_at": m.get("finished_at"), "seconds": m.get("seconds"),
-            "outcome": m.get("outcome"), "errors": len(errs), "repairs": len(m.get("repairs") or []),
-            "peak_mb": (m.get("memory") or {}).get("peak_mb"),
+            "outcome": m.get("outcome"), "errors": len(errs), "logged_errors": m.get("logged_errors") or 0,
+            "repairs": len(m.get("repairs") or []), "peak_mb": (m.get("memory") or {}).get("peak_mb"),
             "first_error": {k: errs[0].get(k) for k in ("type", "where", "step")} if errs else None,
-            "commit": (m.get("code") or {}).get("commit"), "rules_version": (m.get("code") or {}).get("rules_version")}
+            "commit": (m.get("code") or {}).get("commit"), "rules_version": (m.get("code") or {}).get("rules_version"),
+            "steps_ok": steps_ok[-40:]}
 
 
 def update_index(sink, entry: dict, whole: bool = False) -> Any:
@@ -1329,7 +1421,8 @@ def read_index(sink) -> list[dict]:
 def find_killed_runs(sink, *, now: datetime | None = None, exclude: str | None = None, host: str = "server") -> list[dict]:
     """Open markers of runs that are gone: on a server, a marker whose process is not running here or that is older
     than SERVER_STALE_SECONDS; on a serverless host, one older than SERVERLESS_STALE_SECONDS. Each is recorded in the
-    index as killed and its marker removed."""
+    index as killed, given a record of its own (_write_killed_record: the step it was in, its memory, its last events)
+    and its marker removed."""
     t = now or utcnow()
     out = []
     for meta in sink.list("open"):
@@ -1356,9 +1449,34 @@ def find_killed_runs(sink, *, now: datetime | None = None, exclude: str | None =
                  "outcome": "killed", "last_step": body.get("last_step"), "last_at": body.get("last_at"),
                  "peak_mb": body.get("peak_mb"), "errors": 0, "repairs": 0}
         update_index(sink, entry)
+        _write_killed_record(sink, body)
         sink.delete(name)
         out.append(entry)
     return out
+
+
+def _write_killed_record(sink, body: dict) -> None:
+    """The record of a run the platform stopped, written by the run that found its marker: a manifest (outcome killed,
+    the steps it finished, the step it was in, its memory) and its last events, so the panel and the bundle show
+    where it was. On a server its events are already in the day's events file; only the manifest is added."""
+    rid = str(body.get("run_id") or "")
+    if not re.fullmatch(_RUN_ID, rid):
+        return
+    steps = [{"step": s, "ok": True} for s in (body.get("steps_done") or []) if isinstance(s, str)]
+    if body.get("last_step"):
+        steps.append({"step": body.get("last_step"), "ok": False, "killed": True})
+    m = {"schema": SCHEMA, "run_id": rid, "kind": body.get("kind"), "host_mode": body.get("host_mode"), "trigger": body.get("trigger"),
+         "started_at": body.get("started_at"), "finished_at": None, "seconds": None, "outcome": "killed",
+         "last_step": body.get("last_step"), "last_at": body.get("last_at"),
+         "memory": {"rss_mb": body.get("rss_mb"), "peak_mb": body.get("peak_mb")}, "steps": steps, "inputs": [], "errors": [],
+         "repairs": [], "sections": {},
+         "note": "The platform stopped this run before it finished (memory or time). The next run wrote this record from the "
+                 "run's last marker: the step it was in, its memory then, and its last events."}
+    events = [dict(e, run_id=rid) for e in (body.get("trail") or []) if isinstance(e, dict)]
+    try:
+        sink.write_run(rid, str(body.get("started_at") or _iso())[:10], scrub(m, cap=None), scrub(events, cap=None))
+    except Exception as exc:        # noqa: BLE001  (the index already says the run was killed)
+        _note_internal("killed_record", exc)
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -1998,7 +2116,9 @@ def panel(conn: sqlite3.Connection | None, logs_dir: Any = None, *, now: datetim
                 errs = s.get("errors") or []
                 runs[r[0]] = {"run_id": r[0], "kind": r[1], "started_at": r[2], "finished_at": r[3], "host_mode": r[4], "trigger": r[5],
                               "outcome": r[6], "seconds": r[7], "peak_mb": r[8], "errors": r[9] or 0, "repairs": r[10] or 0,
-                              "first_error": {k: errs[0].get(k) for k in ("type", "where", "step")} if errs else None}
+                              "logged_errors": ((s.get("events") or {}) if isinstance(s.get("events"), dict) else {}).get("logged_errors") or 0,
+                              "first_error": ({k: errs[0].get(k) for k in ("type", "where", "step")}
+                                              if errs and isinstance(errs, list) and isinstance(errs[0], dict) else None)}
         except sqlite3.Error:
             pass
     sink = None
@@ -2020,6 +2140,7 @@ def panel(conn: sqlite3.Connection | None, logs_dir: Any = None, *, now: datetim
     except Exception as exc:        # noqa: BLE001
         _note_internal("panel_repairs", exc)
     last = listed[0] if listed else None
+    stale = False
     if last is None:
         sentence = "No run has been logged yet."
     else:
@@ -2029,18 +2150,114 @@ def panel(conn: sqlite3.Connection | None, logs_dir: Any = None, *, now: datetim
             ago_h = None
         when = "just now" if ago_h is not None and ago_h < 1 else (f"{ago_h:.0f} hours ago" if ago_h is not None and ago_h < 48
                                                                   else (f"{ago_h / 24:.0f} days ago" if ago_h is not None else "at an unknown time"))
-        words = {"ok": "finished with no errors", "partial": f"finished; {last.get('errors')} step(s) failed and were contained",
-                 "failed": "failed", "killed": "was stopped before it finished (killed)", "skipped": "was skipped: another run was going",
-                 "safe_mode": "finished in safe mode: automatic closures were held", "running": "is still running"}
+        n_err = int(last.get("errors") or 0) + int(last.get("logged_errors") or 0)
+        words = {"ok": "finished with no errors",
+                 "partial": f"finished, with {n_err} error(s) logged; each was contained and the run carried on",
+                 "failed": "failed", "killed": f"was stopped before it finished (killed during {last.get('last_step') or 'an unknown step'})",
+                 "skipped": "was skipped: another run was going", "safe_mode": "finished in safe mode: automatic closures were held",
+                 "running": "is still running"}
         sentence = f"The last run started {when} and {words.get(last.get('outcome'), last.get('outcome'))}."
+        gap = _usual_gap(listed)
+        if gap and ago_h is not None and ago_h * 3600 > max(2 * gap, 3600):
+            stale = True
+            sentence += (f" No run has started for {_span(ago_h * 3600)}, though runs usually start {_every(gap)}. Check that the "
+                         "scheduled runs are still on (the server's container, or Vercel's daily cron).")
     if problems:
         sentence += f" {len(problems)} problem(s) could not be repaired automatically: see below."
     return {"title": "Logs and diagnostics", "sentence": sentence, "last_run": last, "runs": listed, "repairs": repairs,
-            "open_problems": problems,
+            "open_problems": problems, "stale": stale,
             "bundle": {"route": "/api/ops/diagnostic-bundle", "command": "python -m remitwatch.diagnose --days 7",
                        "what": "A zip with the run logs, errors, self-checks and repairs, and the store's layout. It holds no "
                                "patient data. Give it to Claude Code with the repository to find the cause of a problem."},
             "logs": {"where": sink.describe() if sink is not None else "the store", "keep_days": getattr(sink, "keep_days", None)}}
+
+
+def _usual_gap(runs: list[dict]) -> float | None:
+    """How often runs start, in seconds: the upper quartile of the gaps between the listed runs' starts (a burst of
+    runs that continue one another does not make the usual gap a minute). None with fewer than three runs."""
+    starts = []
+    for r in runs:
+        try:
+            starts.append(datetime.fromisoformat(str(r.get("started_at")).replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError):
+            continue
+    starts.sort()
+    gaps = sorted(b - a for a, b in zip(starts, starts[1:]) if b - a >= 60)
+    if len(starts) < 3 or not gaps:
+        return None
+    return gaps[min(len(gaps) - 1, (3 * len(gaps)) // 4)]
+
+
+def _span(seconds: float) -> str:
+    if seconds < 7200:
+        return f"{round(seconds / 60)} minutes"
+    if seconds < 48 * 3600:
+        return f"{round(seconds / 3600)} hours"
+    return f"{round(seconds / 86400)} days"
+
+
+def _every(seconds: float) -> str:
+    if seconds <= 90:
+        return "every minute"
+    if seconds < 3600:
+        return f"every {round(seconds / 60)} minutes"
+    if 0.8 * 86400 <= seconds <= 1.25 * 86400:
+        return "every day"
+    if seconds < 86400:
+        return f"every {round(seconds / 3600)} hours"
+    return f"every {round(seconds / 86400)} days"
+
+
+# ------------------------------------------------------------------------------------- runs that ended outside a run log
+def record_early_failure(exc: BaseException, step: str = "open_store", *, kind: str = "cycle", trigger: str = "manual",
+                         db_path: str | None = None, state: Any = None, logs_dir: Any = None, host: str | None = None,
+                         now: datetime | None = None) -> str | None:
+    """A run that failed before its run log could start: a store that cannot be opened or brought up to date (a
+    migration bug, a full disk, a damaged file), a lock that cannot be read. Writes one failed run, with the error's
+    stack, to the logs folder (which needs no store), so the panel and the bundle show it instead of the last good
+    run. Returns the run's one line; never raises (None when even the logs folder cannot be written)."""
+    try:
+        rl = start_run(kind, trigger=trigger, db_path=db_path, state=state, logs_dir=logs_dir, host=host, now=now,
+                       learn=False, make_current=False)
+        rl.fail(exc, step)
+        return rl.finish(now=now)
+    except Exception as err:        # noqa: BLE001  (nothing more can be done from here; the caller raises its own error)
+        _note_internal("early_failure", err)
+        return None
+
+
+def note_child_exit(db_path: str, returncode: int | None, *, trigger: str = "schedule", started: float | None = None,
+                    now: datetime | None = None, kind: str = "cycle") -> dict | None:
+    """The scheduler's child process (a cycle) ended with an error code (a negative one: a signal killed it). If the
+    child's run log said so already, nothing more. If it left an open marker, that run is recorded as killed now.
+    Otherwise a run is added from the exit code, so the panel and the bundle show it: a cycle that died before its run
+    log started is never silent. started: when the child started (seconds since the epoch). Never raises."""
+    if not returncode:
+        return None
+    try:
+        sink = sink_for(db_path=db_path)
+        t = now or utcnow()
+        began = datetime.fromtimestamp(started, timezone.utc) if started else t - timedelta(hours=12)
+        since = _iso(began)
+        for k in find_killed_runs(sink, now=t, host="server"):
+            if str(k.get("started_at") or "") >= since:
+                return k
+        if any(str(r.get("started_at") or "") >= since for r in read_index(sink)):
+            return None
+        rid = new_run_id(began)
+        outcome = "killed" if returncode < 0 else "failed"
+        note = (f"The scheduled {kind} ended with exit code {int(returncode)} before its run log could say why: a store that "
+                "could not be opened, or the process was stopped. Run the cycle by hand on a copy to see the error.")
+        entry = {"run_id": rid, "kind": kind, "host_mode": "server", "trigger": scrub(trigger, "trigger"), "started_at": since,
+                 "finished_at": _iso(t), "seconds": round((t - began).total_seconds(), 1), "outcome": outcome,
+                 "exit_code": int(returncode), "errors": 0, "repairs": 0, "note": note}
+        m = dict(entry, schema=SCHEMA, errors=[], repairs=[], steps=[], inputs=[], sections={})
+        update_index(sink, entry)
+        sink.write_run(rid, since[:10], m, [])
+        return entry
+    except Exception as err:        # noqa: BLE001
+        _note_internal("child_exit", err)
+        return None
 
 
 # -------------------------------------------------------------------------------------------- silent exception census

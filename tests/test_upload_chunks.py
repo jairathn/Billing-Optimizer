@@ -132,6 +132,9 @@ def build(tmp_path, monkeypatch):
         monkeypatch.setattr(api, "SHOW_PHI", False)
         monkeypatch.setenv("REMITWATCH_ALLOW_OPEN", "1")
         monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "tmp"))
+        # every host reads both reports here (a serverless host's own default is the A/R only): a test of a site that
+        # does not read one sets it
+        monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
         for k in ("VERCEL", "VERCEL_ENV", "REMITWATCH_STATE_DIR", "REMITWATCH_UPLOAD_MAX_GB", "DROPBOX_APP_KEY", "DROPBOX_APP_SECRET",
                   "DROPBOX_REFRESH_TOKEN", "CRON_SECRET"):
             monkeypatch.delenv(k, raising=False)
@@ -1274,20 +1277,24 @@ def test_a_report_held_or_kept_unread_never_makes_its_export_up_to_date(site, mo
     assert row["overdue"] is False and row["flag"] == "held" and row["age_days"] == 3
     assert "The newest file is held: Apply or Discard it on the Data tab." in row["state_line"]
     assert f"The newest read runs to {uploads._day((today - timedelta(days=3)).isoformat())}." in row["last_line"]
-    # kept and not read because this site does not read Production: said before anything is uploaded
+    # a site that does not read Production says so before anything is uploaded ...
     monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "ar")
+    site.fill(lambda c: c.execute("DELETE FROM ema_report_files"))
+    rows = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}
+    assert rows["production"]["reads_here"] is False and rows["production"]["flag"] == "overdue"
+    assert rows["production"]["host_line"].startswith("This site does not read the Production (collections) report yet.")
+    assert rows["ar"]["host_line"] is None and rows["charge_lines"]["host_line"] is None
 
+    # ... and, once one is kept unread, once only: on the line that says when it arrived
     def kept(c):
-        c.execute("DELETE FROM ema_report_files")
         c.execute("""INSERT INTO ema_report_files (file_id, report, status, status_reason, received_at, via) VALUES (?,?,?,?,?,?)""",
                   ("w1", "production", "waiting", "This host does not read the Production report yet (REMITWATCH_EMA_REPORTS is "
                    "'ar'). It is read as soon as that setting allows.", _ago(0), "upload"))
     site.fill(kept)
     rows = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}
     assert rows["production"]["reads_here"] is False and rows["production"]["flag"] == "overdue"
-    assert rows["production"]["host_line"].startswith("This site does not read the Production (collections) report yet.")
     assert "kept and not read yet: this site does not read the Production (collections) report yet" in rows["production"]["last_line"]
-    assert rows["ar"]["host_line"] is None and rows["charge_lines"]["host_line"] is None
+    assert rows["production"]["host_line"] is None
     monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
     assert {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]["host_line"] is None
 
@@ -1320,6 +1327,57 @@ def test_a_report_kept_waiting_says_why_as_things_stand_now(site, monkeypatch):
     c.execute("UPDATE ema_report_files SET status_reason=?", (other,))
     monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
     assert uploads.report_outcome(c, sha)["lines"] == [f"Recognised as the Production (collections) report, kept and not read yet: {other}"]
+
+
+def test_a_report_this_site_does_not_read_is_never_said_to_be_read_next(site, monkeypatch):
+    """A Production report uploaded to a site that does not read it (a serverless host's default) is kept: the finish,
+    the same file again and its checklist row all say so. None says the next run reads it, and no "Pull it now" turns
+    into "Waiting to be read". Once the site reads Production, the same upload is waiting to be read again."""
+    word = "run" if site.mode != "server" else "cycle"
+    today = uploads._day(datetime.now(timezone.utc).date().isoformat())
+    kept = ("kept and not read yet: this site does not read the Production (collections) report yet. It is read once it "
+            "does; the practice's server reads it now.")
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "ar")
+    raw = text_report(600, seed=41)
+    up = Up(site, raw)
+    fin = up.send()
+    assert fin.status_code == 200, fin.text
+    lines = fin.json()["lines"]
+    assert lines[0].startswith(f"Received and checked on {today}: ") and lines[0].endswith(f". It is {kept}")
+    runs = ("The next run", "The next cycle", "The cycle was asked", "A run is going now", "the run checks its checksum")
+    assert len(lines) == 1 and not [x for x in lines if any(w in x for w in runs)], lines
+    assert fin.json()["applied"] == "waiting" and status(site, up.uid)["applied"] == "waiting"   # the page shows 'not read yet'
+    # the same file again
+    again = Up(site, raw).start().json()
+    assert again["status"] == "already"
+    assert again["lines"] == [f"Already have this; nothing changed. This exact file was uploaded on {today} and is {kept}"]
+    # its row: kept, not waiting for a read, not stuck; overdue by the data read (none yet); said once
+    row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]
+    assert row["waiting"] is False and row["stuck"] is False and row["flag"] == "overdue" and row["overdue"] is True
+    assert row["last_line"] == f"Last arrived {today} (uploaded here), {kept}"
+    assert row["state_line"] == "Overdue: RemitWatch has none yet. Pull it now." and row["host_line"] is None
+    # beside Production data read three days ago (on a host that read it then), the row is up to date and says it is kept
+    d3 = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+    site.fill(lambda c: c.execute("INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, via) VALUES (?,?,?,?,?,?)",
+                                  ("p3", "production", "current", d3, _ago(3), "dropbox")))
+    row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]
+    assert row["flag"] == "unread" and row["overdue"] is False and row["state_line"] == "Up to date: the newest is 3 days old."
+    assert row["last_line"].startswith(f"Last arrived {today} (uploaded here), {kept} The one before it, read already, arrived ")
+    # once this site reads Production, the same upload waits for the next cycle (or run) again
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]
+    assert row["flag"] == "waiting" and row["waiting"] is True
+    assert row["state_line"] == f"Waiting to be read: the next {word} reads it, then this row says what it held."
+    assert Up(site, raw).start().json()["lines"] == [f"Already have this; nothing changed. This exact file was uploaded on "
+                                                      f"{today} and waits for the next {word}."]
+    st = status(site, up.uid)
+    assert st["applied"] is None and st["lines"][0].endswith(f"It waits for the next {word} to read it.")
+    # the A/R report is read on such a site: its upload says the next run reads it
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "ar")
+    assert uploads.kept_unread("ar_report") is None and uploads.kept_unread("charge_lines") is None
+    assert uploads.kept_unread(None) is None and uploads.kept_unread("production") == kept[len("kept and "):]
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "off")
+    assert uploads.kept_unread("ar_report").startswith("not read yet: this site does not read the A/R report yet.")
 
 
 def test_a_file_the_loader_set_aside_unread_is_never_called_read(site):

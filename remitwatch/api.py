@@ -413,6 +413,9 @@ def meta(_: str = Depends(require_auth)):
                            # whether EMA's A/R and Production reports and the weekly exports can be uploaded (remitwatch.api_uploads):
                            # both hosts, in pieces (the page shows its Upload link when either is true)
                            "report_uploads": True,
+                           # whether appeals may be faxed in bulk (REMITWATCH_BULK_APPEAL): while it is off the pages offer
+                           # no bulk appeal button, only the one-item send in each item's panel
+                           "bulk_appeal": bulk_appeals_on(),
                            # whether this build has the run's decision log for an item ("Why did this change?" in its panel)
                            "decisions": _route_here("/api/findings/probe/decisions")}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
@@ -1383,15 +1386,30 @@ def _one_at_a_time(ids: list) -> list[str]:
         conn.close()
 
 
+def _known(finding_id: str) -> bool:
+    """Whether the copy the dashboard shows holds this item."""
+    return one("SELECT 1 FROM findings WHERE finding_id=?", (finding_id,)) is not None
+
+
+# Money is let go (or marked lost) only through the owner's policy table or by a person with a reason (brief C, shared
+# rules): the reason goes in the item's history. Here, not in actions.apply_status, so journal entries from before keep
+# replaying.
+LET_GO_REASON = "Letting an item go, or marking it lost, needs a reason: say why (it is kept in the item's history)."
+
+
 @app.post("/api/findings/{finding_id}/status", dependencies=[Depends(require_xhr)])
 async def set_status(finding_id: str, request: Request, user: str = Depends(require_auth)):
     body = await request.json()
     status = body.get("status")
     if status not in STATUSES:
         raise HTTPException(400, "bad status")
-    if status in LET_GO and not str(body.get("notes") or "").strip() and await asyncio.to_thread(_one_at_a_time, [finding_id]):
-        raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
-                                 "only with a note. Say why.")
+    if status in LET_GO and not str(body.get("notes") or "").strip():
+        if not await asyncio.to_thread(_known, finding_id):
+            raise HTTPException(404, "finding not found")
+        if await asyncio.to_thread(_one_at_a_time, [finding_id]):
+            raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
+                                     "only with a note. Say why.")
+        raise HTTPException(400, LET_GO_REASON)
     rec = body.get("recovered_cents")
     n = await asyncio.to_thread(_record_status, [finding_id], status, body.get("notes"), int(rec) if rec not in (None, "") else None, user)
     if not n:
@@ -1409,6 +1427,9 @@ async def bulk_status(request: Request, user: str = Depends(require_auth)):
     if status in LET_GO and await asyncio.to_thread(_one_at_a_time, ids):
         raise HTTPException(400, "Claims the payer never answered, or rejected before reaching it, are let go one at a time, "
                                  "with a note. Open each one.")
+    if status in LET_GO and not str(body.get("notes") or "").strip():
+        raise HTTPException(400, "Letting items go, or marking them lost, needs a reason: say why, once for all of them (it is kept "
+                                 "in each item's history).")
     n = await asyncio.to_thread(_record_status, list(ids), status, body.get("notes"), None, user)
     return {"ok": True, "updated": n}
 
@@ -4180,7 +4201,7 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
         out_rows = rows(f"""SELECT finding_id, payer_group, signal, category, shortfall_cents, appeal_deadline, work_state, appeal_block FROM findings
                             WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
                             AND (appeal_deadline IS NULL OR appeal_deadline >= ?){by_payer}
-                            AND NOT ({BULK_RULE} AND claim_key IS NOT NULL)
+                            AND NOT COALESCE(({BULK_RULE} AND claim_key IS NOT NULL), 0)
                             ORDER BY COALESCE(shortfall_cents, 0) DESC, finding_id""",
                         (*params, today, *([payer] if payer else []), today))
     else:
@@ -4210,7 +4231,7 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
         b["kinds"][k] = b["kinds"].get(k, 0) + 1
         out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0, "ready": bool(numbers.get(pg)),
                     "by_hand": bool(by_hand)})
-    left = {"n": 0, "cents": 0, "paid": 0, "waiting": 0, "credit": 0, "reprocessed": 0, "other": 0, "items": []}
+    left = dict({k: 0 for k, _w in LEFT_OUT}, n=0, cents=0, items=[])
     for r in out_rows:
         why = _left_out_reason(r)
         left["n"] += 1
@@ -4218,9 +4239,8 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
         left[why] += 1
         if len(left["items"]) < 500:
             left["items"].append({"finding_id": r["finding_id"], "payer_group": r["payer_group"], "signal": r["signal"],
-                                  "cents": r["shortfall_cents"] or 0, "reason": why, "words": BLOCK_WORDS.get(why, "not an item to appeal now")})
-    parts = [f"{w} {left[k]}" for k, w in (("paid", "paid"), ("waiting", "waiting"), ("credit", "credit"), ("reprocessed", "reprocessed"),
-                                           ("other", "other")) if left[k]]
+                                  "cents": r["shortfall_cents"] or 0, "reason": why, "words": LEFT_OUT_WORDS.get(why, LEFT_OUT_WORDS["other"])})
+    parts = [f"{w} {left[k]}" for k, w in LEFT_OUT if left[k]]
     left["line"] = f"Left out: {left['n']:,} item{'s' if left['n'] != 1 else ''} ({', '.join(parts)})" if left["n"] else ""
     return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "not_here": fax.not_here(),
             "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY")),
@@ -4966,7 +4986,7 @@ def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
     modifier (one, or 'none') x the payer's reason code: its open items go to Let go with the note, and so do new ones;
     nothing a person has worked is touched. remove: true takes the rule away and reopens what it hid (what another rule
     still covers stays hidden). A rule for any reason needs a code or a reason code: a whole payer is never hidden."""
-    from .actions import NEVER_HIDDEN, hide_rule_of
+    from .actions import HIDE_GRAIN, NEVER_HIDDEN, hide_rule_of
     from .archive_rules import hide_sql
     pg = str(body.get("payer_group") or "").strip()
     sig = str(body.get("signal") or "").strip() or "*"
@@ -4979,17 +4999,26 @@ def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
         raise HTTPException(400, "code, modifier and reason are a code (or a comma list, or an @family), one modifier (or none), "
                                  "and a reason code (97 or CO-97); leave one out for any")
     rule = hide_rule_of(dict(raw, payer_group=pg, signal=sig))
-    if rule["signal"] == "*" and rule["code"] == "*" and rule["reason"] == "*":
-        raise HTTPException(400, "Name a reason, a code or the payer's reason code: a whole payer is never hidden.")
     entry = {"kind": "hide_rule", "payer_group": pg, "signal": rule["signal"], "code": rule["code"], "modifier": rule["modifier"],
              "reason": rule["reason"], "actor": user}
     if body.get("remove"):
-        if not (has_table("hide_rules") and one(f"SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=? AND "
-                                                f"COALESCE(code,'*')=? AND COALESCE(modifier,'*')=? AND COALESCE(reason,'*')=? AND {_rules_in_force()}",
-                                                (pg, rule["signal"], rule["code"], rule["modifier"], rule["reason"]))):
+        # Show again takes away the rule the Hidden list shows, at whatever grain it was made (a rule for any reason by a code
+        # included). A table still at the two-part key (a copy saved by an earlier release, until its first run here) holds
+        # payer x reason rules only: the grain it lacks is read as any ('*')
+        have = {r["name"] for r in rows("PRAGMA table_info(hide_rules)")} if has_table("hide_rules") else set()
+        conds, params = ["payer_group=?", "signal=?"], [pg, rule["signal"]]
+        for k in HIDE_GRAIN:
+            if k in have:
+                conds.append(f"COALESCE({k},'*')=?")
+                params.append(rule[k])
+            elif rule[k] != "*":
+                raise HTTPException(404, "No such rule.")
+        if not (have and one(f"SELECT 1 FROM hide_rules WHERE {' AND '.join(conds)} AND {_rules_in_force()}", tuple(params))):
             raise HTTPException(404, "No such rule.")
         _record_action(dict(entry, op="remove"))
         return {"ok": True}
+    if rule["signal"] == "*" and rule["code"] == "*" and rule["reason"] == "*":
+        raise HTTPException(400, "Name a reason, a code or the payer's reason code: a whole payer is never hidden.")
     if sig in NEVER_HIDDEN:
         raise HTTPException(400, "Claims the payer never answered are not hidden for a payer: each one is money nobody has "
                                  "asked for yet. Let them go one at a time, with a note.")

@@ -133,6 +133,7 @@ OTHER_PAYER_CARCS = {"22", "109", "B11", "31", "26", "27", "200", "177", "B9"}
 TIMELY_CARCS = {"29"}
 PROVIDER_CARCS = {"B7", "170", "171", "185", "208", "242", "54", "147"}
 DUP_CARCS = {"18", "B13"}
+CONTRACT_REMARKS = {"N381"}         # "consult our contractual agreement": a CO-45 the contract explains, not a denial
 IGNORE_CARCS = {"45", "253", "144", "23", "94", "187", "59", "131", "237", "A2", "P1", "W1", "3", "2", "1"}
 MODIFIER_RARCS = {"N822", "N823", "N519", "M78", "N793"}
 CODING_RARCS = {"M20", "M51", "N56", "M53"}
@@ -1904,15 +1905,16 @@ class Detector:
                     continue
 
             # ---- the whole charge taken as a contractual reduction (CO-45) with nothing allowed: the payer paid nothing for
-            # the service, a denial in all but name (the answer key's R9), never a fee-schedule cut
+            # the service, a denial in all but name (the answer key's R9), never a fee-schedule cut. Settled after the line
+            # rules: not when the payer allowed or paid the same service on another of its answers, and not with a remark that
+            # points to the contract (N381)
             charge_l = l.get("charge_cents") or 0
             if paid == 0 and allowed == 0 and pr == 0 and charge_l > 100 and not top and code not in ("99024", "G2211") \
                     and status in ("1", "19") and sum(a for g, rc, a in adj if rc == "45" and g in ("CO", "PI", "OA")) >= charge_l:
-                exp, basis = self.expected_allowed(l, code)
-                self._emit("DENIED_OTHER", "denial", "low", "review",
-                           f"{code} paid $0: the whole charge was taken as a contractual reduction (CO-45), nothing allowed",
-                           l, exp, exp, "45", rarc, {"basis": basis, "whole_charge_co45": True},
-                           resolved_by=self.later_payment(l, expected=exp))
+                if CONTRACT_REMARKS & set(rarcs):
+                    self.ema_counts["co45_contract_remark"] += 1
+                    continue
+                self.__dict__.setdefault("_co45_cands", []).append((l, rarc))
                 continue
             # ---- zero-paid lines (silent denials inside paid claims)
             if paid == 0 and allowed == 0 and pr == 0 and (l.get("charge_cents") or 0) > 0 and top:
@@ -2092,6 +2094,47 @@ class Detector:
                         continue
                     self._emit_underpaid(l, allowed, r, one_off)
         self._settle_mppr_candidates()
+        self._settle_co45_candidates()
+
+    def _patient_of_claims(self, claim_keys) -> dict[str, str | None]:
+        """The patient key (member number, else name) of each 835 claim."""
+        keys = sorted({k for k in claim_keys if k})
+        who: dict[str, str | None] = {}
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            for ck, pid, last, first in self.conn.execute(f"SELECT claim_key, patient_id, patient_last, patient_first FROM claims "
+                                                          f"WHERE claim_key IN ({','.join('?' * len(part))})", part):
+                ks = patient_keys(pid, last, first)
+                who[ck] = ks[0] or ks[1]
+        return who
+
+    def _settle_co45_candidates(self) -> None:
+        """Lines whose whole charge the payer took as CO-45 with nothing allowed: a denial (the answer key's R9), unless the
+        same payer allowed or paid the same service (patient, date, code) on another of its answers, a corrected or
+        repeated claim it processed (the key's 'recognized' stance: 196 of 222 work-now items of one Medicare Advantage
+        plan on real data)."""
+        cands = self.__dict__.pop("_co45_cands", None) or []
+        if not cands:
+            return
+        want = {(l.get("service_date"), l.get("procedure_code")) for l, _r in cands}
+        answered: dict[tuple, list] = defaultdict(list)
+        for x in self.lines:
+            k = (x.get("service_date"), x.get("procedure_code"))
+            if k in want and ((x.get("allowed_cents") or 0) > 0 or (x.get("paid_cents") or 0) > 0):
+                answered[k].append(x)
+        who = self._patient_of_claims({x["claim_key"] for v in answered.values() for x in v} | {l["claim_key"] for l, _r in cands})
+        for l, rarc in cands:
+            me = who.get(l["claim_key"])
+            if me and any(x["line_key"] != l["line_key"] and who.get(x["claim_key"]) == me and x.get("payer_group") == l.get("payer_group")
+                          for x in answered.get((l.get("service_date"), l.get("procedure_code")), [])):
+                self.ema_counts["co45_answered_elsewhere"] += 1
+                continue
+            code = l["procedure_code"]
+            exp, basis = self.expected_allowed(l, code)
+            self._emit("DENIED_OTHER", "denial", "low", "review",
+                       f"{code} paid $0: the whole charge was taken as a contractual reduction (CO-45), nothing allowed",
+                       l, exp, exp, "45", rarc, {"basis": basis, "whole_charge_co45": True},
+                       resolved_by=self.later_payment(l, expected=exp))
 
     def _outranked(self, l: dict, rate: int) -> bool:
         """Whether another reducible procedure on the line's claim is worth at least 95% of this one at the same payer's

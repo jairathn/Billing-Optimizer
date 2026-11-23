@@ -1286,12 +1286,39 @@ def test_a_whole_charge_taken_as_contractual_with_nothing_allowed_is_a_denial(st
     remit(store, trace=F.check_no(71), paid_on="2026-03-28",
           claims=[{"pcn": F.claim_id(71), "lines": [(S, "99213", 150, 0, [("CO", "45", 150)], {"allowed_cents": 0})]}])
     remit(store, trace=F.check_no(72), paid_on="2026-03-28", status="2",
-          claims=[{"pcn": F.claim_id(72), "lines": [(S, "99213", 150, 0, [("CO", "45", 150)], {"allowed_cents": 0})]}])
+          claims=[{"pcn": F.claim_id(72), "last": "SECONDPAYER", "member": "MEMBER000072",
+                   "lines": [(S, "99213", 150, 0, [("CO", "45", 150)], {"allowed_cents": 0})]}])
     remit(store, trace=F.check_no(73), paid_on="2026-03-28",
-          claims=[{"pcn": F.claim_id(73), "lines": [(S, "99213", 150, 90, [("CO", "45", 60)], {"allowed_cents": 9000})]}])
+          claims=[{"pcn": F.claim_id(73), "last": "FEECUT", "member": "MEMBER000073",
+                   "lines": [(S, "99213", 150, 90, [("CO", "45", 60)], {"allowed_cents": 9000})]}])
     run(store)
     f = one(store, "signal='DENIED_OTHER'")
     assert f["patient_control_number"] == F.claim_id(71) and f["carc"] == "45" and json.loads(f["evidence"])["whole_charge_co45"]
+
+
+def test_a_whole_charge_contractual_reduction_the_contract_explains_or_another_answer_paid_is_no_denial(store):
+    """Two whole-charge CO-45 lines that are not denials (567 of 701 such items on real data were one Medicare Advantage
+    plan's): one carries remark N381 (consult the contractual agreement); the payer allowed and paid the other's patient,
+    date and code on another of its answers. A third, with neither, is still a denial."""
+    remit(store, trace=F.check_no(74), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(74), "last": "NREMARK", "member": "MEMBER000074", "lines": [(S, "17000", 150, 0, [("CO", "45", 150)], {"allowed_cents": 0})]}])
+    lk = store.conn.execute("SELECT line_key FROM lines WHERE patient_control_number=?", (F.claim_id(74),)).fetchone()[0]
+    store.conn.execute("INSERT INTO remarks (line_key, level, qualifier, code) VALUES (?, 'line', 'HE', 'N381')", (lk,))
+    store.conn.commit()
+    remit(store, trace=F.check_no(75), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(75), "last": "ANSWERED", "member": "MEMBER000075", "lines": [(S, "17003", 120, 0, [("CO", "45", 120)], {"allowed_cents": 0})]}])
+    remit(store, trace=F.check_no(76), paid_on="2026-04-10",
+          claims=[{"pcn": F.claim_id(76), "last": "ANSWERED", "member": "MEMBER000075", "lines": [(S, "17003", 120, 60, [("CO", "45", 60)], {"allowed_cents": 6000})]}])
+    remit(store, trace=F.check_no(77), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(77), "last": "DENIED", "member": "MEMBER000077", "lines": [(S, "17003", 120, 0, [("CO", "45", 120)], {"allowed_cents": 0})]}])
+    # another payer allowing the service does not answer for this one
+    remit(store, trace=F.check_no(78), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(78), "last": "OTHERPAYER", "member": "MEMBER000078", "lines": [(S, "17003", 120, 0, [("CO", "45", 120)], {"allowed_cents": 0})]}])
+    remit(store, trace=F.check_no(79), paid_on="2026-04-10", payer="HUMANA CARE PLAN",
+          claims=[{"pcn": F.claim_id(79), "last": "OTHERPAYER", "member": "MEMBER000078", "lines": [(S, "17003", 120, 60, [("CO", "45", 60)], {"allowed_cents": 6000})]}])
+    det = run(store)
+    assert sorted(f["patient_control_number"] for f in items(store, "signal='DENIED_OTHER'")) == [F.claim_id(77), F.claim_id(78)]
+    assert det.ema_counts["co45_contract_remark"] == 1 and det.ema_counts["co45_answered_elsewhere"] == 1
 
 
 def test_an_ar_denied_row_beside_a_routine_contractual_reduction_is_an_ema_only_denial(store, ledger, tmp_path):
