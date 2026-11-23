@@ -147,7 +147,7 @@ def test_the_balance_reconciles_to_the_cent_on_the_server_and_on_the_dashboard_c
     assert [r["kind"] for r in out["story"]["rows"] if r["source"] == "production"].count("payment") == 1
     assert not any(story.SERVER_ONLY in n for n in out["story"]["notes"])
     # the dashboard's copy: no ledger, the store's summaries, the same balance, and the story says the detail is on the server;
-    # its state is the one the daily run stored (the copy keeps only the remittances of the item's own claim)
+    # its state is the one the daily run stored
     st = states.states_of(store.conn, [dict(r) for r in store.conn.execute("SELECT * FROM findings")], today=TODAY)["F1"]
     assert st["work_state"] == out["verdict"]["state"] == "done"
     store.conn.execute("UPDATE findings SET work_state=?, follow_up_on=?, state_basis=? WHERE finding_id='F1'",
