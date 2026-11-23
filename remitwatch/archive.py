@@ -1409,7 +1409,11 @@ def archive_ar(conn: sqlite3.Connection, sink: Any, *, today: Any = None, months
         out["files"] += 1
         out["rows"] += n
         out["names"].append(name)
-        log(f"  archive: an A/R snapshot of {str(as_of)[:10]} ({n:,} rows) to {name}")
+        if kept:
+            out["kept_rows"] += kept
+            out["kept_files"] += 1
+        log(f"  archive: an A/R snapshot of {str(as_of)[:10]} ({n:,} rows) to {name}"
+            + (f"; {kept:,} rows of open items stay" if kept else ""))
     return out
 
 
