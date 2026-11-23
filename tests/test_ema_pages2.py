@@ -1723,6 +1723,11 @@ def test_the_blind_spot_gives_each_part_its_dollars_and_basis(page_run):
     text = re.sub(r"<[^>]+>", "", out["today_html"])
     assert "Blind spot: $80 of insurance payments no remittance explains and $210 in Work now that may already be worked." in text
     assert "$290" not in text
+    # on a phone the headline and its dollars stay; the explanation folds under Why, so the plan stays on the first screen
+    narrow, _ = page_run({"/api/ema/today": dict(ans["/api/ema/today"], blind=blind), "__narrow": True})
+    banner = narrow["today_html"].split('id="tdBlind"')[1].split('id="tdHealth"')[0]
+    assert "$80" in banner and "What to do" in banner and "<details" in banner and "<summary>Why</summary>" in banner
+    assert banner.index("What to do") < banner.index("No remittance after")
 
 
 def test_the_data_tab_lands_on_what_a_link_names_says_remittance_and_shows_an_ar_rows_item(page_run):

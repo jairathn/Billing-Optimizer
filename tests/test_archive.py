@@ -436,7 +436,7 @@ def test_a_new_pattern_measured_on_what_the_archive_left_is_dropped_and_its_line
                     "now": {"finding_id": "now", "signal": "SEQUESTRATION", "year": "2026", "shortfall_cents": 100}}
     det = Det()
     out = archive.carry_locked_aggregates(det)
-    assert out == {"kept": 1, "dropped": 1, "put_back": 1}
+    assert out == {"kept": 1, "dropped": 1, "put_back": 1, "folded": 0, "late_lines": 0, "late_items": 0, "uncovered": 0}
     assert det.findings["total-2023"]["shortfall_cents"] == 2820                   # the whole year's figure
     assert "new-pattern" not in det.findings and det.findings["one-off"]["shortfall_cents"] == 2760
     assert det.findings["fees-2023"]["shortfall_cents"] == 500 and det.findings["now"]["shortfall_cents"] == 100
@@ -1189,4 +1189,125 @@ def test_a_serverless_archive_run_keeps_its_temporary_tables_in_memory(tmp_path,
     res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, mode="serverless")
     assert res["bills"] == 9 and seen and set(seen) == {2}                      # MEMORY while it ran
     assert store.conn.execute("PRAGMA temp_store").fetchone()[0] == before      # as it was after
+    store.close()
+
+
+# =========================================================================== 12. a locked year's routine rates and late lines
+# (the review's finding B: a kept routine-rate finding hid the late underpayments detection found at its amount, and stood
+# beside one-off items for its own lines when the reason that grouped them was no longer visible)
+def _wired_save(monkeypatch):
+    monkeypatch.setattr(Detector, "save", lambda self, _orig=Detector.save: (archive.carry_locked_aggregates(self), _orig(self))[1])
+
+
+def _covering(conn) -> dict:
+    """line key -> the items (not stale) that list it: its own line item, or a routine-rate finding's line list."""
+    out: dict = {}
+    for fid, lk, ev in conn.execute("SELECT finding_id, line_key, evidence FROM findings WHERE COALESCE(stale,0)=0"):
+        keys = [lk] if lk else []
+        try:
+            keys += json.loads(ev or "{}").get("line_keys") or []
+        except ValueError:
+            pass
+        for k in keys:
+            out.setdefault(k, []).append(fid)
+    return out
+
+
+def test_late_underpayments_of_a_locked_year_are_listed_once_beside_the_kept_pattern(tmp_path, frozen_hook, monkeypatch):
+    """2022: 24 visits paid the usual $117.60 and 5 paid $100.00 (85%: a routine second rate, one SECOND_RATE finding).
+    The archive at the floor takes the 24 usual bills (the pattern's own five stay while it is open) and locks 2022. A
+    remittance in October 2026 pays 5 more 2022 visits at $100.00: their windows are open from then. Each new line is
+    listed exactly once (in a routine-rate finding that continues the year's kept one), and every old line too."""
+    _wired_save(monkeypatch)
+    store = Store(":memory:", compact=True)
+    ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 5, "20220315", paid="100.00"), "20220415"),
+                             (visits(100, 6, NEW), "20260415")])
+    detect(store)
+    pat = store.conn.execute("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'").fetchall()
+    assert len(pat) == 1
+    old_lines = set(json.loads(pat[0][1])["line_keys"])
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, horizon=24)
+    assert res["bills"] == 24 and "2022" in archive.locked_years(store.conn)
+    ingest(store, tmp_path, [(visits(300, 5, "20220320", paid="100.00"), "20261015")], tag="late")
+    new_lines = {r[0] for r in store.conn.execute("SELECT line_key FROM lines WHERE payment_date >= '2026-10-01'")}
+    assert len(new_lines) == 5
+    detect(store, "r2")
+    cover = _covering(store.conn)
+    assert all(len(cover.get(k, [])) == 1 for k in new_lines | old_lines), {k: cover.get(k) for k in new_lines | old_lines}
+    assert pat[0][0] in cover[next(iter(old_lines))]                    # the kept finding keeps its own five
+    late = {cover[k][0] for k in new_lines}
+    assert len(late) == 1 and late != {pat[0][0]}
+    sig, ev, ws = store.conn.execute("SELECT signal, evidence, work_state FROM findings WHERE finding_id=?", (late.pop(),)).fetchone()
+    ev = json.loads(ev)
+    assert sig == "SECOND_RATE" and ev["continues"] == pat[0][0] and ev["lines"] == 5 and ws in archive.OPEN_STATES
+    assert "moved to the archive" in ev["note"]
+    # a second analysis with nothing new changes nothing: the late finding is now the year's own, kept as it is
+    before = items(store.conn)
+    detect(store, "r3")
+    assert items(store.conn) == before
+    store.close()
+
+
+def test_control_the_same_late_lines_are_listed_when_the_year_is_not_locked(tmp_path):
+    store = Store(":memory:", compact=True)
+    ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 5, "20220315", paid="100.00"), "20220415"),
+                             (visits(100, 6, NEW), "20260415")])
+    detect(store)
+    ingest(store, tmp_path, [(visits(300, 5, "20220320", paid="100.00"), "20261015")], tag="late")
+    new_lines = {r[0] for r in store.conn.execute("SELECT line_key FROM lines WHERE payment_date >= '2026-10-01'")}
+    detect(store, "r2")
+    cover = _covering(store.conn)
+    assert all(len(cover.get(k, [])) == 1 for k in new_lines)
+    store.close()
+
+
+def test_a_kept_pattern_and_the_one_off_items_of_its_own_lines_are_never_both_listed(tmp_path, frozen_hook, monkeypatch):
+    """2022: 24 visits paid the usual $117.60 (March) and 6 paid $82.32 from September on: a routine second rate whose
+    reason is a rate change (every line after the last usual visit). The finding is open, so its six bills stay; the 24
+    usual bills leave and 2022 is locked. The next analysis can no longer see the reason (the usual visits it compares
+    with left), so it lists the six lines as one-off underpayments: they are left out, the kept finding speaks for them,
+    and the money is counted once."""
+    _wired_save(monkeypatch)
+    store = Store(":memory:", compact=True)
+    ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 6, "20220915", paid="82.32"), "20221015"),
+                             (visits(100, 6, NEW), "20260415")])
+    detect(store)
+    pat = store.conn.execute("SELECT finding_id, work_state, shortfall_cents, evidence FROM findings WHERE signal='SECOND_RATE'").fetchall()
+    assert len(pat) == 1 and pat[0][1] in archive.OPEN_STATES
+    lines6 = set(json.loads(pat[0][3])["line_keys"])
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, horizon=24)
+    assert res["bills"] == 24 and "2022" in archive.locked_years(store.conn)
+    detect(store, "r2")
+    cover = _covering(store.conn)
+    assert all(cover.get(k) == [pat[0][0]] for k in lines6), {k: cover.get(k) for k in lines6}
+    total = store.conn.execute("""SELECT COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE COALESCE(stale,0)=0
+                                  AND (signal='SECOND_RATE' OR signal='UNDERPAID_VS_OWN_RATE')""").fetchone()[0]
+    assert total == pat[0][2]
+    store.close()
+
+
+def _late_99213(start: int, n: int, dos: str) -> list[str]:
+    return [claim(start + i, svc("99213", "150.00", "75.00", "75.00", "CAS*CO*45*75.00~", dos=dos), dos=dos) for i in range(n)]
+
+
+def test_a_locked_year_keeps_a_rate_only_late_lines_can_explain_and_drops_one_measured_on_what_was_left(tmp_path, frozen_hook):
+    """2022 is locked with a baseline for 99214 only. A late remittance (read after the lock) pays six 2022 visits of
+    99213 at $75.00: a rate the snapshot never had, from new data, so it stays and the pages show it. A key the year's
+    remainder alone made (not in the snapshot, no line read after the lock) still goes."""
+    store = Store(":memory:", compact=True)
+    ingest(store, tmp_path, [(visits(1, 24, OLD), "20220415"), (visits(100, 6, NEW), "20260415")])
+    detect(store)
+    assert archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, horizon=24)["bills"] == 24
+    assert set(archive._meta_json(store.conn, archive.META_LOCKED_AT, {})) == {"2022"}
+    ingest(store, tmp_path, [(_late_99213(400, 6, "20220321"), "20261015")], tag="late")
+    det = Detector(store, run_id="t", today=TODAY)
+    det.load()
+    det.build_baselines()                                   # with apply_frozen_rates at its end (the frozen_hook fixture)
+    late_key = next(k for k in det.rates if k[1] == "2022" and k[2] == "99213")
+    assert det.rates[late_key]["mode"] == 7500 and det.rates[late_key]["n"] == 6
+    assert store.conn.execute("SELECT mode_cents FROM payer_rates WHERE year='2022' AND code='99213'").fetchone()[0] == 7500
+    ghost = ("Anthem / BCBS", "2022", "11111", "unknown", "office")        # as if measured on the year's remainder
+    det.rates[ghost] = {"mode": 1, "median": 1, "p10": 1, "p90": 1, "n": 9, "share": 1.0, "key": ghost}
+    out = archive.apply_frozen_rates(det)
+    assert ghost not in det.rates and late_key in det.rates and out["late_keys"] == 1
     store.close()

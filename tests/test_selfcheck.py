@@ -1524,6 +1524,27 @@ def test_the_first_run_keeps_vanished_items_too(store):
     assert [o["key"] for o in sc.offenders(c, "vanished")] == ["F-a"]          # the Data tab lists every one, not 20
 
 
+def test_an_item_kept_from_a_store_with_no_states_yet_is_listed_and_kept_again(kind):
+    """The store before this release keeps no states (no item has a work state). The first wired run keeps an item the
+    new rules drop: it must land on Work now (an item with no state is on no list), and the next run, which sees the
+    states the first one set, must keep it again instead of losing it with no trace (found on the real world: the first
+    run kept 917 items with no state, and the second run dropped every one)."""
+    c = kind.conn
+    add_item(c, "F-a", line_key="La", work_state=None, state_basis=None)     # saved by the release before
+    add_item(c, "F-b", line_key="Lb", work_state=None, state_basis=None)
+
+    def first(cn):                                       # the new rules drop F-a and give F-b its state
+        cn.execute("DELETE FROM findings WHERE finding_id='F-a'")
+        cn.execute("UPDATE findings SET work_state='work_now' WHERE finding_id='F-b'")
+    out = run(c, first, "r1")
+    assert out["first"] and out["kept"] == 1 and "F-a" in _listed(c), (out["kept"], _listed(c))
+    kind.reopen()
+    c = kind.conn
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id='F-a'"), "r2")      # still not produced
+    assert out["kept"] == 1 and "F-a" in _listed(c), (out["kept"], _listed(c))
+    assert [o["key"] for o in sc.offenders(c, "vanished")] == ["F-a"]
+
+
 def test_any_new_coverage_gap_and_any_rise_in_money_given_up_raise_their_alerts(store):
     """The owner's decision 9: no dollar floor. A new $3 coverage gap raises AUDIT_GAPS; money given up rising by $1
     raises GIVEN_UP_RISING."""

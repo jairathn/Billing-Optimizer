@@ -105,6 +105,7 @@ META_HORIZON = "archive:horizon"            # the horizon the last run used: {mo
 META_HISTORY = "archive:history"            # per run: hot size, peak memory against the budget, what was retired
 META_SUMMARY = "archive:summary"            # the archive's totals (the dashboard's copy reads these)
 META_LOCKED = "archive:locked_years"        # service years the archive took lines of: detection uses their snapshot
+META_LOCKED_AT = "archive:locked_at"        # {year: when the archive first took lines of it}: later data is post-lock
 META_FROZEN = "archive:frozen_years"        # {year: {at, digest, rates}}: the years with a baseline snapshot
 META_WHERE = "archive:where"                # where the archive lives, in words
 META_DETECT_PENDING = "cloud:detect_pending"
@@ -1174,6 +1175,10 @@ def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, n
         if keep and years:
             locked = _locked_years(conn) | set(years)
             _meta_put(conn, META_LOCKED, sorted(locked))
+            when = _meta_json(conn, META_LOCKED_AT, {})
+            for y in sorted(set(years)):
+                when.setdefault(str(y), at)
+            _meta_put(conn, META_LOCKED_AT, when)
         conn.execute("COMMIT")
     except BaseException:
         try:
@@ -1545,12 +1550,20 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
                 frozen_counts[key] = Counter()
             if kinds is not None and kind:
                 kinds.setdefault(grp, kind)
-        for key in [k for k in rates if k[1] in locked]:
-            del rates[key]
+        # a key the snapshot does not have was measured on what the archive left (mostly the bills of open items, which
+        # could make an underpaid amount look usual): it goes, unless lines that reached the store after the year was
+        # locked (a late remittance) are part of it. Those are new data, and without a rate they would not be checked.
+        late = _post_lock_keys(det, locked)
+        out["late_keys"] = 0
+        for key in [k for k in rates if k[1] in locked and k not in frozen_rates]:
+            if key in late:
+                out["late_keys"] += 1
+            else:
+                del rates[key]
         rates.update(frozen_rates)
         out["overridden"] = len(frozen_rates)
         if counts is not None:
-            for key in [k for k in counts if k[1] in locked]:
+            for key in [k for k in counts if k[1] in locked and k not in frozen_counts and k not in late]:
                 del counts[key]
             for key, cnt in frozen_counts.items():
                 counts[key] = cnt
@@ -1563,12 +1576,13 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
                 frozen_market[(year, code, tier, pos)] = {"median": med, "n": n}
             if mcare is not None:
                 frozen_medicare[(year, code, tier, pos)] = mcare
+        late_cells = {k[1:] for k in late}          # (year, code, provider type, place) of the late keys
         if market is not None:
-            for key in [k for k in market if k[0] in locked]:
+            for key in [k for k in market if k[0] in locked and k not in frozen_market and k not in late_cells]:
                 del market[key]
             market.update(frozen_market)
         if medicare is not None:
-            for key in [k for k in medicare if k[0] in locked]:
+            for key in [k for k in medicare if k[0] in locked and k not in frozen_medicare and k not in late_cells]:
                 del medicare[key]
             medicare.update(frozen_medicare)
             _rewrite_payer_rates(det, locked)
@@ -1602,6 +1616,32 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
     if out["snapshot"]:
         _meta_put(conn, META_FROZEN, frozen)
     return out
+
+
+def _post_lock_keys(det: Any, locked: set[str]) -> set[tuple]:
+    """The rate keys (payer group, year, code, provider type, place) of a locked year that a clean line read into the
+    store after the year was locked counts toward (a late remittance: its file arrived after the archive took lines of
+    the year). A year locked before its time was recorded has none."""
+    when = _meta_json(det.conn, META_LOCKED_AT, {})
+    if not when or not any(str(y) in when for y in locked):
+        return set()
+    lines = [l for l in (getattr(det, "lines", None) or [])
+             if l.get("clean") and str(l.get("year") or "") in when and l.get("transaction_key")]
+    if not lines:
+        return set()
+    conn = det.conn
+    if not (_have(conn, "files") and "file_sha256" in _cols(conn, "transactions")):
+        return set()
+    tks = sorted({l["transaction_key"] for l in lines})
+    read_at: dict[str, str] = {}
+    for i in range(0, len(tks), 500):
+        part = tks[i:i + 500]
+        for tk, at in conn.execute(f"""SELECT t.transaction_key, f.ingested_at FROM transactions t JOIN files f ON f.sha256 = t.file_sha256
+                                       WHERE t.transaction_key IN ({','.join('?' * len(part))})""", part):
+            if at:
+                read_at[tk] = str(at)
+    return {(l["payer_group"], l["year"], l["procedure_code"], l.get("provider_tier"), l.get("pos_class")) for l in lines
+            if read_at.get(l["transaction_key"], "") >= str(when.get(str(l["year"])) or "~")}
 
 
 # the items whose inputs never leave the store (provider-level adjustments, EMA's own reports): measured afresh every run
