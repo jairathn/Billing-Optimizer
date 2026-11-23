@@ -679,6 +679,13 @@ def _group_of(a: Ans, x: Ans, gm: tuple) -> tuple | None:
                 k = by_sig[0]
     if k is None:
         if len(groups) <= 1:
+            # the submission bills the code once: that line, unless x's own claim billed the item's unit (its unit-making
+            # modifiers, 76 for a repeat) on another line, which makes x the other unit (a second Mohs stage resubmitted alone)
+            mine_sig = next(iter(groups.values()))[0].sig() if groups else frozenset()
+            if x.sig() != mine_sig and x.claim is not None and any(
+                    y is not x and y.billed_code == x.billed_code and y.dos == x.dos and (y.charge or 0) > 0 and y.sig() == mine_sig
+                    for y in x.claim.lines):
+                return ("O", x.line_key)
             return next(iter(groups))
         same = [k2 for k2, v in groups.items() if v[0].sig() == x.sig()]
         if len(same) > 1:
@@ -708,8 +715,8 @@ def _units_covered(a: Ans, pays: Sequence[Ans], gm: tuple) -> float:
         k = _group_of(a, x, gm)
         if k is None:
             loose.append(x)
-        else:
-            keys.add(k)
+        elif k in groups:
+            keys.add(k)                 # (a key outside the submission is another unit: it pays none of these lines)
     return sum(max(y.billed_units for y in groups[k]) for k in keys) + _units_paid(loose)
 
 
@@ -1614,13 +1621,20 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
         # the allowed amount against the expected one, not as "paid"
         if not mine:
             if (f.get("paid_cents") or 0) > 0:
-                # the payment was taken back and nothing replaced it: the whole line is unpaid now, from the takeback's remittance
+                # the payment was taken back and nothing replaced it: the whole line is unpaid now, from the latest takeback's
+                # remittance (a payment the payer made in its place and took back too counts: the newest takeback dates it)
+                later = [cancelled[x.line_key] for x in ans if x.line_key in cancelled and x.line_key != a.line_key and (x.paid or 0) > 0
+                         and tag.get(x.line_key) != "other" and (_same_payer(x, a) or _same_payer_loose(x, r)) and not _before(x, a)]
+                last = max([r] + later, key=lambda y: (y.paid_on or "", y.trace or "", y.line_key))
+                if last is not r:
+                    proof.append(_proof(last, "reversal", True, f"{who} took back the payment it made in its place on {last.paid_on}"))
                 whole = exp or ((f.get("shortfall_cents") or 0) + (f.get("paid_cents") or 0))
-                hint = (f"{who} took this payment back on {r.paid_on} ({_usd(-(r.paid or 0))}) and no new answer for this line is on file: "
-                        f"the whole line is unpaid now ({_usd(whole)}). The payer may be reprocessing it; if no new answer comes, dispute the "
-                        "takeback.")
+                hint = (f"{who} took this payment back on {r.paid_on} ({_usd(-(r.paid or 0))})"
+                        + (f", paid the line again and took that back too on {last.paid_on} ({_usd(-(last.paid or 0))})" if last is not r else "")
+                        + f"; no new answer for this line is on file: the whole line is unpaid now ({_usd(whole)}). The payer may be "
+                        "reprocessing it; if no new answer comes, dispute the takeback.")
                 return _reclass(R_SAME_DAY, f, "reversed_no_answer", "Payment taken back, no new answer yet", hint, whole, "waiting", proof,
-                                taken_back_cents=-(r.paid or 0))
+                                taken_back_cents=-(r.paid or 0) - (0 if last is r else (last.paid or 0)))
             hint = f"{who} reversed this answer on {r.paid_on} and no new answer for this line is on file: the payer is reprocessing it."
             return _reclass(R_SAME_DAY, f, "reversed_no_answer", "Reversed by the payer, no new answer yet", hint, f.get("shortfall_cents"),
                             "waiting", proof)

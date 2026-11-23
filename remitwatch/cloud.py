@@ -963,7 +963,13 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
         if (e.get("size") or 0) > MAX_FILE_BYTES:
             # a file this large is not downloaded here. An EMA report among them (a raw Production CSV) is recognised from
             # its first bytes and kept waiting, with what to do about it; anything else is noted as too large
-            if _big_report(store, client, e, out, log):
+            big = _big_report(store, client, e, out, log)
+            if big is None:
+                # its first bytes could not be fetched (a timeout, a busy server): not remembered, and the position
+                # stays, so the next run looks at it again
+                out["download_errors"] += 1
+                continue
+            if big:
                 ema_changed = True
             else:
                 out["errors"] += 1
@@ -1043,13 +1049,13 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
 _REPORT_ENDINGS = (".xlsx", ".csv", ".tsv", ".txt", ".zip", ".gz")
 
 
-def _big_report(store, client, e: dict, out: dict, log) -> bool:
+def _big_report(store, client, e: dict, out: dict, log) -> bool | None:
     """A file over the size this site downloads: when its first 64 KB show an EMA report (a raw Production CSV, or a
     gzip of one), it is kept waiting in the catalog under its Dropbox content hash, with its origin and what to do about
     it, and is not counted as an error. An upload of the same bytes already read makes it 'already'. False when it is no
-    report (it is 'too large')."""
+    report (it is 'too large'); None when its first bytes could not be fetched this time (the next run looks again)."""
     from . import ema_reports as er
-    from .dropbox_sync import peek
+    from .dropbox_sync import peek, permanent_download_error
     name = e.get("name") or "file"
     low = name.lower()
     gz = low.endswith(".gz")
@@ -1059,7 +1065,7 @@ def _big_report(store, client, e: dict, out: dict, log) -> bool:
         head = peek(client, e.get("id") or e["path_lower"], er.PEEK_BYTES)
     except Exception as exc:       # noqa: BLE001
         log(f"  {name}: could not look at its first bytes ({type(exc).__name__})")
-        return False
+        return False if permanent_download_error(exc) else None
     if gz:
         head = _gunzip_head(head)
     try:

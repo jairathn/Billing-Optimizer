@@ -1364,10 +1364,22 @@ def _priced(rate: Callable | None, grp: str | None, lines: Iterable[tuple]) -> i
     return got if any_ else None
 
 
-def _paid_elsewhere_all(k: dict, paid_other: dict[tuple, int]) -> bool:
-    """Every line of a claim (_status_claims) was paid on another of EMA's claims for the same patient, date and code."""
+def _paid_elsewhere_all(k: dict, paid_other: dict[tuple, dict]) -> bool:
+    """Every line of a claim (_status_claims) was paid by its own payer on another of EMA's claims for the same patient,
+    date and code."""
     keys = list(k["lines"])
-    return bool(keys) and all(any(paid_other.get((lk, svc, cpt)) for lk in k["links"]) for (cpt, svc) in keys)
+    return bool(keys) and all(any((paid_other.get((lk, svc, cpt)) or {}).get("same") for lk in k["links"]) for (cpt, svc) in keys)
+
+
+def _paid_elsewhere_other(lines: Iterable[tuple], paid_other: dict[tuple, dict]) -> dict | None:
+    """What other payers paid on another of EMA's claims for these lines (link, date, code), for a hint."""
+    cents, payers = 0, set()
+    for key in lines:
+        got = paid_other.get(tuple(key)) or {}
+        if (got.get("cents") or 0) > (got.get("same") or 0):
+            cents += got["cents"] - (got.get("same") or 0)
+            payers.update(got.get("payers") or [])
+    return {"cents": cents, "payers": sorted(payers)} if cents > 0 else None
 
 
 def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callable | None = None,
@@ -1388,7 +1400,8 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
                               links=[lk for k in claims.values() for lk in k["links"]])
     first_charge = _first_charges(conn, [lk for k in claims.values() for lk in k["links"]])
     first_paid = _first_ins_paid(conn, [lk for k in claims.values() if k.get("secondary") for lk in k["links"]])
-    paid_other = _paid_on_another_claim(conn, [(lk, svc, cpt) for k in claims.values() for lk in k["links"] for (cpt, svc) in k["lines"]])
+    want = {(lk, svc, cpt): k["group"] for k in claims.values() for lk in k["links"] for (cpt, svc) in k["lines"]}
+    paid_other = _paid_on_another_claim(conn, list(want), group_of=want)
     made = _bill_created(conn, [k["claim_id"] for k in claims.values() if k["claim_id"]])
     out = []
     for key, k in sorted(claims.items()):
@@ -1446,7 +1459,9 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
             evidence={"codes": codes, "lines": [[c, s, v] for (c, s), v in lines], "ema_status": word,
                       "status_source": st["source"], "status_as_of": st["as_of"], "since": clock, "since_basis": clock_basis,
                       "days_waiting": age_now, "balance_cents": balance, "ema_links": sorted(k["links"]), "not_sent": True},
-            hint=f"EMA shows the claim as {word} since {clock}: send it, or fix what holds it",
+            hint=(_paid_elsewhere_note(_paid_elsewhere_other([(lk, svc, cpt) for lk in k["links"] for (cpt, svc) in k["lines"]],
+                                                             paid_other))
+                  or f"EMA shows the claim as {word} since {clock}: send it, or fix what holds it"),
             link=lk0, heir_keys=[("EMA_OPEN_CLAIM", f"link:{lk}") for lk in sorted(k["links"])] if k["claim_id"] else []))
     return out
 
@@ -1692,7 +1707,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
     bills835 = _bills_with_835(conn, {c["bill"] for c in cands if c["bill"]})
     keys = {(ln[4], ln[0], ln[1]) for c in cands for ln in lines[c["link"]] if ln[4] is not None}
     seen835 = _name_day_codes_835(conn, keys)
-    paid_other = _paid_on_another_claim(conn, [(c["link"], ln[0], ln[1]) for c in cands for ln in lines[c["link"]]])
+    want = {(c["link"], ln[0], ln[1]): c["group"] for c in cands for ln in lines[c["link"]]}
+    paid_other = _paid_on_another_claim(conn, list(want), group_of=want)
     cid_of = _claim_id_of_links(conn, [c["link"] for c in cands])
     out = []
     for c in cands:
@@ -1702,8 +1718,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
             continue
         if any((ln[4], ln[0], ln[1]) in seen835 for ln in ls if ln[4] is not None):
             continue
-        if ls and all(paid_other.get((lk, ln[0], ln[1])) for ln in ls):
-            continue                    # every line was paid on another of EMA's claims: answered there
+        if ls and all((paid_other.get((lk, ln[0], ln[1])) or {}).get("same") for ln in ls):
+            continue                    # its payer paid every line on another of EMA's claims: answered there
         cid = cid_of.get(lk)
         if cid and cid in skip:
             continue
@@ -1744,7 +1760,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
                       "days_waiting": waited, "production_as_of": prod, "turnaround_days": c["p95"],
                       "turnaround": turnaround_text(grp, c["p95"]) + " of the charge being posted",
                       "balance_cents": c["balance"], "source": "production", "ema_link": lk},
-            hint=("No payment, $0 answer or reason code is posted in EMA for this claim: look it up on the payer's portal "
+            hint=(_paid_elsewhere_note(_paid_elsewhere_other([(lk, ln[0], ln[1]) for ln in ls], paid_other)) or
+                  "No payment, $0 answer or reason code is posted in EMA for this claim: look it up on the payer's portal "
                   "before sending it again"),
             link=lk, heir_keys=[("EMA_OPEN_CLAIM", f"link:{lk}")] if cid else []))
     return out
@@ -1783,10 +1800,11 @@ def _paid_on_other_links(conn: sqlite3.Connection, keys: set[tuple]) -> dict[tup
     return out
 
 
-def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple]) -> dict[tuple, int]:
+def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple], group_of: dict | None = None) -> dict[tuple, dict]:
     """For EMA lines (link, date, code): what insurance paid on ANOTHER of EMA's claims for the same patient, date and code
-    (never the ASC's facility claim): {(link, date, code): cents}. A resubmission, or the same service billed twice."""
-    want = sorted({tuple(x) for x in lines if x and x[0] is not None})
+    (never the ASC's facility claim): a resubmission, or the same service billed twice. Returns {(link, date, code):
+    {'cents': all of it, 'same': the part paid by that line's payer group (group_of), 'payers': the payer groups}}."""
+    want = sorted({tuple(x[:3]) for x in lines if x and x[0] is not None})
     nk_of: dict[tuple, int] = {}
     for part in _chunks(want):
         _temp(conn, "ec_poc", ["link INTEGER", "svc TEXT", "cpt TEXT"], part, ["link, svc, cpt"])
@@ -1795,13 +1813,45 @@ def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple]) -> 
                                                 WHERE l.name_key IS NOT NULL"""):
             nk_of[(lk, svc, cpt)] = nk
     _drop(conn, "ec_poc")
-    paid = _paid_on_other_links(conn, {(nk, k[1], k[2]) for k, nk in nk_of.items()}) if nk_of else {}
-    out: dict[tuple, int] = {}
+    if not nk_of:
+        return {}
+    keys = {(nk, k[1], k[2]) for k, nk in nk_of.items()}
+    rows: dict[tuple, list] = defaultdict(list)
+    for part in _chunks(sorted({k[0] for k in keys})):
+        _temp(conn, "ec_pk", ["name_key INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for nk, svc, cpt, lk, grp, cents in conn.execute(
+                """SELECT y.name_key, y.svc, y.cpt, y.link, y.payer_group, SUM(COALESCE(y.ins_paid, 0)) FROM ema_line_payments y
+                   LEFT JOIN ema_link_map m ON m.link = y.link
+                   WHERE y.name_key IN (SELECT name_key FROM temp.ec_pk) AND COALESCE(m.facility, 0) = 0
+                   GROUP BY y.name_key, y.svc, y.cpt, y.link, y.payer_group"""):
+            if (nk, svc, cpt) in keys and (cents or 0) > 0:
+                rows[(nk, svc, cpt)].append((lk, grp, cents))
+        _drop(conn, "ec_pk")
+    out: dict[tuple, dict] = {}
     for k, nk in nk_of.items():
-        got = sum(v for lk2, v in paid.get((nk, k[1], k[2]), {}).items() if lk2 != k[0] and v > 0)
-        if got > 0:
-            out[k] = got
+        grp = (group_of or {}).get(k)
+        tot = same = 0
+        payers: set = set()
+        for lk2, g2, v in rows.get((nk, k[1], k[2]), []):
+            if lk2 == k[0]:
+                continue
+            tot += v
+            if grp and grp != "Unknown" and _same_payer(grp, g2):
+                same += v
+            if g2:
+                payers.add(g2)
+        if tot > 0:
+            out[k] = {"cents": tot, "same": same, "payers": sorted(payers)}
     return out
+
+
+def _paid_elsewhere_note(got: dict | None) -> str | None:
+    """The hint for a claim whose service was paid on another of EMA's claims by another payer (or one EMA does not name)."""
+    if not got or not got.get("cents"):
+        return None
+    who = f" by {got['payers'][0]}" if len(got.get("payers") or []) == 1 else ""
+    return (f"EMA shows {_usd(got['cents'])} paid{who} on another of its claims for this patient, date and code: check whether "
+            "this claim is still owed")
 
 
 def _name_day_codes_835(conn: sqlite3.Connection, keys: set[tuple]) -> set[tuple]:
@@ -2453,18 +2503,20 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
     # a hint, never a closure: the service paid on another of EMA's claims for the same patient, date and code (the store's
     # copy of EMA's lines and payments is partial, so a payment it does not hold cannot be seen)
     rest = [(f, outcomes[f["finding_id"]]) for f in findings if f.get("finding_id") in outcomes and f["finding_id"] not in out
-            and not f.get("auto_status") and _wanted(f) and f.get("signal") not in CLAIM_SIGNALS
+            and not f.get("auto_status") and not f.get("hint") and _wanted(f) and f.get("signal") not in CLAIM_SIGNALS
             and (outcomes[f["finding_id"]].get("lines") or []) and outcomes[f["finding_id"]].get("covered")
             and not outcomes[f["finding_id"]].get("facility") and outcomes[f["finding_id"]].get("outcome") not in PAID_OUTCOMES]
     if rest:
         elsewhere = _paid_on_another_claim(conn, [tuple(o["lines"][0]) for _f, o in rest])
         for f, o in rest:
-            got = elsewhere.get(tuple(o["lines"][0])) or 0
-            if got >= _threshold(f):
-                hint = (f"EMA shows {_usd(got)} paid on another of its claims for this patient, date and code: check whether it paid "
-                        "this service (a resubmission, or the service billed twice) before working it")
-                out[f["finding_id"]] = {"action": "hint_paid_elsewhere", "paid_cents": got, "date": None, "check_tail": None,
-                                        "payer": None, "note": hint, "hint": hint, "used": None}
+            got = elsewhere.get(tuple(o["lines"][0])) or {}
+            if (got.get("cents") or 0) >= _threshold(f):
+                payer = got["payers"][0] if len(got.get("payers") or []) == 1 else None
+                hint = (f"EMA shows {_usd(got['cents'])} paid{' by ' + payer if payer else ''} on another of its claims for this "
+                        "patient, date and code: check whether that paid this service (a resubmission, or the service billed "
+                        "twice) before working it")
+                out[f["finding_id"]] = {"action": "hint_paid_elsewhere", "paid_cents": got["cents"], "date": None,
+                                        "check_tail": None, "payer": payer, "note": hint, "hint": hint, "used": None}
     return out
 
 

@@ -401,7 +401,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
     from . import ema_ledger, ema_reports, intake
     from .alerts import notify, run_alerts
     from .detect import run_detection
-    from .dropbox_sync import ingest_new_files, refind_reports
+    from .dropbox_sync import ingest_new_files, refind_reports, settle_pending, take_pending
     from .dropbox_sync import sync as dropbox_sync
 
     store = Store(db_path)
@@ -465,6 +465,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         if local:
             new_files += [os.path.join(dp, f) for dp, _d, fs in os.walk(local) for f in fs]
         new_files += [p for p in refound if p not in set(new_files)]
+        # files fetched by an earlier cycle that the readers did not finish (that cycle stopped, or the read raised): the
+        # position has moved past them, so they are offered from here, each counted first (dropbox_sync.take_pending)
+        pend = _ema_step(out, "sync_pending", take_pending, store, log=beat_log) or {}
+        have = set(new_files)
+        new_files += [p for p in pend.get("paths") or [] if p not in have]
         ingested = {"remits": 0, "ema": 0, "claims_837": 0}
         heartbeat(store.conn, token)
         if new_files:
@@ -472,6 +477,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                                         origins={p: {"path": p} for p in new_files})
             ingested.pop("remit_stats", None)
             heartbeat(store.conn, token)
+        retry = ingested.pop("retry", None) or []
+        waiting_files = _ema_step(out, "sync_settle", settle_pending, store, new_files, retry)
+        if waiting_files or pend.get("given_up") or pend.get("gone"):
+            out["sync_pending"] = {"waiting": waiting_files or 0, "given_up": pend.get("given_up", 0),
+                                   "gone": pend.get("gone", 0)}
         from . import trizetto
         if trizetto.configured():         # the remittances straight from TriZetto's SFTP (remitwatch.trizetto)
             from .cloud import _ingest_batch

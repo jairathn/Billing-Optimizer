@@ -1620,9 +1620,11 @@ const out = {errors: []};
     page.on('request', r => { if (r.method() === 'POST' && r.url().includes('/api/uploads')) posts.push(r.url()); });
     await page.goto(base + '/upload'); await page.waitForSelector('.export');
     await page.setInputFiles('#files', path.join(dir, 'Doe Jane 2026-01-05 visit.pdf'));
-    await page.waitForFunction(() => { const c = document.querySelector('#now .card'); return c && !['checking', 'sending'].includes(c.dataset.status); },
+    await page.waitForFunction(() => { const c = document.querySelector('#now .card');            // a new card has no status yet
+                                       return c && c.dataset.status && !['checking', 'sending'].includes(c.dataset.status); },
                                null, {timeout: 30000, polling: 200});
-    out.name = {posts, status: await page.evaluate(() => document.querySelector('#now .card').dataset.status)};
+    out.name = {posts, status: await page.evaluate(() => document.querySelector('#now .card').dataset.status),
+                lines: await page.evaluate(() => [...document.querySelectorAll('#now .card [data-lines] li')].map(li => li.textContent))};
     await page.close();
     // 3. a compressed report whose cut-off upload was compressed elsewhere: sent afresh, then finished
     page = await open();
@@ -1742,8 +1744,9 @@ def test_the_page_in_a_browser_keyboard_names_fresh_uploads_lost_finishes_and_bo
     # 2. no name in an address or a log line
     logged = (tmp_path / "uvicorn.log").read_text()
     assert res["name"]["posts"] and not [u for u in res["name"]["posts"] if "name=" in u or "Doe" in u], res["name"]
+    assert res["name"]["status"] == "unmatched", res["name"]            # the note was taken (no item fits an empty store)
     named = [line for line in logged.splitlines() if "Doe" in line or "Jane" in line]
-    assert not named and "POST /api/uploads HTTP" in logged, (named[:5], [line for line in logged.splitlines() if "POST" in line][:20])
+    assert not named and "POST /api/uploads HTTP" in logged, (named[:5], res["name"])
     # 3. sent afresh, finished, the cut-off upload let go
     fresh = res["fresh"]
     assert fresh["result"] == "waiting" and fresh["uploadId"] != seed["upload_id"], fresh

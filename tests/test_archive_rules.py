@@ -1258,3 +1258,28 @@ def test_rule4_a_restated_short_payment_topped_up_later_closes(store):
                                    claim_paid=10.54, adj=[("CO", "B13", 79.00)])])
     a = only(ar.short_pay_topped_up(store.conn, [item(store, lk, "UNDERPAID_VS_OWN_RATE", "underpayment", expected=9137, shortfall=1076)]))
     assert (a["action"], a["paid_cents"]) == ("close_with_proof", 1054)
+
+
+def test_rule1_a_repeat_unit_resubmitted_alone_is_not_a_second_payment_of_the_first(store):
+    """The first claim billed 17313-79 and its repeat 17313-79-76: the payer paid the first unit and denied the repeat. The
+    repeat, resubmitted alone, is paid: that pays the second unit, it is no second payment of the first."""
+    remit(store, "2026-01-10", [cl("CB0002013C017", [ln("17313", 584.55, 272.11, 277.66, [("CO", "253", 5.55), ("CO", "45", 306.89)], mods=("79",),
+                                                        lcn="1"),
+                                                     ln("17313", 584.55, 0, None, [("CO", "97", 584.55)], mods=("79", "76"), lcn="2")])])
+    lk = remit(store, "2026-07-27", [cl("CB0002013C017", [ln("17313", 584.55, 272.11, 277.66, [("CO", "253", 5.55), ("CO", "45", 306.89)],
+                                                             mods=("79", "76"))])])[0]
+    f = item(store, lk, "UNDERPAID_VS_OWN_RATE", "underpayment", expected=55532, shortfall=27766)
+    assert ar.same_payer_paid_before(store.conn, [f]) == []
+
+
+def test_rule5_the_latest_takeback_dates_an_unpaid_line(store):
+    """The payer took a short payment back, paid the line again and took that back too, with no new answer since: the
+    whole line is unpaid from the latest takeback, which the proof names."""
+    paid = ln("17000", 63.00, 52.48, 53.55, [("CO", "45", 9.45), ("CO", "253", 1.07)], lcn="1")
+    lk = remit(store, "2026-01-10", [cl("CB0002402C017", [paid])])[0]
+    again = ln("17000", 63.00, 27.99, 28.56, [("CO", "59", 34.44), ("CO", "253", 0.57)])
+    remit(store, "2026-08-25", [cl("CB0002402C017", [neg(paid)], status="22"), cl("CB0002402C017", [again])])
+    remit(store, "2027-04-02", [cl("CB0002402C017", [neg(again)], status="22")])
+    a = only(ar.same_day_answers(store.conn, [item(store, lk, "UNDERPAID_VS_OWN_RATE", "underpayment", expected=5711, shortfall=356)]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"], a["taken_back_cents"]) == ("reversed_no_answer", "waiting", 5711, 8047)
+    assert max(p["date"] for p in a["proof"]) == "2027-04-02" and "took that back too" in a["hint"]
