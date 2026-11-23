@@ -1388,7 +1388,7 @@ def archive_ar(conn: sqlite3.Connection, sink: Any, *, today: Any = None, months
         ci, li, ri = cols.index("claim_id"), cols.index("link"), cols.index("row_no")
 
         def stays(r: tuple) -> bool:
-            return bool(r[ci] and _bill_of(r[ci]) in keep_bills)
+            return bool((r[ci] and _bill_of(r[ci]) in keep_bills) or (r[li] is not None and r[li] in keep_links))
         rows = [r for r in every if not stays(r)]
         kept = len(every) - len(rows)
         if not rows:
@@ -2405,7 +2405,7 @@ def _plb_touched(conn: sqlite3.Connection) -> set[str]:
                 bills.update(b for (b,) in conn.execute("SELECT bill FROM archive_ids WHERE id = ? AND kind = 'payer_ref'", (norm,)))
         for b in bills:
             seen = conn.execute("SELECT COALESCE(plb_seen, 0) FROM archive_bills WHERE bill = ?", (b,)).fetchone()
-            if seen is not None and pid > seen[0]:
+            if seen is not None:
                 out.add(b)
     return out
 
