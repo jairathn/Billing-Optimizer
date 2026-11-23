@@ -958,8 +958,9 @@ D = __import__("datetime").date
 
 
 @pytest.fixture
-def ema_world(tmp_path, monkeypatch):
-    """A server store with the EMA tables and a posting ledger, set up as tests/test_ema_checks.py's fixtures are."""
+def ema_world(tmp_path, monkeypatch, request):
+    """A store with the EMA tables and a posting ledger, set up as tests/test_ema_checks.py's fixtures are: the server's
+    file store, or (indirect parameter 'compact') the compact in-memory store a serverless run loads."""
     from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
     monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", EF.HOST_SUFFIX)
     monkeypatch.setenv("REMITWATCH_MODE", "server")
@@ -967,7 +968,8 @@ def ema_world(tmp_path, monkeypatch):
               "REMITWATCH_EMA_LEDGER", "REMITWATCH_EMA_REPORT_KEEP"):
         monkeypatch.delenv(k, raising=False)
     ec._LAST_POST.clear()
-    store = Store(str(tmp_path / "store.sqlite"))
+    kind = getattr(request, "param", "file")
+    store = Store(str(tmp_path / "store.sqlite")) if kind == "file" else Store(":memory:", compact=True)
     er.ensure_schema(store.conn)
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", ("cd" * 32,))
     store.conn.commit()
@@ -1021,16 +1023,18 @@ def _ema_named_bill(store, ledger, tmp_path, posted=D(2024, 6, 15)) -> None:
 
 
 @pytest.mark.parametrize("posted", [D(2024, 6, 15), D(2024, 4, 15)])      # EMA's posting after the cutoff, and before it
-@pytest.mark.parametrize("kind", ["file", "compact"])
+@pytest.mark.parametrize("ema_world", ["file", "compact"], indirect=True)
 def test_a_bill_emas_reports_still_list_keeps_its_835_and_is_never_listed_as_denied_with_no_remittance(ema_world, tmp_path,
-                                                                                                        kind, posted):
+                                                                                                        posted):
     """A 24-month horizon (the floor) and an old bill whose items are all closed: while EMA's posting summaries still list
     it (the ledger keeps a line with a payer's denial posted for its whole retention, longer than the floor), its 835 rows
-    stay, so EMA's checks still find the remittance that answered it."""
+    stay, so EMA's checks still find the remittance that answered it. Both store kinds (the compact one is saved and
+    loaded again as the serverless run does)."""
     store, ledger = ema_world
+    kind = "file" if store.conn.execute("PRAGMA database_list").fetchone()[2] else "compact"
     _ema_named_bill(store, ledger, tmp_path, posted)
     if kind == "compact":
-        store = as_image(store)              # the serverless host's image of the same store (no ledger needed to plan)
+        store = as_image(store)
     p = archive.plan(store.conn, today=EMA_TODAY, horizon=24)
     assert p["bills"] == [] and p["held"] == {archive.HELD_EMA: 1}
     res = archive.run(store.conn, sink=sink_of(tmp_path, kind), today=EMA_TODAY, horizon=24)
