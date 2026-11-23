@@ -1793,3 +1793,24 @@ def test_the_remittances_in_a_zip_dropped_in_the_folder_are_read_once(host, requ
         again = cycle(state, client)
         n = state_store(state).execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
         assert out["ingest"]["remits"] == 2 and n == 3 and again["ingest"]["remits"] == 0
+
+
+def test_a_damaged_member_of_a_zip_of_remittances_is_listed_and_the_others_are_read(tmp_path):
+    from tests.test_remitwatch import CLAIM_DOWNCODE, remit
+    good = remit(CLAIM_DOWNCODE, "77.60", seg_count=20, isa_ctrl="000000401")
+    bad = remit(CLAIM_DOWNCODE.replace("CB00TEST01C017", "CB00TEST09C017"), "77.60", seg_count=20, isa_ctrl="000000402")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("ERA 001.RMT", good)
+        zf.writestr("ERA 002.RMT", bad)
+    data = bytearray(buf.getvalue())
+    at = data.find(b"TRACE000000402")
+    data[at] ^= 0x20                                         # one byte of the second member changed: its CRC fails
+    p = write(tmp_path / "in" / "ERAs week 48.zip", bytes(data))
+    store = open_store(tmp_path / "s.sqlite")
+    try:
+        out = dropbox_sync.ingest_new_files(store, [p], log=lambda *a: None)
+        assert out["remits"] == 1 and store.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 1
+        assert any("ERA 002.RMT (damaged in the zip" in f for f in out["failed"]) and "retry" not in out
+    finally:
+        store.close()
