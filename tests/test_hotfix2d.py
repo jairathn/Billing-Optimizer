@@ -931,3 +931,128 @@ def test_serverless_a_status_journaled_for_the_old_id_lands_on_the_heir(tmp_path
     serving = _serving(state, tmp_path)
     assert serving.execute("SELECT status FROM findings WHERE finding_id=?", (heir,)).fetchone()[0] == "appealed"
     serving.close()
+
+
+# --------------------------------------------------------------------------- an appeal in flight when its item gets a new id (review mr-4)
+
+def _reserved(fid: str, key: str = "out:fake:5") -> dict:
+    """What api._reserve writes before a send: going out, no fax id from the line yet. The item is still To do: it becomes
+    Sent only once the line takes the fax."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return dict(_fax_record(fid, key=key), provider_id=None, status="sending", created_at=now, updated_at=now, sent_at=None)
+
+
+def _later(days: int = 60) -> str:
+    from datetime import date, timedelta
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def test_an_appeal_being_faxed_when_its_item_gets_a_new_id_follows_the_heir(tmp_path, kind):
+    """Review mr-4: a person pressed Appeal by fax on a To do item, and the send is reserved, when a run gives the item's
+    money a new id. The fax follows the heir, the send's Sent (recorded for the id it was reserved under) reaches it, and
+    the follow-ups chase the heir, run after run."""
+    from remitwatch import actions, fax
+    from remitwatch.detect import Detector
+    s = _downcode_store(tmp_path, kind)
+    c = s.conn
+    old = _first_downcode(c)
+    line_key = c.execute("SELECT line_key FROM findings WHERE finding_id=?", (old,)).fetchone()[0]
+    actions.apply_fax(c, _reserved(old))
+    c.commit()
+    _claim_files_arrive(s)
+    Detector(s, run_id="r2").run()
+    heir = c.execute("SELECT finding_id FROM findings WHERE line_key=? AND COALESCE(stale,0)=0", (line_key,)).fetchone()[0]
+    assert heir != old
+    assert (c.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (old,)).fetchone() or [None])[0] == heir, "no heir was recorded"
+    assert c.execute("SELECT finding_id FROM faxes WHERE fax_key='out:fake:5'").fetchone()[0] == heir, "the fax stayed on an id no item has"
+    assert c.execute("SELECT status FROM findings WHERE finding_id=?", (heir,)).fetchone()[0] == "open"
+    # the line takes it: the send settles the fax by its key and records Sent for the id it reserved under
+    actions.apply_fax(c, {"fax_key": "out:fake:5", "provider_id": "F5", "status": "queued"})
+    assert actions.apply_status(c, old, "appealed", "Faxed to Anthem / BCBS at (800) 555-0142 (fax F5, 6 pages).", actor="biller")
+    c.commit()
+    assert c.execute("SELECT status FROM findings WHERE finding_id=?", (heir,)).fetchone()[0] == "appealed"
+    assert [(d["finding_id"], d["action"]) for d in fax.followups(c, today=_later())] == [(heir, "second_request")]
+    Detector(s, run_id="r3").run()           # a later run with nothing new keeps it all on the heir
+    assert c.execute("SELECT finding_id FROM faxes WHERE fax_key='out:fake:5'").fetchone()[0] == heir
+    assert c.execute("SELECT status FROM findings WHERE finding_id=?", (heir,)).fetchone()[0] == "appealed"
+
+
+def test_the_heir_of_an_item_being_faxed_waits_for_the_fax_too(tmp_path, monkeypatch):
+    """Review mr-4 on the server's pages: while the fax is going out, the heir's panel shows it, and a second Appeal by fax
+    on the heir, or a person's status change, waits for it (409 in_flight), as on the item it was pressed on."""
+    from remitwatch import actions
+    from remitwatch.detect import Detector
+    s = _downcode_store(tmp_path, "file")
+    c = s.conn
+    old = _first_downcode(c)
+    line_key = c.execute("SELECT line_key FROM findings WHERE finding_id=?", (old,)).fetchone()[0]
+    actions.apply_payer_fax(c, {"payer_group": "Anthem / BCBS", "number": "8005550142", "actor": "owner", "at": "2026-09-01T00:00:00+00:00"})
+    actions.apply_fax(c, _reserved(old))
+    c.commit()
+    _claim_files_arrive(s)
+    Detector(s, run_id="r2").run()
+    heir = c.execute("SELECT finding_id FROM findings WHERE line_key=? AND COALESCE(stale,0)=0", (line_key,)).fetchone()[0]
+    s.close()
+    client, line, _api = _site(tmp_path, monkeypatch, str(tmp_path / "s.sqlite"))
+    d = client.get(f"/api/findings/{heir}").json()
+    assert [x["direction"] for x in d["faxes"]] == ["out"], "the heir's panel shows no fax"
+    r = client.post("/api/appeals/send", json={"finding_id": heir, "stale_ok": True}, headers=XHR)
+    assert r.status_code == 409 and r.json()["code"] == "in_flight", r.json()
+    r = client.post(f"/api/findings/{heir}/status", json={"status": "dismissed", "notes": "not worth it", "seen_status": "open"}, headers=XHR)
+    assert r.status_code == 409 and r.json()["code"] == "in_flight", r.json()
+    assert line.sent == {}
+
+
+def test_serverless_an_appeal_being_faxed_follows_its_heir(tmp_path, monkeypatch):
+    """The same on the serverless host: the send's reservation is journaled and folded in by the run that gives the money a
+    new id; then the line takes the fax. Its update and the Sent journaled for the old id reach the heir in the next run,
+    nothing waits in the journal, and the dashboard's copy shows the heir Sent with its fax, chased by the follow-ups."""
+    from datetime import datetime, timezone
+
+    from remitwatch import fax
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    _write_remits(root / "Trizetto Data", _downcode_claims(), "d", 900)
+    assert "error" not in _cycle(state, client)
+    store, _ = cloud.load_raw(state)
+    old = _first_downcode(store.conn)
+    line_key = store.conn.execute("SELECT line_key FROM findings WHERE finding_id=?", (old,)).fetchone()[0]
+    _claim_files_arrive(store)
+    cloud.save_raw(state, store)
+    store.close()
+    cloud.record_action(state, {"kind": "fax", "record": _reserved(old)})
+    assert "error" not in _cycle(state, client, force_detect=True)      # folds the reservation, then gives the money a new id
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    cloud.record_action(state, {"kind": "fax", "record": {"fax_key": "out:fake:5", "provider_id": "F5", "status": "queued", "updated_at": now}})
+    cloud.record_action(state, {"kind": "status", "finding_id": old, "status": "appealed", "notes": "Faxed (fax F5)", "actor": "biller", "seen": "open"})
+    out = _cycle(state, client)
+    assert "error" not in out and not out.get("actions_waiting"), out
+    serving = _serving(state, tmp_path)
+    heir = serving.execute("SELECT finding_id FROM findings WHERE line_key=? AND COALESCE(stale,0)=0", (line_key,)).fetchone()[0]
+    assert heir != old
+    assert serving.execute("SELECT status FROM findings WHERE finding_id=?", (heir,)).fetchone()[0] == "appealed"
+    assert [tuple(r) for r in serving.execute("SELECT finding_id, provider_id FROM faxes WHERE fax_key='out:fake:5'")] == [(heir, "F5")]
+    assert [(d["finding_id"], d["action"]) for d in fax.followups(serving, today=_later())] == [(heir, "second_request")]
+    serving.close()
+
+
+def test_an_appeal_being_prepared_when_its_item_gets_a_new_id_gives_it_an_heir(tmp_path):
+    """Review mr-4: on a server, an appeal being prepared (the note looked up and reviewed: api._prep_take's marker in the
+    store) is work on the item too. When a run gives the money a new id meanwhile, the send stops at its last check (the
+    item it was pressed on is gone), and what was written for the old id meanwhile (the note check) follows the heir."""
+    from remitwatch import actions
+    from remitwatch.api import PREP_KEY
+    from remitwatch.detect import Detector
+    s = _downcode_store(tmp_path, "file")
+    c = s.conn
+    old = _first_downcode(c)
+    c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (PREP_KEY + old, json.dumps({"token": "t1", "at": "2026-11-20T15:00:00+00:00"})))
+    c.commit()
+    _claim_files_arrive(s)
+    Detector(s, run_id="r2").run()
+    pair = c.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (old,)).fetchone()
+    assert pair, "no heir was recorded for an item whose appeal was being prepared"
+    assert actions.apply_event(c, {"finding_id": old, "event": "note_check", "note": "The biller opened the note.", "actor": "biller",
+                                   "at": "2026-11-20T15:00:05+00:00"})
+    assert c.execute("SELECT COUNT(*) FROM finding_events WHERE finding_id=? AND kind='note_check'", (pair[0],)).fetchone()[0] == 1

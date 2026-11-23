@@ -2952,10 +2952,18 @@ class Detector:
             return any(e[0] > after and e[3] in ("1", "19") for code in codes for e in
                        (self.paid_events.get((bill, code, f.get("service_date")), []) if f.get("service_date") else self.paid_by_code.get((bill, code), [])))
         label = {"open": "open", "in_progress": "in progress", "appealed": "appealed", "lost": "lost", "dismissed": "dismissed"}
+        # A fax sent or going out for an item, or an appeal being prepared for it (on a server, the marker api._prep_take keeps
+        # in meta under api.PREP_KEY), is work on it, though the item stays To do until the line takes the fax: when its money
+        # gets a new id meanwhile, the fax follows the heir (carry_to_heirs) and so does the send's Sent (actions.heir_of).
+        have_tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        faxed = {r[0] for r in c.execute("SELECT DISTINCT finding_id FROM faxes WHERE direction='out' AND finding_id IS NOT NULL")} \
+            if "faxes" in have_tables else set()
+        if "meta" in have_tables:
+            faxed |= {r[0][len("fax:prep:"):] for r in c.execute("SELECT key FROM meta WHERE key LIKE 'fax:prep:%'")}
 
         def worked(r: dict) -> bool:        # a person recorded something on this finding
             return bool(r.get("notes") or r.get("appealed_at")) or r["status"] in MANUAL_STATUSES or r["status"] == "dismissed" \
-                or (r["status"] == "resolved" and not r.get("auto_note")) or r["finding_id"] in overridden
+                or (r["status"] == "resolved" and not r.get("auto_note")) or r["finding_id"] in overridden or r["finding_id"] in faxed
 
         # when new information changes a line's signal (and so its id), the work recorded on the old finding follows the line
         orphans: dict[tuple, dict] = {}
