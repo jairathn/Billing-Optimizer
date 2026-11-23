@@ -240,6 +240,16 @@ def _add_days(iso: str | None, days: int) -> str | None:
         return None
 
 
+def real_day(d) -> str | None:
+    """A stored date (YYYY-MM-DD) when it is a day on the calendar, else None. The store keeps a date as the file wrote it,
+    and a remittance can carry one no calendar has (BPR16 20260931, or 20270229): it says nothing of how far a feed reaches."""
+    try:
+        date.fromisoformat(str(d)[:10])
+    except (TypeError, ValueError):
+        return None
+    return str(d)[:10]
+
+
 FEED_WINDOW_DAYS = 120          # the remittance lines that weigh each payer group's say in feed_date
 FEED_META = "feed:date"         # the feed date the last analysis used, for a copy that does not hold every line (Vercel's)
 # A hole in the feed: more than FEED_GAP_DAYS in a row with no remittance from any payer, followed by newer ones (weeks a
@@ -257,7 +267,7 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
     file from one payer (a small one, an adjustment, a file dated in the future) moves it only when that payer carries half
     the volume. Nor does the newest week put in after weeks that are missing: when no payer paid for more than
     FEED_GAP_DAYS in a row, the feed reaches only the last day before that hole. With fewer than three payer groups it is
-    the newest date, clamped to today. None with no remittances."""
+    the newest date, clamped to today. A payment date no calendar has is skipped (real_day). None with no remittances."""
     today = today or datetime.now(timezone.utc).date().isoformat()
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "transactions" not in tables:
@@ -265,9 +275,15 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
     last: dict[str, str] = {}
     for name, d in conn.execute("""SELECT payer_name, MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0
                                    AND payment_date IS NOT NULL GROUP BY 1""").fetchall():
+        if not real_day(d):     # a newest date no calendar has: the payer's newest real one before it
+            d = next((x for (x,) in conn.execute("""SELECT DISTINCT payment_date FROM transactions WHERE payer_name IS ?
+                                                     AND COALESCE(superseded,0)=0 AND payment_date < ? ORDER BY 1 DESC""", (name, d))
+                      if real_day(x)), None)
+            if not d:
+                continue
         d = min(str(d)[:10], today)
         g = normalize_payer(name)[0]
-        if d and d > last.get(g, ""):
+        if d > last.get(g, ""):
             last[g] = d
     if not last:
         return None
@@ -288,9 +304,9 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
             reach = last[g]
             break
     # a hole: the feed reaches only the last day before the first one in the window
-    days = sorted({min(str(d)[:10], today) for (d,) in conn.execute(
+    days = sorted({min(x, today) for x in (real_day(d) for (d,) in conn.execute(
         """SELECT DISTINCT payment_date FROM transactions WHERE COALESCE(superseded,0)=0 AND payment_date IS NOT NULL
-           AND payment_date > ?""", (_add_days(newest, -FEED_WINDOW_DAYS),))})
+           AND payment_date > ?""", (_add_days(newest, -FEED_WINDOW_DAYS),))) if x})
     if len(days) >= FEED_GAP_MIN_DAYS:
         for a, b in zip(days, days[1:]):
             if (date.fromisoformat(b) - date.fromisoformat(a)).days > FEED_GAP_DAYS:

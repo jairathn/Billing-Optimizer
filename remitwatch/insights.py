@@ -222,10 +222,16 @@ def _meta(conn: sqlite3.Connection, key: str):
 
 
 def newest_payment(conn: sqlite3.Connection) -> str | None:
+    """The newest payment date in the store that is a day on the calendar: one no calendar has (BPR16 20270229, kept as
+    the file wrote it) is skipped for the real one before it."""
     if "transactions" not in _tables(conn):
         return None
-    r = conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
-    return r[0] if r and r[0] else None
+    from .detect import real_day
+    for (d,) in conn.execute("""SELECT DISTINCT payment_date FROM transactions WHERE COALESCE(superseded,0)=0
+                                AND payment_date IS NOT NULL ORDER BY 1 DESC"""):
+        if real_day(d):
+            return d
+    return None
 
 
 def work(conn: sqlite3.Connection, today: str) -> dict:

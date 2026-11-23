@@ -3328,10 +3328,11 @@ STALE_APPEAL_DAYS = int(os.environ.get("REMITWATCH_STALE_APPEAL_DAYS", "14"))
 def _feed_day() -> str | None:
     """The day the remittance feed reaches for most payers (detect.feed_date): worked out from the store on a server. A
     serverless host's copy holds only the lines behind items, so it reads the date the last analysis worked out on the
-    full store, else the newest payment, never after today."""
+    full store, else the newest payment that is a day on the calendar, never after today."""
     if not has_table("transactions"):
         return None
-    from .detect import FEED_META, feed_date
+    from .detect import FEED_META, feed_date, real_day
+    from .insights import newest_payment
     today = _day(0)                         # never after today where the practice is (a future-dated file counts as today)
     conn = db()
     try:
@@ -3343,8 +3344,8 @@ def _feed_day() -> str | None:
             d = json.loads(r[0]).get("date") if r else None
         except (TypeError, ValueError, AttributeError):
             d = None
-        if not d:
-            d = conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+        if not real_day(d):         # no analysis saved it (or saved a day no calendar has, before this check)
+            d = newest_payment(conn)
         return min(str(d)[:10], today) if d else None
     finally:
         conn.close()
