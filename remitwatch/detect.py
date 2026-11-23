@@ -421,6 +421,18 @@ SECOND_RATE_MIN_LINES = 5        # a lower amount the payer allowed this often f
 STATE_NAMES = {"KY": "Kentucky", "IN": "Indiana"}
 
 
+def _service_keys(item: dict, evidence: dict, code: str | None, dos: str | None) -> list[tuple]:
+    """The services (code, date) a recovery is counted against: a line item's own code and date; a whole claim's item every
+    code and date it lists as unpaid (its codes on its date when it lists none)."""
+    if item.get("line_key"):
+        return [(code, dos)]
+    ev = evidence if isinstance(evidence, dict) else {}
+    pairs = [(p[0], p[1] or dos) for p in ev.get("unpaid") or [] if isinstance(p, (list, tuple)) and len(p) == 2 and p[0]]
+    if not pairs:
+        pairs = [(c, dos) for c in ev.get("codes") or [] if c]
+    return sorted(set(pairs)) or [(code, dos)]
+
+
 def patient_keys(pid: str | None, last: str | None, first: str | None) -> tuple[str | None, str | None]:
     """(same person, same name). The first needs the member number AND the name, the rule the dashboard uses for "this
     patient": one member number often covers a family, and two people can share a name. The second, the name alone,
@@ -1364,12 +1376,16 @@ class Detector:
         if not short or short <= 0:
             f["expected_cents"] = f["shortfall_cents"] = short = paid
             ev["basis"] = "amount paid later (no baseline for this code)"
-        # one payment of one line: a later claim paying two of the claim's lines brings two recoveries, never one
-        used = used or (paid_date, detail.get("trace"), detail.get("claim"), f.get("procedure_code"), f.get("service_date"))
-        f["recovered_cents"], f["recovered_date"] = (0 if used in self.used_payments else min(paid, short)), paid_date
-        if used in self.used_payments:
+        # one payment of one line: a later claim paying two of the claim's lines brings two recoveries, never one; a whole
+        # claim's item names every code and date it lists, so a line item already closed by the same payment is not counted
+        # again on it
+        keys = [used] if used else [(paid_date, detail.get("trace"), detail.get("claim"), c, d)
+                                    for c, d in _service_keys(f, ev, f.get("procedure_code"), f.get("service_date"))]
+        seen = any(k in self.used_payments for k in keys)
+        f["recovered_cents"], f["recovered_date"] = (0 if seen else min(paid, short)), paid_date
+        if seen:
             detail = dict(detail, recovery_counted_elsewhere=True)
-        self.used_payments.add(used)
+        self.used_payments.update(keys)
         ev["paid_later"] = detail
         f["evidence"] = json.dumps(ev, default=str)
         f["auto_status"], f["auto_notes"] = "resolved", note
@@ -1725,12 +1741,14 @@ class Detector:
                 expected = shortfall = resolved_by[2] or 0
                 evidence = dict(evidence, basis="amount paid on the later remittance (no baseline for this code)")
             recovered = min(resolved_by[2] or 0, shortfall)
-            # one payment of one line (its code and date): a later claim paying two lines is two recoveries
-            used = (resolved_by[0], resolved_by[1], resolved_by[4] if len(resolved_by) > 4 else None, code, dos)
-            if used in self.used_payments:
+            # one payment of one line (its code and date): a later claim paying two lines is two recoveries; a whole claim's
+            # item names every code and date it lists, so a line item the same payment closed is not counted again on it
+            keys = [(resolved_by[0], resolved_by[1], resolved_by[4] if len(resolved_by) > 4 else None, c, d)
+                    for c, d in _service_keys(base, evidence, code, dos)]
+            if any(k in self.used_payments for k in keys):
                 recovered = 0           # this payment is already counted as recovered on another finding
                 evidence = dict(evidence, recovery_counted_elsewhere=True)
-            self.used_payments.add(used)
+            self.used_payments.update(keys)
         self.findings[fid] = {
             "billed_code": billed, "code_pair": pair, "level_drop": level_drop,
             "pos": base.get("pos") or base.get("facility_type_code"), "pos_class": base.get("pos_class") or pos_class(base.get("facility_type_code")),

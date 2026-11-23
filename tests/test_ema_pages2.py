@@ -1116,7 +1116,7 @@ def page_run(worlds, tmp_path, monkeypatch):
         answers["/api/ema/policy/items?"] = c.get("/api/ema/policy/items", params={"pattern": answers["/api/ema/policy"]["patterns"][1]["pattern"]}).json()
         answers["/api/ema/policy"] = answers["/api/ema/policy"]
         # the two lists the Data tab opens (the payments to post, the credits to refund), as the real route answers them
-        for key, item in d["items"].items():
+        for key, item in (d.get("items") or {}).items():
             answers[f"/api/findings?|signal={item['go']['signal']}"] = c.get("/api/findings", params=dict(item["go"], live=1, limit=25)).json()
         answers.update(extra or {})
         f = tmp_path / "answers.json"
@@ -1688,7 +1688,7 @@ def test_the_policy_page_shows_what_waits_for_the_owners_decision(page_run):
     pressed = {(b[0], b[1]): b[2] for b in out["policy_buttons"]}
     assert [pressed[(i, d)] for i in ("0", "1") for d in ("pursue", "accept")] == ["false"] * 4
     assert h.count("Waits for your decision") == 2 and "out of Work now until then" in h
-    assert "1 code a payer almost never pays wait for your decision" in h.replace("waits", "wait")
+    assert "1 code a payer almost never pays waits for your decision" in h
     assert "written off, in no total" in h and "0 of 21 lines" in h and 'class="polItems" data-i="0"' not in h
     assert "1 write-off pattern worth $6,300 (est.) waits for the owner's decision" in out["today_html"]
 

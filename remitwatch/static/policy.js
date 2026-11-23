@@ -37,7 +37,7 @@ function polWho(p){ return `${p.payer_group}, ${p.code ? p.code + (p.modifier ? 
 function polTotalsHtml(t, pats){
   const tot = t.totals || {}, dc = tot.decide || {}, c7 = tot.contractual || {};
   return `<b>${esc(pl(pats.length, 'pattern'))}</b> · <span title="Estimate: the shortfall against the payer's usual rate">${money(tot.cents)} written off in all (est.)</span> · <b>${money(tot.appealable_cents)}</b> still appealable (${esc(pl(tot.appealable, 'item'))})${tot.legal_only_cents ? `, of it ${money(tot.legal_only_cents)} only inside the payer's own limit` : ''} · ${esc(pl(tot.accepted||0, 'pattern'))} accepted`
-    + (dc.patterns ? ` · <b class="sev-medium">${esc(pl(dc.patterns, 'code'))} a payer almost never pays wait for your decision</b> (${esc(pl(dc.items, 'denial'))}, ${money(dc.cents)} est.)` : '')
+    + (dc.patterns ? ` · <b class="sev-medium">${esc(pl(dc.patterns, 'code'))} a payer almost never pays ${dc.patterns === 1 ? 'waits' : 'wait'} for your decision</b> (${esc(pl(dc.items, 'denial'))}, ${money(dc.cents)} est.)` : '')
     + (c7.patterns ? ` · ${esc(pl(c7.patterns, 'reason'))} EMA posts as contractual, ${money(c7.written_off_cents)} written off that way (in no total)` : '');
 }
 
