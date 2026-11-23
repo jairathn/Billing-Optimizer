@@ -1231,7 +1231,7 @@ def run(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: d
     only measures what it would do. `deadline` (time.time()) stops it between batches; what is left waits for the next
     run. Idempotent: a second run with nothing new archives nothing. On a serverless host the run's temporary tables stay
     in memory (temp_store=MEMORY while it runs): its temporary folder is small and shared."""
-    old = _temp_store(conn, "MEMORY") if (mode or ("serverless" if serverless(env) else "server")) == "serverless" else None
+    old = None
     try:
         return _run(conn, horizon=horizon, budget_state=budget_state, sink=sink, run_id=run_id, today=today, mode=mode,
                     deadline=deadline, env=env, floor=floor, require_frozen=require_frozen, max_bills=max_bills,
@@ -2683,7 +2683,7 @@ def compact(conn: sqlite3.Connection, *, min_free_share: float = COMPACT_FREE_SH
     t0 = time.time()
     try:
         conn.commit()
-        old = None
+        old = _temp_store(conn, "MEMORY")
         try:
             conn.execute("VACUUM")
         finally:
