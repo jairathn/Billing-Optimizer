@@ -29,10 +29,10 @@ for fid, s, amt, us in sel:
         add("signal", "missing", amt); continue
     add("signal", r[1], amt); add("work_state", r[2], amt); add("block", r[3] or "-", amt)
     h = (r[4] or "-")
-    h = re.sub(r"[0-9$.,/]+", "#", h)[:40]
+    h = re.sub(r"[0-9$.,/]+", "#", h)  # every digit masked[:40]
     add("hint", h, amt); add("ema_status", (r[5] or "-")[:30], amt); add("ema_outcome", (r[7] or "-")[:30], amt)
     add("payer_group", r[8] or "-", amt); add("has_link", "link" if r[9] else "no_link", amt)
-    add("basis", re.sub(r"[0-9$.,/-]+", "#", (r[10] or "-"))[:50], amt)
+    add("basis", re.sub(r"[0-9$.,/-]+", "#", (r[10] or "-"))[:50], amt)  # every digit masked
     add("how", ",".join(sorted({(u[2] or "-") for u in us})), amt)
     add("a16_status", ",".join(sorted({(u[4] or "-")[:20] for u in us})), amt)
     add("carc", r[13] or "-", amt); add("source", r[14] or "-", amt)

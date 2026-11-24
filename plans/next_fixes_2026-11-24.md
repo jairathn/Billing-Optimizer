@@ -34,7 +34,24 @@ The probes are `plans/tools/a16/residual_probe.py` and `offfeed_probe.py`. Run t
   REJECTED_PRE_PAYER item on the same EMA claim still lists it. But a claim must be answered only by an answer for its
   own component: 26, TC, or the global covering both (T-C1).
 
+- **A bare $0 row is not an answer (independent hand-trace, 16:55 UTC; 1 of the 76 dropped claims).** The answered
+  rule took a $0 row on a batch check as a payer's $0 answer. The row had no CARC, no allowed amount and no adjustment,
+  and nothing went to the patient. EMA still showed the claim pending with its whole charge open 60 days later, and no
+  item lists it. A $0 answer must carry a reason, an allowed amount or an adjustment.
+- Claims the 837 pass will list only at their due day (sent days ago) are on no list meanwhile. Consider a waiting view
+  that shows them with the due day (blindness is loud).
+
 ## 3. Amounts (after fix4 is merged; its leftovers join this list)
+- **The underpayment threshold (fix4 against A16; to decide by hand-tracing).** fix4 requires a 60% share and backing (20
+  lines, or a clear majority). A16 calls a 50% or larger mode firm. Measured on the four merged fixers (f773a10): 151
+  underpayment items ($9,400) that A16 calls owed are no longer listed:
+  - by payer: UMR 54, UnitedHealthcare 26, Anthem 23, Humana MA 22, UHC MA 20, others 6;
+  - money left on the table, short below the rate: 104 services ($5,908) became 188 ($12,810);
+  - in the same change, 201 items A16 calls not short ($9,081) rightly left the list.
+
+  A stratified sample of 31 is in the private folder (`verify_under/`) for a hand-trace against each payer's own payment
+  history: the same plan, year, place and provider type.
+
 - A claim item is sized without its units (example: $98 where the units say $196).
 - A claim sent to a payer as its secondary is priced at that payer's full rate: the 837's SBR01 and the claim filing
   indicator are not read.

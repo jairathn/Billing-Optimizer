@@ -15,7 +15,7 @@ for fid, s, amt, keys, verdict, vsub in c.execute("select finding_id, signal, it
     us = [u for k in json.loads(keys) for u in units.get(tuple(k.split("|")), [])]
     if any(u[0] == "PAID" and (u[1] or "") == "ema_paid_off_feed" for u in us): continue
     r = w.execute("select signal, work_state, appeal_block, state_basis, payer_group, carc from findings where finding_id=?", (fid,)).fetchone()
-    basis = re.sub(r"\$[0-9,.]+", "$#", r[3] or "-")
+    basis = re.sub(r"\$[0-9,.]+", "$#", re.sub(r"\d{5,}", "#####", r[3] or "-"))
     basis = re.sub(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? ?\d{0,4}", "<day>", basis)
     basis = re.sub(r"\d{4}-\d{2}-\d{2}", "<day>", basis)[:70]
     k = (verdict, (vsub or "-")[:34], r[0][:24], r[2] or "-", basis)

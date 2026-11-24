@@ -20,7 +20,7 @@ for fid in set(A) | set(B):
     r = w.execute("select signal, work_state, state_basis from findings where finding_id=?", (fid,)).fetchone()
     sig = r[0] if r else (b[5] if b else a[5])
     st = r[1] if r else "gone"
-    basis = re.sub(r"\$[0-9,.]+", "$#", (r[2] if r else "") or "-")
+    basis = re.sub(r"\$[0-9,.]+", "$#", re.sub(r"\d{5,}", "#####", (r[2] if r else "") or "-"))
     basis = re.sub(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? ?\d{0,4}", "<day>", basis)
     basis = re.sub(r"\d{4}-\d{2}-\d{2}", "<day>", basis)[:60]
     k = ("off" if la else "on", va, vb, sig[:22], st, basis)
