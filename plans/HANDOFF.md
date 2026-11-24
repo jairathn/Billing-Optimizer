@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 08:15 UTC.
+Last updated: 2026-11-24, 08:35 UTC.
 
 ## 1. Where things are
 
@@ -118,6 +118,17 @@ Last updated: 2026-11-24, 08:15 UTC.
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
    4. Iterate (fix, audit, trace every disagreement by hand) until the auditor and the hand traces find no failure; then
       the release gates (four environments, node checks, catch-up on a fresh live copy, privacy scan) and release.
+      Docs: push 2's modules, page scripts, the `ema-reports` command and nine settings are now in the README and both
+      runbooks (merge fadf79b; tests/test_docs.py passes). Still stale, to fix before release: docs/OPERATIONS.md (around
+      its lines 48, 357, 364) says A/R and Production reports are not read or are refused and that uploads are a
+      server's only; the README's "What you get" table has nothing of push 2 and its "Upload from EMA" row says three
+      exports, server only; the runbook's Backups section lacks the posting ledger's daily copy and its restore;
+      .env.example lacks REMITWATCH_EMA_STRICT and REMITWATCH_EMA_STALE_DAYS; six settings read through helpers are named
+      in neither runbook (REMITWATCH_RETENTION_MONTHS, _MEMORY_BUDGET_MB, _ARCHIVE_DIR, _TODAY, _CYCLE_BUDGET_SECONDS,
+      _AUDIT_WASTED_ITEMS). CLAUDE.md overstates the wiring: nothing the app runs imports selfcheck.py or diagnose.py,
+      the cycle never calls runlog.start_run, and repair is used only by runlog's panel code and diagnose (push 2's units
+      G and H are built, not wired: its HOOK unit). A held ledger retention cannot be released on Vercel (only the
+      server's `ema-reports --retain-force`).
    5. Full visibility (837 to 835 to EMA posting to open balance, per charge, reconciled to the cent), built on the merged
       code with the 837 as a first-class source.
    Started 2026-11-24 04:35 UTC: the audit's private foundations (a private EMA-ledger world from the four A/R and
