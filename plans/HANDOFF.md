@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, about 04:00 UTC.
+Last updated: 2026-11-24, about 05:00 UTC.
 
 ## 1. Where things are
 
@@ -50,11 +50,15 @@ Last updated: 2026-11-24, about 04:00 UTC.
 
 1. Round-1 review fixes: all merged here (mr-1, mr-2, mr-3, mr-4 in-flight case, mr-5, mr-7, mr-8, mr-9, mr-10, mr-11,
    mr-12), each with failing-first tests (tests/test_feed_and_day.py, tests/test_notes_bodies_cli.py and others).
-2. Round 2: merged here: CH-1, CH-2, CH-3, CH-4, CH-6, CH-10, CH-14. Still running (local branch fix3/money-falls-off from
-   1515ae5, one fixer): T-C1 (a TC payment closing a 26 denial), T-C2 (a claim answered only by a secondary vanishes), T-N5
-   (items from answers to voided claims), CH-8 (one payer stopping turns its paid claims into never-answered items). If
-   that branch is gone, redo them from section 4 and the trace file, or ship without them (they also belong to step 5).
-   Every fix: a failing test with invented data first, both store kinds, break and restore.
+2. Round 2: all merged here: CH-1, CH-2, CH-3, CH-4, CH-6, CH-10, CH-14, and the money fixes T-C1 (a payment for one part
+   of a service, 26 or TC, closes only that part), T-C2 (a claim answered only by a secondary stays listed until its
+   primary's remittance is in), T-N5 (no item from an answer to a voided claim), CH-8 (a payer whose remittances stopped
+   has its claims counted on the Data tab, not listed as never answered).
+   Final checks on e0021cf: the suite in the four environments (1,234 passed in each of 3.13, newest libraries and
+   3.12; 3.11.1 only the allowed serialize failures) and both node checks; the catch-up again on a fresh copy of the live
+   store: every item that moved against the first run is explained (20 items on voided claims gone, $1,157.50; the 2
+   split-service closures reopened plus 2 TC denials a 26 payment had closed and 1 claim denial; 30 never-answered items
+   whose bill only a secondary answered, the primary's remittance missing and EMA showing payment pending, hand-checked).
 3. Run the four environments and the node checks (`plans/tools/four_envs.sh`), and the catch-up harness on a fresh copy of
    the live store (`plans/tools/catchup.py`). Every item that closes or leaves must be explained by a payment, a newer copy
    of its remittance, or an heir.
