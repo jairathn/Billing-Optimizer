@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 08:10 UTC.
+Last updated: 2026-11-24, 08:15 UTC.
 
 ## 1. Where things are
 
@@ -103,9 +103,19 @@ Last updated: 2026-11-24, 08:10 UTC.
       From now on this branch carries push 2 + the release; `main` stays at the release for hotfixes (a hotfix goes on a
       local branch off `main`, reviewed, then pushed to `main`).
    2. Auditor pass 2 (rules A16): the 13 fixes in `plans/audit_calibration_2026-11-24.md` section 3, EMA's Production
-      postings and A/R notes first; re-check by hand; then score the merged code.
-   3. Push 2's remaining needs (`plans/push2_eval_2026-11-24.md` section 2): no default "accept" in the payer-policy fold;
-      wire the archive-rule hooks; the shared failure kinds, each with a failing test from invented data; serverless memory.
+      postings and A/R notes first; re-check by hand; then score the merged code. **Running (08:00 UTC)** as a background
+      agent in the session's private audit folder (`claim_audit_a16.py`, outputs `a16/`, notes `a16_notes.md`). The merged
+      code scored by A15 is in `plans/push2_eval_2026-11-24.md` section 4.
+   3. Push 2's remaining needs (`plans/push2_eval_2026-11-24.md` section 2): done: no default "accept" (pursue until the
+      owner accepts, decisions 14 and 16) and the archive-rule hooks wired. Left: the shared failure kinds, each with a
+      failing test from invented data, and serverless memory. **Running (08:15 UTC)** as two background agents, each in
+      its own git worktree from 389c267, committing on local branches for the integrator to merge: (a) settled elsewhere
+      (T-C3/T-N3 a coordination denial the same payer settled as secondary, T-N6 processed to the patient on the same
+      bill, T-N8 CO-151 M86), (b) money accounting (T-I1 PLB references that embed the claim id, T-I5 a reversal of a
+      version not on file, T-C5/T-C6 recovered dollars and the closure's remittance). Each measures on its own private
+      copy of the world and hand-traces samples. Next after them: the 837 as a source of sends and the never-answered
+      pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
+      (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
    4. Iterate (fix, audit, trace every disagreement by hand) until the auditor and the hand traces find no failure; then
       the release gates (four environments, node checks, catch-up on a fresh live copy, privacy scan) and release.
    5. Full visibility (837 to 835 to EMA posting to open balance, per charge, reconciled to the cent), built on the merged
