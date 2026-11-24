@@ -1,6 +1,7 @@
 """
 Round 2 of the fixes, the money that falls off the list (plans/catchup_trace_2026-11-23.md and the misuse check):
-T-C1, a payment for the technical part (TC) of a service closed the denial of its professional part (26).
+T-C1, a payment for the technical part (TC) of a service closed the denial of its professional part (26); T-C2, a claim
+no primary payer answered left the never-answered list when only a secondary payer answered it.
 
 Every claim, member number, name, amount and date here is invented (tests/test_remitwatch.remit, tests/test_features.svc).
 Each test runs on the server's store file and on the compact in-memory store the serverless cycle builds and analyses.
@@ -96,4 +97,77 @@ def test_a_payment_for_one_part_of_a_service_closes_only_that_part(tmp_path, kin
     print("whole service denied, 26 and TC paid:", rows["CB0000303C017"]["status"], rows["CB0000303C017"]["auto_note"])
     assert rows["CB0000303C017"]["status"] == "resolved" and "under claim CB0000703C017" in rows["CB0000303C017"]["auto_note"]
     assert rows["CB0000300C017"]["status"] == "open" and rows["CB0000304C017"]["status"] == "open"
+    s.close()
+
+
+# --------------------------------------------------------------------------- T-C2: only a secondary payer answered
+
+def _secondary(claim_id: str, paid: str = "23.52", dos: str = "20260914") -> str:
+    """A secondary payer's answer to a claim (CLP02 2, processed as secondary): OA-23 for what the primary did, and its share."""
+    return (f"CLP*{claim_id}*2*223.65*{paid}*0.00*12*SEC{claim_id[4:9]}*11~NM1*QC*1*SAMPLE*PAT****MI*M00000777~"
+            f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*{dos}~"
+            + svc("99214", "223.65", paid, "117.60", f"CAS*OA*23*{223.65 - float(paid):.2f}~", dos=dos))
+
+
+def _primary(claim_id: str, dos: str = "20260914") -> str:
+    """The claim's primary payer processed it and paid (CLP02 1)."""
+    return (f"CLP*{claim_id}*1*223.65*117.60*0.00*12*PRI{claim_id[4:9]}*11~NM1*QC*1*SAMPLE*PAT****MI*M00000778~"
+            f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*{dos}~" + svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos=dos))
+
+
+def _visits(n: int = 25) -> list[str]:
+    """Anthem paying 99214 at $117.60 on other claims: its usual rate, and remittances that reach the day they are dated."""
+    from tests.test_features import claim
+    return [claim(i, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~")) for i in range(1, n + 1)]
+
+
+def _chased(s: Store, run: str) -> dict[str, dict]:
+    Detector(s, run_id=run).run()
+    return {r["patient_control_number"]: dict(r) for r in s.query(
+        "SELECT * FROM findings WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') AND COALESCE(stale,0)=0")}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_only_a_secondary_payer_answered_is_still_chased_from_its_primary(tmp_path, kind):
+    """EMA shows four claims sent in September. The remittances to November 10 hold:
+    - S01, billed to Anthem: only Humana's answer, processed as secondary (CLP02 2, OA-23), $23.52, its share. Anthem's
+      remittance is not on file: the claim stays listed, sized at Anthem's usual $117.60 less the $23.52, and the item
+      says the secondary paid its share and the primary's remittance is missing (trace finding T-C2).
+    - S02, billed to Humana itself, and Humana processed it as secondary: the payer EMA billed answered. Not listed.
+    - S03: C017 sent September 1 and C024 sent again on the 20th, only Humana answered C024 as secondary. The bill is not
+      answered by its primary: C024, the latest submission, is listed (before, the answer to C024 dropped the whole bill).
+    - S04, billed to Anthem, processed by Anthem as primary (CLP02 1). Not listed."""
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    _add(s, tmp_path, [_secondary("CB0000S01C017"), _secondary("CB0000S02C017"), _secondary("CB0000S03C024")], "20261020", payer="HUMANA",
+         payer_id="HUMNA")
+    _add(s, tmp_path, [_primary("CB0000S04C017")], "20261021")
+    _add(s, tmp_path, _visits(), "20261110")
+    c = s.conn
+    ema(c, "CB0000S01C017")
+    ema(c, "CB0000S02C017", payer="Humana", payer_id="61101")
+    ema(c, "CB0000S03C017")
+    ema(c, "CB0000S03C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-01")
+    ema(c, "CB0000S03C024")
+    ema(c, "CB0000S03C024", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-20")
+    ema(c, "CB0000S04C017")
+    c.commit()
+    found = _chased(s, "t1")
+    print("listed:", sorted(found))
+    assert set(found) == {"CB0000S01C017", "CB0000S03C024"}, (
+        f"listed {sorted(found)}: S01 and S03's C024 wait for their primary's remittance; S02's own payer and S04's primary answered")
+    a = found["CB0000S01C017"]
+    print(a["title"], "|", a["hint"], "|", a["expected_cents"], a["shortfall_cents"])
+    assert a["signal"] == "NO_ANSWER" and a["payer_group"] == "Anthem / BCBS" and a["status"] == "open"
+    assert a["title"] == "Sent 2026-09-15, no answer from Anthem / BCBS in 56 days; only Humana answered, as secondary: 99214"
+    assert a["hint"].startswith("Humana processed this claim as secondary on 2026-10-20 and paid $23.52, its share. The primary's "
+                                "remittance, from Anthem / BCBS, is not on file")
+    assert (a["expected_cents"], a["shortfall_cents"]) == (11760, 11760 - 2352)
+    ev = json.loads(a["evidence"])
+    assert ev["secondary_answer"] == {"payer": "Humana", "date": "2026-10-20", "paid_cents": 2352, "processed_as": "secondary"}
+    assert "Another submission of this bill was answered" not in (found["CB0000S03C024"]["hint"] or "")
+    # Anthem's remittance for S01 arrives (processed as primary): S01 is answered and leaves the list
+    _add(s, tmp_path, [_primary("CB0000S01C017")], "20261112")
+    found = _chased(s, "t2")
+    assert set(found) == {"CB0000S03C024"}
     s.close()

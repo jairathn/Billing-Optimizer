@@ -2378,20 +2378,35 @@ class Detector:
         # longest first-filing limit, 365); and nothing sent before the remittances on file begin can be judged unanswered
         since = _add_days(newest, -(365 + NO_ANSWER_DAYS + 730 + 5))
         recent = _add_days(newest, -400) or ""
-        # answered: a remittance for the claim, or the payer's answer posted in EMA (its 835 may never have reached us)
+        # answered: a remittance in which a payer processed the claim as its primary (CLP02 1, 19, 4 or 22), or the payer's
+        # answer posted in EMA (its 835 may never have reached us). A claim that only another payer answered, processed as
+        # secondary (CLP02 2 or 3, a crossover) or otherwise, still waits for its primary's remittance (trace finding T-C2):
+        # it counts as answered only when that payer is the one EMA billed, which is known once EMA's rows are read (below).
         answered: set[str] = set()
-        bill_last: dict[str, str] = {}
-        for pcn, paid_on in c.execute("""SELECT cl.patient_control_number, MAX(t.payment_date) FROM claims cl
-                                         JOIN transactions t ON t.transaction_key = cl.transaction_key
-                                         WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IS NOT NULL GROUP BY 1"""):
-            answered.add(pcn)
+        bill_last: dict[str, str] = {}          # each bill's newest answer of any kind (a submission sent again went out after it)
+        bill_answered: dict[str, str] = {}      # each bill's newest answer that counts
+        for pcn, paid_on, primary in c.execute("""SELECT cl.patient_control_number, MAX(t.payment_date), MAX(cl.claim_status_code IN ('1','19','4','22'))
+                                                  FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
+                                                  WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IS NOT NULL GROUP BY 1"""):
             b = bill_of(pcn)
             bill_last[b] = max(bill_last.get(b, ""), paid_on or "")
+            if primary:
+                answered.add(pcn)
+                bill_answered[b] = max(bill_answered.get(b, ""), paid_on or "")
+        second: dict[str, list[tuple]] = defaultdict(list)     # claim id -> the other payers' answers: (date, payer group, paid, CLP02)
+        for pcn, st, paid_on, name, cfi, paid in c.execute(
+                """SELECT cl.patient_control_number, cl.claim_status_code, t.payment_date, t.payer_name, cl.claim_filing_indicator, cl.paid_cents
+                   FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
+                   WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IS NOT NULL
+                     AND COALESCE(cl.claim_status_code, '') NOT IN ('1','19','4','22')"""):
+            if pcn not in answered:
+                second[pcn].append((paid_on or "", payer_group_kind(name, cfi)[0], paid or 0, st or ""))
         for cid, when in c.execute("""SELECT claim_id, MAX(COALESCE(transaction_date, posted_date, '')) FROM ema_rows
                                       WHERE family='era_lines' AND claim_id IS NOT NULL GROUP BY 1"""):
             answered.add(cid)
             b = bill_of(cid)
             bill_last[b] = max(bill_last.get(b, ""), when or "")
+            bill_answered[b] = max(bill_answered.get(b, ""), when or "")
         # EMA payer names that stand for the VA's network: at least 20 rows carry a payer id, and 90 percent of those are
         # the VA's (the rule ema_reports.learn_payer_aliases uses), so a claim of that name with no id of its own is the VA's
         ids_of: dict[str, list[int]] = defaultdict(lambda: [0, 0])
@@ -2517,6 +2532,30 @@ class Detector:
             if created:
                 k["created"] = max(k["created"], created[:10])
 
+        def group_of(k: dict) -> tuple[str, str]:
+            """The payer group and kind of the payer EMA billed a claim to: the VA's network by its payer id (EMA names it after
+            the network's administrator), else what the remittances call EMA's name for it (votes), else the name's own group."""
+            ema_payer = k["payers"].most_common(1)[0][0]
+            payer_id = k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None
+            if (payer_id or "").strip().upper() in VA_PAYER_IDS or (not payer_id and " ".join(ema_payer.split()).upper() in va_names):
+                return VA_GROUP
+            return votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
+
+        # a claim only another payer answered is answered when that payer is the one EMA billed (the practice sent the claim
+        # to it); otherwise the primary's remittance is missing, and the claim is chased like any claim no payer answered
+        for cid in [x for x in claims if x in second and claims[x]["payers"]]:
+            k = claims[cid]
+            if group_of(k)[0] not in {g for _d, g, _p, _s in second[cid]}:
+                continue
+            answered.add(cid)
+            b = bill_of(cid)
+            bill_answered[b] = max([bill_answered.get(b, "")] + [d for d, _g, _p, _s in second[cid]])
+            pat = k["patients"].most_common(1)[0][0] if k["patients"] else None
+            for v in k["charges"].values():
+                if pat and v[0] and v[1] and hash((cid, v[0], v[1])) in paid_lines:
+                    paid_visits.setdefault(hash((pat, v[1], v[0])), set()).add(b)
+            del claims[cid]
+
         def went_out(k: dict) -> bool:
             """EMA shows the claim sent (a rejected claim went out and came back), not on hold, ready, voided or cancelled."""
             st = k["status"] or ""
@@ -2629,8 +2668,8 @@ class Detector:
                 continue                    # not due yet, or the remittances on file do not reach the day it was due
             cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
                           "again_after": again_after, "rejected": rejected, "unsent": unsent, "gave_up": gave_up, "status": status,
-                          "ema_payer": ema_payer,
-                          "bill_answered": bill_last.get(b) if (bill_last.get(b) or "") >= sent else None})
+                          "ema_payer": ema_payer, "group": group_of(k), "secondary": second.get(pcn) or [],
+                          "bill_answered": bill_answered.get(b) if (bill_answered.get(b) or "") >= sent else None})
         # one visit chased under two bills (a bill made again): only the newest carries it
         newest_for: dict[int, tuple] = {}
         for cd in cands:
@@ -2645,21 +2684,19 @@ class Detector:
             items = [x for x in cd["items"] if not (patient and x[1] and newest_for.get(hash((patient, x[1], x[0])), (None, b))[1] != b)]
             if not items:
                 continue                    # chased under the newer bill made for the same visit
-            self._emit_open_claim(cd, items, newest, votes, payer_last, name_last, va_names)
+            self._emit_open_claim(cd, items, newest, payer_last, name_last)
 
-    def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str, votes: dict, payer_last: dict, name_last: dict,
-                         va_names: set[str] | frozenset = frozenset()) -> None:
+    def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str, payer_last: dict, name_last: dict) -> None:
         """One claim no payer answered (run_ema_open_claims): its payer group, size, filing date and item. A claim still in
-        EMA's print batch (cd["unsent"]) was never sent: it is listed under Fix and resubmit, dated by the first-filing limit."""
+        EMA's print batch (cd["unsent"]) was never sent: it is listed under Fix and resubmit, dated by the first-filing limit.
+        A claim only another payer answered (cd["secondary"]: its answers, processed as secondary or otherwise) says so, and
+        is sized at what is left once that payer's payment is taken off."""
         k, pcn, sent, due, rejected, gave_up, status, ema_payer = (cd["k"], cd["pcn"], cd["sent"], cd["due"], cd["rejected"], cd["gave_up"],
                                                                    cd["status"], cd["ema_payer"])
         unsent = bool(cd.get("unsent"))
         days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
         payer_id = k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None
-        if (payer_id or "").strip().upper() in VA_PAYER_IDS or (not payer_id and " ".join(ema_payer.split()).upper() in va_names):
-            grp, kind = VA_GROUP            # the VA's network, though EMA names its administrator: the VA's limits apply
-        else:
-            grp, kind = votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
+        grp, kind = cd["group"]             # the VA's network by its payer id, though EMA names its administrator: the VA's limits apply
         rule = filing_rule(grp, kind)
         file_by = window_end(days[0], rule)
         # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
@@ -2692,6 +2729,18 @@ class Detector:
               "days_waiting": _days_between(sent, newest), "payer_last_remittance": last}
         if unsent:
             ev["not_sent"] = True
+        # only another payer answered (trace finding T-C2): what it paid comes off the item's size, and the item says that the
+        # primary's remittance is missing
+        sec = cd.get("secondary") or []
+        other, short = "", expected
+        if sec:
+            sec_paid, sec_on, sec_payer = sum(p for _d, _g, p, _s in sec), max(sec)[0], max(sec)[1]
+            as_second = all(s in ("2", "3", "20", "21") for _d, _g, _p, s in sec)
+            ev["secondary_answer"] = {"payer": sec_payer, "date": sec_on, "paid_cents": sec_paid, "processed_as": "secondary" if as_second
+                                      else "not as the primary payer (CLP02 " + ", ".join(sorted({s for _d, _g, _p, s in sec})) + ")"}
+            other = f"; only {sec_payer} answered, " + ("as secondary" if as_second else "not as the primary payer")
+            if expected and 0 < sec_paid < expected:
+                short = expected - sec_paid
         label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
         # sent on time: past the first-filing date the payer still owes a claim it has, and most take proof of timely filing
         # for one they have no record of (Medicare's year from the date of service is firm). Its date runs the payer's
@@ -2726,14 +2775,14 @@ class Detector:
             title = (f"In EMA's print batch, never sent to {grp}{made}: {label}" if unsent else
                      f"Rejected before reaching {grp} (EMA: {status}): {label}")
             self._emit("REJECTED_PRE_PAYER", "denial", "high" if soon else "medium", "correct_and_resubmit", title, None, expected,
-                       expected, None, None, ev, key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
+                       short, None, None, ev, key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
         else:
             said = f" (EMA: {status})" if gave_up else ""
-            title = (f"Sent again after {_add_days(sent, -1)}, no answer from {grp} yet{said}: {label}" if cd["again_after"] else
-                     f"Visit of {sent}, no answer from {grp} in {ev['days_waiting']} days, and EMA gives no date it was sent{said}: {label}"
+            title = (f"Sent again after {_add_days(sent, -1)}, no answer from {grp} yet{other}{said}: {label}" if cd["again_after"] else
+                     f"Visit of {sent}, no answer from {grp} in {ev['days_waiting']} days, and EMA gives no date it was sent{other}{said}: {label}"
                      if cd["basis"] == SENT_DOS else
-                     f"Sent {sent}, no answer from {grp} in {ev['days_waiting']} days{said}: {label}")
-            self._emit("NO_ANSWER", "denial", "high" if soon else "medium", "review", title, None, expected, expected,
+                     f"Sent {sent}, no answer from {grp} in {ev['days_waiting']} days{other}{said}: {label}")
+            self._emit("NO_ANSWER", "denial", "high" if soon else "medium", "review", title, None, expected, short,
                        None, None, ev, key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
         f = self.findings[_fid("EMA_OPEN_CLAIM", pcn)]
         f["appeal_deadline"], f["deadline_basis"] = deadline, dbasis
@@ -2742,6 +2791,12 @@ class Detector:
             f["written_off_cents"] = min(expected, owed) if expected else owed
             f["written_off_on"] = (k["status_at"][0] or "")[:10] or None
         hints = []
+        if sec:
+            hints.append((f"{sec_payer} processed this claim as secondary on {sec_on}" + (f" and paid ${sec_paid/100:,.2f}, its share" if sec_paid > 0 else ", paying nothing")
+                          if as_second else f"{sec_payer} answered this claim on {sec_on}, but not as its primary payer"
+                          + (f", and paid ${sec_paid/100:,.2f}" if sec_paid > 0 else ""))
+                         + f". The primary's remittance, from {grp}, is not on file: look it up on the payer's portal, or ask the "
+                         "payer to send it again, before sending the claim again")
         if unsent:
             hints.append("EMA shows it waiting in its print batch, with no date it was sent: print and mail it, or send it electronically")
         if cd.get("bill_answered"):
