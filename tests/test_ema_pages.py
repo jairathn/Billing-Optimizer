@@ -294,7 +294,10 @@ def test_a_status_a_person_sets_takes_the_item_off_work_now_at_once(site, status
     it; the next run's stored state takes over again."""
     before = _items(site, category=CATS, live=1, state="todo")
     fid = before["items"][0]["finding_id"]
-    r = site.c.post(f"/api/findings/{fid}/status", json={"status": status, "notes": "worked by a person"}, headers=XHR)
+    body = {"status": status, "notes": "worked by a person"}
+    if status == "resolved":
+        body["recovered_cents"] = 1000              # Paid takes the amount the payer paid (hotfix 2)
+    r = site.c.post(f"/api/findings/{fid}/status", json=body, headers=XHR)
     assert r.status_code == 200, r.text
     after = _items(site, category=CATS, live=1, state="todo")
     assert fid not in {i["finding_id"] for i in after["items"]} and after["total"] == before["total"] - 1
@@ -791,6 +794,14 @@ def _show_again(c, rule):
                                      "modifier": rule.get("modifier"), "reason": rule.get("reason"), "remove": True}, headers=XHR)
 
 
+def _hide(c, body):
+    """POST /api/hide the way the page does since hotfix 2 (H7): the preview's count, typed back to confirm."""
+    q = {k: body[k] for k in ("payer_group", "signal", "code", "modifier", "reason") if body.get(k)}
+    q.setdefault("signal", "*")
+    p = c.get("/api/hide/preview", params=q)
+    return c.post("/api/hide", json=dict(body, confirm=p.json().get("n", 0) if p.status_code == 200 else 0), headers=XHR)
+
+
 def test_the_red_number_on_a_tab_counts_the_work_closing_this_week_never_an_item_that_only_waits(server):
     """Review C1 (medium): the red number on a category tab counted every to-do item closing within 7 days whatever its
     state, so an item that only waits on the payer (its follow-up not due yet) was counted, and the list the tab opens
@@ -798,7 +809,7 @@ def test_the_red_number_on_a_tab_counts_the_work_closing_this_week_never_an_item
     conn = _store(server)
     wid, work = [r[0] for r in conn.execute("SELECT finding_id FROM findings WHERE category='denial' AND status='open' "
                                             "ORDER BY finding_id LIMIT 2")]
-    today = dt.datetime.now(dt.timezone.utc).date()                  # the window filters read SQLite's date('now')
+    today = dt.date.fromisoformat(server.api._day(0))               # the window filters count by the practice's day (api._day)
     conn.execute("UPDATE findings SET work_state='waiting', appeal_deadline=?, follow_up_on=? WHERE finding_id=?",
                  ((today + dt.timedelta(days=3)).isoformat(), (today + dt.timedelta(days=20)).isoformat(), wid))
     conn.execute("UPDATE findings SET work_state='work_now', appeal_deadline=?, follow_up_on=NULL WHERE finding_id=?",
@@ -822,7 +833,7 @@ def test_todays_step_one_counts_what_its_start_button_opens_on_both_hosts(site):
         conn = _store(site)
         wid, work = [r[0] for r in conn.execute("SELECT finding_id FROM findings WHERE category='denial' AND status='open' "
                                                 "ORDER BY finding_id LIMIT 2")]
-        today = dt.datetime.now(dt.timezone.utc).date()              # Today and the window filters read the real date
+        today = dt.date.fromisoformat(site.api._day(0))              # Today and the window filters count by the practice's day
         conn.execute("UPDATE findings SET work_state='waiting', appeal_deadline=?, follow_up_on=? WHERE finding_id=?",
                      ((today + dt.timedelta(days=3)).isoformat(), (today + dt.timedelta(days=20)).isoformat(), wid))
         conn.execute("UPDATE findings SET work_state='work_now', appeal_deadline=?, follow_up_on=NULL WHERE finding_id=?",
@@ -852,7 +863,7 @@ def test_show_again_removes_the_rule_it_lists_at_any_grain_on_both_hosts(site):
     was = {i["finding_id"]: i["status"] for i in _items(site)["items"]}
     hid = 0
     for made in ({"signal": "EMA_DENIED", "code": code, "reason": f"CO-{item['carc']}"}, {"code": code}, {"signal": "EMA_DENIED", "modifier": "none"}):
-        r = c.post("/api/hide", json=dict(made, payer_group=pg, note="never pays"), headers=XHR)
+        r = _hide(c, dict(made, payer_group=pg, note="never pays"))
         assert r.status_code == 200, (made, r.text)
         hid += r.json()["hidden"]
         rules = c.get("/api/hide").json()["rules"]
@@ -865,10 +876,10 @@ def test_show_again_removes_the_rule_it_lists_at_any_grain_on_both_hosts(site):
     # a page loaded before this release sends the payer and the reason only: the one rule in force for them goes, whatever
     # its grain; with two, it is never a guess
     old_page = lambda sig: c.post("/api/hide", json={"payer_group": pg, "signal": sig, "remove": True}, headers=XHR)   # noqa: E731
-    assert c.post("/api/hide", json={"payer_group": pg, "code": code, "note": "x"}, headers=XHR).status_code == 200
+    assert _hide(c, {"payer_group": pg, "code": code, "note": "x"}).status_code == 200
     assert old_page("*").status_code == 200 and c.get("/api/hide").json()["rules"] == []
     for made in ({"code": code}, {"reason": f"CO-{item['carc']}"}):
-        assert c.post("/api/hide", json=dict(made, payer_group=pg, note="x"), headers=XHR).status_code == 200
+        assert _hide(c, dict(made, payer_group=pg, note="x")).status_code == 200
     assert old_page("*").status_code == 409 and len(c.get("/api/hide").json()["rules"]) == 2
     assert _show_again(c, {"payer_group": pg, "signal": "DENIED_AUTH", "code": code}).status_code == 404        # gone: nothing to remove
 
@@ -904,8 +915,7 @@ def test_the_hide_page_takes_and_lists_the_finer_grain_and_refuses_a_whole_payer
     assert c.post("/api/hide", json={"payer_group": pg, "signal": "NO_ANSWER"}, headers=XHR).status_code == 400
     assert c.post("/api/hide", json={"payer_group": pg, "signal": "DENIED_AUTH", "code": "<script>"}, headers=XHR).status_code == 400
     assert c.post("/api/hide", json={"payer_group": pg, "signal": "DENIED_AUTH", "code": "00000"}, headers=XHR).status_code == 404
-    r = c.post("/api/hide", json={"payer_group": pg, "signal": "DENIED_AUTH", "code": item["procedure_code"], "reason": "CO-197", "note": "never pays"},
-               headers=XHR)
+    r = _hide(c, {"payer_group": pg, "signal": "DENIED_AUTH", "code": item["procedure_code"], "reason": "CO-197", "note": "never pays"})
     assert r.status_code == 200, r.text
     rules = c.get("/api/hide").json()["rules"]
     mine = [x for x in rules if x["code"] == item["procedure_code"]]

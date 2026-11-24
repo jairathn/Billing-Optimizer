@@ -723,8 +723,10 @@ class Detector:
         ensure_schema(self.conn)
         self.run_id = run_id or datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ")
         self.now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        # the day the run judges windows and freshness by (EMA's checks, the states): today in UTC, as the pages see it
-        self.today = (today or datetime.now(timezone.utc).date().isoformat())[:10]
+        # the day the run judges windows and freshness by (EMA's checks, the states): the practice's day, as the pages see it
+        # (runtime.practice_today: from 7 PM Eastern the UTC date is already tomorrow; review mr-8)
+        from . import runtime
+        self.today = (today or runtime.practice_today())[:10]
         # EMA's A/R and Production reports: whether the store has them, the line outcome of each item (computed once), and
         # the steps that failed (recorded, never fatal: the remittance items are still produced)
         self.ema_on = False
@@ -3992,21 +3994,25 @@ class Detector:
             self.ema_counts["CREDIT_BALANCE"] += 1
 
     # ------------------------------------------------------------------ hooks for the archive-only rules (unit B2)
-    # remitwatch.archive_rules acts on the run's items at these four points; each is a no-op until its hook is wired.
+    # remitwatch.archive_rules acts on the run's items at these four points (needs_B2 section 1; hook_hide stays a no-op).
     def hook_expected(self) -> None:
         """After the line and claim rules set expected amounts: a fair expected amount where an item has none (drugs and
-        skin substitutes: archive_rules.drug_expected)."""
-        return None
+        skin substitutes: archive_rules.drug_expected, rule 10)."""
+        from .archive_rules import hook_expected
+        self.archive_expected = hook_expected(self)        # {'expected_cents': n}
 
     def hook_archive_rules(self) -> None:
         """Between the second rates and resolve_elsewhere, before every EMA closure, so a closure the 835 archive proves
-        comes first: closures with proof, reclassifications, folds, PR-group items and drug expected amounts
-        (archive_rules.run_on_detector, the one hook needs_B2 asks for)."""
-        return None
+        comes first: closures with proof, reclassifications and the items rule 8 raises (archive_rules.evaluate, rules 1
+        to 8). The folds wait for hook_fold."""
+        from .archive_rules import hook_archive_rules
+        self.archive_summary = hook_archive_rules(self)    # per-rule counts, applied_counts, rate_errors; sets self.archive_folds
 
     def hook_fold(self) -> None:
-        """Before save: repeat listings of one service folded into the item that carries it (archive_rules fold_into)."""
-        return None
+        """Before save: repeat listings of one service folded into the item that carries it (archive_rules fold_into). A
+        person's work is read again first: an item a person worked is never folded."""
+        from .archive_rules import hook_fold
+        self.archive_folded = hook_fold(self)              # {'fold_into': n}
 
     def hook_hide(self) -> None:
         """After save, where the hide rules are matched: hide rules at payer x code x modifier x reason grain."""

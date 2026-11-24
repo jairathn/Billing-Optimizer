@@ -508,3 +508,22 @@ def test_ch14_serverless_a_panel_drawn_before_a_run_gave_its_item_a_new_number_i
     _renumbered(c.get(f"/api/findings/{old}", headers=h), heir)
     assert state.list(cloud.ACTIONS) == []
     assert c.get(f"/api/findings/{heir}", headers=h).json()["finding"]["status"] == "in_progress"
+
+
+@pytest.mark.parametrize("block", ["post", "credit"])
+def test_merge_an_item_done_by_posting_in_ema_takes_paid_with_nothing_recovered(tmp_path, monkeypatch, block):
+    """Push 2 with the release: "Mark posted in EMA" closes an 835 payment EMA never posted (its work, appeal_block 'post')
+    as Paid with $0, as does posting a takeback that is the only reason for a credit ('credit'): the money already came, or
+    none is owed. The release's CH-10 refusal of a $0 Paid stands for every other item."""
+    s = _server(tmp_path, monkeypatch, n=2)
+    work, other = s.ids
+    conn = s.conn()
+    conn.execute("UPDATE findings SET appeal_block=? WHERE finding_id=?", (block, work))
+    conn.commit()
+    conn.close()
+    body = {"status": "resolved", "seen_status": "open", "recovered_cents": 0, "notes": "Posted in EMA"}
+    r = s.c.post(f"/api/findings/{other}/status", json=body, headers=XHR)
+    assert r.status_code == 400 and r.json()["detail"] == PAID_ZERO, r.json()
+    assert s.c.post(f"/api/findings/{work}/status", json=body, headers=XHR).status_code == 200
+    got = s.c.get(f"/api/findings/{work}").json()["finding"]
+    assert (got["status"], got["recovered_cents"]) == ("resolved", 0)

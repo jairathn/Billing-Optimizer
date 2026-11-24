@@ -553,14 +553,14 @@ def test_the_detector_hooks_apply_the_rules_before_save(tmp_path, monkeypatch, k
     store.close()
 
 
-def test_without_the_hooks_nothing_changes(tmp_path):
-    """The Detector's hook points are no-ops until wired: the same archive raises no plan exclusion item, and lists the
-    drug denial twice with no expected amount."""
+def test_the_detector_runs_the_hooks_as_wired(tmp_path):
+    """The Detector's hook points are wired (needs_B2 section 1): with nothing patched, the same archive raises the plan
+    exclusion item, and the two listings of the drug denial fold into one with the payer's own price."""
     store = _detector_world(tmp_path, "file")
     Detector(store, run_id="t").run()
-    assert not store.query("SELECT 1 FROM findings WHERE signal = 'DENIED_PLAN_EXCLUSION'")
+    assert store.query("SELECT 1 FROM findings WHERE signal = 'DENIED_PLAN_EXCLUSION'")
     j = store.query("SELECT expected_cents FROM findings WHERE patient_control_number LIKE 'CB0000300%' AND procedure_code = 'J7345'")
-    assert [r["expected_cents"] for r in j] == [None, None]
+    assert [r["expected_cents"] for r in j] == [35000]
     store.close()
 
 
@@ -936,18 +936,19 @@ def test_rule5_never_folds_an_item_a_person_worked(store):
 
 @pytest.mark.parametrize("kind", ["file", "compact"])
 def test_wired_rule5_fold_does_not_drop_a_worked_item_from_the_worklist(tmp_path, monkeypatch, kind):
-    """The same through the real Detector with the hooks wired: after a person appealed the first denial, the next run keeps
-    it listed (not stale) with its status."""
+    """The same through the real Detector with the hooks wired (as they are in Detector.run): a person appealed the first
+    denial before the payer reversed it and denied the line again; the next run keeps the appealed item listed (not
+    stale) with its status, never folded into the new denial."""
     s = Store(str(tmp_path / "s.sqlite")) if kind == "file" else Store(":memory:", compact=True)
     denial = ln("17110", 177.56, 0, None, [("CO", "16", 177.56)], lcn="1")
     lk1 = remit(s, "2026-03-20", [cl("CB0002702C017", [denial])])[0]
+    _wire(monkeypatch)
+    Detector(s, run_id="r1", today="2026-04-01").run()                     # the first denial, listed
+    fid = s.conn.execute("SELECT finding_id FROM findings WHERE line_key=?", (lk1,)).fetchone()[0]
+    s.conn.execute("UPDATE findings SET status='appealed', notes='appeal faxed', appealed_at='2026-04-02' WHERE finding_id=?", (fid,))
+    s.conn.commit()
     remit(s, "2026-04-20", [cl("CB0002702C017", [neg(denial)], status="22"),
                             cl("CB0002702C017", [ln("17110", 177.56, 0, None, [("CO", "50", 177.56)], lcn="1")])])
-    Detector(s, run_id="r1", today="2026-05-01").run()                     # unwired: both denials listed
-    fid = s.conn.execute("SELECT finding_id FROM findings WHERE line_key=?", (lk1,)).fetchone()[0]
-    s.conn.execute("UPDATE findings SET status='appealed', notes='appeal faxed', appealed_at='2026-05-02' WHERE finding_id=?", (fid,))
-    s.conn.commit()
-    _wire(monkeypatch)
     Detector(s, run_id="r2", today="2026-05-03").run()
     row = s.conn.execute("SELECT status, COALESCE(stale, 0), evidence FROM findings WHERE finding_id=?", (fid,)).fetchone()
     s.close()

@@ -282,6 +282,13 @@ def test_mr12_send_appeals_prints_no_date_from_a_held_items_reason(site, capsys)
     fid, rate = site.ids["DENIED_MEDICAL_NECESSITY"], site.ids["UNDERPAID_VS_OWN_RATE"]
     assert _number(c, PAYER_FAX).status_code == 200
     assert _build(c, fid, OTHER_NOTE).status_code == 200            # another patient's note: it waits for a person's look
+    # push 2's states route a medical-necessity denial to a person's decision first (appeal_block 'check_first'), which
+    # keeps it off the bulk list; here it is an item the list takes, so the send itself meets the note check
+    import sqlite3
+    con = sqlite3.connect(site.db)
+    con.execute("UPDATE findings SET appeal_block=NULL WHERE finding_id=?", (fid,))
+    con.commit()
+    con.close()
     capsys.readouterr()
     assert cli.main(["--db", site.db, "send-appeals"]) == 0
     out = capsys.readouterr().out

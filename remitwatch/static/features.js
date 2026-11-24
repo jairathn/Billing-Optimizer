@@ -618,7 +618,8 @@ function xpBind(f, x, r, d, done){
   const err = msg => { const e = d.querySelector('#xpErr'); if(e) e.textContent = msg; };
   const say = msg => { const m = d.querySelector('#xpMsg'); if(m){ m.className = 'small ok'; m.textContent = msg; } };
   const copy = async (text, what) => { try { await navigator.clipboard.writeText(text); say(`${what} copied.`); } catch(e){ err('Could not copy here: select the text and copy it by hand.'); } };
-  const status = async (st, notes, extra) => { await post('/api/findings/' + f.finding_id + '/status', Object.assign({status: st}, notes ? {notes} : {}, extra || {})); state.brief = null; state.dirty = true; done(st); };
+  // every change carries the status this panel showed (hotfix 2, H3): one made elsewhere since is not undone (409 changed)
+  const status = async (st, notes, extra) => { await post('/api/findings/' + f.finding_id + '/status', Object.assign({status: st, seen_status: f.status}, notes ? {notes} : {}, extra || {})); state.brief = null; state.dirty = true; done(st); };
   const event = async (ev, note) => post('/api/findings/' + f.finding_id + '/event', {event: ev, note: note || ''});
   const fold = id => { const el = d.querySelector(id); if(el){ el.open = true; el.scrollIntoView({block:'start'}); } };
   const eraText = (nx.steps || []).find(s => /ERA of the check/.test(s)) || '';
@@ -724,6 +725,12 @@ async function xpFaxPreview(f, packets, d){
     <div id="xpFaxMsg" class="small"></div><pre>${esc(letter)}</pre>`;
   $('#modal').classList.add('open');
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
+  // this preview's mark: an answer that comes after the person closed it, or opened another item's, is said in a notice and
+  // never closes or rewrites the window now showing (hotfix 2, H1: a late answer never acts on another item)
+  const mine = 'fx' + (xpFaxPreview.n = (xpFaxPreview.n || 0) + 1);
+  $('#modalBox').dataset.fax = mine;
+  const here = () => $('#modal').classList.contains('open') && $('#modalBox').dataset.fax === mine;
+  const what = `${f.payer_group || 'the payer'}${f.shortfall_cents ? ' · ' + money2(f.shortfall_cents) : ''}`;
   const said = pk ? {packet_id: pk.packet_id} : {};
   let busy = false;
   const go = async () => { const bt = $('#xpFaxGo'), msg = $('#xpFaxMsg');
@@ -731,12 +738,17 @@ async function xpFaxPreview(f, packets, d){
     busy = true; bt.disabled = true; msg.querySelectorAll('button').forEach(x => x.disabled = true);
     msg.className = 'small muted'; msg.textContent = 'Sending…';
     let res; try { res = await post('/api/appeals/send', Object.assign({finding_id: f.finding_id}, said)); }
-    catch(e){ busy = false; msg.className = e.code === 'in_flight' ? 'small sev-medium' : 'small sev-high'; msg.textContent = e.message; bt.disabled = false; return; }
+    catch(e){ busy = false;
+      if(!here()){ if(typeof notice === 'function') notice(`Appeal by fax (${what}): ${e.message}`); return; }
+      msg.className = e.code === 'in_flight' ? 'small sev-medium' : 'small sev-high'; msg.textContent = e.message; bt.disabled = false; return; }
     busy = false;
-    if(res.status === 'sent'){ $('#modal').classList.remove('open'); state.brief = null; state.dirty = true;
+    if(res.status === 'sent'){ state.brief = null; state.dirty = true;
+      if(!here()){ if(typeof notice === 'function') notice(`Faxed: ${what}${res.number ? ' to ' + res.number : ''}. ${res.kept || 'It is marked Sent.'}`); return; }
+      $('#modal').classList.remove('open');
       // kept: the item changed while the fax went out (the run's Paid, a hide), so it was not marked Sent; its history says so
       if(res.kept && typeof notice === 'function') notice(`Faxed${res.number ? ' to ' + res.number : ''}. ${res.kept}`);
       openDetail(f.finding_id); return; }
+    if(!here()){ if(typeof notice === 'function') notice(`Not faxed (${what}): ${res.reason || 'Not sent.'} Open it again to finish.`); return; }
     msg.className = 'small sev-medium'; msg.textContent = res.reason || 'Not sent.'; bt.disabled = false;
     if(res.code === 'note_check' && res.confirm){
       // the note is this patient's visit only when a person opened it and said so (hotfix 2: wrong-patient notes)

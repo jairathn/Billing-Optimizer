@@ -289,6 +289,11 @@ def save_raw(state, store, log=print, status: dict | None = None) -> dict:
         gc.collect()
     meta[IMAGE_KEY] = {"size": size[0], "sha256": h.hexdigest(), "saved": _now()}
     record_image(state, meta[IMAGE_KEY], log)
+    if status is not None:
+        # the run's own status, which its end writes over status.json whatever happened: a save in the middle of a run
+        # (the Production slot's) must not be followed by the record of the image before it, or the next run refuses a
+        # good store
+        status[IMAGE_KEY] = meta[IMAGE_KEY]
     return meta
 
 
@@ -625,8 +630,9 @@ class ProductionSlot:
     the store's summaries and saves the ledger. Every caller with a Production report in hand (the intake folder, the
     Dropbox delta, the reports waiting by Dropbox id) goes through it."""
 
-    def __init__(self, store, state, *, deadline: float, log=print):
+    def __init__(self, store, state, *, deadline: float, log=print, status: dict | None = None):
         self.store, self.state, self.deadline, self.log = store, state, deadline, log
+        self.status = status                        # the run's status: a save here records its image there too (save_raw)
         self.handle = None
         self.used = False
         self.pending: list[str] | None = None       # file ids applied, waiting for finish()
@@ -686,7 +692,7 @@ class ProductionSlot:
             # salt, the next run would make another, and the ledger (keyed for the lost one) would be emptied and every
             # Production file read again. Once per host: the A/R usually makes the salt first.
             er.key_salt(conn)
-            save_raw(self.state, self.store)
+            save_raw(self.state, self.store, status=self.status)
             say("  EMA: the store's key salt was made and saved before the posting ledger")
         for f in fids:
             h.note_attempt(f)               # in the state folder, before a byte of it is read
@@ -1725,7 +1731,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         ema_dirty = False
         try:
             mig = ema_reports.migrate_misread(store, serverless=True, log=log)
-            if not mig.get("skipped"):
+            # the store is saved for it only when there was something to clean: on a store that holds nothing yet (a new
+            # site, or its first runs on an empty folder) an image saved for the mark alone would claim a store existed
+            # (hotfix 2d, CH-2); the mark goes with the next save, and running the check again until then finds nothing
+            if not mig.get("skipped") and any(v for k, v in mig.items() if isinstance(v, int)):
                 ema_dirty = True
                 if mig.get("candidates"):
                     out["ema_migrate"] = {k: v for k, v in mig.items() if isinstance(v, int)}
@@ -1746,7 +1755,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         except Exception as exc:       # noqa: BLE001
             out["ema_howto"] = {"error": type(exc).__name__}
         # one Production file per run, read in the time it leaves for its summaries and the saves (75 s)
-        slot = ProductionSlot(store, state, deadline=t0 + budget - 75, log=log)
+        slot = ProductionSlot(store, state, deadline=t0 + budget - 75, log=log, status=out)
 
         # Is the dashboard's copy the one built from this store? A run that died between the two saves leaves it behind.
         data_rev = (conn.execute("SELECT value FROM meta WHERE key='cloud:data_rev'").fetchone() or [None])[0]

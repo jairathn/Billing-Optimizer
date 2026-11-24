@@ -77,11 +77,11 @@ def test_h2_sent_pressed_while_the_appeal_is_prepared_is_refused_and_the_fax_sti
     t.start()
     try:
         assert entered.wait(30)
-        for body in ({"status": "appealed", "seen_status": "open"}, {"status": "appealed"}, {"status": "dismissed", "seen_status": "open"}):
+        for body in ({"status": "appealed", "seen_status": "open"}, {"status": "appealed"}, {"status": "dismissed", "seen_status": "open", "notes": "the payer was right"}):
             r = _status(c, fid, **body)
             assert r.status_code == 409 and r.json()["code"] == "in_flight", r.json()
             assert r.json()["detail"] == "A fax for this item is going out now. Wait a minute and look at the item again."
-        b = c.post("/api/findings/bulk-status", json={"ids": [fid], "status": "dismissed", "seen": {fid: "open"}}, headers=XHR).json()
+        b = c.post("/api/findings/bulk-status", json={"ids": [fid], "status": "dismissed", "notes": "the payer was right", "seen": {fid: "open"}}, headers=XHR).json()
         assert b["updated"] == 0 and b["in_flight"] == [fid]
         second = c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR)
         assert second.status_code == 409 and second.json()["code"] == "in_flight"
@@ -137,7 +137,7 @@ def test_h2_a_reservation_left_by_a_stopped_server_is_in_flight_then_unknown_nev
     _reserve_row(site.db, rate)
     r = c.post("/api/appeals/send", json={"finding_id": rate}, headers=XHR)
     assert r.status_code == 409 and r.json()["code"] == "in_flight"
-    assert _status(c, rate, status="dismissed", seen_status="open").status_code == 409
+    assert _status(c, rate, status="dismissed", seen_status="open", notes="the payer was right").status_code == 409
     _age(site.db, minutes=11)
     r = _send(c, rate)
     assert r["status"] == "held" and r["code"] == "unknown_send", r
@@ -215,7 +215,7 @@ def test_h2_serverless_a_status_change_waits_while_this_hosts_fax_is_going_out(s
                                                     "provider": "fake", "provider_id": None, "status": "sending",
                                                     "created_at": _now_iso(), "updated_at": _now_iso(), "doc": {}}})
     n = len(_journal(sl.state))
-    r = c.post(f"/api/findings/{fid}/status", json={"status": "dismissed", "seen_status": "open"}, headers=h)
+    r = c.post(f"/api/findings/{fid}/status", json={"status": "dismissed", "seen_status": "open", "notes": "the payer was right"}, headers=h)
     assert r.status_code == 409 and r.json()["code"] == "in_flight" and len(_journal(sl.state)) == n
     assert c.get(f"/api/findings/{fid}", headers=h).json()["finding"]["status"] == "open"
 
@@ -238,7 +238,7 @@ def test_h3_a_panel_left_open_cannot_undo_a_payment_the_run_found(site):
     c = site.c
     fid = site.ids["UNDERPAID_VS_OWN_RATE"]
     _close_by_the_run(site.db, fid)
-    for body in ({"status": "appealed", "seen_status": "open"}, {"status": "dismissed", "seen_status": "open"}, {"status": "appealed"}):
+    for body in ({"status": "appealed", "seen_status": "open"}, {"status": "dismissed", "seen_status": "open", "notes": "the payer was right"}, {"status": "appealed"}):
         r = _status(c, fid, **body)
         assert r.status_code == 409 and r.json()["code"] == "changed", r.json()
         assert r.json()["detail"] == "This item changed since your page loaded: it is now Paid. It was not changed."
@@ -254,14 +254,14 @@ def test_h3_a_list_opened_earlier_leaves_out_what_changed_since(site):
     note_id, rate = site.ids["DENIED_MEDICAL_NECESSITY"], site.ids["UNDERPAID_VS_OWN_RATE"]
     assert _number(c, PAYER_FAX).status_code == 200
     assert _send(c, rate)["status"] == "sent"                            # tab B faxed it: it is Sent now
-    b = c.post("/api/findings/bulk-status", json={"ids": [rate, note_id, note_id], "status": "dismissed",
+    b = c.post("/api/findings/bulk-status", json={"ids": [rate, note_id, note_id], "status": "dismissed", "notes": "the payer was right",
                                                   "seen": {rate: "open", note_id: "open"}}, headers=XHR).json()
     assert b["updated"] == 1 and b["changed"] == [rate] and b["in_flight"] == []
     assert c.get(f"/api/findings/{rate}").json()["finding"]["status"] == "appealed"
     assert c.get(f"/api/findings/{note_id}").json()["finding"]["status"] == "dismissed"
     assert len([e for e in _events(c, note_id) if e["kind"] == "manual"]) == 1      # a repeated id counts once (0d-9)
     # a single change from that list, the same
-    r = _status(c, rate, status="dismissed", seen_status="open")
+    r = _status(c, rate, status="dismissed", seen_status="open", notes="the payer was right")
     assert r.status_code == 409 and r.json()["code"] == "changed" and "it is now Sent" in r.json()["detail"]
     # a page loaded before this release still changes an ordinary item as before
     assert _status(c, site.ids["UNDERPAID_VS_OWN_RATE"], status="in_progress").status_code == 200
@@ -278,7 +278,7 @@ def test_h3_serverless_refuses_a_change_against_the_copy_it_serves(sl):
     assert r.status_code == 409 and r.json()["code"] == "changed"
     assert len(_journal(sl.state)) == n
     other = sl.ids[1]
-    b = c.post("/api/findings/bulk-status", json={"ids": [fid, other], "status": "dismissed", "seen": {fid: "open", other: "open"}}, headers=h).json()
+    b = c.post("/api/findings/bulk-status", json={"ids": [fid, other], "status": "dismissed", "notes": "the payer was right", "seen": {fid: "open", other: "open"}}, headers=h).json()
     assert b["updated"] == 1 and b["changed"] == [fid]
 
 

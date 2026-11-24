@@ -42,7 +42,10 @@ def _claims() -> tuple[list[str], str]:
     dos = (date.today() - timedelta(days=14)).strftime("%Y%m%d")
     under = [claim(300 + i, svc("99214", "223.65", f"{80 + i}.00", f"{80 + i}.00", f"CAS*CO*45*{143.65 - i:.2f}~", dos=dos), dos=dos) for i in range(14)]
     denied = [claim(400 + i, svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~", dos=dos), dos=dos) for i in range(2)]
-    return clean_visits(1, 25, "99214", "223.65", "117.60") + under + denied, pay
+    # each visit its own patient: one name on many member numbers, the same day and code, is the archive's sign that a
+    # denial was possibly paid on another claim (push 2's check-first step), which these walks are not about
+    every = clean_visits(1, 25, "99214", "223.65", "117.60") + under + denied
+    return [c.replace("NM1*QC*1*SAMPLE*PAT", f"NM1*QC*1*SAMPLE{n:03d}*PAT", 1) for n, c in enumerate(every)], pay
 
 
 def _store(tmp_path, monkeypatch) -> dict:

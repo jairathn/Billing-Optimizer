@@ -12,6 +12,9 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 }, httpCredentials: { username: user, password: pass } });
   const page = await ctx.newPage();
+  // push 2's next-step panel (the item's explain answer) is held back: these walks act on the What to do box the panel falls
+  // back to, which keeps the release's buttons; push 2's own page tests drive the new panel
+  await page.route('**/api/findings/*/explain', route => route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"held back by the test"}' }));
   const out = { errors: [] };
   page.on('pageerror', e => out.errors.push('pageerror: ' + e.message));
   page.on('console', m => { if (m.type() === 'error' && !/the server responded with a status of (4|5)\d\d|Failed to load resource/.test(m.text())) out.errors.push('console: ' + m.text()); });

@@ -532,7 +532,9 @@ def test_an_unreadable_file_is_remembered_and_starts_nothing_again(box, monkeypa
     downloads = client.calls["download"]
     again = cycle(state, client)
     assert again["ingest"]["downloaded"] == 0 and again["ingest"]["errors"] == 0
-    assert client.calls["download"] - downloads <= 8                 # the store and a few small state files, never the bad file
+    # the store and a few small state files (status.json, which the release reads for the image it saved, the how-to
+    # boxes, the serving mark, the position, the mail marks, the lock), never the bad file
+    assert client.calls["download"] - downloads <= 9
     # a file far larger than any remittance is not read at all
     monkeypatch.setattr(cloud, "MAX_FILE_BYTES", 200)
     time.sleep(0.01)

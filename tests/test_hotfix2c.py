@@ -560,7 +560,8 @@ def test_the_pages_count_by_the_practice_s_day_and_offer_the_checked_follow_up(t
         assert r["overflow"] <= 0, (view, r["overflow"])
         assert r["header"] == "Tuesday, November 24" and r["site"] == "2026-11-24", (view, r["header"], r["site"])
         assert (r["today"], r["tomorrow"]) == ("closes today", "tomorrow"), view
-        assert "closes today" in r["drawer"]["head"] and "closed" not in r["drawer"]["next"], (view, r["drawer"])
+        # push 2's panel names the state in its head and the day in its next step: the practice's day, still open
+        assert "Today is the last day (Nov 24, 2026)" in r["drawer"]["next"] and "closed" not in r["drawer"]["next"], (view, r["drawer"])
         assert "days old" in r["followup"] and "EMA" in r["followup"], (view, r["followup"])
     f = seen["desktop"]["faxes"]
     assert f["stale"] == "1" and f["button"].startswith("Still unpaid in EMA: send it to"), f

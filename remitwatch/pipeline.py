@@ -364,8 +364,10 @@ def people_changed_since_detection(conn) -> bool:
         return False
     # a person's own status changes (kind 'manual'), and hide rules a person added or removed; never the hide pass that
     # runs after each analysis (it stamps the items it hides with its own time)
-    for sql, args in (("SELECT 1 FROM finding_events WHERE kind='manual' AND at > ? LIMIT 1", (last,)),
-                      ("SELECT 1 FROM hide_rules WHERE at > ? OR removed_at > ? LIMIT 1", (last, last))):
+    # (from the run's start second on: a change made in the second the run started, which its timestamps share at that
+    # precision, may not have been seen either)
+    for sql, args in (("SELECT 1 FROM finding_events WHERE kind='manual' AND at >= ? LIMIT 1", (last,)),
+                      ("SELECT 1 FROM hide_rules WHERE at >= ? OR removed_at >= ? LIMIT 1", (last, last))):
         try:
             if conn.execute(sql, args).fetchone():
                 return True

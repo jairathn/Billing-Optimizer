@@ -1487,6 +1487,9 @@ PAID_TIMES_CHARGE = 10                  # nor more than ten times its line's cha
 IN_FLIGHT = "A fax for this item is going out now. Wait a minute and look at the item again."
 NO_AMOUNT = "Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is."
 PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead."
+# items done with $0 recovered, by their work (remitwatch.states' appeal_block): a payment the 835 made that EMA never posted
+# ('post'), and a credit that is only a takeback EMA never posted ('credit'): the money already came, or none is owed
+ZERO_PAID_BLOCKS = ("post", "credit")
 
 
 async def _body_object(request: Request) -> dict:
@@ -1540,12 +1543,14 @@ def _status_now(conn: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
     payer), and its charge (the bound on a Paid amount)."""
     from .actions import LAST_DECISION
     events = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_events'").fetchone())
+    block = "f.appeal_block" if "appeal_block" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else "NULL"
     out: dict[str, dict] = {}
     for k in range(0, len(ids), 500):
         part = ids[k:k + 500]
-        for r in conn.execute(f"""SELECT f.finding_id, f.status, f.auto_note, f.charge_cents, {LAST_DECISION if events else "NULL"} last
+        for r in conn.execute(f"""SELECT f.finding_id, f.status, f.auto_note, f.charge_cents, {LAST_DECISION if events else "NULL"} last,
+                                         {block} block
                                   FROM findings f WHERE f.finding_id IN ({','.join('?' * len(part))})""", part):
-            out[r[0]] = {"status": r[1], "charge_cents": r[3],
+            out[r[0]] = {"status": r[1], "charge_cents": r[3], "block": r[5],
                          "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden")}
     return out
 
@@ -1603,8 +1608,8 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                     raise Refused(400, "amount", NO_AMOUNT)
                 if rec < 0:
                     raise Refused(400, "amount", "The amount paid cannot be below zero.")
-                if rec == 0:                # a Paid with nothing recovered: the item was not paid, it was lost or let go
-                    raise Refused(400, "amount", PAID_ZERO)
+                if rec == 0 and cur.get("block") not in ZERO_PAID_BLOCKS:
+                    raise Refused(400, "amount", PAID_ZERO)   # nothing recovered: the item was not paid, it was lost or let go
                 if rec > top:
                     raise Refused(400, "amount", f"That is more than {'ten times the charge on this line' if top < MAX_PAID_CENTS else '$1,000,000'}"
                                                  f" (${top / 100:,.2f}). Check the amount on the remittance or in EMA.")
@@ -4679,12 +4684,13 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     if token is None:
         raise Refused(409, "in_flight", IN_FLIGHT)
     try:
-        return _appeal_after_holds(body, user, fid, detail, f, kind, out, held, again, prov, number)
+        return _appeal_after_holds(body, user, fid, detail, f, kind, out, held, again, prov, number, vouched)
     finally:
         _prep_release(fid, token)
 
 
-def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, kind: str, out: dict, held, again: bool, prov, number: str) -> dict:
+def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, kind: str, out: dict, held, again: bool, prov, number: str,
+                        vouched: str | None = None) -> dict:
     """appeals_send from the moment the appeal is in flight: what went out for it before, the note and the packet, the
     holds on the packet, the fax."""
     from . import fax

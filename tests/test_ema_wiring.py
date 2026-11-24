@@ -202,8 +202,9 @@ def test_an_automatic_write_off_is_flagged_and_stays_work(store, ledger, tmp_pat
     assert f["ema_link"] == F.link_no(1) and f["ema_status"] == "Resolved/Paid" and f["ema_status_src"] == "production"
     assert f["work_state"] == "work_now" and "EMA's posting rule wrote it off" in f["state_basis"]
     assert json.loads(f["evidence"])["writeoff_pattern"] == f"{BCBS}|99213||CO-197"
-    # Anthem's two years: the safe date (730 days, across a leap day) and the payer's own limit, a day later
-    assert f["appeal_deadline"] == "2028-03-27" and f["legal_deadline"] == "2028-03-28"
+    # Anthem's two years, counted in calendar years since hotfix 2c (730 days would end a day early across the leap day):
+    # the payer's own limit is the same day, so no second date
+    assert f["appeal_deadline"] == "2028-03-28" and f["legal_deadline"] is None
     pol = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:policy_summary'").fetchone()[0])
     assert pol["patterns"][0]["pattern"] == f"{BCBS}|99213||CO-197" and pol["patterns"][0]["auto"] == 1
 
@@ -584,9 +585,9 @@ def test_a_claim_sent_on_to_another_carrier_and_a_denial_to_review_end_with_the_
           claims=[{"pcn": F.claim_id(34), "lines": [(S, "99213", 150, 0, [("CO", "96", 150)])]}])
     run(store)
     fw = one(store, "signal='FORWARDED_TO_CARRIER'")
-    assert fw["appeal_deadline"] == "2028-03-27" and fw["legal_deadline"] == "2028-03-28" and "sent the claim on" in fw["deadline_basis"]
+    assert fw["appeal_deadline"] == "2028-03-28" and fw["legal_deadline"] is None and "sent the claim on" in fw["deadline_basis"]
     nc = one(store, "signal='DENIED_NONCOVERED'")
-    assert nc["appeal_deadline"] == "2028-03-27" and "payer takes no dispute" in nc["deadline_basis"]
+    assert nc["appeal_deadline"] == "2028-03-28" and "payer takes no dispute" in nc["deadline_basis"]
 
 
 def _informational(store, tk):

@@ -605,6 +605,10 @@ def test_the_first_wired_run_finds_the_reports_its_position_passed(vercel):
     folder = root / DATA / "Trizetto" / "AR and Collections Reports from EMA"
     ar = write(folder / "AR 2026.xlsx", F.ar_xlsx(ar_rows()))
     list(client.list_folder(f"/{DATA}", recursive=True))       # an older build's position, past the report
+    from remitwatch.store import Store
+    older = Store(":memory:", compact=True)                      # and the store it saved: a position is kept only beside one
+    cloud.save_raw(state, older)
+    older.close()
     state.put(cloud.CURSOR, json.dumps({"cursor": client.last_cursor, "root": f"/{DATA}"}).encode())
     out = cycle(state, client)
     assert out["ingest"]["mode"].startswith("full (once") and catalog(state_store(state))[sha(ar)] == "current"
@@ -680,7 +684,7 @@ def test_the_how_to_boxes_kept_in_the_state_folder_reach_the_store_once(vercel):
     cycle(state, client)
     doc = {"ar": {"text": "Reports, then A/R, all columns", "by": "staff", "at": "2026-11-20T10:00:00+00:00"}}
     state.put(uploads.HOWTO_STATE, json.dumps(doc).encode())
-    rev = state.meta(cloud.RAW)["rev"]
+    rev = (state.meta(cloud.RAW) or {}).get("rev")         # an empty folder's first run saves no store (hotfix 2d, CH-2)
     cycle(state, client)
     assert uploads.howto_read_conn(state_store(state)) == doc and state.meta(cloud.RAW)["rev"] != rev
     rev = state.meta(cloud.RAW)["rev"]
@@ -1437,11 +1441,11 @@ def test_a_first_production_file_saves_the_stores_key_salt_before_the_ledger_on_
     real_save = cloud.save_raw
     saves: list = []
 
-    def save(st, store):
+    def save(st, store, *a, **kw):
         saves.append(er.stored_salt(store.conn) is not None)
         if len(saves) == 2:                 # the store's own save at the end of the run: the platform stops it here
             raise Killed()
-        return real_save(st, store)
+        return real_save(st, store, *a, **kw)
     monkeypatch.setattr(cloud, "save_raw", save)
     with pytest.raises(Killed):
         cycle(state, client)
