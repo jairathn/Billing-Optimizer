@@ -1109,24 +1109,26 @@ def _never_paid_world(store, ledger, tmp_path):
     denial_world(store, ledger, tmp_path, rows)
 
 
-def test_ema_only_denials_of_a_code_the_payer_never_pays_are_its_policy_not_appeals(store, ledger, tmp_path):
-    """The VA's network paid 77600 on 3 of 245 answered lines (UHC MA G6001: 0 of 357): an appeal per line is wasted work
-    (65 work-now items, $27,240 on real data; the answer key's R9). The lines fold into one pattern for the owner's table,
-    counted with their dollars, and are listed line by line only once the owner chooses 'pursue'."""
+def test_ema_only_denials_of_a_code_the_payer_never_pays_are_pursued_until_the_owner_accepts_the_pattern(store, ledger, tmp_path):
+    """The VA's network paid 77600 on none of 21 answered lines (on real data UHC MA G6001: 8 of 347). The lines are one
+    pattern in the owner's table, counted with their dollars, and stay in the work (appealed in a batch per payer) until the
+    owner accepts the pattern: nothing is accepted by default (PLAN decision 14), and the owner appeals at any win rate
+    when it beats the cost to send (the owner's decision 16)."""
     _never_paid_world(store, ledger, tmp_path)
     run(store)
-    assert items(store, "signal='EMA_DENIED'") == []
+    assert len(items(store, "signal='EMA_DENIED'")) == 21
     lo = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:c5_left_out'").fetchone()[0])
     pat = lo["payer_policy"]["patterns"]["VA Community Care|77600||payer_policy"]
-    assert lo["payer_policy"]["n"] == 21 and pat["answered"] == 21 and pat["paid"] == 0 and pat["decision"] == "accept"
+    assert pat["n"] == 21 and pat["answered"] == 21 and pat["paid"] == 0 and pat["decision"] == "pursue" and pat["default"] is True
+    assert lo["payer_policy"]["n"] == 0                     # none left out of the work
     table = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:policy_summary'").fetchone()[0])["patterns"]
     row = next(p for p in table if p["pattern"] == "VA Community Care|77600||payer_policy")
-    assert row["kind"] == "payer_policy" and row["items"] == 21 and row["decision"] == "accept" and row["default"] is True
-    ec.set_policy(store.conn, "VA Community Care|77600||payer_policy", "pursue", "owner")
+    assert row["kind"] == "payer_policy" and row["items"] == 21 and row["decision"] == "pursue" and row["default"] is True
+    ec.set_policy(store.conn, "VA Community Care|77600||payer_policy", "accept", "owner")
     run(store)
-    assert len(items(store, "signal='EMA_DENIED'")) == 21
+    assert items(store, "signal='EMA_DENIED'") == []
     table = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:policy_summary'").fetchone()[0])["patterns"]
-    assert next(p for p in table if p["pattern"] == "VA Community Care|77600||payer_policy")["decision"] == "pursue"
+    assert next(p for p in table if p["pattern"] == "VA Community Care|77600||payer_policy")["decision"] == "accept"
 
 
 def test_a_code_the_payer_pays_is_still_appealed_line_by_line(store, ledger, tmp_path):
@@ -1269,8 +1271,8 @@ def test_a_duplicates_denial_with_nothing_processed_is_still_listed(store):
 
 def test_remittance_denials_of_a_code_the_payer_never_pays_as_primary_are_its_policy(store, ledger, tmp_path):
     """PM case C18: UHC never paid G6001 as primary (0 of 27 lines it answered as primary; its payments of it were as the
-    second payer). Its denials fold into one pattern in the owner's table and leave the line-by-line work until the owner
-    chooses 'pursue'; a code the payer does pay stays an appeal."""
+    second payer). Its denials are one pattern in the owner's table and stay in the work, pursued in a batch, until the
+    owner accepts it (decisions 14 and 16); a code the payer does pay stays an appeal."""
     for n in range(22):                      # 22 denials of G6001 as primary, and 6 payments of it as the second payer
         remit(store, trace=f"7776{n:05d}", paid_on="2026-02-10", payer="UNITEDHEALTHCARE TEST",
               claims=[{"pcn": F.claim_id(800 + n), "last": f"RAD{n}", "first": "JULIET", "member": f"J{n:011d}",
@@ -1283,13 +1285,15 @@ def test_remittance_denials_of_a_code_the_payer_never_pays_as_primary_are_its_po
           claims=[{"pcn": F.claim_id(61), "lines": [(S, "99213", 150, 0, [("CO", "197", 150)])]}])
     denial_world(store, ledger, tmp_path)
     det = run(store)
+    assert len(items(store, "payer_group='UnitedHealthcare' AND procedure_code='G6001' AND status='open'")) == 22
+    assert det.ema_counts["payer_policy_835"] == 0
+    pol = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:payer_policy'").fetchone()[0])["patterns"]
+    got = pol["UnitedHealthcare|G6001||payer_policy"]
+    assert got["answered"] == 22 and got["paid"] == 0 and got["decision"] == "pursue" and got["default"] is True
+    ec.set_policy(store.conn, "UnitedHealthcare|G6001||payer_policy", "accept", "owner")
+    det = run(store)
     assert [f["procedure_code"] for f in items(store, "payer_group='UnitedHealthcare' AND status='open'")] == ["99213"]
     assert det.ema_counts["payer_policy_835"] == 22
-    pol = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:payer_policy'").fetchone()[0])["patterns"]
-    assert pol["UnitedHealthcare|G6001||payer_policy"]["answered"] == 22 and pol["UnitedHealthcare|G6001||payer_policy"]["paid"] == 0
-    ec.set_policy(store.conn, "UnitedHealthcare|G6001||payer_policy", "pursue", "owner")
-    run(store)
-    assert len(items(store, "payer_group='UnitedHealthcare' AND procedure_code='G6001' AND status='open'")) == 22
 
 
 def test_a_whole_charge_taken_as_contractual_with_nothing_allowed_is_a_denial(store):

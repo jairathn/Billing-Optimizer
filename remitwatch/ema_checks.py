@@ -2948,7 +2948,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             # the owner's table shows the pattern whatever the decision (so it can be changed back); its lines are left out
             # unless the owner chose to pursue them
             key_p = f"{dgrp}|{ln['cpt']}||payer_policy"
-            decision = (decisions.get(key_p) or {}).get("decision") or "accept"
+            decision = (decisions.get(key_p) or {}).get("decision") or "pursue"     # the owner's decision 16: pursued until accepted
             lo = left_out.setdefault("payer_policy", {"n": 0, "cents": 0, "patterns": {}})
             pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": pol[0], "answered": pol[1], "n": 0,
                                                    "cents": 0, "decision": decision, "default": key_p not in decisions})

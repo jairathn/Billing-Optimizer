@@ -3339,7 +3339,9 @@ class Detector:
             if not share or share[0] > ec.POLICY_MAX_PAID_SHARE * share[1]:
                 continue
             key = f"{f.get('payer_group')}|{f.get('procedure_code')}||payer_policy"
-            decision = (decisions.get(key) or {}).get("decision") or "accept"
+            # nothing is accepted by default (PLAN decision 14), and a code a payer almost never pays is pursued in a batch per
+            # payer until the owner accepts it (the owner's decision 16: appeal at any win rate when it beats the cost to send)
+            decision = (decisions.get(key) or {}).get("decision") or "pursue"
             pt = folded.setdefault(key, {"group": f.get("payer_group"), "code": f.get("procedure_code"), "paid": share[0],
                                          "answered": share[1], "n": 0, "cents": 0, "decision": decision, "default": key not in decisions,
                                          "source": "835"})
@@ -4039,7 +4041,7 @@ class Detector:
         pol = self._ema_step("policy_summary", ec.policy_summary, self.conn, items, self.ema_outcomes, today=self.today)
         if pol is not None:
             # the payers' policies EMA-only denials were folded into (a code the payer pays on 5% or less of its answered
-            # lines): one row each in the owner's table, 'accept' until the owner chooses 'pursue'
+            # lines): one row each in the owner's table, 'pursue' until the owner chooses 'accept' (the owner's decision 16)
             try:
                 lo = json.loads((self.conn.execute("SELECT value FROM meta WHERE key=?", (ec.C5_LEFT_OUT_KEY,)).fetchone() or ["{}"])[0])
             except (ValueError, TypeError, sqlite3.Error):

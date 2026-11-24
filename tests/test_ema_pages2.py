@@ -1343,38 +1343,32 @@ def _c7_world(store, lg, tmp):
     W.denial_world(store, lg, tmp, more)
 
 
-def test_a_code_the_payer_never_pays_waits_for_the_owners_decision_on_the_policy_page_and_today(tmp_path, monkeypatch):
-    """PLAN decision 14 and review 1's first high finding: a code a payer almost never pays folds into one pattern
-    'group|code||payer_policy' that the run keeps out of Work now until the owner decides. The policy page lists it as
-    waiting for that decision (never as accepted by nobody), with the payer's paid share, apart from the write-off
-    totals; Today and the Data tab say it in dollars; Pursue is recorded and the next run lists every denial in Work
-    now. Both hosts."""
+def test_a_code_the_payer_never_pays_is_pursued_until_the_owner_accepts_it_on_the_policy_page(tmp_path, monkeypatch):
+    """PLAN decision 14 (nothing is accepted by default) as the owner's decision 16 settled it: a code a payer almost never
+    pays is one pattern 'group|code||payer_policy' on the policy page, with the payer's paid share, apart from the write-off
+    totals, and its denials stay in the work (appealed in a batch per payer) until the owner accepts the pattern; Accept
+    is recorded and the next run takes them off the work. Both hosts."""
     from tests import test_ema_wiring as W
     db = wiring_world(tmp_path, W._never_paid_world)
     stored = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:payer_policy'")[0][0])["patterns"][PP_KEY]
-    assert stored["n"] == 21 and stored["cents"] > 0
+    assert stored["n"] == 21 and stored["cents"] > 0 and stored["decision"] == "pursue"
+    assert rows(db, "SELECT COUNT(*) FROM findings WHERE signal='EMA_DENIED' AND COALESCE(stale,0)=0")[0][0] == 21
     c = _site(monkeypatch, db)
     t = c.get("/api/ema/policy").json()
     p = next(x for x in t["patterns"] if x["pattern"] == PP_KEY)
-    assert (p["kind"], p["items"], p["cents"], p["decision"], p["decided_by"]) == ("payer_policy", 21, stored["cents"], "decide", None)
+    assert (p["kind"], p["items"], p["cents"], p["decision"], p["decided_by"]) == ("payer_policy", 21, stored["cents"], "pursue", None)
     assert (p["payer_group"], p["code"], p["paid"], p["answered"], p["appealable"]) == ("VA Community Care", "77600", 0, 21, None)
-    assert t["patterns"][0]["pattern"] == PP_KEY                     # what waits for the owner comes first
-    assert t["totals"]["decide"] == {"patterns": 1, "items": 21, "cents": stored["cents"]}
+    assert t["totals"]["decide"]["patterns"] == 0                     # nothing waits: pursued until the owner accepts
     assert t["totals"]["cents"] == sum(x["cents"] for x in t["patterns"] if x["kind"] == "write_off")
-    assert c.get("/api/ema/today").json()["decide"] == {"patterns": 1, "items": 21, "cents": stored["cents"]}
-    d = c.get("/api/ema/data").json()["policy"]
-    assert d["patterns"] == len(t["patterns"]) and d["decide"] == t["totals"]["decide"]
-    it = c.get("/api/ema/policy/items", params={"pattern": PP_KEY}).json()
-    assert (it["count"], it["rows"], it["kind"]) == (0, [], "payer_policy") and "Pursue" in it["note"]
-    r = c.post("/api/ema/policy", json={"pattern": PP_KEY, "decision": "pursue", "name": "Owner"}, headers=XHR)
+    r = c.post("/api/ema/policy", json={"pattern": PP_KEY, "decision": "accept", "name": "Owner"}, headers=XHR)
     assert r.status_code == 200, r.text
     p = next(x for x in c.get("/api/ema/policy").json()["patterns"] if x["pattern"] == PP_KEY)
-    assert (p["decision"], p["decided_by"], p["pending"]) == ("pursue", "Owner (anonymous)", True)
+    assert (p["decision"], p["pending"]) == ("accept", True) and p["decided_by"].startswith("Owner")
     rerun_wiring(db)
-    assert rows(db, "SELECT COUNT(*) FROM findings WHERE signal='EMA_DENIED' AND COALESCE(stale,0)=0")[0][0] == 21
+    assert rows(db, "SELECT COUNT(*) FROM findings WHERE signal='EMA_DENIED' AND COALESCE(stale,0)=0")[0][0] == 0
     t = c.get("/api/ema/policy").json()
     p = next(x for x in t["patterns"] if x["pattern"] == PP_KEY)
-    assert (p["decision"], p["pending"], p["items"]) == ("pursue", False, 21) and t["totals"]["decide"]["patterns"] == 0
+    assert (p["decision"], p["pending"], p["items"]) == ("accept", False, 21)
     (tmp_path / "vercel").mkdir()
     cl = _site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel")
     _same(t, cl.get("/api/ema/policy").json(), "/api/ema/policy")

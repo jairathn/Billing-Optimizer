@@ -838,8 +838,8 @@ def policy_table(c: sqlite3.Connection) -> dict:
         payer's own limit (orchestrator decision 2: past the safe date, one at a time; `legal_only` is that part);
         undecided means pursue (the items stay in Work now);
       - the codes a payer almost never pays (kind payer_policy), as the run folded them (meta ema:payer_policy): their
-        denials stay out of Work now until the owner decides (PLAN decision 14: never accepted by default), so an
-        undecided one is 'decide' and its dollars are counted in totals.decide, never in the write-off totals;
+        denials stay in Work now, pursued in a batch per payer, until the owner accepts the pattern (PLAN decision 14:
+        never accepted by default; the owner's decision 16: pursue at any win rate), so an undecided one is 'pursue';
       - the reasons EMA posts as contractual (kind contractual, PLAN decision 3: 'group|||reason'), from the live
         EMA_DENIAL_AS_CONTRACTUAL items, their written-off dollars said apart (outside every money total).
     The archive's later-paid share comes from what the run stored (meta ema:policy_summary); the decision from meta
@@ -919,9 +919,10 @@ def policy_table(c: sqlite3.Connection) -> dict:
         else:
             p["reason_text"] = _reason_text(p["reason"])
         p.setdefault("later_paid_share", s.get("later_paid_share"))
-        # a person's decision, else: pursue for a write-off pattern (its items stay in Work now); waiting for the owner
-        # for the other two (nothing is accepted by default, PLAN decision 14)
-        p["decision"] = d.get("decision") or ("pursue" if kind == "write_off" else "decide")
+        # a person's decision, else: pursue for a write-off pattern and for a code a payer almost never pays (its items stay
+        # in Work now, appealed in a batch per payer: the owner's decision 16); waiting for the owner for a contractual
+        # reason (nothing is accepted by default, PLAN decision 14)
+        p["decision"] = d.get("decision") or ("pursue" if kind in ("write_off", "payer_policy") else "decide")
         p["decided_by"], p["decided_at"] = d.get("by"), d.get("at")
         # a decision the newest run has not applied yet: the run stored the decision it applied for most patterns (a
         # code a payer almost never pays: none while it was the default), so pending is a difference from that; for the
