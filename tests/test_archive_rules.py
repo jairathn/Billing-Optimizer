@@ -356,7 +356,10 @@ def test_rule7_two_units_of_one_code_and_worked_items_never_fold(store):
     f1, f2, f3 = (item(store, lks[0], "DENIED_FREQUENCY"), item(store, lks[1], "DENIED_FREQUENCY"), item(store, later[0], "DENIED_FREQUENCY"))
     acts = ar.fold_repeat_denials(store.conn, [f1, f2, f3], worked=set())
     assert [(a["finding_id"], a["into"]) for a in acts] == [(f2["finding_id"], f3["finding_id"])]      # line 1 is another unit
-    assert ar.fold_repeat_denials(store.conn, [f1, f2, f3], worked={f2["finding_id"]}) == []          # a person worked it
+    # a person worked it: never folded, it stays listed with the newer answer named on it
+    acts = ar.fold_repeat_denials(store.conn, [f1, f2, f3], worked={f2["finding_id"]})
+    assert [(a["action"], a["finding_id"], a.get("reclass"), a.get("new_item")) for a in acts] == [
+        ("reclassify", f2["finding_id"], "replaced", f3["finding_id"])]
 
 
 # =========================================================================== 8. patient-group denials and CO-147

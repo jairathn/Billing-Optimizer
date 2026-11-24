@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 08:35 UTC.
+Last updated: 2026-11-24, 10:15 UTC.
 
 ## 1. Where things are
 
@@ -113,7 +113,36 @@ Last updated: 2026-11-24, 08:35 UTC.
       (T-C3/T-N3 a coordination denial the same payer settled as secondary, T-N6 processed to the patient on the same
       bill, T-N8 CO-151 M86), (b) money accounting (T-I1 PLB references that embed the claim id, T-I5 a reversal of a
       version not on file, T-C5/T-C6 recovered dollars and the closure's remittance). Each measures on its own private
-      copy of the world and hand-traces samples. Next after them: the 837 as a source of sends and the never-answered
+      copy of the world and hand-traces samples. (a) is merged (6c34e08): already done on Work now in scope 173 ($15,690)
+      -> 131 ($11,863); 23 of 23 hand-traced closures right; left: rule 8's patient-group items 52 ($2,540, the owner's
+      ruling), 23 moved-to-patient claim denials whose own reason puts the amount on the patient or that another payer
+      answered, 40 paid by another family, 10 voided by EMA, 6 small. Open points from it: two conventions for a recovery
+      when a payer denies as primary and pays later as secondary (archive rule 3 records $0, the new closure the payment:
+      choose one: the amount is what arrived, the Results tab attributes it); the primary's remittance behind 32 such
+      closures ($5,066) is on no list (handed to the 837 pass); another payer's answer never closes an item (a supplement's
+      PR-96 after Medicare's PR-1 stays listed). (b) is merged (acbf60c): closures whose recovery differs, in scope 172 ->
+      76; closures on a payment taken back 6 -> 0; 170 payment lines on 126 claims taken back ($24,114); 13 wrongly closed
+      items reopened; a Data-tab check counts reversals of payments not on file (64 claims, $26,627; 90 lines are second
+      reversals of an amount already reversed, possibly duplicate deliveries). Open points from it, for the next batch:
+      a service whose payment a take-back left unpaid has no item when the recoupment is under $500 (TAKEBACK lists PLB WO
+      of $500 or more; 12 services in scope, $823): list such a service whatever the amount (owner decision 9, no dollar
+      floor), not every small recoupment (about 320 a year are legitimate recoveries of double payments); a claim-level
+      take-back is split across lines largest first; an empty SVC05 is read as 1 unit (also the auditor's fix 2);
+      paid_cover counts a secondary only at half the expected amount, so a 20% coinsurance is not in a recovery; Medicare
+      J1 entries are not read. (c) the 837 pass (plans/design_837_never_answered.md), (d) the duplicate, already-paid
+      and voided leftovers and (e) item amounts (sizes by units and component, the calibration's rate rules) are running.
+      Full suite on acbf60c (python 3.13): 2,640 passed, 0 failed; the other three environments not run yet.
+      (d) is merged (8ed3b76): Work now in scope: voided 10 -> 0; paid 40 -> 21 (12 the auditor's artifacts: line
+      position, a second payer's answer, the second payer's open share); duplicates 40 -> 24 (20 the auditor's artifact:
+      Anthem's 77600 answered as 77436, each the only item on its service; 4 real left); already worked 36 -> 33; 21 of
+      21 hand traces right. Open points from it: the ledger pairs a reversal with a payment by payer id, so a reversal
+      under another of the payer's ids leaves a taken-back payment standing (guarded only in the secondary-settlement
+      check); TAKEBACK items look at no service of the claim; a same-day payment on another bill of a once-a-day code
+      gives only a hint; the whole-charge CO-45 rule misses claim-level payments, codes rebilled under another code and
+      payers with no rate; a payer's re-processing that lists a line twice is read as two units; two same-day deliveries
+      of one underpayment (T-I3); a claim-level second-payer denial should name the primary's payment (as rule 2 does
+      for lines); an archive Done shows only its rule's label as its state basis.
+      Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
    4. Iterate (fix, audit, trace every disagreement by hand) until the auditor and the hand traces find no failure; then

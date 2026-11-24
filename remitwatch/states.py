@@ -1545,6 +1545,34 @@ def _archive_hint(f: dict) -> dict | None:
     return a
 
 
+# what the archive rules prove settles a denial (archive_rules' reclass): the same payer paid the line before this answer
+# of a copy (rule 1), the primary paid it and nothing is left of the share (rule 2), the practice voided the claim (rule 5)
+SETTLED_BY_ARCHIVE = ("paid_before", "other_payer_paid", "voided")
+
+
+def _worked_here(fx: dict) -> bool:
+    """A person worked the item in RemitWatch beyond its status: a note, an appeal date, a fax sent for it, a packet."""
+    f = fx["item"]
+    if f.get("notes") or f.get("appealed_at"):
+        return True
+    if any((x.get("direction") or "out") == "out" for x in fx["rw"]["faxes"]):
+        return True
+    return any(e["kind"] == "packet" for e in fx["rw"]["events"])
+
+
+def _archive_done(res: dict, hint: dict, put, credit: int = 0) -> dict:
+    """Done on the archive rules' proven reading, its decisive proof rows as the evidence; a credit EMA shows on the line is
+    named as the claim's to refund or recoup."""
+    rows = [{"source": r.get("source") or "835", "kind": r.get("kind") or "proof", "date": r.get("date"), "text": r.get("text")}
+            for r in hint.get("proof") or [] if r.get("decisive")]
+    res["appeal_block"] = "paid"
+    basis = _hint_text(hint, 170 if credit else 240) or "The 835 archive shows it settled"
+    if credit:
+        basis = (f"{basis}. EMA shows a credit of {usd(credit)} on this line: a refund or recoupment of the claim (its credit "
+                 "item), not work on this denial")
+    return put("done", "archive_" + str(hint.get("reclass") or hint.get("rule") or "rule"), basis, rows)
+
+
 def _ema_line_totals(fx: dict) -> dict:
     t = {"charges": 0, "ins_paid": 0, "contractual": 0, "noncontractual": 0, "pat_paid": 0, "pat_adj": 0, "balance": 0, "n": 0,
          "several": False, "facility": False}
@@ -2384,6 +2412,14 @@ def _decide(fx: dict, today: str) -> dict:
         res["appeal_block"] = "paid"
         rows = [{"source": proof["source"], "kind": "proof", "date": proof.get("date"), "text": proof["text"]}]
         return put("done", proof["rule"], proof["text"], rows)
+    # the 835 archive proves this denial settled (archive_rules, proven): the same payer paid the line before this answer of
+    # a copy, the primary paid it and nothing is left of the share, or the practice voided the claim. That holds whatever
+    # EMA shows beside it: a credit on the line is a refund or recoupment of the claim (its own credit item), and the line
+    # settled in EMA, a billing note or the payer's receipt of the void is no work left on this denial. An item a person
+    # worked in RemitWatch (a note, a fax, a packet) is decided as below: it stays listed with the proof named on it.
+    if hint and hint.get("strength") == "proven" and hint.get("state_hint") == "done" and hint.get("reclass") in SETTLED_BY_ARCHIVE \
+            and cat in ("denial", "bundling") and not (f.get("paid_cents") or 0) and not _worked_here(fx):
+        return _archive_done(res, hint, put, credit)
     if credit:
         res["appeal_block"] = "credit"
         left, tb = _credit_left(fx, credit)
@@ -2490,11 +2526,7 @@ def _decide(fx: dict, today: str) -> dict:
         return _follow(res, fx, ev, last.get("date"), work, text, today, deadline, confirmed=bool(last.get("confirmed")),
                        conflict="", person=False, put=put, ev_row=last, ema_follow=ema_follow)
     if hint and hint["state_hint"] == "done" and hint.get("strength") == "proven" and not credit:
-        rows = [{"source": r.get("source") or "835", "kind": r.get("kind") or "proof", "date": r.get("date"), "text": r.get("text")}
-                for r in hint.get("proof") or [] if r.get("decisive")]
-        res["appeal_block"] = "paid"
-        return put("done", "archive_" + str(hint.get("reclass") or hint.get("rule") or "rule"),
-                   _hint_text(hint) or "The 835 archive shows it settled", rows)
+        return _archive_done(res, hint, put)
     if hint and hint["state_hint"] == "waiting":
         since = max((str(r.get("date") or "")[:10] for r in hint.get("proof") or [] if r.get("date")), default="") or f.get("payment_date")
         follow = _add(since, _wait_of(fx, "claim", None)) if since else None

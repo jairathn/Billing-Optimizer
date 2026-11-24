@@ -42,10 +42,12 @@ The rules:
   4  short_pay_topped_up     a short payment the same payer later topped up (same bill, a later remittance, any check)
   5  same_day_answers        two answers on one day for one line: the payer's reversal of the item's answer and its new
                              answer, a line the payer split across two claims (MA15), a payment on another remittance the
-                             same day, and a whole-claim denial answered on another claim of the bill the same day
+                             same day, and a whole-claim denial answered on another claim of the bill the same day; and a
+                             claim the practice voided afterwards
   6  second_payer_share      a secondary that paid less than half the expected amount paid its share of what the primary
                              left: not an underpayment, and not a denial left unpaid
-  7  fold_repeat_denials     one item per service and reason: a payer's repeat denials fold into the newest
+  7  fold_repeat_denials     one item per service: a payer's older listings of a line fold into its newest answer, whatever
+                             the reason (a copy's denial into the payer's own answer; a wrong payer's into the right one's)
   8  pr_group_denials        PR denials that are not deductible, coinsurance or copay (PR-288, PR-27, PR-26, PR-200,
                              PR-49, PR-204) and CO-147: raise the item the archive shows, who should pay and what to fix
   9  hide_matches            hide rules at payer x code x modifier x reason grain (hide_match, hide_sql)
@@ -106,7 +108,8 @@ RULES = (R_SAME_DAY, R_TOPPED_UP, R_UNITS, R_PAID_BEFORE, R_OTHER_PAYER, R_SECON
 # replacement of the item's answer, then what happened before the item's answer, then the size of what is left.
 PRECEDENCE = ((R_SAME_DAY, "close_with_proof"), (R_UNITS, "close_with_proof"), (R_TOPPED_UP, "close_with_proof"),
               (R_SAME_DAY, "fold_into"), (R_SAME_DAY, "reclassify"), (R_PR, "reclassify"), (R_PAID_BEFORE, "reclassify"),
-              (R_OTHER_PAYER, "reclassify"), (R_UNITS, "reclassify"), (R_SECOND, "reclassify"), (R_TOPPED_UP, "reclassify"))
+              (R_OTHER_PAYER, "reclassify"), (R_UNITS, "reclassify"), (R_SECOND, "reclassify"), (R_TOPPED_UP, "reclassify"),
+              (R_FOLD, "reclassify"))
 
 STATUS_WORDS = {"1": "as primary", "19": "as primary", "2": "as secondary", "20": "as secondary", "3": "as tertiary",
                 "21": "as tertiary", "22": "reversal", "4": "denied the claim", "23": "not its claim"}
@@ -241,10 +244,11 @@ class Claim:
     other answers to the same claim id (another remittance, the same kind of submission, the same role); `reanswer` says
     the remittance also reverses an earlier answer to the claim id (this claim is the payer's new answer). `restated`:
     the claim pays less than its lines list, the gap taken by claim-level adjustments (_restated_claims); `net` is then
-    what it paid (CLP04)."""
+    what it paid (CLP04). `seq` is the claim's place in its remittance (the CLP loops' order, claim_seq), None when not
+    recorded."""
     __slots__ = ("claim_key", "txn", "pcn", "bill", "status", "charge", "paid", "patient_resp", "pccn", "freq", "crossover",
                  "payer", "payer_name", "group", "kind", "paid_on", "trace", "adj", "rem", "lines", "original_ref", "halves",
-                 "same_id", "reanswer", "restated", "net")
+                 "same_id", "reanswer", "restated", "net", "seq")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -302,7 +306,10 @@ class Archive:
         """{line_key of an answer: the reversal that cancels it}. A reversal (claim status 22) restates the answer it
         takes back with every amount negated; it cancels the payer's most recent earlier answer of that service with those
         amounts, on an earlier remittance (a remittance that reverses an answer and answers again carries both). The payer
-        may answer under another payer id or name than the answer it takes back (_same_payer_loose)."""
+        may answer under another payer id or name than the answer it takes back (_same_payer_loose). Where no earlier
+        remittance holds such an answer, a remittance that carries the answer itself, then its reversal, then the payer's
+        new answer of the line, in that order (the payer processed, reversed and processed the claim again in one cycle),
+        cancels the answer that comes before the reversal in it."""
         if self._cancelled is not None:
             return self._cancelled
         out: dict[str, Ans] = {}
@@ -313,13 +320,24 @@ class Archive:
             revs = sorted((x for x in g if x.status == REVERSAL_STATUS), key=lambda x: (x.paid_on or "", x.trace or "", x.line_key))
             for r in revs:
                 want = (-(r.charge or 0), -(r.paid or 0), tuple(sorted((gg, c, -x) for gg, c, x in r.adj)))
-                cands = [a for a in g if a.status != REVERSAL_STATUS and a.line_key not in out and _same_payer_loose(a, r)
-                         and ((a.paid_on or "") < (r.paid_on or "") or ((a.paid_on or "") == (r.paid_on or "") and a.trace != r.trace))
-                         and ((a.charge or 0), (a.paid or 0), tuple(sorted(a.adj))) == want]
+                same = [a for a in g if a.status != REVERSAL_STATUS and a.line_key not in out and _same_payer_loose(a, r)
+                        and ((a.charge or 0), (a.paid or 0), tuple(sorted(a.adj))) == want]
+                cands = [a for a in same if (a.paid_on or "") < (r.paid_on or "") or ((a.paid_on or "") == (r.paid_on or "") and a.trace != r.trace)]
+                if not cands:
+                    cands = [a for a in same if _before_in_remittance(a, r)
+                             and any(_before_in_remittance(r, x) and x.status != REVERSAL_STATUS and _same_payer_loose(x, r) for x in g)]
                 if cands:
                     out[max(cands, key=lambda a: (a.paid_on or "", a.trace or "", a.line_key)).line_key] = r
         self._cancelled = out
         return out
+
+
+def _before_in_remittance(a: "Ans", b: "Ans") -> bool:
+    """a comes before b in one remittance (the same payment and transaction, an earlier claim loop), where both claims'
+    places in it are recorded."""
+    ca, cb = a.claim, b.claim
+    return (ca is not None and cb is not None and ca is not cb and a.txn == b.txn and a.trace == b.trace
+            and (a.paid_on or "") == (b.paid_on or "") and ca.seq is not None and cb.seq is not None and ca.seq < cb.seq)
 
 
 def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing: Mapping[str, int] | None = None,
@@ -348,10 +366,10 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
         wanted = set(bills)
         keep = []
         # every claim id from the bill up to the bill followed by 'D': the bill itself and its submissions (bill + 'C' + digits)
-        for (ck, txn, pcn, st, charge, paid, pr, pccn, freq, cross, oref, cpay, cfi, tpay, trace, pname, pid) in conn.execute(
+        for (ck, txn, pcn, st, charge, paid, pr, pccn, freq, cross, oref, cpay, cfi, seq, tpay, trace, pname, pid) in conn.execute(
                 """SELECT c.claim_key, c.transaction_key, c.patient_control_number, c.claim_status_code, c.charge_cents, c.paid_cents,
                           c.patient_responsibility_cents, c.payer_claim_control_number, c.claim_frequency_code, c.crossover_carrier_name,
-                          c.original_reference_number, c.payment_date, c.claim_filing_indicator,
+                          c.original_reference_number, c.payment_date, c.claim_filing_indicator, c.claim_seq,
                           t.payment_date, t.trace_number, t.payer_name, t.payer_id
                    FROM temp.b2_bills b
                    JOIN claims c ON c.patient_control_number >= b.bill AND c.patient_control_number < b.hi
@@ -363,7 +381,7 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
             grp, kind = payer_group_kind(pname, cfi)
             cl = Claim(claim_key=ck, txn=txn, pcn=pcn, bill=b, status=st, charge=charge or 0, paid=paid or 0, patient_resp=pr, pccn=pccn,
                        freq=freq, crossover=cross, original_ref=oref, payer=_payer_key(pid, pname), payer_name=pname,
-                       group=grp, kind=kind, paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[], restated=False)
+                       group=grp, kind=kind, paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[], restated=False, seq=seq)
             arch.claims[ck] = cl
             arch.by_bill[b].append(cl)
             keep.append((ck,))
@@ -864,9 +882,11 @@ def _act(action: str, rule: str, f: Mapping | None, strength: str, proof: list[d
 
 def _close(rule: str, f: Mapping, pay: Ans, paid_cents: int, note: str, how: str, proof: list[dict], *, recovery: bool,
            strength: str = "proven") -> dict:
-    """A closure in the shape Detector._mark_paid takes: the payment's date, amount, a note and the paid_later detail."""
+    """A closure in the shape Detector._mark_paid takes: the payment's date, amount, a note and the paid_later detail. The
+    detail names the paying line and its units: each unit of a payment counts as recovered on one item only (trace finding
+    T-C5: counted by date, trace and claim, a second line paid on the same claim recorded $0)."""
     detail = {"payment_date": pay.paid_on or None, "claim": pay.pcn, "trace": pay.trace, "paid_cents": paid_cents,
-              "claim_status": pay.status, "how": how, "rule": rule}
+              "claim_status": pay.status, "how": how, "rule": rule, "line_key": pay.line_key, "units": pay.unit_count}
     return _act("close_with_proof", rule, f, strength, proof, paid_date=pay.paid_on or None, paid_cents=paid_cents, note=note,
                 detail=detail, counts_as_recovery=recovery)
 
@@ -1380,7 +1400,10 @@ def same_day_answers(conn: sqlite3.Connection, items: Iterable[Mapping], *, arch
     f) A line the practice's later corrected claim (frequency 7, or the claim id after the payer processed the
        practice's adjustment request, CO-129/N770) no longer bills: dropped by the practice ('done').
     g) The payer answered the denied line itself again later, with no reversal, allowing it and putting the allowed amount
-       on the patient's deductible, coinsurance or copay with no denial reason: settled ('done', moved_to_patient)."""
+       on the patient's deductible, coinsurance or copay with no denial reason: settled ('done', moved_to_patient).
+    h) The practice voided the item's claim afterwards: the payer answered the void (frequency 8) of the item's own claim
+       id, and nothing was answered on the bill since (_voided_after). The claim is withdrawn: nothing is left to work
+       ('done', voided; trace finding T-N5, whose answers to the void itself make no item)."""
     items = list(items)
     arch = archive or load_archive(conn, items, standing=standing)
     cancelled = arch.cancelled()
@@ -1390,6 +1413,14 @@ def same_day_answers(conn: sqlite3.Connection, items: Iterable[Mapping], *, arch
             open_by_line[f["line_key"]].append(f)
     out = []
     for f, a in _line_items(items, arch):
+        void = _voided_after(a, arch)
+        if void is not None:
+            who = void.payer_name or a.payer_name or "The payer"
+            proof = [_void_proof(void), _proof(a, _kind(a), False)]
+            hint = (f"The practice voided this claim: {who} answered its void of the claim (frequency 8) on {void.paid_on}, and nothing "
+                    "was billed or answered for it since. Nothing is left to work unless the claim was voided by mistake.")
+            out.append(_reclass(R_SAME_DAY, f, "voided", "Voided by the practice", hint, 0, "done", proof))
+            continue
         ans = arch.answers_of(a)
         gm = _groups(a)
         need = _units_billed(a, gm)
@@ -1485,6 +1516,37 @@ def same_day_answers(conn: sqlite3.Connection, items: Iterable[Mapping], *, arch
                 out.append(_reclass(R_SAME_DAY, f, "dropped_on_correction", "Dropped on the corrected claim", hint, 0, "done", proof))
     out += _claim_level_same_day(items, arch)
     return out
+
+
+def _is_void(cl: Claim | None) -> bool:
+    """The practice's void of a claim (frequency code 8)."""
+    return cl is not None and str(cl.freq or "").strip() == "8"
+
+
+def _voided_after(a: Ans, arch: Archive) -> Claim | None:
+    """The payer's answer to the practice's void (frequency 8) of the item's own claim id, after the item's answer (a later
+    remittance, or the same day on another), when nothing on the bill was answered after it (no answer of any claim id
+    that is not a void or a reversal): the practice withdrew the claim. The newest such void, else None. A void the
+    practice sent before billing the service again is no withdrawal of it: the new claim's answer is."""
+    if not a.pcn or a.claim is None or _is_void(a.claim):
+        return None
+    voids = [cl for cl in arch.by_bill.get(a.bill, []) if cl.pcn == a.pcn and _is_void(cl) and cl.claim_key != a.claim_key
+             and ((cl.paid_on or "") > (a.paid_on or "") or ((cl.paid_on or "") == (a.paid_on or "") and cl.trace != a.trace))
+             and _same_payer_loose(cl, a.claim)]
+    if not voids:
+        return None
+    v = max(voids, key=lambda cl: (cl.paid_on or "", cl.trace or ""))
+    if any(not _is_void(cl) and cl.status != REVERSAL_STATUS and (cl.paid_on or "") > (v.paid_on or "") for cl in arch.by_bill.get(a.bill, [])):
+        return None
+    return v
+
+
+def _void_proof(cl: Claim) -> dict:
+    """The payer's answer to the practice's void, as a proof row (a claim, not a line)."""
+    return {"date": cl.paid_on or None, "source": "835", "kind": "void", "payer": cl.payer_name, "amount_cents": cl.paid or 0,
+            "codes": [], "text": f"{cl.payer_name or 'The payer'} answered the practice's void of the claim (frequency 8) on {cl.paid_on}",
+            "decisive": True, "line_key": None, "claim_key": cl.claim_key, "trace": cl.trace, "claim_status": cl.status,
+            "code": None, "units": None, "allowed_cents": None}
 
 
 def _corrective(cl: Claim | None, arch: Archive) -> bool:
@@ -1892,29 +1954,44 @@ def second_payer_share(conn: sqlite3.Connection, items: Iterable[Mapping], *, ar
 
 # ------------------------------------------------------------------------------------------------ 7. repeat denials
 def worked_ids(conn: sqlite3.Connection, ids: Iterable[str]) -> set[str]:
-    """The items a person has worked (a status other than open, a note, an appeal date), from the store's findings table:
-    those are never folded away."""
+    """The items a person has worked (a status other than open, a note, an appeal date, a fax sent or being prepared for
+    it), from the store's findings and faxes tables: those are never folded away."""
     ids = sorted(set(i for i in ids if i))
-    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='findings'")}
-    if not have or not ids:
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('findings', 'faxes', 'meta')")}
+    if "findings" not in have or not ids:
         return set()
     cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
-    # as detect.save's worked(): a status a person set (a closure by the analysis is not one), a note, an appeal date
+    # as detect.save's worked(): a status a person set (a closure by the analysis is not one), a note, an appeal date, a fax
     auto = "auto_note IS NULL" if "auto_note" in cols else "1=1"
     worked = (f"status IN ('in_progress', 'appealed', 'lost', 'dismissed') OR (status = 'resolved' AND {auto}) OR notes IS NOT NULL"
               + (" OR appealed_at IS NOT NULL" if "appealed_at" in cols else ""))
     out: set[str] = set()
     for part in _chunks(ids):
-        out |= {r[0] for r in conn.execute(f"SELECT finding_id FROM findings WHERE finding_id IN ({','.join('?' * len(part))}) AND ({worked})", part)}
+        q = ','.join('?' * len(part))
+        out |= {r[0] for r in conn.execute(f"SELECT finding_id FROM findings WHERE finding_id IN ({q}) AND ({worked})", part)}
+        if "faxes" in have:
+            out |= {r[0] for r in conn.execute(f"SELECT DISTINCT finding_id FROM faxes WHERE direction = 'out' AND finding_id IN ({q})", part)}
+        if "meta" in have:
+            out |= {r[0][len("fax:prep:"):] for r in conn.execute(f"SELECT key FROM meta WHERE key IN ({q})", [f"fax:prep:{i}" for i in part])}
     return out
+
+
+def _wrong_payer(a: Ans) -> bool:
+    """The payer says the service is not its to pay and must go to the correct payer or contractor (CARC 109)."""
+    return any(r == "109" for _g, r, _c in a.denial_reasons())
 
 
 def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
                         standing: Mapping[str, int] | None = None, worked: set[str] | None = None) -> list[dict]:
-    """One item per service and reason: a payer's denials of one service (bill, billed code, date of service) for one
-    reason (the item's signal), on several remittances, fold into the newest. The lines of the newest remittance stay as
-    they are (each is a unit of that answer); every older listing folds into the first of them and is listed in its
-    evidence. A listing a person has worked (worked_ids) is never folded. Nothing is hidden: the newest denial stays.
+    """One item per service (trace finding T-N2): a payer's denials of one billed line (bill, billed code, date of service,
+    the line among the code's lines that day) on several remittances fold into the payer's newest answer, whatever reason
+    each gives: the newest answer is the one to work, and the older listings are listed in its evidence. A denial of a
+    copy (its only reasons CO-18 or B13: a duplicate claim, or paid before) is never the answer to work while the payer's
+    own answer of the line is listed: it folds into the newest listing of that answer, earlier or later. A denial saying
+    the service is not this payer's to pay (CARC 109: send it to the correct payer or contractor) folds into the newest
+    listing of the same line by a payer that answered it since. The lines of the newest remittance stay as they are (each
+    is a unit of that answer). Nothing is hidden: the newest denial stays. A listing a person has worked (worked_ids: a
+    status, a note, a fax) is never folded: it stays listed with the newer answer named on it (reclassify 'replaced').
     Where the payer only reprocessed the same claim number, the dispute window runs from its first decision (C26): the
     fold carries the older listing's deadlines, and apply_actions puts the earliest on the item that stays."""
     items = list(items)
@@ -1922,23 +1999,57 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
     groups: dict[tuple, list[tuple[Mapping, Ans]]] = defaultdict(list)
     for f, a in _line_items(items, arch, zero_paid=True, categories=("denial", "bundling", "downcoding")):
         # one billed line: two lines of one code on a claim (77401 and 77401-59) are two units, never repeats of each other
-        groups[(a.bill, a.billed_code, a.dos, a.group or a.payer, f.get("signal"), _line_identity(a, arch))].append((f, a))
-    multi = {k: v for k, v in groups.items() if len(v) > 1}
+        groups[(a.bill, a.billed_code, a.dos, _line_identity(a, arch), a.group or a.payer)].append((f, a))
+    # each payer's newest answer of each line: its newest listings that are not a copy's denial (else its newest)
+    heads: dict[tuple, tuple[list, str]] = {}
+    for k, v in groups.items():
+        pool = [p for p in v if not _copy_denial(p[1])] or v
+        newest = max((a.paid_on or "") for _f, a in pool)
+        heads[k] = (sorted((p for p in pool if (p[1].paid_on or "") == newest), key=lambda p: (p[1].trace or "", p[1].line_key)), newest)
+    # a payer that said the line is not its to pay hands it to the payer that answered it since
+    moved: dict[tuple, tuple] = {}
+    for k, (carriers, newest) in heads.items():
+        if not all(_wrong_payer(a) for _f, a in carriers):
+            continue
+        later = [(k2, h) for k2, h in heads.items() if k2[:4] == k[:4] and k2 != k and h[1] > newest
+                 and not any(_same_payer_loose(a2, a) for _f2, a2 in h[0] for _f, a in carriers)]
+        if later:
+            moved[k] = max(later, key=lambda kh: (kh[1][1], str(kh[0][4] or "")))[1][0][0]
+    folding = [p for k, v in groups.items() if len(v) > 1 or k in moved for p in v]
     if worked is None:
-        worked = worked_ids(conn, [f["finding_id"] for v in multi.values() for f, _a in v])
+        worked = worked_ids(conn, [f["finding_id"] for f, _a in folding])
     out = []
-    for v in multi.values():
-        newest = max((a.paid_on or "") for _f, a in v)
-        carriers = sorted((p for p in v if (p[1].paid_on or "") == newest), key=lambda p: (p[1].trace or "", p[1].line_key))
-        carrier, carrier_ans = carriers[0]
+    for k, v in groups.items():
+        if len(v) < 2 and k not in moved:
+            continue
+        carriers, _newest = heads[k]
+        here = k not in moved
+        carrier, carrier_ans = moved[k] if not here else carriers[0]
         for f, a in sorted(v, key=lambda p: (p[1].paid_on or "", p[1].line_key)):
-            if (a.paid_on or "") == newest or f["finding_id"] in worked:
+            if here and any(f is c for c, _x in carriers):
+                continue                # the lines of the payer's newest answer stay as they are
+            what = f"{_reasons_text(a)} on {a.paid_on}"
+            if not here:
+                note = (f"{a.payer_name or 'The payer'} said this service is not its to pay ({what}); {carrier_ans.payer_name or 'another payer'} "
+                        f"answered it since, on {carrier_ans.paid_on}: that answer is the one to work, and this listing is part of its item.")
+            elif _copy_denial(a) and not _copy_denial(carrier_ans):
+                note = (f"This denial ({what}) is of a copy of the claim; the payer's answer of the service of {carrier_ans.paid_on} "
+                        f"({_reasons_text(carrier_ans)}) is the one to work, and this listing is part of its item.")
+            elif f.get("signal") == carrier.get("signal"):
+                note = f"The same service was denied again for the same reason on {carrier_ans.paid_on}; this earlier listing is part of that item."
+            else:
+                note = (f"The payer answered this service again on {carrier_ans.paid_on} ({_reasons_text(carrier_ans)}): its newest answer is "
+                        f"the one to work; this earlier listing ({what}) is part of that item.")
+            proof = [_proof(a, _kind(a), True, f"Denied before on {a.paid_on} ({_reasons_text(a)})")]
+            if f["finding_id"] in worked:
+                # a person's work is never folded away: the item stays listed with the newer answer named on it
+                out.append(_reclass(R_FOLD, f, "replaced", "Replaced by a new answer",
+                                    note + " This item stays listed because a person worked it: carry the work over to that answer.",
+                                    None, "work_now", proof + [_proof(carrier_ans, _kind(carrier_ans), True)], new_item=carrier["finding_id"]))
                 continue
             # a reprocessing under the payer's same claim number: its dispute clock may run from this first decision (C26)
-            same_number = bool(a.claim.pccn and a.claim.pccn == carrier_ans.claim.pccn)
-            proof = [_proof(a, _kind(a), True, f"Denied before on {a.paid_on} ({_reasons_text(a)})")]
-            out.append(_act("fold_into", R_FOLD, f, "proven", proof, into=carrier["finding_id"],
-                            note=f"The same service was denied again for the same reason on {newest}; this earlier listing is part of that item.",
+            same_number = bool(here and a.claim.pccn and a.claim.pccn == carrier_ans.claim.pccn)
+            out.append(_act("fold_into", R_FOLD, f, "proven", proof, into=carrier["finding_id"], note=note,
                             folded={"finding_id": f["finding_id"], "payment_date": a.paid_on, "carc": f.get("carc"),
                                     "shortfall_cents": f.get("shortfall_cents"), "appeal_deadline": f.get("appeal_deadline"),
                                     "legal_deadline": f.get("legal_deadline"), "same_claim_number": same_number}))
@@ -2575,8 +2686,8 @@ def evaluate(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing: Ma
       - fold_into for repeat listings (rule 7), for answers the payer replaced (rule 5) and for older listings of a
         service rule 8 raises an item for, unless the item closes; a fold into an item that itself folds goes on to the
         item that carries it;
-      - never a fold of an item a person worked (worked_ids, read once here for every rule): rule 5 keeps it listed as
-        'replaced', rules 7 and 8 leave it;
+      - never a fold of an item a person worked (worked_ids, read once here for every rule): rules 5 and 7 keep it listed
+        as 'replaced', the newer answer named on it; rule 8 leaves it;
       - expected_cents (rule 10) and hide_match (rule 9) for items that stay;
       - raise_item (rule 8) for lines no item lists.
     The archive is read once, for the items' bills and the bills of the lines rule 8 looks at, and released before this
@@ -2630,7 +2741,7 @@ def evaluate(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing: Ma
                                     new_item=act.get("into"))
     closed = {fid for fid, a in primary.items() if a["action"] == "close_with_proof"}
     folds: dict[str, dict] = {fid: a for fid, a in primary.items() if a["action"] == "fold_into"}
-    for act in by_rule.get(R_FOLD, []) + [a for a in by_rule.get(R_PR, []) if a["action"] == "fold_into"]:
+    for act in [a for a in by_rule.get(R_FOLD, []) + by_rule.get(R_PR, []) if a["action"] == "fold_into"]:
         fid = act["finding_id"]
         if fid in closed or fid in folds or fid in worked:
             continue
@@ -2815,7 +2926,7 @@ def apply_actions(det, actions: Iterable[Mapping]) -> dict:
                                                     "state_hint": "done", "strength": act.get("strength"), "proof": _kept_proof(act.get("proof"))})
                 n["likely_close_kept_open"] += 1
                 continue
-            det._mark_paid(f, act["paid_date"], act["paid_cents"], act["note"], dict(act["detail"]))
+            det._mark_paid(f, act["paid_date"], act["paid_cents"], act["note"], dict(act["detail"]), counts=bool(act.get("counts_as_recovery")))
             if not act.get("counts_as_recovery"):
                 f["recovered_cents"] = 0
             f["hint"] = None
