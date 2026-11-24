@@ -526,6 +526,113 @@ def test_an_837_claim_is_found_in_ema_under_its_payers_own_name_and_its_send_day
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_one_answered_rule_for_the_claims_emas_exports_and_reports_chase(tmp_path, kind, monkeypatch):
+    """The claims EMA's weekly exports and Production report chase meet the answered rule the 837s' claims meet. Visits
+    March 2, EMA's Production report as of May 1:
+    - claim 84, sent March 4 to Testcare Shared Services (the remittances for the claims EMA names after that payer come
+      from Testcare Health): EMA's claim 84, under Testcare Shared Services, was paid April 10. Answered, not listed
+      (before: EMA's claims were looked for under Testcare Health alone).
+    - claim 85, in EMA's print batch since March 3 to Blue Cross: EMA's claim 85 was paid April 12, but another patient's
+      EMA claim 86 has the same day, code and charge. EMA's patient on the export also has claim 87, which the A/R pairs
+      with EMA claim 87: that names the patient, whose claim 85 was paid. Answered, not listed (before: listed to be sent).
+    - claim 88, in the print batch, nothing posted anywhere: truly unsent, listed.
+    - claim 89, in the print batch since March 3 for a January 5 visit that EMA shows paid February 1 on another EMA claim
+      of the patient (named through claim 97): paid before this bill was made, never an answer to it. Listed.
+    - claim 91, sent March 4 to Blue Cross; the patient's same visit and code were paid on another EMA claim by Testcare
+      Health, another company: not Blue Cross's answer. Listed.
+    - EMA claim 94 (Production only, nothing posted): the patient's same visit and code are settled on EMA claim 95 (Blue
+      Cross's write-down and the patient's payment). Answered, not listed (before: the Production check listed it). EMA
+      claim 86, the other patient's, has nothing posted: listed by the Production check."""
+    from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import adj, charge, denial_world, pay, remit as raw_remit
+    from tests.test_workable import ema
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setenv("REMITWATCH_EMA_STRICT", "1")
+    for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES", "REMITWATCH_EMA_LEDGER",
+              "REMITWATCH_EMA_REPORT_KEEP", "REMITWATCH_EMA_CLOSES"):
+        monkeypatch.delenv(k, raising=False)
+    ec._LAST_POST.clear()
+    s = _store(tmp_path, kind)
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", ("ab" * 32,))
+    s.conn.commit()
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    D = dt.date
+    S_, FEB, JAN = D(2026, 3, 2), D(2026, 2, 2), D(2026, 1, 5)
+    tss, bcp = "Testcare Shared Services", F.PAYERS["bcbs"]
+    # the claims EMA names after Testcare Shared Services, answered on the remittances by Testcare Health
+    for n in (80, 81, 82):
+        raw_remit(s, trace=f"77709{n}", paid_on="2026-04-20", payer="TESTCARE HEALTH",
+                  claims=[{"pcn": F.claim_id(n), "status": "1", "member": f"MEMBER0000{n}", "last": "VOTER", "first": f"N{n}",
+                           "lines": [("2026-03-02", "99212", 100, 60, [("CO", "45", 40)])]}])
+    # the claims that name EMA's patients (each answered, each with its EMA claim paired by the A/R)
+    for n, pat_code in ((87, "99212"), (97, "99213"), (98, "99212")):
+        raw_remit(s, trace=f"77719{n}", paid_on="2026-02-20", claims=[{
+            "pcn": F.claim_id(n), "status": "1", "member": f"MEMBER0000{n}", "last": "TIE", "first": f"N{n}",
+            "lines": [("2026-02-02", pat_code, 150 if pat_code == "99213" else 100, 60, [("CO", "45", 40)])]}])
+    rows = [charge(F.link_no(84), cpt="99213", amount=150, patient=1, posted=D(2026, 3, 4), primary=tss, payer=tss),
+            pay(F.link_no(84), "PAPER-84", 90, cpt="99213", patient=1, posted=D(2026, 4, 10), primary=tss, payer=tss),
+            charge(F.link_no(85), cpt="99203", amount=180, patient=1, posted=D(2026, 3, 3)),
+            pay(F.link_no(85), "PAPER-85", 95, cpt="99203", patient=1, posted=D(2026, 4, 12)),
+            charge(F.link_no(86), cpt="99203", amount=180, patient=2, posted=D(2026, 3, 3), status="Payment Pending"),
+            charge(F.link_no(90), cpt="99212", amount=100, patient=3, svc=JAN, posted=D(2026, 1, 6)),
+            pay(F.link_no(90), "PAPER-90", 60, cpt="99212", patient=3, svc=JAN, posted=D(2026, 2, 1)),
+            charge(F.link_no(96), cpt="99214", amount=200, patient=2, posted=D(2026, 3, 4), primary=F.PAYERS["commercial"],
+                   payer=F.PAYERS["commercial"]),
+            pay(F.link_no(96), "PAPER-96", 120, cpt="99214", patient=2, posted=D(2026, 4, 10), primary=F.PAYERS["commercial"],
+                payer=F.PAYERS["commercial"]),
+            charge(F.link_no(94), cpt="99212", amount=100, patient=2, posted=D(2026, 3, 4), status="Payment Pending"),
+            charge(F.link_no(95), cpt="99212", amount=100, patient=2, posted=D(2026, 3, 4)),
+            adj(F.link_no(95), "CO-45", 40, cpt="99212", patient=2, posted=D(2026, 3, 20), contractual=True),
+            F.production_row(link=F.link_no(95), cpt="99212", pat_paid=60, patient=2, svc=S_, posted=D(2026, 3, 25), payer="Patient")]
+    for n, pat, code, amount in ((87, 1, "99212", 100), (97, 3, "99213", 150), (98, 2, "99212", 100)):
+        rows += [charge(F.link_no(n), cpt=code, amount=amount, patient=pat, svc=FEB, posted=D(2026, 2, 3)),
+                 pay(F.link_no(n), f"77719{n}", 60, cpt=code, patient=pat, svc=FEB, posted=D(2026, 2, 21))]
+    ar = [F.ar_row(claim=F.claim_id(n), link=F.link_no(n), status="Payment Pending", current=0, svc=FEB, patient=pat, cpt=code)
+          for n, pat, code in ((87, 1, "99212"), (97, 3, "99213"), (98, 2, "99212"))]
+    denial_world(s, lg, tmp_path, rows, ar_rows=ar)
+    c = s.conn
+    bc = {"payer": bcp, "payer_id": "BCT01"}
+    for n in (80, 81, 82):
+        ema(c, F.claim_id(n), cpt="99212", service_date="2026-03-02", bill_created="2026-03-03", charges_cents=10000, payer=tss,
+            payer_id="TSS01", patient_id=f"EMA{n}", posted_date="2026-05-01")
+    ema(c, F.claim_id(84), cpt="99213", service_date="2026-03-02", bill_created="2026-03-03", charges_cents=15000, payer=tss,
+        payer_id="TSS01", patient_id="EMA84")
+    ema(c, F.claim_id(84), family="claim_status", claim_status="Submitted", claim_submission_date="2026-03-04", cpt="99213",
+        service_date="2026-03-02", payer=tss, payer_id="TSS01", patient_id="EMA84")
+    for n, code, chg, dos, pid in ((85, "99203", 18000, "2026-03-02", "EMA85"), (88, "99202", 10000, "2026-03-02", "EMA88"),
+                                   (89, "99212", 10000, "2026-01-05", "EMA89")):
+        ema(c, F.claim_id(n), cpt=code, service_date=dos, bill_created="2026-03-03", charges_cents=chg, patient_id=pid, **bc)
+        ema(c, F.claim_id(n), family="claim_status", claim_status="Batched for Printing", cpt=code, service_date=dos,
+            patient_id=pid, **bc)
+    ema(c, F.claim_id(91), cpt="99214", service_date="2026-03-02", bill_created="2026-03-03", charges_cents=20000,
+        patient_id="EMA91", **bc)
+    ema(c, F.claim_id(91), family="claim_status", claim_status="Submitted", claim_submission_date="2026-03-04", cpt="99214",
+        service_date="2026-03-02", patient_id="EMA91", **bc)
+    for n, pid, code, chg in ((87, "EMA85", "99212", 10000), (97, "EMA89", "99213", 15000), (98, "EMA91", "99212", 10000)):
+        ema(c, F.claim_id(n), cpt=code, service_date="2026-02-02", bill_created="2026-02-03", charges_cents=chg, patient_id=pid, **bc)
+    c.commit()
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = {(r["patient_control_number"] or f"link:{r['ema_link']}"): dict(r) for r in s.query(
+        "SELECT finding_id, patient_control_number, ema_link, signal, source, hint FROM findings "
+        "WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') AND COALESCE(stale,0)=0")}
+    print(sorted((k, v["signal"]) for k, v in got.items()), dict(det.ema_counts))
+    assert {F.claim_id(n) for n in (84, 85, 88, 89, 91)} & set(got) == {F.claim_id(88), F.claim_id(89), F.claim_id(91)}, (
+        f"listed {sorted(got)}: claims 84 and 85 are answered in EMA; 88 never went out, 89's payment came before its bill, "
+        f"and another company paid 91's visit")
+    assert got[F.claim_id(88)]["signal"] == "REJECTED_PRE_PAYER" and got[F.claim_id(91)]["signal"] == "NO_ANSWER"
+    links = {v["ema_link"] for v in got.values() if not v["patient_control_number"]}
+    assert F.link_no(94) not in links, f"EMA claim 94, settled on EMA claim 95, still listed: {sorted(got)}"
+    assert F.link_no(86) in links, f"EMA claim 86, the other patient's open claim, not listed: {sorted(got)}"
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_a_coordination_denials_primary_answer_posted_in_ema_leaves_nothing_to_chase(tmp_path, kind, monkeypatch):
     """Blue Cross denied claims 54 and 55 as primary because another payer covers them first (CO-22) and then processed
     them as secondary, paying $20; the 837s show both sent March 4, and no other payer's remittance is on file. EMA's
