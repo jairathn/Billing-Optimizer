@@ -607,6 +607,51 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
     return out
 
 
+def _feeds_837(conn: sqlite3.Connection) -> list[dict]:
+    """What the 837 claim files show that the other feeds do not, as the last analysis saved it (detect.NO_ERA_META and
+    detect.SEND_WEEKS_META, which the dashboard's copy carries): a payer whose claims never get an ERA, so that only EMA's
+    postings can show its answers; and weeks one feed shows claims sent and the other none (trace finding T-N13)."""
+    from .detect import NO_ERA_META, SEND_WEEKS_META
+    out: list[dict] = []
+    for p in [p for p in _meta(conn, NO_ERA_META) or [] if isinstance(p, dict) and p.get("payer") and p.get("claims")][:10]:
+        n, cents = int(p.get("claims") or 0), int(p.get("billed_cents") or 0)
+        listed, ema_ans, blind = int(p.get("listed") or 0), int(p.get("answered_in_ema") or 0), int(p.get("unchecked") or 0)
+        parts = []
+        if ema_ans:
+            parts.append(f"{ema_ans} of those due EMA shows answered")
+        if listed:
+            parts.append(f"{listed} EMA shows no answer to {'is' if listed == 1 else 'are'} listed as never answered")
+        if blind:
+            parts.append(f"{blind} no source can show an answer to {'is' if blind == 1 else 'are'} not listed")
+        out.append({"key": "no_era_837", "ok": False, "payer": p["payer"], "payer_id": p.get("payer_id"), "n": n, "cents": cents,
+                    "listed": listed, "answered_in_ema": ema_ans, "unchecked": blind,
+                    "title": f"No ERA comes for claims sent to {p['payer']}",
+                    "detail": (f"{n} {'claim' if n == 1 else 'claims'} sent since {p.get('since')} (${cents / 100:,.2f} billed), and no 835 "
+                               f"for any of them: only EMA's postings can show whether {p['payer']} answered."
+                               + (" " + "; ".join(parts) + "." if parts else "")),
+                    "who": f"Billing lead: ask {p['payer']} (or TriZetto) about ERA enrollment, and keep posting its payments in EMA. "
+                           "Check the claims not listed on its portal."})
+    weeks = _meta(conn, SEND_WEEKS_META) or {}
+    a = [w for w in weeks.get("ema_no_837") or [] if isinstance(w, dict) and w.get("week")] if isinstance(weeks, dict) else []
+    b = [w for w in weeks.get("no_ema_837") or [] if isinstance(w, dict) and w.get("week")] if isinstance(weeks, dict) else []
+    if a or b:
+        def wk(ws: list[dict], what: str) -> str:
+            return "; ".join(f"the week of {w['week']} ({int(w.get('claims') or 0)} {what})" for w in ws[:6]) + ("; and more" if len(ws) > 6 else "")
+        said = []
+        if a:
+            said.append(f"EMA shows claims sent and no 837 file is on file in {wk(a, 'claims in EMA')}")
+        if b:
+            said.append(f"the 837 files show claims sent and EMA's claim exports show none in {wk(b, 'claims in the 837s')}")
+        n = len(a) + len(b)
+        out.append({"key": "send_weeks", "ok": False, "n": n, "ema_no_837": a, "no_ema_837": b,
+                    "title": f"{n} {'week' if n == 1 else 'weeks'} of claims sent are in one feed and not the other",
+                    "detail": ("; ".join(said)[:1].upper() + "; ".join(said)[1:] + ". A claim sent in a week with no 837 on file cannot be "
+                               "dated by it, and a week EMA does not show cannot be checked against EMA."),
+                    "who": "Billing lead: put the 837 claim files for those weeks in the Dropbox folder. Practice administrator: pull "
+                           "Claim & Claim Status again for the weeks EMA's exports miss."})
+    return out
+
+
 def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: str | None = None) -> list[dict]:
     """What in the data is hiding money, most urgent first. Each item says what to do and who does it. The feed check goes
     by the day the remittances reach for most payers (`feed`, else feed_day's), not the newest payment: one stray newer
@@ -671,6 +716,7 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
                                  + ("; and more" if len(behind) > 5 else "") + ". Nothing on file says whether those payers answered them."),
                       "who": "Billing lead, with TriZetto: ask why the payer's remittances stopped (its ERA enrollment, or files missing from the "
                              "downloads) and put any missing files in the Dropbox folder. Until they are in, check those claims on the payer's portal."})
+    items += _feeds_837(conn)
     items += trizetto_health(conn, today)
     # versions of one remittance that differ (remitwatch.store.mark_superseded): no rule can say which stands, so both are
     # counted until a person checks
