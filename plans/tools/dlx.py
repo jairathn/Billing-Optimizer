@@ -7,7 +7,9 @@ re-typing any listing or URL: it reads the agent's own transcript (found by a ma
 Prints counts and ids only (never a file name or content)."""
 import hashlib, json, os, re, subprocess, sys, time
 ROOT = os.environ["RW_TRANSCRIPTS"]     # the session's transcripts folder: ~/.claude/projects/<project>/<session id>
-NS = {"ns:15011251635//": "Trizetto Data/", "ns:15364949075//": ""}
+# Dropbox namespace prefix -> mirrored folder, e.g. '{"ns:<shared folder id>//": "Trizetto Data/", "ns:<home id>//": ""}'
+# (list_folder on "" and on the shared folder's path shows both ids)
+NS = json.loads(os.environ.get("RW_DROPBOX_NS", "{}"))
 mode, st = sys.argv[1], sys.argv[2]
 os.makedirs(st, mode=0o700, exist_ok=True)
 

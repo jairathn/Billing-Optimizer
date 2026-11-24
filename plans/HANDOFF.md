@@ -113,6 +113,7 @@ shares the volume). Also the chaos round 0 backlog in `wip/plans:plans/wire/chao
 - **Getting the data**: the Dropbox connector (`list_folder`, `download_link`). Single-use links cost about 13 KB of tool
   output per 25 files, and an agent re-reads its whole history on every call, so keep each download agent to about 250
   files; `plans/tools/dlx.py` builds the work list from the agent's own listings and fetches each batch with curl, so the
-  agent never re-types a listing or a link. The live store image is one file: `/RemitWatch-state/store.sqlite.gz`.
+  agent never re-types a listing or a link (set RW_TRANSCRIPTS and RW_DROPBOX_NS, see its header). The live store image is one
+  file: `/RemitWatch-state/store.sqlite.gz`.
 - **Usage**: big parallel fan-outs hit the 5-hour limit (about 25 agents in 25 minutes did on 2026-11-23). Keep two to four
   agents at a time, push after every milestone, and update this file before starting anything long.
