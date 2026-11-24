@@ -523,17 +523,17 @@ def test_the_real_detector_with_a_dropped_rule_keeps_its_items(kind, monkeypatch
     for i in range(3):
         remit(c, "2026-10-20", f"ZZ00T000{i}C001", [("99213", 150, 0, [("CO", "197", 150)], "2026-10-01")])
         remit(c, "2026-10-21", f"ZZ00T000{i}C002", [("99214", 200, 120, [("CO", "45", 80)], "2026-10-02")])
-    ctx = sc.begin_detection(c, run_id="d1", today=TODAY)
-    Detector(kind.store, "d1", today=TODAY).run()
-    first = sc.after_detection(c, ctx, mode="server", today=TODAY, run_id="d1")
+    det = Detector(kind.store, "d1", today=TODAY)
+    det.run()                                                                # the self-check runs inside (needs_G section 1)
+    first = det.selfcheck
     n0 = c.execute("SELECT COUNT(*) FROM findings WHERE work_state IN ('work_now','waiting')").fetchone()[0]
     assert n0 > 0 and first["first"]
     kind.reopen()
     c = kind.conn
     monkeypatch.setattr(Detector, "run_line_rules", lambda self: None)       # the bug: line rules dropped
-    ctx = sc.begin_detection(c, run_id="d2", today=TODAY)
-    Detector(kind.store, "d2", today=TODAY).run()
-    out = sc.after_detection(c, ctx, mode="server", today=TODAY, run_id="d2")
+    det = Detector(kind.store, "d2", today=TODAY)
+    det.run()
+    out = det.selfcheck
     assert out["kept"] == n0
     assert c.execute("SELECT COUNT(*) FROM findings WHERE work_state IN ('work_now','waiting')").fetchone()[0] == n0
 
@@ -1071,11 +1071,10 @@ def _three_denials(c):
 
 
 def _detect(store_obj, rid, today=TODAY):
-    """One detection run as needs_G section 1 wires it: begin_detection, Detector.run, after_detection."""
-    c = store_obj.conn
-    ctx = sc.begin_detection(c, run_id=rid, today=today)
-    Detector(store_obj, rid, today=today).run()
-    return sc.after_detection(c, ctx, mode="server", today=today, run_id=rid)
+    """One detection run as needs_G section 1 wires it: Detector.run alone (begin_detection and after_detection inside)."""
+    det = Detector(store_obj, rid, today=today)
+    det.run()
+    return det.selfcheck
 
 
 def _listed(c):
@@ -1114,6 +1113,42 @@ def test_a_dropped_rule_keeps_the_items_people_worked_on_the_list(kind, monkeypa
     c = kind.conn
     out = _detect(kind.store, "d4")
     assert out["kept"] == 0 and not ({sent, started, untouched} & _listed(c))
+
+
+def test_items_the_owner_took_off_by_accepting_a_payer_pattern_are_not_kept(store):
+    """The owner's write-off policy is a person's decision: denials of a code the payer never pays leave the work when the
+    owner accepts the pattern (ema_checks.set_policy, detect.fold_payer_policy). Found by wiring the check into detection:
+    it kept them, overriding the owner. Another payer's item gone with no reason is still kept."""
+    from remitwatch import ema_checks as ec
+    c = store.conn
+    add_item(c, "F-policy-1", line_key="LP1", procedure_code="G6001", payer_group="UnitedHealthcare")
+    add_item(c, "F-policy-2", line_key="LP2", procedure_code="G6001", payer_group="UnitedHealthcare")
+    add_item(c, "F-other", line_key="LP3", procedure_code="G6001", payer_group="Testcare Health")
+    run(c, None, "r1")
+    ec.set_policy(c, "UnitedHealthcare|G6001||payer_policy", "accept", "owner@example.test")
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id LIKE 'F-%'"), "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert out["kept"] == 1 and set(van["examples"]) == {"F-other"}, van
+    assert van["info"]["routes"].get("owner_policy") == 2
+
+
+def test_a_claim_sent_again_takes_its_earlier_chase_off_the_list_without_a_keep(store):
+    """A rejected claim fixed and sent again (submission C024 of the same bill) leaves its earlier chase waiting, stale,
+    until the new one comes due (detect.save). That is a route, not a vanishing. An item whose bill has no newer
+    submission is still kept."""
+    c = store.conn
+    c.execute("INSERT INTO ema_rows (claim_id, family, claim_submission_date) VALUES ('ZZ00T0001C024', 'claim_status', '2026-10-21')")
+    c.execute("INSERT INTO ema_rows (claim_id, family) VALUES ('ZZ00T0002C024', 'claim_status')")      # never went out
+    c.commit()
+    add_item(c, "F-sent", signal="REJECTED_PRE_PAYER", category="denial", line_key=None, claim_key=None,
+             patient_control_number="ZZ00T0001C017")
+    add_item(c, "F-lone", signal="REJECTED_PRE_PAYER", category="denial", line_key=None, claim_key=None,
+             patient_control_number="ZZ00T0002C017")
+    run(c, None, "r1")
+    out = run(c, lambda cn: cn.execute("UPDATE findings SET stale=1 WHERE finding_id IN ('F-sent','F-lone')"), "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert out["kept"] == 1 and set(van["examples"]) == {"F-lone"}, van
+    assert van["info"]["routes"].get("sent_again") == 1
 
 
 def test_an_old_decision_on_the_same_line_does_not_excuse_a_vanished_item(store):

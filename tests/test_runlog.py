@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from remitwatch import cloud, diagnose, pipeline, runlog  # noqa: E402
 from remitwatch.alerts import ALERTS_DDL  # noqa: E402
-from remitwatch.detect import Detector, ensure_schema  # noqa: E402
+from remitwatch.detect import DETECT_VERSION, Detector, ensure_schema  # noqa: E402
 from remitwatch.state import DropboxState, LocalState  # noqa: E402
 from remitwatch.store import Store  # noqa: E402
 from tests import ema_fixtures as F  # noqa: E402
@@ -805,18 +805,19 @@ def test_a_closure_by_a_later_payment_is_recorded_with_its_rule_and_evidence(tmp
     feed = tmp_path / "feed"
     p1, p2 = denial_files(feed, paid_later=True)
     _ingest(store, [p1])
-    Detector(store, "run-20261101T000000Z-aaaa").run()
-    before = runlog.snapshot_items(store.conn)
-    assert len(before) == 1
+    Detector(store, "run-20261101T000000Z-aaaa").run()          # the run writes its own decision log (needs_H, W3)
+    fids = [r[0] for r in store.conn.execute("SELECT finding_id FROM findings")]
+    assert len(fids) == 1
     _ingest(store, [p2])
-    Detector(store, "run-20261102T000000Z-bbbb").run()
-    res = runlog.record_decisions(store.conn, "run-20261102T000000Z-bbbb", before, rule_version="2.11-test")
+    det = Detector(store, "run-20261102T000000Z-bbbb")
+    det.run()
+    res = det.decisions
     assert res["by_kind"] == {"closed": 1} and list(res["closed_by_rule"]) == ["paid_later:later_payment"]
-    fid = next(iter(before.rows))
+    fid = fids[0]
     got = runlog.decisions_for(store.conn, fid)["items"]
-    assert len(got) == 1
+    assert [x["kind"] for x in got] == ["closed", "raised"]           # the newest first: closed by run b, raised by run a
     d = got[0]
-    assert d["rule"] == "paid_later:later_payment" and d["rule_version"] == "2.11-test" and d["kind"] == "closed"
+    assert d["rule"] == "paid_later:later_payment" and d["rule_version"] == DETECT_VERSION and d["kind"] == "closed"
     assert d["change"]["status"] == ["open", "resolved"] and d["change"]["closed_automatically"] == [False, True]
     assert d["change"]["work_state"][1] == "done"
     src = {e["source"]: e for e in d["evidence"]}

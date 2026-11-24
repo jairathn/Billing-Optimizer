@@ -166,3 +166,152 @@ def test_the_serverless_save_goes_through_the_one_block_image(tmp_path, monkeypa
     assert existed and _meta_rows(loaded.conn) == 50
     loaded.close()
     store.close()
+
+
+# ======================================================================================================================
+# 2. Detection (both hosts: Detector.run serves the server's cycle and the serverless one)
+# ======================================================================================================================
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch, tmp_path):
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "SMTP_HOST", "REPORT_TO", "ALERT_WEBHOOK_URL",
+              "TRIZETTO_SFTP_USER", "SRFAX_ACCESS_ID", "VERCEL", "VERCEL_ENV", "REMITWATCH_STATE_DIR", "REMITWATCH_EMA_REPORTS",
+              "REMITWATCH_EMA_LEDGER", "ANTHROPIC_API_KEY", "REMITWATCH_MEMORY_BUDGET_MB", "REMITWATCH_TODAY", "CRON_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
+    from remitwatch import runlog
+    saved = set(runlog.SCRUB.names)
+    yield
+    runlog.SCRUB.names = saved
+    runlog.set_clock(None)
+    runlog._CURRENT.set(None)
+
+
+@pytest.fixture(params=["file", "image"])
+def kind(request):
+    return request.param
+
+
+def _store(kind: str, tmp_path) -> Store:
+    """The server's file store, or the serverless store as cloud.load_raw makes it (an image held in memory)."""
+    from remitwatch import cloud
+    from remitwatch.alerts import ALERTS_DDL
+    from remitwatch.detect import ensure_schema
+    if kind == "file":
+        s = Store(str(tmp_path / "data" / "remitwatch.sqlite"))
+    else:
+        blank = Store(":memory:", compact=True)
+        s = Store.from_bytes(bytearray(blank.to_bytes()))
+        blank.close()
+    ensure_schema(s.conn)
+    s.conn.executescript(ALERTS_DDL + cloud.CLOUD_DDL)
+    return s
+
+
+def _denials(store: Store, tmp_path, paid_later: bool = False) -> list[str]:
+    from tests.test_runlog import denial_files
+    paths = denial_files(tmp_path / "feed", paid_later=paid_later)
+    store.ingest_835_paths(paths[:1])
+    return paths
+
+
+def test_a_saved_item_carries_its_state_rule_and_its_ranking(kind, tmp_path):
+    """needs_G section 0: each item keeps the rule states.py decided its state by, and its dollars x its pattern's
+    recovery rate with the basis (the worklist sorts by it)."""
+    from remitwatch.detect import Detector
+    s = _store(kind, tmp_path)
+    _denials(s, tmp_path)
+    Detector(s, "run-20261101T000000Z-aaaa", today="2026-11-01").run()
+    rows = s.conn.execute("SELECT state_rule, expected_value_cents, recovery_rate, recovery_basis, work_state, shortfall_cents "
+                          "FROM findings WHERE COALESCE(stale,0)=0").fetchall()
+    assert rows and all(r[0] for r in rows), rows
+    open_rows = [r for r in rows if r[4] in ("work_now", "waiting")]
+    assert open_rows and all(r[1] is not None and r[3] for r in open_rows), open_rows
+    s.close()
+
+
+def test_a_self_check_that_crashes_leaves_the_items_and_says_so(kind, tmp_path, monkeypatch):
+    """A code bug in the checks themselves: the items detection saved stand, and the Data tab and the alerts say the
+    guard is off (a critical check that could not run), with the exception's type only."""
+    from remitwatch import selfcheck
+    from remitwatch.alerts import run_alerts
+    from remitwatch.detect import Detector
+
+    def boom(*a, **k):
+        raise TypeError("a bug in the checks for QUILLWORTHA")
+    monkeypatch.setattr(selfcheck, "run_checks", boom)
+    s = _store(kind, tmp_path)
+    _denials(s, tmp_path)
+    det = Detector(s, "run-20261101T000000Z-aaaa", today="2026-11-01")
+    det.run()
+    assert det.selfcheck["crashed"] and s.conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] > 0
+    last = selfcheck.meta_get(s.conn, selfcheck.K_LAST)
+    assert last["checks"][0]["status"] == "error" and last["checks"][0]["info"] == {"error": "TypeError"}
+    run_alerts(s.conn, today="2026-11-01")
+    titles = [r[0] for r in s.conn.execute("SELECT title FROM alerts WHERE kind='CHECK_FAILED' AND status!='cleared'")]
+    assert titles and "could not run" in titles[0] and "QUILLWORTHA" not in " ".join(titles)
+    s.close()
+
+
+def test_a_contained_ema_step_is_logged_in_the_run(kind, tmp_path, monkeypatch):
+    """needs_H D5: an EMA step that fails is contained as before (the 835 items still come out) and logged with its
+    stack in the run in progress."""
+    from remitwatch import runlog, states
+    from remitwatch.detect import Detector
+
+    def boom(*a, **k):
+        raise ValueError("answer times failed")
+    monkeypatch.setattr(states, "save_response_days", boom)
+    s = _store(kind, tmp_path)
+    _denials(s, tmp_path)
+    rl = runlog.start_run("cycle", trigger="test", logs_dir=str(tmp_path / "logs"), host="server")
+    det = Detector(s, rl.run_id, today="2026-11-01")
+    det.run()
+    errs = [e for e in rl.events if e["level"] == "error"]
+    assert any(e["step"] == "ema:response_days" and e["error"]["type"] == "ValueError" for e in errs), errs
+    assert {"step": "response_days", "error": "ValueError: answer times failed"} in det.ema_errors
+    rl.finish()
+    s.close()
+
+
+def test_a_locked_years_aggregates_are_carried_by_the_detector_itself(tmp_path):
+    """needs_E 1b, wired: with no test wrapper around save, a year the archive took keeps its aggregate items as measured
+    on the whole year (Detector.run calls archive.carry_locked_aggregates before the save)."""
+    from remitwatch import archive
+    from tests.test_archive import NEW, TODAY, _sequestered, detect, ingest, sink_of, visits
+    store = Store(":memory:", compact=True)
+    ingest(store, tmp_path, [(_sequestered(1, 12, "20230310"), "20230415"), (visits(100, 4, NEW), "20260415")])
+    detect(store)
+    seq = {r[0]: r[1] for r in store.conn.execute("SELECT finding_id, shortfall_cents FROM findings WHERE signal='SEQUESTRATION'")}
+    assert list(seq.values()) == [12 * 235]
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, horizon=24)
+    assert res["bills"] == 12
+    detect(store, "r2")
+    assert {r[0]: r[1] for r in store.conn.execute("SELECT finding_id, shortfall_cents FROM findings WHERE signal='SEQUESTRATION'")} == seq
+    store.close()
+
+
+def test_a_held_run_logs_no_change_people_never_saw(tmp_path, monkeypatch):
+    """needs_G section 1 and needs_H D4: the self-check runs before the decision log. A run held for a closure with no
+    proof puts the last good worklist back, and the decision log records no closure for it."""
+    from remitwatch import runlog, selfcheck
+    from remitwatch.detect import Detector
+    s = _store("file", tmp_path)
+    _denials(s, tmp_path)
+    Detector(s, "run-20261101T000000Z-aaaa", today="2026-11-01").run()             # the baseline
+    fid = s.conn.execute("SELECT finding_id FROM findings WHERE work_state='work_now'").fetchone()[0]
+    real_hide = Detector.hook_hide
+
+    def hide_then_a_bug(self):
+        real_hide(self)
+        self.conn.execute("UPDATE findings SET status='resolved', work_state='done', auto_note='Paid', evidence='{}' "
+                          "WHERE finding_id=?", (fid,))
+        self.conn.commit()
+    monkeypatch.setattr(Detector, "hook_hide", hide_then_a_bug)
+    det = Detector(s, "run-20261102T000000Z-bbbb", today="2026-11-02")
+    det.run()
+    assert det.selfcheck["held"] and selfcheck.safe_mode(s.conn)["on"]
+    assert s.conn.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "open"
+    kinds = [x["kind"] for x in runlog.decisions_for(s.conn, fid)["items"] if x["run_id"] == "run-20261102T000000Z-bbbb"]
+    assert "closed" not in kinds, kinds
+    s.close()

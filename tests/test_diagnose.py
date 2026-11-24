@@ -68,7 +68,7 @@ def server_world(tmp_path, monkeypatch):
     with rl.step("ema_waiting", contain=True, inputs={"file": "abcdef0123456789"}):
         raise ValueError(f"bad row for {FIRST} {LAST} born 02/29/1960, member {MEMBER}, MRN {MRN}")
     store = Store(db)
-    rl.set("decisions", runlog.record_decisions(store.conn, rl.run_id, before))
+    assert (rl.manifest["sections"].get("decisions") or {}).get("by_kind") == {"closed": 1}     # written by the run itself
     rl.set("invariants", {"held": False, "failing": ["closures_have_proof"],
                           "checks": [{"id": "closures_have_proof", "status": "fail", "severity": "critical", "n": 1, "examples": [fid]},
                                      {"id": "one_state", "status": "ok", "examples": []}]})

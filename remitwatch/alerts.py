@@ -20,6 +20,18 @@ STALE_FEED         no new remittance files have arrived
 REMITS_MISSING     a payer group's checks in one posted month that EMA posted and no 835 carries, though the payer's 835
                    series shows the remittances exist ($2,000 on at least 2 checks; remitwatch.ema_checks)
 EMA_STALE          EMA's A/R or Production report is more than 8 days old (it clears itself when a newer one arrives)
+SAFE_MODE          a run was held by RemitWatch's self-check: the worklist from before it is kept, its closures held
+                   (remitwatch.selfcheck; the rest of these kinds are the self-check's too)
+CHECK_FAILED       a critical self-check failed, or could not run (the guard it gives is off until it runs again)
+NEAR_LIMIT         the runs keep passing 80% of a budget (memory, time, /tmp, the store's size) and nothing more can be shed
+AUDIT_GAPS         the weekly self-audit found lines with money to recover that no item is working (any new gap)
+WASTED_WORK        the weekly self-audit found items on Work now that look settled already
+TRACK_RECORD       a closure rule whose closures are reopened too often
+GIVEN_UP_RISING    money written off with no person's decision rose this week (any rise)
+DENIAL_PATTERN, CREDENTIALING, CLINICIAN_BELOW_GROUP, BATCH_REPROCESSED, PATTERN_ERROR
+                   the self-check's pattern watch: a denial pattern by code and reason, a clinician a payer stopped paying,
+                   a clinician paid below the group, a payer that reprocessed a batch, a check that could not run
+SELF_REPAIR_FAILED a self-repair rule ran out of attempts (remitwatch.repair): what failed, where, what was tried, the next step
 
 An alert keeps one row for as long as the condition holds. When the condition
 ends it is marked cleared, and if it comes back it is raised again as new.
@@ -377,6 +389,13 @@ class AlertEngine:
                 p_value = poisson_sf(k, rate_base * n_recent)
                 detail.update({"recent_rate": round(rate_recent, 4), "baseline_rate": round(rate_base, 4), "p_value": round(p_value, 5)})
                 if rate_recent >= 2 * rate_base and p_value < 0.01:
+                    if fam in ("denial", "bundling"):
+                        try:        # which code x reason drives it (remitwatch.selfcheck's pattern watch: extends RAMP)
+                            from . import selfcheck
+                            detail["breakdown"] = selfcheck.pattern_breakdown(self.conn, p, asof=self.asof)
+                        except Exception as exc:       # noqa: BLE001  (the alert stands without its breakdown)
+                            from . import runlog
+                            runlog.caught(exc, "alerts:breakdown", level="warning")
                     self._raise("RAMP", sev, f"{p} is ramping up {spec['label']}: {k} of {n_recent:,} lines ({rate_recent:.1%}) in the last {RECENT_DAYS} days "
                                 f"against {rate_base:.1%} over the prior six months, worth {money(cents[p])}", detail, p, fam, None, rate_recent, rate_base, k, cents[p])
 
@@ -652,7 +671,38 @@ class AlertEngine:
         self.stale_rule()
         if "ema_report_files" in tables:
             self.ema_rule()
+        self.repair_rule()
+        self.selfcheck_rule()           # last: the pattern watch does not repeat a payer RAMP or RISING already names
         return self.active
+
+    def selfcheck_rule(self) -> None:
+        """The self-check's alerts (remitwatch.selfcheck.alert_candidates): safe mode, failing checks and checks that could
+        not run, near the limits, the weekly self-audit, the track record, money given up without a decision, and the
+        pattern watch."""
+        try:
+            from . import selfcheck
+            cands = selfcheck.alert_candidates(self.conn, today=self.today, active=self.active)
+        except Exception as exc:       # noqa: BLE001  (logged; the other alerts stand)
+            from . import runlog
+            runlog.caught(exc, "alerts:selfcheck")
+            return
+        for a in cands:
+            self._raise(a["kind"], a.get("severity") or "medium", a["title"], a.get("detail") or {}, a.get("payer_group"),
+                        "selfcheck", None, None, None, a.get("n"), a.get("cents"), key=tuple(a["key"]))
+
+    def repair_rule(self) -> None:
+        """SELF_REPAIR_FAILED: a self-repair rule (remitwatch.repair) ran out of attempts. The title says what failed,
+        where, what was tried and the next step; it clears by itself once the target works again."""
+        try:
+            from . import repair
+            cands = repair.alert_candidates(self.conn)
+        except Exception as exc:        # noqa: BLE001
+            from . import runlog
+            runlog.caught(exc, "alerts:repair", level="warning")
+            return
+        for a in cands:
+            self._raise(a["kind"], a["severity"], a["title"], a["detail"], None, "repair", None, None, None, a.get("n"), None,
+                        key=tuple(a["key"]))
 
     def ema_rule(self) -> None:
         """REMITS_MISSING and EMA_STALE, from EMA's reports (remitwatch.ema_checks.alert_candidates), once the practice

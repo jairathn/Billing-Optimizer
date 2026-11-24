@@ -1362,13 +1362,20 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             have = {tk: sup for tk, sup in conn.execute(f"SELECT transaction_key, COALESCE(superseded, 0) FROM transactions "
                                                         f"WHERE transaction_key IN ({','.join('?' * len(part))})", part)}
             superseded.update(tk for tk in part if have.get(tk, 1))     # gone from the store, or superseded
-    answered = _answered_since(conn, [r for r in cands if not r.get("line_key") and r.get("signal") in CLAIM_SIGNALS])
+    claim_items = [r for r in cands if not r.get("line_key") and r.get("signal") in CLAIM_SIGNALS]
+    answered = _answered_since(conn, claim_items)
+    sent_again = _sent_again(conn, claim_items)
+    accepted = _policy_accepts(conn)
     left: list[dict] = []
     for r in cands:
         if r.get("transaction_key") and r["transaction_key"] in superseded:
             routes["superseded"] += 1
         elif r["finding_id"] in answered:
             routes["claim_answered"] += 1
+        elif r["finding_id"] in sent_again:
+            routes["sent_again"] += 1           # its bill went out again: the earlier chase waits for the new one (detect.save)
+        elif accepted and _owner_accepted(r, accepted):
+            routes["owner_policy"] += 1         # the owner accepted its pattern (a person's decision): it left the work
         else:
             left.append(r)
     if facts and left:
@@ -1385,6 +1392,45 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
     by_signal = Counter(r.get("signal") for r in left)
     return _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10)),
                                            "stale": sum(1 for r in left if r["finding_id"] in after)})
+
+
+_SUB_NO = re.compile(r"C(\d{1,3})$")
+
+
+def _sent_again(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
+    """Items about a whole claim whose bill went out again under a later submission number (EMA's rows with a submission
+    date, an 837 or an 835 claim of the same bill): detection chases only a bill's newest submission, and the earlier
+    one's item waits, stale, until the new one comes due (detect.save hands its notes on)."""
+    out: set[str] = set()
+    sources = [(t, col, extra) for t, col, extra in (("ema_rows", "claim_id", " AND COALESCE(claim_submission_date,'') != ''"),
+                                                     ("claims_837", "patient_control_number", ""),
+                                                     ("claims", "patient_control_number", ""))
+               if _has_table(conn, t) and col in _cols(conn, t)
+               and (not extra or "claim_submission_date" in _cols(conn, t))]
+    for r in items:
+        pcn = str(r.get("patient_control_number") or "")
+        b, m = bill_of(pcn), _SUB_NO.search(pcn)
+        if not b or not m:
+            continue
+        mine = int(m.group(1))
+        for t, col, extra in sources:
+            found = False
+            for (other,) in conn.execute(f"SELECT DISTINCT {col} FROM {t} WHERE {col} >= ? AND {col} < ?{extra}", (b + "C", b + "D")):
+                mo = _SUB_NO.search(str(other or ""))
+                if mo and bill_of(other) == b and int(mo.group(1)) > mine:
+                    found = True
+                    break
+            if found:
+                out.add(r["finding_id"])
+                break
+    return out
+
+
+def _owner_accepted(r: dict, accepted: set[str]) -> bool:
+    """Whether the owner accepted the item's pattern (ema_checks.set_policy): its payer's policy for the code
+    ('group|code||payer_policy', detect.fold_payer_policy) or its write-off pattern ('group|code|modifier|reason')."""
+    keys = {f"{r.get('payer_group') or ''}|{r.get('procedure_code') or ''}||payer_policy", *_pattern_key(r)}
+    return bool(keys & accepted)
 
 
 def _answered_since(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
@@ -1857,6 +1903,35 @@ def _store_results(conn, results, rid, today, mode, held, first, kept, at) -> li
     hist.append({"run_id": rid, "at": at, "held": held, "checks": {r["id"]: r["status"] for r in results}})
     meta_set(conn, K_HISTORY, hist[-HISTORY_RUNS:])
     return summary
+
+
+CRASHED_TITLE = "The checks after the analysis"
+
+
+def crashed(conn: sqlite3.Connection, exc: BaseException, *, run_id: str | None = None, today: Any = None) -> dict:
+    """after_detection itself failed (a code bug in the checks). The items detection saved stand and the next run tries
+    again; what after_detection left half done is rolled back. It is said as a critical check that could not run (the
+    CHECK_FAILED alert, every run until the checks run again), never silent. Only the exception's type is kept."""
+    try:
+        conn.rollback()
+        conn.execute(f"DROP TABLE IF EXISTS temp.{SNAPSHOT}")
+    except sqlite3.Error as e2:
+        _caught(e2, "crashed")
+    rid, at, t = run_id or ("run-" + now_of()[:19]), now_of(), today_of(today)
+    what = ("Download the diagnostic bundle from the Data tab and give it to the maintainer: until the checks run again, a run "
+            "that drops or closes items wrongly is not held.")
+    check = {"id": "selfcheck", "severity": "critical", "status": "error", "n": None, "cents": None, "new": None,
+             "title": CRASHED_TITLE, "sentence": "The checks themselves could not run after this analysis.",
+             "text": f"{CRASHED_TITLE}: they could not run ({type(exc).__name__})", "what_to_check": what, "examples": [],
+             "info": {"error": type(exc).__name__}}
+    meta_set(conn, K_LAST, {"run_id": rid, "at": at, "today": t, "mode": None, "held": False, "first": False, "kept": 0,
+                            "version": VERSION, "checks": [check], "crashed": True})
+    hist = list(meta_get(conn, K_HISTORY, []) or [])
+    hist.append({"run_id": rid, "at": at, "held": False, "checks": {"selfcheck": "error"}})
+    meta_set(conn, K_HISTORY, hist[-HISTORY_RUNS:])
+    conn.commit()
+    return {"run_id": rid, "held": False, "first": False, "crashed": True, "kept": 0, "failing": [], "errors": ["selfcheck"],
+            "checks": [check], "safe_mode": meta_get(conn, K_SAFE, {}) or {}}
 
 
 def accept_findings(conn: sqlite3.Connection, user: str, check_ids: Iterable[str] | None = None, *,
