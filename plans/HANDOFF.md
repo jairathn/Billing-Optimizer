@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 09:10 UTC.
+Last updated: 2026-11-24, 09:45 UTC.
 
 ## 1. Where things are
 
@@ -120,7 +120,17 @@ Last updated: 2026-11-24, 09:10 UTC.
       when a payer denies as primary and pays later as secondary (archive rule 3 records $0, the new closure the payment:
       choose one: the amount is what arrived, the Results tab attributes it); the primary's remittance behind 32 such
       closures ($5,066) is on no list (handed to the 837 pass); another payer's answer never closes an item (a supplement's
-      PR-96 after Medicare's PR-1 stays listed). (c) the 837 pass (plans/design_837_never_answered.md) is running too.
+      PR-96 after Medicare's PR-1 stays listed). (b) is merged (acbf60c): closures whose recovery differs, in scope 172 ->
+      76; closures on a payment taken back 6 -> 0; 170 payment lines on 126 claims taken back ($24,114); 13 wrongly closed
+      items reopened; a Data-tab check counts reversals of payments not on file (64 claims, $26,627; 90 lines are second
+      reversals of an amount already reversed, possibly duplicate deliveries). Open points from it, for the next batch:
+      a service whose payment a take-back left unpaid has no item when the recoupment is under $500 (TAKEBACK lists PLB WO
+      of $500 or more; 12 services in scope, $823): list such a service whatever the amount (owner decision 9, no dollar
+      floor), not every small recoupment (about 320 a year are legitimate recoveries of double payments); a claim-level
+      take-back is split across lines largest first; an empty SVC05 is read as 1 unit (also the auditor's fix 2);
+      paid_cover counts a secondary only at half the expected amount, so a 20% coinsurance is not in a recovery; Medicare
+      J1 entries are not read. (c) the 837 pass (plans/design_837_never_answered.md) and (d) the duplicate, already-paid
+      and voided leftovers are running.
       Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
