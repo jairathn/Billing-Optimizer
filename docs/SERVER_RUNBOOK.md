@@ -51,6 +51,19 @@ The same as on Vercel, wherever Vercel has them:
   `REMITWATCH_ALERT_BASELINE_DAYS`, `REMITWATCH_NOTE_MODEL`, `REMITWATCH_NOTE_SCRUB`, `REMITWATCH_NOTE_SEND_SCANS`,
   `REMITWATCH_EMA_CLOSES`, `REMITWATCH_STALE_APPEAL_DAYS`, `REMITWATCH_FRESHEN_HOURS`, `REMITWATCH_WEBHOOK_DEBOUNCE_SECONDS`,
   `REMITWATCH_NO_ANSWER_DAYS`
+- `REMITWATCH_EMA_STALE_DAYS`: only if Vercel sets it, with the same value. The age in days past which EMA's A/R or
+  Production report counts as old: the Data tab says so and an alert goes out (default 8, for reports pulled every
+  Monday; more if the practice pulls them less often). It moves the warning only: the checks that rest on something
+  missing from EMA (a payment it never posted, a claim no payer answered) still need a Production report at most 14
+  days old.
+- `REMITWATCH_EMA_CLAIM_URL`: only if Vercel sets it, with the same value. The "Open in EMA" link on an item and on the
+  Data tab: an https address with `{claim}` once, where EMA's claim number goes, or `off` for no link. Unset, the
+  address is learned from the claim links in EMA's reports; set it only when they carry none the site can use. Like
+  every address of the practice's EMA, it stays out of the repository.
+- `REMITWATCH_EMA_PAYER_ALIASES`: only if Vercel sets it, with the same value. EMA payer names to count with a payer
+  group RemitWatch knows, as JSON (`{"the name in EMA": "the payer group"}`), for a payer EMA names in a way RemitWatch
+  does not match to that payer's remittances. Unset, RemitWatch's own payer rules decide. The names are the practice's
+  own: never in the repository.
 - `REMITWATCH_BULK_APPEAL`: leave it unset. Faxing many appeals at once stays off until RemitWatch reads EMA's payments;
   one appeal a person opens and checks still goes.
 - `REMITWATCH_SERVER_SITE`: Vercel only, leave it out here. The server's store holds every claim, so Find a claim needs no
@@ -59,9 +72,36 @@ The same as on Vercel, wherever Vercel has them:
 Server only (optional): `REMITWATCH_BACKUP_KEEP` (daily copies kept, default 7; 0 turns them off), `REMITWATCH_BACKUP_DIR`
 (default `/data/backups`), `REMITWATCH_UPLOAD_DIR` (default `/data/uploads`: leave it unset).
 
+EMA's A/R and Production reports on this server (optional: leave these unset unless the reason given applies). Vercel's
+defaults for the first two are not this server's (`ar`, and 730 days): never copy them here.
+
+- `REMITWATCH_EMA_REPORTS`: which of EMA's two reports this site reads: `all` (the A/R and Production, the default
+  here), `ar` (the A/R only, Vercel's default) or `off` (neither). The server is the site that reads Production. Set
+  `ar` or `off` only to pause a report: one a site does not read is kept as waiting, and read once the setting allows.
+- `REMITWATCH_EMA_RETAIN_DAYS`: how many days of service the posting ledger (Production's postings, kept apart from the
+  store) holds, counted back from its newest posting (default 1100 here; never less than 366). Raise it to keep more
+  years of EMA's postings, where the disk has room (two years are about 140 MB). Postings that leave the ledger go to
+  the archive beside the store first. When retention would delete more than 60% of the ledger at once (after the value
+  is lowered, say), it deletes nothing until a person runs
+  `sudo docker compose exec app python -m remitwatch.cli ema-reports --retain-force`.
+- `REMITWATCH_EMA_LEDGER`: the posting ledger's file (default `/data/ema_ledger.sqlite`, beside the store). It is for a
+  host laid out differently; leave it unset here: a path outside `/data` is inside the container, and is lost when the
+  app is made again. The daily backup copies the ledger too (`ema_ledger-<date>-<time>.sqlite.gz`, beside the store's
+  copies).
+- `REMITWATCH_EMA_REPORT_KEEP`: the copy the Upload page kept of a Production file is deleted once newer files have
+  replaced all its rows and at least this many of them each cover all its dates (default 2). Its record on the Data
+  tab stays, and a file in the Dropbox folder is never deleted. Raise it to keep replaced copies on disk longer.
+- `REMITWATCH_UPLOAD_MAX_GB`: the most a file may weigh, in GB, as the Upload page sends it in 4 MiB pieces (default
+  2). Reports, and any file over 20 MB, go that way; a file sent in one piece keeps the limits in "Uploads by hand",
+  below. Leave it unset: a year of Production is about 200 MB as CSV, before the page compresses it. A lower value
+  refuses larger files.
+
 Never on the server: `REMITWATCH_MODE=serverless`, `REMITWATCH_STATE_DIR`, `REMITWATCH_ALLOW_OPEN` (it opens the site
 with no password: for a developer's own machine only), any `VERCEL*`, `REMITWATCH_MAX_SECONDS`,
-`REMITWATCH_DEFER_DETECT_FILES`, `REMITWATCH_BACKFILL_ZIP`, `REMITWATCH_TMP` (a scratch folder for tests). `REMITWATCH_DB`
+`REMITWATCH_DEFER_DETECT_FILES`, `REMITWATCH_BACKFILL_ZIP`, `REMITWATCH_TMP` (a scratch folder for tests),
+`REMITWATCH_EMA_STRICT` (`1` is for tests: a check against EMA's reports that fails then stops the whole analysis;
+unset, as it must be here, the failure is noted on the Data tab and the items from the remittances still come out).
+`REMITWATCH_DB`
 and `REMITWATCH_DATA_DIR` are set by the image (`/data/remitwatch.sqlite`, `/data/dropbox`), `REMITWATCH_COMMIT` by the
 build (the commit `/api/health` shows) and `REMITWATCH_TRIGGER` by the scheduler for its own runs: leave them out.
 
@@ -330,8 +370,9 @@ To update at once instead of waiting for the night: `sudo systemctl start remitw
 - Caddy accepts up to 260 MiB (272,629,760 bytes) on `/api/uploads`, more than the app's own limits (240 MiB per upload,
   60 MiB per EMA export, 15 MiB per visit note), so a file too large gets the app's own plain answer. Everywhere else
   Caddy takes up to 20 MB.
-- A spreadsheet that is none of the three exports RemitWatch reads (an A/R or production report, say) is refused with the
-  reason, and not kept.
+- EMA's A/R and Production reports are read too (`REMITWATCH_EMA_REPORTS`, above). They, and any file over 20 MB, go up
+  in 4 MiB pieces to `/data/incoming/` and wait there for the next cycle. A spreadsheet that is none of the five reports
+  RemitWatch reads (the three weekly exports, the A/R and Production) is refused with the reason.
 - Backups: the store's daily copy holds what was read from the files and the record of every upload; the files themselves
   are on the same volume and are covered by its daily snapshot (below).
 

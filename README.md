@@ -116,13 +116,21 @@ remitwatch/
   x12_835.py      835 parser (all loops, balancing, content fingerprint for duplicate detection)
   x12_837.py      837P reader (what was submitted)
   ema_exports.py  ModMed EMA export loaders, Excel or CSV (charge lines, ERA lines, claim status)
-  uploads.py      files brought in by hand on the Upload page (a server): exports and remittances queued for the cycle, visit notes matched to their visits
+  ema_reports.py  EMA's A/R and Production (collections) reports: recognition by their exact columns, streaming readers, keyed hashes in place of names, A/R snapshots, the report catalog, held files
+  ema_ledger.py   the posting ledger of the Production report (a SQLite file of its own, apart from the store) and the summaries the store keeps from it
+  uploads.py      files brought in by hand on the Upload page: exports and remittances queued for the cycle and visit notes matched to their visits (a server), and reports and large files sent in pieces, checked and handed to the intake folder (both hosts)
+  intake.py       the upload hand-off: a finished upload waits in an intake folder (beside the store; on Vercel, in the state folder) until the next cycle reads it
   store.py        SQLite store, idempotent ingestion
   link.py         835 line to EMA charge line and biller handling
   fees.py         fee-schedule inference from charges; code level families
   codes.py        reason and remark texts, global periods, payer rules, filing windows, statute wording
   detect.py       detection engine: baselines, findings, denominators, status carry-over, claims no payer answered
+  archive_rules.py what the 835 archive alone says about the run's items before they are saved (a line paid before, another payer paid first, a units split, repeat denials folded), each with its proof rows
+  ema_checks.py   what EMA's reports add to the items: payments posted under checks no 835 carries, write-offs, claims that never left EMA or no payer answered, 835 payments EMA never posted, denials only EMA saw, credits
+  states.py       the one place an item's state is decided: work now, waiting, done, accepted, expired, can't check (a person's status always wins)
+  story.py        each item's story (every event on its line, from the 835s and EMA, with a balance that reconciles to the cent or shows the gap), its verdict and its exact next step; never from EMA's claim status alone
   insights.py     what Today and Bigger wins say: kinds of work, the plan, the data checks (the TriZetto feed's among them)
+  results.py      the Results tab's figures, by fixed rules and each with the exact items behind it: money returned on items RemitWatch flagged or worked, lift against similar unworked items, ROI, work done, spot checks
   activity.py     what each clinician did: who rendered each visit, patients per clinic day, panels, levels, allowed per patient
   calculator.py   the collections calculator's figures, and the ASC final rule view's (asc_rule)
   pfs.py          global periods and multiple-procedure indicators from CMS's physician fee schedule file (generated)
@@ -138,13 +146,19 @@ remitwatch/
   pipeline.py     the cycle, its lock and the scheduler (a host with a disk)
   cloud.py        the same cycle for a serverless host: store in memory, saved to a state folder, time-boxed runs
   state.py        the state folder (Dropbox, or a local directory for tests)
+  archive.py      retention and the cold archive: old, settled bills leave the store for compressed files the daily run never reads (so its memory stays flat), and come back whole when new data names them
+  runlog.py       run manifests, the event log, the decision log of automatic changes to items, the one scrubber every log line and error message goes through, and where the logs live and for how long
+  repair.py       self-repair by fixed rules when an operational step fails (a network call tried again, a file that cannot be read held, a derived table rebuilt once, a lock left by a dead run removed); it never edits its own code
   actions.py      status changes and acknowledgements, applied to the store or written to the journal
   runtime.py      which of the two modes is in effect, and what the host offers
   dropbox_sync.py Dropbox client (refresh token, cursor deltas, downloads, uploads)
   report.py       summary report and email
   api.py          FastAPI endpoints
-  static/         dashboard (index.html, today.js, desk.js, features.js, claim.js, faxes.js, providers.js, calc*.js, lab*.js, asc*.js), the setup checklist (setup.html), the Upload page (upload.html) and the big-change banner all three show (swing.js); no build step
-  cli.py          cycle | weekly | sync | ingest-835 | ingest-ema | link | detect | activity | alerts | stats | serve | oauth | modmed-key | modmed-check | prepare-appeals | send-appeals | fax-cycle | import-cloud | compare-cloud | accept-store | backup
+  api_ema.py      the EMA pages' routes: Today's EMA figures, the Data tab's EMA panels, the owner's write-off policy page, the reconcile summary and its CSVs
+  api_results.py  the Results tab's routes: its figures, the exact items behind each, the owner's minutes and costs, the daily spot checks
+  api_uploads.py  the Upload page's large files, sent in pieces that carry on after a break (both hosts), and its checklist of the five EMA exports
+  static/         dashboard (index.html, today.js, desk.js, features.js, claim.js, faxes.js, providers.js, results.js for the Results tab, data.js for the Data tab, policy.js for the owner's write-off policy page, calc*.js, lab*.js, asc*.js), the setup checklist (setup.html), the Upload page (upload.html, upload.js) and the big-change banner all three show (swing.js); no build step
+  cli.py          cycle | weekly | sync | ingest-835 | ingest-ema | link | detect | activity | alerts | ema-reports | stats | serve | oauth | modmed-key | modmed-check | prepare-appeals | send-appeals | fax-cycle | import-cloud | compare-cloud | accept-store | backup
 api/index.py      Vercel entry point
 vercel.json       one function behind every address, two daily schedules (the cycle at 10:17 UTC, the fax line at 15:43 UTC)
 public/           robots.txt only: Vercel serves nothing else from the repository
@@ -165,5 +179,5 @@ Where patient data goes, and under which agreement:
 - SRFax (its own BAA, signed before the `SRFAX_` settings are added): each appeal packet faxed carries the letter with the patient's name and member number, the visit note and the remittance evidence; the cover sheet names no patient. Payers' faxes come back through it. Only numbers a person saved are used.
 - ModMed EMA: visit notes are read from its FHIR API (read only); a note stays in memory or in the appeal packet built from it.
 - Email: an appeal packet goes only to an address in `APPEAL_EMAIL_DOMAINS`, through the practice's mail service (under its BAA). Alert and summary emails, the chat webhook (`ALERT_WEBHOOK_URL`) and the deploy's failure messages never contain patient data.
-- Dropbox (a BAA on its team plans): the remittances and EMA exports, and on Vercel the whole store, the packets and the journal in the state folder.
-- On the server, files uploaded by hand stay in `/data/uploads` (owner-only) and the daily copies of the store in `/data/backups` (owner-only), both on the encrypted disk and in its daily snapshots. An export or remittance file never leaves the server; a visit note leaves it only inside its appeal packet and for the review.
+- Dropbox (a BAA on its team plans): the remittances and EMA exports, and on Vercel the whole store, the packets, the journal and the files uploaded there, in the state folder.
+- On the server, files uploaded by hand stay in `/data/uploads` and `/data/incoming` (owner-only) and the daily copies of the store in `/data/backups` (owner-only), all on the encrypted disk and in its daily snapshots. An export or remittance file never leaves the server; a visit note leaves it only inside its appeal packet and for the review.
