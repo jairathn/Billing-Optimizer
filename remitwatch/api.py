@@ -455,6 +455,19 @@ def _trizetto_here() -> bool:
     return trizetto.configured()
 
 
+_ROUTES_SEEN: dict[str, bool] = {}
+
+
+def _route_here(path: str) -> bool:
+    """Whether this build answers GET `path` (a route another unit's router adds, included at the end of this file):
+    the page asks for it only then, so a build without it shows no error. Worked out once per path."""
+    if path not in _ROUTES_SEEN:
+        from starlette.routing import Match
+        scope = {"type": "http", "path": path, "method": "GET", "root_path": "", "headers": [], "query_string": b""}
+        _ROUTES_SEEN[path] = any(getattr(r, "matches", None) and r.matches(scope)[0] == Match.FULL for r in app.router.routes)
+    return _ROUTES_SEEN[path]
+
+
 @app.get("/api/meta")
 def meta(_: str = Depends(require_auth)):
     out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server",
@@ -467,8 +480,16 @@ def meta(_: str = Depends(require_auth)):
                            # whether this site reads remittances straight from TriZetto (remitwatch.trizetto): a serverless
                            # host does only with TRIZETTO_SFTP_SERVERLESS=1, whatever login it is given
                            "trizetto": _trizetto_here(),
-                           # whether EMA's exports and visit notes can be uploaded by hand (remitwatch.uploads): a server only
-                           "uploads": not runtime.serverless()}
+                           # whether visit notes can be uploaded by hand (remitwatch.uploads): a server only
+                           "uploads": not runtime.serverless(),
+                           # whether EMA's A/R and Production reports and the weekly exports can be uploaded (remitwatch.api_uploads):
+                           # both hosts, in pieces (the page shows its Upload link when either is true)
+                           "report_uploads": True,
+                           # whether appeals may be faxed in bulk (REMITWATCH_BULK_APPEAL): while it is off the pages offer
+                           # no bulk appeal button, only the one-item send in each item's panel
+                           "bulk_appeal": bulk_appeals_on(),
+                           # whether this build has the run's decision log for an item ("Why did this change?" in its panel)
+                           "decisions": _route_here("/api/findings/probe/decisions")}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -534,7 +555,14 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
 FINDING_COLS = ("finding_id, signal, category, severity, actionable, title, patient_control_number, claim_key, line_key, payer_name, payer_group, payer_kind, "
                 "rendering_provider_name, rendering_provider_npi, provider_tier, service_date, payment_date, year, procedure_code, modifiers, original_procedure_code, "
                 "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, ema_handling, written_off_cents, written_off_on, status, notes, first_seen, last_seen, "
-                "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note, hint")
+                "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note, hint, "
+                # what EMA's reports say about the item (remitwatch.ema_checks, through detection), its state (remitwatch.states)
+                # and the payer's own limit beside the safe date the item is dated by
+                "written_off_source, written_off_kind, written_off_when, ema_writeoff_evidence, ema_link, ema_status, ema_status_src, ema_as_of, "
+                "ema_balance_cents, ema_worked_on, ema_worked_how, ema_outcome, ema_outcome_on, source, work_state, follow_up_on, state_basis, "
+                "appeal_block, legal_deadline, "
+                # what working it is worth: dollars x the payer's recovery rate for its pattern, with the basis (remitwatch.selfcheck)
+                "expected_value_cents, recovery_rate, recovery_basis")
 
 
 def _day(offset: int) -> str:
@@ -598,7 +626,20 @@ def _finding_cols() -> str:
     """FINDING_COLS, with NULL for a column the store does not have yet. A store saved by an earlier release lacks the
     newest columns until the next detection run adds them, and the dashboard must work in that window."""
     have = {r["name"] for r in rows("PRAGMA table_info(findings)")}
-    return ", ".join(c if c in have else f"NULL AS {c}" for c in (x.strip() for x in FINDING_COLS.split(",")))
+    cols = [c if c in have else f"NULL AS {c}" for c in (x.strip() for x in FINDING_COLS.split(","))]
+    if {"work_state", "follow_up_on", "state_basis"} <= have:
+        # the item's state as the lists filter by it (_state_expr): a person's status set since the newest run decides
+        at = {c: i for i, c in enumerate(cols)}
+        for name, expr in zip(("work_state", "follow_up_on", "state_basis"), _state_cols(have)):
+            cols[at[name]] = expr
+    return ", ".join(cols)
+
+
+def _value_sql(cols: set[str] | None = None) -> str:
+    """What working an item is worth, as the lists sort by it: expected_value_cents (its dollars x the payer's recovery
+    rate for its pattern, written by the run) where the run wrote one, else its dollars."""
+    have = cols if cols is not None else _columns()
+    return "COALESCE(expected_value_cents, shortfall_cents)" if "expected_value_cents" in have else "shortfall_cents"
 
 
 EXTRA_FILTERS = {"plan": "COALESCE(plan,'')", "billed_code": "billed_code", "code_pair": "code_pair", "month": "month", "modifier": "modifier_class",
@@ -635,9 +676,173 @@ def _has_written_off() -> bool:
     return "written_off_cents" in {r["name"] for r in rows("PRAGMA table_info(findings)")}
 
 
+def _columns() -> set[str]:
+    """The findings table's columns on the copy at hand: a store or dashboard copy saved by an earlier release lacks the
+    newest until the next detection run adds them, and every filter on one of them must still answer (with nothing)."""
+    return {r["name"] for r in rows("PRAGMA table_info(findings)")}
+
+
+# The item states (remitwatch.states, amendment 13.1) a list narrows to, plus 'followup_due' (a waiting item whose
+# follow-up day has come: the state is worked out at each run, the day can pass between two runs) and 'todo' (work now
+# and the follow-ups due: what the Worklist and the category pages open with). Several may be given, comma separated.
+STATES = ("work_now", "waiting", "done", "accepted", "expired", "cant_check")
+STATE_FILTERS = STATES + ("followup_due", "todo")
+STATE_WORDS = {"work_now": "Work now", "waiting": "Waiting", "done": "Done", "accepted": "Accepted", "expired": "Expired",
+               "cant_check": "Can't be checked", "followup_due": "Follow-up due", "todo": "Work now and follow-ups due"}
+# an item the run has not given a state yet (a store saved before states, or a run whose states step failed) is read the
+# way remitwatch.states reads a person's status, and as work to do otherwise: nothing drops off the lists for want of one
+_STATE_GUESS_T = ("CASE WHEN COALESCE({a}stale,0)=1 THEN 'done' WHEN {a}status='resolved' THEN 'done' WHEN {a}status IN ('lost','dismissed') "
+                  "THEN 'accepted' WHEN {a}status='appealed' THEN 'waiting' ELSE 'work_now' END")
+_STATE_GUESS = _STATE_GUESS_T.format(a="")
+# A status a person set after the newest detection run started decides the item's state until the next run works it out
+# again, as remitwatch.states does (a person's status wins): Paid is done, Let go and Lost are accepted, Sent waits on the
+# payer (no follow-up due until the run dates one), Started is work now, and To do is work now (done when no rule lists the
+# item any more). Without it, an item a person let go, sent or marked paid stays on Work now until new data arrives.
+# The hide rules' own changes (actions.apply_hide_rules after a run, a rule added or removed) are statuses like any other.
+_STATUS_STATE = ("CASE {a}status WHEN 'resolved' THEN 'done' WHEN 'lost' THEN 'accepted' WHEN 'dismissed' THEN 'accepted' "
+                 "WHEN 'appealed' THEN 'waiting' WHEN 'in_progress' THEN 'work_now' "
+                 "ELSE CASE WHEN COALESCE({a}stale,0)=1 THEN 'done' ELSE 'work_now' END END")
+_ANCHOR_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[0-9T:.+Z -]{0,30}")
+# EMA's view of an item (needs_ema_checks section 4): each a condition on the findings row's own columns
+EMA_FILTERS = ("written_off", "contractual", "paid_other", "on_ar", "ema_only", "worked", "unworked", "auto_written_off")
+
+
+def _status_state(f: dict) -> str:
+    """_STATUS_STATE for one item at hand: the state a person's status gives it."""
+    st = f.get("status") or "open"
+    return {"resolved": "done", "lost": "accepted", "dismissed": "accepted", "appealed": "waiting", "in_progress": "work_now"}.get(
+        st, "done" if f.get("stale") else "work_now")
+
+
+def _run_anchor() -> str | None:
+    """When the newest detection run started (detection_runs.started_at, the time each item it saved carries as
+    last_seen): the states it stored were worked out on the statuses of that moment. None before any run is recorded (the
+    stored states, or the guess, stand)."""
+    if not has_table("detection_runs"):
+        return None
+    got = (one("SELECT MAX(started_at) a FROM detection_runs") or {}).get("a")
+    return got if isinstance(got, str) and _ANCHOR_RE.fullmatch(got) else None
+
+
+def _fresh_sql(cols: set[str], alias: str = "", anchor: str | None = None) -> str:
+    """'A person set this item's status after the newest run started' as SQL (the run's time inlined: it is the store's
+    own timestamp, checked by _ANCHOR_RE), or '0' when nothing can be newer."""
+    if "status_changed_at" not in cols:
+        return "0"
+    a = anchor if anchor is not None else _run_anchor()
+    return f"(COALESCE({alias}status_changed_at,'') > '{a}')" if a else "0"
+
+
+def _state_expr(cols: set[str], alias: str = "", anchor: str | None = None) -> str:
+    """The item's state as every list, tile, count and export reads it: the state the newest run stored (or the guess on a
+    store without one), unless a person's status is newer, when the status decides (_STATUS_STATE)."""
+    a = alias
+    guess = _STATE_GUESS_T.format(a=a)
+    stored = f"COALESCE({a}work_state, {guess})" if "work_state" in cols else guess
+    fresh = _fresh_sql(cols, a, anchor)
+    return stored if fresh == "0" else f"(CASE WHEN {fresh} THEN {_STATUS_STATE.format(a=a)} ELSE {stored} END)"
+
+
+def _state_cols(cols: set[str], alias: str = "", anchor: str | None = None) -> list[str]:
+    """work_state, follow_up_on and state_basis as a list shows them (three SQL expressions): the state per _state_expr,
+    and no follow-up day or basis from the run while a person's newer status decides (the next run gives its own)."""
+    a = alias
+    fresh = _fresh_sql(cols, a, anchor)
+    if fresh == "0":
+        return [f"{a}work_state", f"{a}follow_up_on", f"{a}state_basis"]
+    return [f"(CASE WHEN {fresh} THEN {_STATUS_STATE.format(a=a)} ELSE {a}work_state END) AS work_state",
+            f"(CASE WHEN {fresh} THEN NULL ELSE {a}follow_up_on END) AS follow_up_on",
+            f"(CASE WHEN {fresh} THEN NULL ELSE {a}state_basis END) AS state_basis"]
+
+
+def _state_sql(states: str | None, cols: set[str], today: str) -> tuple[str, list] | None:
+    """`state=` as one condition: work_now, waiting, done, accepted, expired, cant_check, followup_due, todo (several,
+    comma separated, are any of them). None when nothing is asked; '0' for a name it does not know. The state is
+    _state_expr's: a status a person set since the newest run decides it at once."""
+    wanted = [x.strip() for x in (states or "").split(",") if x.strip()]
+    if not wanted:
+        return None
+    anchor = _run_anchor()
+    ws = _state_expr(cols, anchor=anchor)
+    fresh = _fresh_sql(cols, anchor=anchor)
+    due = "(follow_up_on IS NOT NULL AND follow_up_on <= ?)" if "follow_up_on" in cols else "0"
+    if due != "0" and fresh != "0":
+        due = f"({due[1:-1]} AND NOT {fresh})"      # a person's newer status: the run has not dated its follow-up yet
+    parts, params = [], []
+    for x in wanted:
+        if x in STATES:
+            parts.append(f"{ws} = ?")
+            params.append(x)
+        elif x == "followup_due":
+            parts.append(f"({ws} IN ('work_now','waiting') AND {due})")
+            params += [today] if due != "0" else []
+        elif x == "todo":
+            parts.append(f"({ws} = 'work_now' OR ({ws} = 'waiting' AND {due}))")
+            params += [today] if due != "0" else []
+        else:
+            parts.append("0")
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def _ema_sql(ema: str | None, cols: set[str]) -> tuple[str, list] | None:
+    """`ema=` as one condition (needs_ema_checks section 4, so counts, tiles and lists agree): written_off, contractual,
+    paid_other, on_ar, ema_only, worked, unworked (ema_checks.unworked_sql over the day the run measured it to) and
+    auto_written_off. A copy without the column, or a name it does not know, answers with nothing."""
+    if not ema:
+        return None
+    need = {"written_off": "written_off_cents", "contractual": "written_off_kind", "paid_other": "ema_outcome", "on_ar": "ema_link",
+            "ema_only": "source", "worked": "ema_worked_on", "unworked": "ema_worked_on", "auto_written_off": "ema_outcome"}.get(ema)
+    if need is None or need not in cols:
+        return "0", []
+    if ema == "written_off":
+        return "COALESCE(written_off_cents,0) > 0", []
+    if ema == "contractual":
+        return "written_off_kind = 'contractual'", []
+    if ema == "paid_other":
+        return "ema_outcome = 'paid_after_other'", []
+    if ema == "auto_written_off":
+        return "ema_outcome = 'auto_written_off'", []
+    if ema == "ema_only":
+        return "source = 'ema'", []
+    if ema == "worked":
+        return "ema_worked_on IS NOT NULL", []
+    if ema == "on_ar":
+        return ("ema_link IN (SELECT link FROM ema_ar WHERE link IS NOT NULL)", []) if has_table("ema_ar") else ("0", [])
+    # unworked: the day the run measured the number to (meta ema:unworked), so the list holds what Today's number counts
+    from .ema_checks import UNWORKED_KEY, unworked_sql
+    got = one("SELECT value FROM meta WHERE key=?", (UNWORKED_KEY,)) if has_table("meta") else None
+    try:
+        through = (json.loads(got["value"]) or {}).get("data_through") if got else None
+    except (TypeError, ValueError):
+        through = None
+    if not through:
+        return "0", []
+    clause, params = unworked_sql(str(through))
+    return f"({clause})", list(params)
+
+
+def _list_sql(column: str, value: str | None, cols: set[str]) -> tuple[str, list] | None:
+    """One column equal to one of the values given (comma separated); nothing on a copy without the column."""
+    vals = [x.strip() for x in (value or "").split(",") if x.strip()]
+    if not vals:
+        return None
+    if column not in cols:
+        return "0", []
+    return f"{column} IN ({','.join('?' * len(vals))})", vals
+
+
 def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None,
-             patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0, min_dollars: int = 0):
+             patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0, min_dollars: int = 0, *,
+             ema: str | None = None, state: str | None = None, ema_outcome: str | None = None, source: str | None = None,
+             today: str | None = None):
     where, params = [], []
+    if ema or state or ema_outcome or source:
+        cols = _columns()
+        for got in (_state_sql(state, cols, today or _day(0)), _ema_sql(ema, cols), _list_sql("ema_outcome", ema_outcome, cols),
+                    _list_sql("source", source, cols)):
+            if got is not None:
+                where.append(got[0])
+                params += got[1]
     if min_dollars:
         # the worklist's amount filter hides items known to be worth less (small items are a third of the list and little of the
         # money); an item whose value is not known stays, since it may be large
@@ -878,23 +1083,31 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
              provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
              patient_of: Optional[str] = Query(None, max_length=200), sort: str = "shortfall", limit: int = Query(100, ge=1, le=2000),
              offset: int = Query(0, ge=0, le=10**9), kind: Optional[str] = Query(None, max_length=20), live: int = Query(0, ge=0, le=1),
-             paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), request: Request = None, _: str = Depends(require_auth)):
+             paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), ema: Optional[str] = Query(None, max_length=40),
+             state: Optional[str] = Query(None, max_length=120), work_state: Optional[str] = Query(None, max_length=120),
+             ema_outcome: Optional[str] = Query(None, max_length=200), source: Optional[str] = Query(None, max_length=20),
+             request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind, bool(live), paid, min)
+                         _extra(request), patient_of, kind, bool(live), paid, min, ema=ema, state=state or work_state, ema_outcome=ema_outcome,
+                         source=source)
     delta, each = _pattern_cents(w, params, deadline)
-    due, order_params = "appeal_deadline", []
-    if each and sort in ("deadline", "payer"):
+    due, due_params = "appeal_deadline", []
+    if each:
         # a routine-rate finding sorts by the first of its claims still in range, not by the last
         nxt = [(fid, d) for fid, (_c, d, _n) in each.items() if d]
         if nxt:
             due = "COALESCE(CASE finding_id " + " ".join("WHEN ? THEN ?" for _ in nxt) + " END, appeal_deadline)"
-            order_params = [x for pair in nxt for x in pair]
-    by_due = f"({due}) IS NULL, ({due}) < ?, {due} ASC"
-    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": f"{by_due}, shortfall_cents DESC",
-             "payer": f"payer_group, {by_due}, shortfall_cents DESC", "paid": "payment_date DESC, shortfall_cents DESC",
-             "sent": "COALESCE(appealed_at, status_changed_at) ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
+            due_params = [x for pair in nxt for x in pair]
     # by_due names `due` three times, the practice's day between the second and the third
-    order_params = order_params * 2 + [_day(0)] + order_params if sort in ("deadline", "payer") else []
+    by_due = f"({due}) IS NULL, ({due}) < ?, {due} ASC"
+    value = _value_sql()
+    orders = {"shortfall": f"shortfall_cents DESC, {by_due}", "date": "service_date DESC", "deadline": f"{by_due}, shortfall_cents DESC",
+              "payer": f"payer_group, {by_due}, shortfall_cents DESC", "paid": "payment_date DESC, shortfall_cents DESC",
+              "sent": "COALESCE(appealed_at, status_changed_at) ASC, shortfall_cents DESC",
+              # what working it is worth (dollars x the payer's recovery rate for its pattern), then the date it must be done by
+              "value": f"({value}) IS NULL, {value} DESC, {by_due}"}
+    order = orders.get(sort, orders["shortfall"])
+    order_params = (due_params * 2 + [_day(0)] + due_params) if by_due in order else []
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
                               tuple(params) + tuple(order_params) + (limit, offset)))
@@ -921,9 +1134,13 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
                  patient_of: Optional[str] = Query(None, max_length=200), kind: Optional[str] = Query(None, max_length=20),
                  live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6),
-                 view: str = Query("raw", pattern="^(raw|worklist)$"), request: Request = None, _: str = Depends(require_auth)):
+                 view: str = Query("raw", pattern="^(raw|worklist)$"), ema: Optional[str] = Query(None, max_length=40),
+                 state: Optional[str] = Query(None, max_length=120), work_state: Optional[str] = Query(None, max_length=120),
+                 ema_outcome: Optional[str] = Query(None, max_length=200), source: Optional[str] = Query(None, max_length=20),
+                 request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind, bool(live), paid, min)
+                         _extra(request), patient_of, kind, bool(live), paid, min, ema=ema, state=state or work_state, ema_outcome=ema_outcome,
+                         source=source)
     data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
     if view == "worklist":
         return _worklist_csv(data, deadline, w, params)
@@ -1040,8 +1257,10 @@ def _initials(last: str | None, first: str | None) -> str:
     return "".join(x[0] for x in (first or "", last or "") if x).upper() or "?"
 
 
-@app.get("/api/findings/{finding_id}")
-def finding_detail(finding_id: str, _: str = Depends(require_auth)):
+def finding_detail(finding_id: str, _: str = "ok"):
+    """One finding with everything its panel shows from the store: the claim (allowlisted columns), its lines, reasons
+    and remarks, its remittances, the EMA export rows, the history, packets and faxes. The routes that build a letter or
+    a fax read it too (without the story: see finding_page)."""
     f = one("SELECT * FROM findings WHERE finding_id=?", (finding_id,))
     if not f:
         _not_found(finding_id)
@@ -1115,6 +1334,92 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
             out["faxes"].append(x)
         sent = [x["created_at"] for x in out["faxes"] if x["direction"] == "out" and x["status"] != "failed"]
         f["faxed_at"] = min(sent) if sent else None      # its follow-ups go by fax by themselves
+    return out
+
+
+@app.get("/api/findings/{finding_id}")
+def finding_page(finding_id: str, story: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
+    """An item's panel: finding_detail. story=1 adds what /api/findings/{id}/explain gives, in the same answer. The state
+    is the one the lists show: a status a person set since the newest run decides it (state_by_status says so)."""
+    out = finding_detail(finding_id, "ok")
+    f = out["finding"]
+    anchor = _run_anchor()
+    if anchor and "work_state" in f and str(f.get("status_changed_at") or "") > anchor:
+        f.update(work_state=_status_state(f), follow_up_on=None, state_basis=None, state_by_status=True)
+    if story:
+        out.update(_explained(out["finding"]))
+    return out
+
+
+@app.get("/api/findings/{finding_id}/explain")
+def finding_explain(finding_id: str, _: str = Depends(require_auth)):
+    """The item's story, verdict and next step (remitwatch.story.explain, one gathering of its facts: `explain`) and what
+    EMA's reports hold on its claim (remitwatch.ema_checks.claim_block: `ema_block`). The panel asks for it beside the
+    finding itself, so the item's own facts show at once. On a server the posting ledger is opened read-only and the story
+    lists every EMA posting; on Vercel the dashboard's copy shows EMA's summaries and says the postings are kept on the
+    server (and that the state shown was worked out on the daily run's full store)."""
+    f = one("SELECT finding_id, patient_control_number, ema_link FROM findings WHERE finding_id=?", (finding_id,)) \
+        if "ema_link" in _columns() else one("SELECT finding_id, patient_control_number FROM findings WHERE finding_id=?", (finding_id,))
+    if not f:
+        raise HTTPException(404, "finding not found")
+    return dict(_explained(f), finding_id=finding_id)
+
+
+def _ledger_readonly():
+    """The posting ledger opened read-only (a server's, beside its store), or None: a serverless host keeps none, and a
+    server has none until its first Production report. Closed by the caller."""
+    if runtime.serverless():
+        return None
+    from . import ema_ledger
+    path = ema_ledger.ledger_path(DB_PATH)
+    if not os.path.exists(path):
+        return None
+    try:
+        return ema_ledger.Ledger.open(path, readonly=True)
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        # the story is told from the store's summaries instead, and says the detail is kept on the server
+        _say(f"api: the posting ledger could not be opened read-only ({type(exc).__name__}); the item panels show EMA's summaries")
+        return None
+
+
+def _say(line: str) -> None:
+    """One line in the server's log (no patient, claim or check number in it: callers pass ids and kinds only)."""
+    import sys
+    print(line, file=sys.stderr, flush=True)
+
+
+def _explained(f: dict, *, claim_key: str | None = None, bill: str | None = None) -> dict:
+    """{'explain': {'story', 'verdict', 'next_step', 'state'}, 'ema_block': claim_block} for an item (f) or, with claim_key,
+    for a whole claim ({'claim_story', 'ema_block'}). A story that cannot be put together leaves the rest of the panel as it
+    is and says why ('explain_error'), and the server's log names the item and the kind of error."""
+    from . import ema_checks as ec
+    from . import story as story_mod
+    from .detect import bill_of
+    out: dict[str, Any] = {}
+    lg = _ledger_readonly()
+    conn = db()
+    conn.row_factory = None
+    try:
+        try:
+            if claim_key:
+                out["claim_story"] = story_mod.item_story(conn, claim_key=claim_key, ledger=lg, today=_day(0))
+            else:
+                out["explain"] = story_mod.explain(conn, f["finding_id"], ledger=lg, today=_day(0))
+        except Exception as exc:        # noqa: BLE001  (shown on the panel and logged: the item's own facts still show)
+            out["explain_error"] = f"The story of this {'claim' if claim_key else 'item'} could not be put together ({type(exc).__name__})."
+            _say(f"api: story failed for {'claim' if claim_key else 'item ' + str(f.get('finding_id'))}: {type(exc).__name__}: {str(exc)[:160]}")
+        try:
+            pcn = (f or {}).get("patient_control_number")
+            links = [int(f["ema_link"])] if (f or {}).get("ema_link") not in (None, "") else []
+            out["ema_block"] = ec.claim_block(conn, claim_id=pcn, bill=bill or (bill_of(pcn) if pcn else None), links=links, ledger=lg)
+        except Exception as exc:        # noqa: BLE001  (a store with no EMA tables yet, or a damaged one: said on the panel)
+            out["ema_block"] = None
+            out["ema_block_error"] = f"EMA's reports for this claim could not be read ({type(exc).__name__})."
+            _say(f"api: claim_block failed: {type(exc).__name__}: {str(exc)[:160]}")
+    finally:
+        conn.close()
+        if lg is not None:
+            lg.close()
     return out
 
 
@@ -1342,19 +1647,35 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
     return out
 
 
+def _known(finding_id: str) -> bool:
+    """Whether the copy the dashboard shows holds this item."""
+    return one("SELECT 1 FROM findings WHERE finding_id=?", (finding_id,)) is not None
+
+
+# Money is let go (or marked lost) only through the owner's policy table or by a person with a reason (brief C, shared
+# rules): the reason goes in the item's history. Here, not in actions.apply_status, so journal entries from before keep
+# replaying.
+LET_GO_REASON = "Letting an item go, or marking it lost, needs a reason: say why (it is kept in the item's history)."
+
+
 @app.post("/api/findings/{finding_id}/status", dependencies=[Depends(require_xhr)])
 async def set_status(finding_id: str, request: Request, user: str = Depends(require_auth)):
     """A person's status for one item. seen_status: the status the item had on their page when it was drawn; an item that
     changed since is left as it is (409 changed), and so is one with a fax going out (409 in_flight). A page from before
-    seen_status existed is refused for an item the daily run closed by itself. Paid takes the amount the payer paid."""
+    seen_status existed is refused for an item the daily run closed by itself. Paid takes the amount the payer paid. Let go
+    and Lost take a reason (LET_GO_REASON), kept in the item's history."""
     body = await _body_object(request)
     status, notes, rec = _status_fields(body)
     seen = body.get("seen_status")
     if not _seen_ok(seen):
         raise HTTPException(400, "The status your page showed could not be read. Reload the page.")
-    if status in LET_GO and not (notes or "").strip() and await asyncio.to_thread(_one_at_a_time, [finding_id]):
-        raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
-                                 "only with a note. Say why.")
+    if status in LET_GO and not (notes or "").strip():
+        if not await asyncio.to_thread(_known, finding_id):
+            await asyncio.to_thread(_not_found, finding_id)        # 409 with its new number, or 404
+        if await asyncio.to_thread(_one_at_a_time, [finding_id]):
+            raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
+                                     "only with a note. Say why.")
+        raise HTTPException(400, LET_GO_REASON)
     await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True)
     return {"ok": True}
 
@@ -1376,6 +1697,9 @@ async def bulk_status(request: Request, user: str = Depends(require_auth)):
     if status in LET_GO and await asyncio.to_thread(_one_at_a_time, ids):
         raise HTTPException(400, "Claims the payer never answered, or rejected before reaching it, are let go one at a time, "
                                  "with a note. Open each one.")
+    if status in LET_GO and not (notes or "").strip():
+        raise HTTPException(400, "Letting items go, or marking them lost, needs a reason: say why, once for all of them (it is kept "
+                                 "in each item's history).")
     out = await asyncio.to_thread(_person_status, ids, status, notes, None, user, {k: v for k, v in (seen or {}).items() if v}, False)
     return {"ok": True, "updated": out["n"], "changed": out["changed"], "in_flight": out["in_flight"]}
 
@@ -1717,8 +2041,10 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
     ids = sorted(set(pcns) | set(ema_ids))      # with the submissions no payer has answered: their items are on the bill too
     if ids:
         qp = ",".join("?" * len(ids))
+        have = _columns()
+        state_cols = (", " + ", ".join(_state_cols(have, "f."))) if {"work_state", "follow_up_on", "state_basis"} <= have else ""
         findings = [dict(f, via="line") for f in rows(f"""SELECT f.finding_id, f.signal, f.category, f.status, f.shortfall_cents, f.appeal_deadline, f.procedure_code,
-                                                                f.claim_key, f.line_key, f.stale, c.payment_date remit_date, c.payer_name remit_payer
+                                                                f.claim_key, f.line_key, f.stale, c.payment_date remit_date, c.payer_name remit_payer{state_cols}
                                                          FROM findings f LEFT JOIN claims c ON c.claim_key = f.claim_key
                                                          WHERE f.patient_control_number IN ({qp}) ORDER BY f.payment_date, f.finding_id""", tuple(ids))]
     plb, takebacks, patterns = _bill_extras(pcns, {r["payer_claim_control_number"] for r in rem if r.get("payer_claim_control_number")},
@@ -1728,7 +2054,12 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
                           claim_status, activity_type, carc, rarc, adjustment_status, denial_category, posted_date, claim_submission_date, transaction_date
                    FROM ema_rows WHERE claim_id IN ({qe}) ORDER BY claim_id, family, service_date, row_index""", tuple(ids)) if has_table("ema_rows") and ids else []
     who = _who(rem[-1]) if rem else _who_ema(_ema_first(ema_ids))     # a bill no payer has answered yet: EMA says who
-    return dict(who, bill=bill, claim_ids=ids, answered=pcns, remits=remits, findings=findings + takebacks + patterns, taken_back=plb, ema=ema)
+    # the claim's story (every remittance and EMA posting on its lines, the balance) and EMA's block for the whole bill
+    newest = (pcns or ema_ids or [bill])[-1]
+    told = _explained({"patient_control_number": newest}, claim_key=newest, bill=bill)
+    return dict(who, bill=bill, claim_ids=ids, answered=pcns, remits=remits, findings=findings + takebacks + patterns, taken_back=plb, ema=ema,
+                story=told.get("claim_story"), ema_block=told.get("ema_block"),
+                **({"story_error": told["explain_error"]} if told.get("explain_error") else {}))
 
 
 # --------------------------------------------------------------------------- payment fees: one request per payer
@@ -2078,29 +2409,56 @@ def brief(_: str = Depends(require_auth)):
             fu["note"] = (f"{gap_words(gap)} Some of these may have been paid in those weeks. " if gap else
                           f"The newest remittance RemitWatch has is {behind} days old, so some of these may have been paid since. ") \
                 + "Check each one in EMA or on the payer's portal before you follow up."
-        # the red number on each category tab: what closes within 7 days, counted as that page's first tile and its list
+        # the red number on each category tab: the work that closes within 7 days, counted as the list a click on it opens
+        # (desk.js badgeOpen: to do and started, closing within 7 days, the work now and follow-ups due among them; never
+        # an item that only waits on the payer)
         token = _WINDOWS_MEMO.set({})
         try:
-            out["badges"] = {c: _bucket(c, None, TODO_STATUSES, "week") for c in BADGE_CATEGORIES}
+            out["badges"] = {c: _bucket(c, None, TODO_STATUSES, "week", state="todo") for c in BADGE_CATEGORIES}
+            _todo_soon(out.get("work") or {})
         finally:
             _WINDOWS_MEMO.reset(token)
     return out
+
+
+def _todo_soon(work: dict) -> None:
+    """Today's step 1 (what closes within 7 days, or within 30) and its chips by kind of work, counted as the list its
+    Start button opens: the to-do statuses closing then, the work now and the follow-ups due among them (desk.js
+    deskFilter), as the red numbers on the tabs are. insights.brief counts them by status and window alone, which also
+    counted an item that only waits on the payer, and the list did not show it."""
+    from .insights import WORK_TYPES
+    meta = {t["key"]: t for t in WORK_TYPES}
+    total = work.setdefault("total", {})
+    types = {t["key"]: t for t in work.get("types") or []}
+    for dl, key in (("week", "due7"), ("month", "due30")):
+        got = _desk_kinds(CLAIM_CATEGORIES, None, TODO_STATUSES, dl, state="todo")
+        total[key + "_n"], total[key + "_cents"] = got["n"], got["cents"]
+        by = {k["key"]: k for k in got["kinds"]}
+        for k in by:
+            if k not in types:          # never expected (7 and 30 days are inside the window), but a chip is never lost
+                types[k] = dict(meta.get(k, {"key": k}), n=0, cents=0, due7_n=0, due7_cents=0, due30_n=0, due30_cents=0, working_n=0)
+                work.setdefault("types", []).append(types[k])
+        for k, t in types.items():
+            t[key + "_n"], t[key + "_cents"] = (by.get(k) or {}).get("n", 0), (by.get(k) or {}).get("cents", 0)
 
 
 @app.get("/api/worklist/counts")
 def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None, status: str = "open", deadline: Optional[str] = None,
                     q: Optional[str] = None, signal: Optional[str] = None, live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650),
                     min: int = Query(0, ge=0, le=10**6), kind: Optional[str] = Query(None, max_length=20), year: Optional[str] = Query(None, max_length=4),
-                    handling: Optional[str] = Query(None, max_length=40), request: Request = None, _: str = Depends(require_auth)):
+                    handling: Optional[str] = Query(None, max_length=40), ema: Optional[str] = Query(None, max_length=40),
+                    state: Optional[str] = Query(None, max_length=120), work_state: Optional[str] = Query(None, max_length=120),
+                    ema_outcome: Optional[str] = Query(None, max_length=200), source: Optional[str] = Query(None, max_length=20),
+                    request: Request = None, _: str = Depends(require_auth)):
     """Items and dollars for each kind of work under the worklist's other filters, so each tab counts what a click on it
     opens, and for each reason (signal), so a reason chip counts what it opens too. Counts only: no patient, claim or date."""
     from .insights import WORK_TYPES, work_type
     w, params = _filters(signal, category, payer, year, status, None, None, _search_text(request, q), None, None, deadline, handling or None, None,
-                         None, kind, bool(live), paid, min)
+                         None, kind, bool(live), paid, min, ema=ema, state=state or work_state, ema_outcome=ema_outcome, source=source)
     out = {t["key"]: {"key": t["key"], "n": 0, "cents": 0} for t in WORK_TYPES}
     by_signal: dict[str, dict] = {}
     for r in rows(f"SELECT signal, actionable, carc, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w} GROUP BY 1,2,3", tuple(params)):
-        k = out[work_type(r["signal"], r["actionable"], r["carc"])]
+        k = out.setdefault(work_type(r["signal"], r["actionable"], r["carc"]), {"key": work_type(r["signal"], r["actionable"], r["carc"]), "n": 0, "cents": 0})
         k["n"] += r["n"]
         k["cents"] += r["cents"]
         sg = by_signal.setdefault(r["signal"] or "", {"signal": r["signal"], "n": 0, "cents": 0})
@@ -2134,24 +2492,40 @@ BADGE_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
 CLAIM_CATEGORIES = ",".join(BADGE_CATEGORIES)          # the four claim pages together: the Worklist
 
 
-def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None, year=None, handling=None) -> dict:
+# A category page's state tiles (amendment 13.1): what to work now (with the follow-ups whose day has come), the part of it
+# that closes within 7 days, what waits on the payer, and the four kinds of item that need no work, each findable
+STATE_TILES = (
+    ("todo", "todo", None),                     # work now and follow-ups due: the list a page opens with
+    ("todo_week", "todo", "week"),              # of those, the ones whose filing window closes within 7 days
+    ("todo_decide", "todo", "decide"),          # of those, the ones with no filing date: a person says what they are
+    ("waiting", "waiting", None),               # a person or EMA shows the work was done: waiting on the payer
+    ("followup_due", "followup_due", None),     # waiting, and its follow-up day has come
+    ("done", "done", None), ("accepted", "accepted", None), ("st_expired", "expired", None), ("cant_check", "cant_check", None),
+)
+
+
+def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None, year=None, handling=None, ema=None, state=None) -> dict:
     """Items and dollars under exactly the filter /api/findings uses for the same choices (live findings only): the
     count line of the list a click opens. A routine-rate pattern counts its claims in range, as the list does."""
-    w, params = _filters(signal, category, payer, year, status, None, None, None, None, None, deadline, handling, None, None, kind, True, 0, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, None, None, None, deadline, handling, None, None, kind, True, 0, min_dollars,
+                         ema=ema, state=state)
     r = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}", tuple(params))
     delta, _each = _pattern_cents(w, params, deadline)
     return {"n": r["n"], "cents": (r["cents"] or 0) + (delta if r["n"] else 0)}
 
 
-def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None, year=None, handling=None) -> dict:
+def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None, year=None, handling=None, ema=None,
+                state=None) -> dict:
     """The kinds of work under one filter, largest dollars first, each with its three biggest payer piles; a pile's count
     and dollars are what the list shows for that kind and payer."""
     from .insights import WORK_TYPES, work_type
-    w, params = _filters(signal, category, payer, year, status, None, None, q, None, None, deadline, handling, None, None, None, True, paid_days, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, q, None, None, deadline, handling, None, None, None, True, paid_days, min_dollars,
+                         ema=ema, state=state)
     kinds = {t["key"]: {"key": t["key"], "n": 0, "cents": 0, "payers": {}} for t in WORK_TYPES}
     for r in rows(f"""SELECT signal, actionable, carc, payer_group pg, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}
                       GROUP BY 1,2,3,4""", tuple(params)):
-        k = kinds[work_type(r["signal"], r["actionable"], r["carc"])]
+        wt = work_type(r["signal"], r["actionable"], r["carc"])
+        k = kinds.setdefault(wt, {"key": wt, "n": 0, "cents": 0, "payers": {}})
         k["n"] += r["n"]
         k["cents"] += r["cents"]
         p = k["payers"].setdefault(r["pg"], [0, 0])
@@ -2183,19 +2557,27 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
          status: str = Query(TODO_STATUSES, max_length=80), deadline: Optional[str] = Query(None, max_length=20),
          signal: Optional[str] = Query(None, max_length=400), paid: int = Query(0, ge=0, le=3650), tiles: int = Query(1, ge=0, le=1),
          kind: Optional[str] = Query(None, max_length=20), reason: Optional[str] = Query(None, max_length=60), q: Optional[str] = None,
-         year: Optional[str] = Query(None, max_length=4), handling: Optional[str] = Query(None, max_length=40), request: Request = None,
-         _: str = Depends(require_auth)):
+         year: Optional[str] = Query(None, max_length=4), handling: Optional[str] = Query(None, max_length=40),
+         ema: Optional[str] = Query(None, max_length=40), state: Optional[str] = Query(None, max_length=120),
+         tileset: str = Query("all", pattern="^(all|state)$"), request: Request = None, _: str = Depends(require_auth)):
     """A category page in one call: its tiles (closes in 7 and 30 days, window open, to decide, older with no date, window
-    closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), and the kinds of work under
-    the chosen status, filing date, payment window and search with their payer piles. `signal` narrows the whole page;
-    the chosen kind of work and reason narrow the tiles only (a tile click keeps them, and the kinds of work stay listed so
-    another can be chosen). Every number is the count line of the list it opens. Counts only: no patient, claim or date."""
+    closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), its state tiles (STATE_TILES:
+    work now with the follow-ups due, of those what closes in 7 days, waiting, follow-ups due, done, accepted, expired,
+    can't be checked), and the kinds of work under the chosen status, state, filing date, payment window and search with
+    their payer piles. `signal` and `ema` narrow the whole page; the chosen kind of work and reason narrow the tiles only (a
+    tile click keeps them, and the kinds of work stay listed so another can be chosen). Every number is the count line of
+    the list it opens. Counts only: no patient, claim or date."""
     token = _WINDOWS_MEMO.set({})
     try:
         out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid, _search_text(request, q), year,
-                                                         handling or None)}
+                                                         handling or None, ema or None, state or None)}
         if tiles:
-            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year, handling or None) for name, st, dl in DESK_TILES}
+            # tileset=state: the state tiles the pages draw, and every item to do (the page's "any window" line); all: the
+            # filing-date tiles too, as an earlier page and the counts elsewhere read them
+            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year, handling or None, ema or None)
+                            for name, st, dl in DESK_TILES if tileset == "all" or name == "all"}
+            out["tiles"].update({name: _bucket(category, payer, None, dl, min, reason or signal, kind, year, handling or None, ema or None, sv)
+                                 for name, sv, dl in STATE_TILES})
         return out
     finally:
         _WINDOWS_MEMO.reset(token)
@@ -2724,12 +3106,17 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
         # it to the daily run. Notifications start nothing in the meantime, so without this the file would wait a day.
         if hop < 2:
             out["continued"] = cloud.trigger_cycle(base_url(request), "retry", delay=90, hop=hop + 1)
-    elif client is not None and not out.get("skipped") and not out.get("more"):
-        try:        # files that landed while this cycle ran
-            if cloud.has_new_files(st, client):
+    elif not out.get("skipped") and not out.get("more"):
+        # files that landed while this cycle ran: new in the Dropbox folder, or an upload finished into the state folder's
+        # intake/ (its own cron call was skipped while this run held the lock), so it is read now, not by tomorrow's run
+        try:
+            from .intake import state_pending
+            late = "uploads" if state_pending(st) else ("files" if client is not None and cloud.has_new_files(st, client) else None)
+            if late:
                 out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)
-        except Exception:
-            pass
+                out["continued_for"] = late
+        except Exception as exc:        # noqa: BLE001  (the daily run reads them; the answer says why none was started)
+            out["continue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     return out
 
 
@@ -3230,8 +3617,16 @@ def uploads_needed(limit: int = Query(100, ge=1, le=500), _: str = Depends(requi
 
 
 @app.post("/api/uploads/notes/{note_id}/match", dependencies=[Depends(require_xhr)])
-def uploads_note_match(note_id: str, body: dict = Body(default={}), _: str = Depends(require_auth)):
-    """A person settles which visit an uploaded note is for: one of the visits it could be (pick), or an item (finding_id)."""
+async def uploads_note_match(note_id: str, request: Request, _: str = Depends(require_auth)):
+    """A person settles which visit an uploaded note is for: one of the visits it could be (pick), or an item (finding_id).
+    The body is read after the sign-in, and at most 64 KB of it (api_uploads._json_body): a Body() parameter would be read
+    and parsed before the sign-in, so anyone could make the server parse a large body (needs_A2 F.2)."""
+    from . import api_uploads
+    body = await api_uploads._json_body(request)
+    return await asyncio.to_thread(_uploads_note_match, note_id, body)
+
+
+def _uploads_note_match(note_id: str, body: dict):
     _uploads_here()
     from . import uploads
     if not re.fullmatch(r"[0-9a-f]{24}", note_id):
@@ -4064,6 +4459,102 @@ def bulk_appeals_on() -> bool:
     return os.environ.get("REMITWATCH_BULK_APPEAL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# What "Appeal everything appealable" may send (needs_B.md 1.3, unit B's rule, exactly): an open item to work now, with
+# nothing that blocks an appeal (remitwatch.states' appeal_block: paid, credit, reprocessed, waiting), an appeal by its
+# action, inside its window, never money owed back, and never a claim to chase, fix, post, bill or decide.
+BULK_EXCLUDED_SIGNALS = ("NO_ANSWER", "REJECTED_PRE_PAYER", "NOT_SENT", "REMIT_NOT_POSTED", "SECONDARY_NOT_BILLED", "CREDIT_BALANCE",
+                         "FORWARDED_TO_CARRIER", "EMA_DENIAL_AS_CONTRACTUAL")
+BULK_RULE = ("status='open' AND COALESCE(stale,0)=0 AND work_state='work_now' AND appeal_block IS NULL AND actionable='appeal' "
+             "AND appeal_deadline >= ? AND category <> 'refund' AND signal NOT IN (" + ",".join(f"'{x}'" for x in BULK_EXCLUDED_SIGNALS) + ")")
+# why an appeal must not go (remitwatch.states' appeal_block), in the page's words
+BLOCK_WORDS = {"paid": "it was paid or settled", "credit": "the line carries a credit (money owed back)",
+               "reprocessed": "the payer reprocessed the line after this answer", "waiting": "it waits on the payer's answer to work already done",
+               "settled_in_ema": "EMA shows the line settled: find which payer paid before appealing it",
+               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)"}
+# never appealed, whoever asks and whatever the item's status: a line paid, credited or reprocessed (amendment 14); one EMA
+# shows settled, or the archive shows likely paid (orchestrator decision 4), goes only after a person checked it is unpaid
+NEVER_APPEALED = ("paid", "credit", "reprocessed")
+CHECK_FIRST = ("settled_in_ema", "likely_paid")
+# the states in which nothing is appealed: done (paid or settled, with proof), accepted (let go, lost, the owner's policy),
+# expired (past every window)
+# what EMA's postings show (ema_checks.fax_vouch) that holds an item in bulk even after a person's "still unpaid in EMA"
+EMA_SHOWS_PAID = ("paid_after", "no_balance")
+CLOSED_STATES = {"done": "it was found paid or settled", "accepted": "it is accepted (let go, lost, or the owner's write-off policy)",
+                 "expired": "every window to appeal it has closed"}
+# why an open item a letter settles is not on the bulk list, in the "Left out" line's words and order
+LEFT_OUT = (("paid", "paid"), ("waiting", "waiting"), ("credit", "credit"), ("reprocessed", "reprocessed"), ("settled", "settled in EMA"),
+            ("likely_paid", "likely paid"), ("no_date", "no filing date"), ("no_state", "state not worked out yet"), ("other", "other"))
+LEFT_OUT_WORDS = dict(BLOCK_WORDS, settled="EMA shows it settled: find which payer paid", no_date="no filing date on file: its panel says what to check",
+                      no_state="the run has not worked out its state yet", other="not an item to appeal now")
+
+
+def _bulk_ready(cols: set[str]) -> bool:
+    """Whether the store has the columns the bulk rule reads (a store analysed before them sends nothing in bulk)."""
+    return {"work_state", "appeal_block"} <= cols
+
+
+def _left_out_reason(r: dict) -> str:
+    """Why an open item an appeal letter would settle is not on the bulk list (LEFT_OUT): paid, waiting, credit,
+    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), no filing date,
+    no state worked out yet, or other."""
+    block = r.get("appeal_block")
+    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid"):
+        return block
+    if block in ("settled_in_ema", "patient_paid"):
+        return "settled"
+    ws = r.get("work_state")
+    if ws == "done":
+        return "paid"
+    if ws == "waiting":
+        return "waiting"
+    if r.get("category") == "refund" or r.get("signal") == "CREDIT_BALANCE":
+        return "credit"
+    if r.get("work_state") is None:
+        return "no_state"
+    if not r.get("appeal_deadline"):
+        return "no_date"
+    return "other"
+
+
+def _appeal_ok_now(fid: str) -> tuple[bool, str | None]:
+    """The item's own next step (remitwatch.story.next_step) says an appeal may go: never for a line paid, settled, credited,
+    reprocessed or waiting, nor past its last window. (False, why) otherwise; (True, None) when it may."""
+    from . import story as story_mod
+    lg = _ledger_readonly()
+    conn = db()
+    conn.row_factory = None
+    try:
+        nxt = story_mod.next_step(conn, fid, ledger=lg, today=_day(0))
+    except Exception as exc:        # noqa: BLE001  (an item whose story cannot be told is not sent in bulk)
+        _say(f"api: next_step failed for item {fid}: {type(exc).__name__}: {str(exc)[:160]}")
+        return False, "Its next step could not be worked out, so it is not sent in bulk: open it and send it from there."
+    finally:
+        conn.close()
+        if lg is not None:
+            lg.close()
+    if nxt.get("appeal_ok"):
+        return True, None
+    why = BLOCK_WORDS.get(nxt.get("appeal_block") or "")
+    return False, (f"Not appealed: {why}." if why else f"Not appealed: its next step is not an appeal ({nxt.get('action') or 'nothing to send'}).")
+
+
+def _vouch(f: dict) -> dict | None:
+    """W5 (ema_checks.fax_vouch): whether EMA's reports vouch for an item the remittances alone hold as stale (they stopped
+    coming): its line's outcome worked out now, on whichever copy is at hand. None when EMA's reports cannot be read here."""
+    from . import ema_checks as ec
+    conn = db()
+    conn.row_factory = None
+    try:
+        rules = ec.store_rules(conn)
+        oc = ec.line_outcomes(conn, [f], code_once=rules.code_once, today=_day(0))
+        return (ec.fax_vouch(conn, [f], oc, today=_day(0)) or {}).get(f["finding_id"])
+    except Exception as exc:        # noqa: BLE001  (no EMA tables on this copy: nothing vouches, the stale hold stands)
+        _say(f"api: fax_vouch failed for item {f.get('finding_id')}: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+    finally:
+        conn.close()
+
+
 @app.post("/api/appeals/send", dependencies=[Depends(require_xhr)])
 def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth)):
     """One item all the way to the payer: the visit note from EMA where the appeal rests on it (Claude reviews it and
@@ -4088,12 +4579,43 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     # a yes that skips a hold counts only as JSON true: "false", "no" or "0" sent as text is not a yes
     if body.get("bulk") is True and not bulk_appeals_on():
         return held("bulk_paused", BULK_PAUSED)
+    if f.get("signal") == "EMA_DENIED":
+        # a denial only EMA's postings show: no remittance carries it, so there is nothing to cite yet (W5)
+        from .ema_checks import NO_REMITTANCE_MESSAGE
+        return held("no_remittance", NO_REMITTANCE_MESSAGE)
+    if body.get("bulk"):
+        # the bulk list's rule, read again on the item as it is now, and the item's own next step (unit B's rule and unit
+        # D's appeal_ok): a paid, settled, credited, reprocessed or waiting line is never appealed in bulk
+        cols = _columns()
+        ok = _bulk_ready(cols) and one(f"SELECT 1 FROM findings WHERE finding_id=? AND {BULK_RULE}", (fid, _day(0))) is not None
+        if not ok:
+            why = BLOCK_WORDS.get(f.get("appeal_block") or "") or (
+                "it is not an open item to work now inside its window" if _bulk_ready(cols) else "this site has not worked out the items' states yet")
+            return held("left_out", f"Not sent in bulk: {why}.")
+        fine, why = _appeal_ok_now(fid)
+        if not fine:
+            return held("left_out", why)
+    # an appeal whose every fax failed (a busy line, a number replaced since) can be sent again, to the number saved now
+    again = f.get("status") == "appealed" and not _faxes_out(fid) and bool(_faxes_out(fid, live=False))
+    # one item a person sends: never a line paid, credited or reprocessed since, whatever its status (an appeal sent again
+    # too); a line EMA shows settled, or the archive shows likely paid, only after the person checked it is unpaid
+    # ("checked"); never an item whose state is done, accepted or expired; and never one that waits on the payer, unless
+    # it waits only because its own failed fax marked it Sent (amendment 14, orchestrator decision 4)
+    block = f.get("appeal_block") or ""
+    live_state = _status_state(f) if (str(f.get("status_changed_at") or "") > (_run_anchor() or "~")) else f.get("work_state")
+    if f.get("status") in ("open", "in_progress") or again:
+        if block in NEVER_APPEALED or (block == "waiting" and not again):
+            return held("blocked", f"Not sent: {BLOCK_WORDS[block]}. Its panel says what to do instead.")
+        if block in CHECK_FIRST and not body.get("checked"):
+            return held("check_first", f"Not sent yet: {BLOCK_WORDS[block]}. If it is still unpaid, press \"Checked: still unpaid, fax it\".",
+                        block=block)
+        if live_state in CLOSED_STATES:
+            return held("blocked", f"Not sent: {CLOSED_STATES[live_state]}. Its panel says what to do instead.")
     if kind not in fax.APPEALABLE:
         return held("not_appealable", {"fix": "This one is corrected in EMA and sent again as a claim, not appealed.",
                                        "auth": "This one needs the authorization record, or a retro-authorization, first.",
                                        "check": "This one needs a person to decide first: another payer, the patient, or let it go."}
                     .get(kind, "This one is not an appeal."))
-    again = f.get("status") == "appealed" and not _faxes_out(fid) and bool(_faxes_out(fid, live=False))
     if f.get("status") not in ("open", "in_progress") and not again:
         return dict(out, status="skipped", reason=f"It is {STATUS_WORDS.get(f.get('status'), f.get('status'))}.")
     # a payer that files no faxed request at the first level (CGS): a person files it on the payer's portal or by mail. An
@@ -4102,15 +4624,28 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     if route and not (f.get("appeal_deadline") and f["appeal_deadline"] < _day(0)):
         return held("no_fax_route", route)
     # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed. Only a
-    # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
+    # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below). In bulk that
+    # answer covers many items at once, so EMA's own sign of a payment after the denial, or of no balance left, still holds
+    # each one it shows (W5 is asked in bulk whatever the answer)
     behind = _data_behind_days()
-    if behind is not None and behind > STALE_APPEAL_DAYS and body.get("stale_ok") is not True:
-        from .detect import gap_words
-        gap = _feed_gap()       # weeks missing, then newer files (misuse check CH-6): named, with what to do
-        return held("stale", (f"{gap_words(gap)} This claim may have been paid in those weeks; " if gap else
-                              f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since. "
-                              "Get the remittances current first (Data tab, or the TriZetto feed); ")
-                    + "\"Still unpaid in EMA: fax it anyway\" in the item sends it now.")
+    vouched = None
+    if behind is not None and behind > STALE_APPEAL_DAYS and (body.get("stale_ok") is not True or body.get("bulk")):
+        # W5: EMA's Production report can vouch for the item where the remittances stopped coming (still unpaid, on its EMA
+        # claim, nothing posted since); only when neither can is it held
+        v = _vouch(f)
+        code = (v or {}).get("code") or "no_ema"
+        if not (v and v.get("vouched")) and body.get("stale_ok") is True and code in EMA_SHOWS_PAID:
+            return held(code, f"{v.get('message') or 'EMA shows this line paid or closed.'} It is not faxed in bulk: open it and check it first.",
+                        vouch=code)
+        if not (v and v.get("vouched")) and body.get("stale_ok") is not True:
+            from .detect import gap_words
+            gap = _feed_gap()       # weeks missing, then newer files (misuse check CH-6): named, with what to do
+            extra = f" {v['message']}" if v and v.get("message") else ""
+            return held("stale", (f"{gap_words(gap)} This claim may have been paid in those weeks.{extra} " if gap else
+                                  f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since.{extra} "
+                                  "Get the remittances current first (Data tab, or the TriZetto feed); ")
+                        + "\"Still unpaid in EMA: fax it anyway\" in the item sends it now.", vouch=code)
+        vouched = (v or {}).get("message") if v and v.get("vouched") else None
     # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
     # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
@@ -4119,8 +4654,13 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         billed = ev.get("billed_code") or ev.get("charge_implies") or "the higher level"
         return held("check_code", f"The remittance does not say the payer changed the code. Check in EMA that {billed} went out on the claim, "
                                   "then press \"It went out as billed: fax it\" in the item.")
-    if f.get("appeal_deadline") and f["appeal_deadline"] < _day(0):       # open until midnight where the practice is
-        return held("expired", f"Its filing window closed on {f['appeal_deadline']}.")
+    # the safe date (appeal_deadline) is what a bulk send keeps to (BULK_RULE); one item a person sends goes until the last
+    # window closes: the payer's own limit (legal_deadline) when it is later (orchestrator decision 2)
+    today = _day(0)                 # open until midnight where the practice is
+    last = max((d for d in ((f.get("appeal_deadline") or "")[:10], "" if body.get("bulk") else (f.get("legal_deadline") or "")[:10]) if d), default="")
+    if last and last < today:
+        which = "the payer's own limit" if last != (f.get("appeal_deadline") or "")[:10] else "its filing window"
+        return held("expired", f"Not sent: {which} closed on {last}.")
     if not f.get("claim_key"):
         return held("no_claim", "It is not tied to one claim.")
     missing = _practice_missing()
@@ -4167,6 +4707,13 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
     use_ai = _yes_ai(body.get("use_ai", True))
     pk = None if body.get("rebuild") is True else next(iter(_packets_for(fid)), None)
+    seen = str(body.get("packet_id") or "")
+    if seen:
+        # the packet the person read in the preview goes as it is, or not at all: never one built behind their back
+        pk = next((p for p in _packets_for(fid) if p.get("packet_id") == seen), None)
+        if pk is None or _packet_problem(seen, f, first=True):
+            return held("packet_changed", "The packet you read can no longer go as it is: build it again and read it before it is sent.")
+        use_ai = False
     if pk and pk.get("mode") == "template" and use_ai and os.environ.get("ANTHROPIC_API_KEY") and kind != "rate":
         pk = None           # built before the review could run: now it can
     if pk and _packet_problem(pk["packet_id"], f, first=True):
@@ -4262,8 +4809,8 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
     except fax.FaxError as exc:
         return held("fax_error", str(exc))
     # Sent only if nothing changed the item while SRFax had the fax (the run's Paid, a hide): else it keeps its status
-    kept = _sent_once_faxed(fid, f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages).",
-                            user, again)
+    kept = _sent_once_faxed(fid, f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages)."
+                            + (f" {vouched}" if vouched else ""), user, again)
     return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), pages=pages, note=note, **({"kept": kept} if kept else {}))
 
 
@@ -4276,20 +4823,40 @@ def _yes_ai(v: Any) -> bool:
 
 @app.get("/api/appeals/appealable")
 def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit: int = Query(2000, ge=1, le=5000), _: str = Depends(require_auth)):
-    """What "Appeal everything appealable" sends: every open item an appeal letter settles, inside its filing window,
-    soonest window first; and what stands in the way (payers with no fax number yet, the fax line, the practice's
-    details, EMA)."""
+    """What "Appeal everything appealable" sends: unit B's rule exactly (BULK_RULE: open, work now, nothing blocking an
+    appeal, an appeal by its action, inside its window, no refund and no claim to chase, fix, post, bill or decide) for the
+    items an appeal letter settles, soonest window first; each is checked again against its own next step when it is sent.
+    With it, what is left out and why ("Left out: N items (paid M, waiting K, credit C, reprocessed R)", each item listed)
+    and what stands in the way (payers with no fax number yet, the fax line, the practice's details, EMA)."""
     from . import fax, modmed
     from .insights import work_type
     if not bulk_appeals_on():
         return {"paused": BULK_PAUSED, "items": [], "payers": [], "fax": fax.configured(),
                 "practice_missing": [], "modmed": False, "review": False}
     cond, params = _appealable_cond()
-    where = f"""{cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
-                AND (appeal_deadline IS NULL OR appeal_deadline >= ?)""" + (" AND payer_group=?" if payer else "")
-    items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings WHERE {where}
-                     ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
-                  (*params, _day(0), *([payer] if payer else []), limit))
+    cols = _columns()
+    by_payer = " AND payer_group=?" if payer else ""
+    today = _day(0)
+    if _bulk_ready(cols):
+        items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings
+                         WHERE {cond} AND {BULK_RULE} AND claim_key IS NOT NULL{by_payer}
+                         ORDER BY appeal_deadline, COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
+                      (*params, today, *([payer] if payer else []), limit))
+        # the open items in their windows a letter would settle that the rule leaves out, each with why
+        out_rows = rows(f"""SELECT finding_id, payer_group, signal, category, shortfall_cents, appeal_deadline, work_state, appeal_block FROM findings
+                            WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
+                            AND (appeal_deadline IS NULL OR appeal_deadline >= ?){by_payer}
+                            AND NOT COALESCE(({BULK_RULE} AND claim_key IS NOT NULL), 0)
+                            ORDER BY COALESCE(shortfall_cents, 0) DESC, finding_id""",
+                        (*params, today, *([payer] if payer else []), today))
+    else:
+        # a store analysed before the states: nothing goes in bulk until the next run has worked them out
+        items = []
+        out_rows = [dict(r, work_state=None, appeal_block=None) for r in rows(
+            f"""SELECT finding_id, payer_group, signal, category, shortfall_cents, appeal_deadline FROM findings
+                WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
+                AND (appeal_deadline IS NULL OR appeal_deadline >= ?){by_payer} ORDER BY COALESCE(shortfall_cents, 0) DESC, finding_id""",
+            (*params, today, *([payer] if payer else [])))]
     numbers = {r["payer_group"]: fax.digits(r["number"]) for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")
                if not fax.shared_group(r["payer_group"])} if has_table("payer_fax") else {}
     sent = {r["finding_id"] for r in rows("SELECT DISTINCT finding_id FROM faxes WHERE direction='out' AND COALESCE(status,'')!='failed'")} if has_table("faxes") else set()
@@ -4310,8 +4877,20 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
         b["kinds"][k] = b["kinds"].get(k, 0) + 1
         out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0,
                     "ready": bool(numbers.get(pg)) and not by_hand, "by_hand": bool(by_hand), "no_fax": bool(fax.no_fax(pg, 1))})
+    left = dict({k: 0 for k, _w in LEFT_OUT}, n=0, cents=0, items=[])
+    for r in out_rows:
+        why = _left_out_reason(r)
+        left["n"] += 1
+        left["cents"] += r["shortfall_cents"] or 0
+        left[why] += 1
+        if len(left["items"]) < 500:
+            left["items"].append({"finding_id": r["finding_id"], "payer_group": r["payer_group"], "signal": r["signal"],
+                                  "cents": r["shortfall_cents"] or 0, "reason": why, "words": LEFT_OUT_WORDS.get(why, LEFT_OUT_WORDS["other"])})
+    parts = [f"{w} {left[k]}" for k, w in LEFT_OUT if left[k]]
+    left["line"] = f"Left out: {left['n']:,} item{'s' if left['n'] != 1 else ''} ({', '.join(parts)})" if left["n"] else ""
     return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "not_here": fax.not_here(),
-            "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+            "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "left_out": left}
 
 
 @app.get("/api/faxes")
@@ -4989,23 +5568,110 @@ def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = D
         return {"skipped": str(exc)}
 
 
+# --------------------------------------------------------------------------- a person's decision on a held EMA report
+_FILE_ID = re.compile(r"[A-Za-z0-9:_.-]{8,128}")
+
+
+@app.post("/api/ema/reports/{file_id}/decision", dependencies=[Depends(require_xhr)])
+def ema_report_decision(file_id: str, request: Request, body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Apply or discard a report the reader held (a filtered-looking A/R, a Production file that would replace a box with
+    much less, a file three runs could not finish): remitwatch.ema_reports.decide. Apply lets the next run read it again
+    from its kept copy; discard closes it. On a server the decision is made on the store and a run is asked for; on Vercel it
+    goes through the journal (actions.apply, kind ema_report_decision) and a file the ledger held as too slow has its tries
+    cleared (ema_ledger.LedgerHandle.clear_attempt), so the next run reads it again. Body {"decision": "apply"|"discard"}."""
+    decision = str(body.get("decision") or "")
+    if decision not in ("apply", "discard"):
+        raise HTTPException(400, "The decision is apply or discard.")
+    if not _FILE_ID.fullmatch(file_id or ""):
+        raise HTTPException(400, "That is not a report's id.")
+    if not has_table("ema_report_files"):
+        raise HTTPException(404, "No EMA report is on file.")
+    row = one("SELECT status FROM ema_report_files WHERE file_id=?", (file_id,))
+    if row is None:
+        raise HTTPException(404, "No report with that id is on file.")
+    if row["status"] != "held":
+        raise HTTPException(409, "Only a held report waits for a decision." if row["status"] != "refused"
+                            else "A refused report cannot be applied. Export it again from EMA.")
+    if runtime.serverless():
+        from . import cloud, ema_ledger
+        st = cloud.SERVING_COPY.state()
+        if st is None:
+            raise HTTPException(503, "Storage is not connected yet. Open /setup.")
+        cloud.SERVING_COPY.record({"kind": "ema_report_decision", "file_id": file_id, "decision": decision, "actor": user})
+        if decision == "apply":
+            ema_ledger.LedgerHandle(st).clear_attempt(file_id)
+            started = cloud.trigger_cycle(base_url(request), trigger="decision")
+        else:
+            started = False
+        return {"ok": True, "file_id": file_id, "decision": decision, "run_started": bool(started)}
+    from . import ema_reports
+    conn = db()
+    try:
+        res = ema_reports.decide(conn, file_id, decision, user)
+        conn.commit()
+    finally:
+        conn.close()
+    if res.get("error"):
+        raise HTTPException(409, res["error"])
+    started = False
+    if decision == "apply":
+        from . import intake
+        started = intake.kick(os.path.dirname(os.path.abspath(DB_PATH)))
+    return {"ok": True, "file_id": file_id, "decision": decision, "status": res.get("status"), "run_started": bool(started)}
+
+
+# --------------------------------------------------------------------------- a line in an item's history that changes no status
+EVENT_KINDS = {"posted": "Posted in EMA", "era_requested": "ERA asked for", "billed": "Billed", "outcome": "Outcome logged",
+               "instructions": "Instructions copied"}
+
+
+@app.post("/api/findings/{finding_id}/event", dependencies=[Depends(require_xhr)])
+def finding_event(finding_id: str, body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Write down work done outside RemitWatch that changes no status (a remittance posted in EMA while the denial is still
+    worked, the ERA asked for, a bill sent): one line in the item's history, kept like any other (the journal on Vercel)."""
+    kind = str(body.get("event") or "")
+    if kind not in EVENT_KINDS:
+        raise HTTPException(400, "Unknown event.")
+    if not one("SELECT 1 FROM findings WHERE finding_id=?", (finding_id,)):
+        raise HTTPException(404, "finding not found")
+    note = " ".join(str(body.get("note") or "").split())[:300]
+    _record_action({"kind": "event", "finding_id": finding_id, "event": kind, "note": f"{EVENT_KINDS[kind]}: {note}" if note else EVENT_KINDS[kind],
+                    "actor": user})
+    return {"ok": True}
+
+
 # --------------------------------------------------------------------------- reasons hidden for a payer (actions.apply_hide_rule)
 @app.get("/api/hide")
-def hide_list(_: str = Depends(require_auth)):
-    """The reasons hidden for a payer, with how many items each hides now: the items the rule itself let go and that
-    Show again brings back, not the ones a person let go by hand."""
-    from .actions import LAST_DECISION
+def hide_list(patterns: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
+    """The reasons hidden for a payer (payer x reason x code x modifier x payer's reason code, remitwatch.archive_rules'
+    grain), with how many items each hides now: the items the rule itself let go and that Show again brings back, not the
+    ones a person let go by hand. patterns=1 adds the patterns a person can decide on at that grain, with the share the
+    archive saw paid later (archive_rules.hide_patterns: the column to read before hiding one)."""
+    from .actions import LAST_DECISION, hide_rule_of
+    from .archive_rules import hide_patterns, hide_sql
     from .insights import SHORT_LABELS
-    if not has_table("hide_rules"):
-        return {"rules": []}
-    out = []
-    events = has_table("finding_events")
-    for r in rows(f"SELECT payer_group, signal, actor, at, note FROM hide_rules WHERE {_rules_in_force()} ORDER BY at DESC"):
-        n = one(f"""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings f WHERE f.payer_group=? AND f.signal=?
-                    AND f.status='dismissed' AND COALESCE(f.stale,0)=0 AND {LAST_DECISION if events else "'hidden'"}='hidden'""",
-                (r["payer_group"], r["signal"])) or {}
-        out.append(dict(r, label=SHORT_LABELS.get(r["signal"], r["signal"]), n=n.get("n") or 0, cents=n.get("cents") or 0))
-    return {"rules": out}
+    out: dict[str, Any] = {"rules": []}
+    if has_table("hide_rules"):
+        events = has_table("finding_events")
+        have = {r["name"] for r in rows("PRAGMA table_info(hide_rules)")}
+        grain = [c for c in ("code", "modifier", "reason") if c in have]
+        for r in rows(f"SELECT payer_group, signal, {''.join(c + ', ' for c in grain)}actor, at, note FROM hide_rules "
+                      f"WHERE {_rules_in_force()} ORDER BY at DESC"):
+            rule = hide_rule_of(r)
+            cond, params = hide_sql(rule, alias="f")
+            n = one(f"""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings f WHERE {cond}
+                        AND f.status='dismissed' AND COALESCE(f.stale,0)=0 AND {LAST_DECISION if events else "'hidden'"}='hidden'""",
+                    tuple(params)) or {}
+            label = SHORT_LABELS.get(rule["signal"], rule["signal"]) if rule["signal"] != "*" else "Any reason"
+            narrow = [x for x in (rule["code"] if rule["code"] != "*" else "", f"modifier {rule['modifier']}" if rule["modifier"] != "*" else "",
+                                  rule["reason"] if rule["reason"] != "*" else "") if x]
+            out["rules"].append(dict(r, **{k: rule[k] for k in ("signal", "code", "modifier", "reason")},
+                                     label=label + (f" ({', '.join(narrow)})" if narrow else ""), n=n.get("n") or 0, cents=n.get("cents") or 0))
+    if patterns:
+        items = rows("""SELECT finding_id, payer_group, signal, category, status, line_key, paid_cents, billed_code, procedure_code, modifiers,
+                               carc, shortfall_cents, stale FROM findings WHERE category IN ('denial','bundling') AND COALESCE(stale,0)=0""")
+        out["patterns"] = hide_patterns(items)[:200]
+    return out
 
 
 def _rules_in_force() -> str:
@@ -5018,15 +5684,26 @@ def _rules_in_force() -> str:
         conn.close()
 
 
-def _hide_size(pg: str, sig: str, skip: list | None = None) -> dict:
-    """What hiding one reason for one payer lets go now, from the copy the dashboard serves: the open items, their dollars,
-    and how many of them are still inside their filing window. An item with a fax going out now (_sending_now) is left
-    out: let go now, the send would find it let go (or mark it Sent over the hide). They are counted apart (in_flight_n),
-    and their ids added to `skip` when given (the hide's journal entry carries them, so every copy leaves them out)."""
-    from .actions import hide_candidates
+def _hide_grain_ok(raw: dict) -> bool:
+    """A hide rule's finer grain as typed: a code (or a comma list, or an @family), one modifier (or none), and the payer's
+    reason code (97 or CO-97); '*' for any."""
+    code, mod, reason = raw.get("code") or "*", raw.get("modifier") or "*", raw.get("reason") or "*"
+    return bool(re.fullmatch(r"\*|@[a-z_]{2,30}|[A-Z0-9]{3,7}(,[A-Z0-9]{3,7}){0,19}", code if code.startswith("@") else code.upper())
+                and re.fullmatch(r"\*|none|[A-Z0-9]{2}", mod if mod in ("*", "none") else mod.upper())
+                and re.fullmatch(r"\*|((CO|PR|OA|PI|CR)-?)?[A-Z0-9]{1,5}", reason.upper()))
+
+
+def _hide_size(pg: str, sig: str, skip: list | None = None, rule: dict | None = None) -> dict:
+    """What hiding one reason for one payer (at the rule's grain, when given) lets go now, from the copy the dashboard
+    serves: the open items, their dollars, and how many of them are still inside their filing window. An item with a fax
+    going out now (_sending_now) is left out: let go now, the send would find it let go (or mark it Sent over the hide).
+    They are counted apart (in_flight_n), and their ids added to `skip` when given (the hide's journal entry carries them,
+    so every copy leaves them out)."""
+    from .actions import hide_candidates, hide_rule_of
+    r = rule or hide_rule_of({"payer_group": pg, "signal": sig})
     conn = db()
     try:
-        ids = hide_candidates(conn, pg, sig, _now_iso())
+        ids = hide_candidates(conn, pg, r["signal"], _now_iso(), r["code"], r["modifier"], r["reason"])
         flying = _sending_now(conn, ids)
         if skip is not None:
             skip.extend(sorted(flying))
@@ -5045,36 +5722,80 @@ def _hide_size(pg: str, sig: str, skip: list | None = None) -> dict:
 
 
 @app.get("/api/hide/preview")
-def hide_preview(payer_group: str = Query(..., max_length=200), signal: str = Query(..., max_length=60), _: str = Depends(require_auth)):
-    """Before a reason is hidden for a payer: how many open items it lets go now, their dollars, how many of them are still
-    inside their filing window, and that every future item of that reason for that payer will be let go too."""
-    from .actions import NEVER_HIDDEN
-    if not re.fullmatch(r"[A-Z0-9_]{2,60}", signal or "") or signal in NEVER_HIDDEN:
+def hide_preview(payer_group: str = Query(..., max_length=200), signal: str = Query(..., max_length=60),
+                 code: str = Query("*", max_length=200), modifier: str = Query("*", max_length=10), reason: str = Query("*", max_length=12),
+                 _: str = Depends(require_auth)):
+    """Before a reason is hidden for a payer (at payer x reason, and where given x code x modifier x the payer's reason
+    code, as POST /api/hide takes them): how many open items it lets go now, their dollars, how many of them are still
+    inside their filing window, and that every future item of that kind for that payer will be let go too."""
+    from .actions import NEVER_HIDDEN, hide_rule_of
+    sig = (signal or "").strip() or "*"
+    raw = {"code": code.strip() or "*", "modifier": modifier.strip() or "*", "reason": reason.strip() or "*"}
+    if not (sig == "*" or re.fullmatch(r"[A-Z0-9_]{2,60}", sig)) or sig in NEVER_HIDDEN or not _hide_grain_ok(raw):
         raise HTTPException(400, "That reason is not hidden for a payer.")
-    return dict(_hide_size(payer_group.strip(), signal), future=True, owner=bool(OWNER_PASSWORD))
+    rule = hide_rule_of(dict(raw, payer_group=payer_group.strip(), signal=sig))
+    if rule["signal"] == "*" and rule["code"] == "*" and rule["reason"] == "*":
+        raise HTTPException(400, "Name a reason, a code or the payer's reason code: a whole payer is never hidden.")
+    return dict(_hide_size(payer_group.strip(), rule["signal"], rule=rule), future=True, owner=bool(OWNER_PASSWORD))
 
 
 @app.post("/api/hide", dependencies=[Depends(require_xhr)])
 def hide_add(request: Request, body: dict = Body(default={}), user: str = Depends(require_auth)):
-    """Hide one reason for one payer: its open items go to Let go with the note, and so do new ones; nothing a person
-    has worked is touched. It takes the owner's password where one is set (as the Providers tab does), a typed reason,
-    and `confirm`: the number of items the person was shown, which must be what it lets go now (409 changed when not).
-    remove: true (JSON true) takes the rule away and reopens what it hid."""
-    pg, sig = str(body.get("payer_group") or "").strip(), str(body.get("signal") or "").strip()
-    if not pg or not sig or len(pg) > 200 or not re.fullmatch(r"[A-Z0-9_]{2,60}", sig):
+    """Hide one reason for one payer, at payer x reason, and where given x code (one, a comma list, or an '@family') x
+    modifier (one, or 'none') x the payer's reason code: its open items go to Let go with the note, and so do new ones;
+    nothing a person has worked is touched. Adding a rule takes the owner's password where one is set (as the Providers
+    tab does), a typed reason, and `confirm`: the number of items the person was shown (GET /api/hide/preview), which
+    must be what it lets go now (409 changed when not). remove: true (JSON true) takes the rule away and reopens what it
+    hid (what another rule still covers stays hidden). A rule for any reason needs a code or a reason code: a whole payer
+    is never hidden."""
+    from .actions import HIDE_GRAIN, NEVER_HIDDEN, hide_rule_of
+    from .archive_rules import hide_sql
+    pg = str(body.get("payer_group") or "").strip()
+    sig = str(body.get("signal") or "").strip() or "*"
+    raw = {k: str(body.get(k) or "").strip() or "*" for k in ("code", "modifier", "reason")}
+    if not pg or len(pg) > 200 or not (sig == "*" or re.fullmatch(r"[A-Z0-9_]{2,60}", sig)):
         raise HTTPException(400, "payer_group and signal are required")
+    if not _hide_grain_ok(raw):
+        raise HTTPException(400, "code, modifier and reason are a code (or a comma list, or an @family), one modifier (or none), "
+                                 "and a reason code (97 or CO-97); leave one out for any")
     if body.get("remove") is not None and body.get("remove") is not True:
         raise HTTPException(400, "remove must be true or left out.")
+    rule = hide_rule_of(dict(raw, payer_group=pg, signal=sig))
+    entry = {"kind": "hide_rule", "payer_group": pg, "signal": rule["signal"], "code": rule["code"], "modifier": rule["modifier"],
+             "reason": rule["reason"], "actor": user}
     if body.get("remove") is True:
-        if not (has_table("hide_rules") and one(f"SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=? AND {_rules_in_force()}", (pg, sig))):
+        # Show again takes away the rule the Hidden list shows, at whatever grain it was made (a rule for any reason by a code
+        # included). A table still at the two-part key (a copy saved by an earlier release, until its first run here) holds
+        # payer x reason rules only: the grain it lacks is read as any ('*')
+        have = {r["name"] for r in rows("PRAGMA table_info(hide_rules)")} if has_table("hide_rules") else set()
+        if have and not any(k in body for k in HIDE_GRAIN) and set(HIDE_GRAIN) <= have:
+            # a page loaded before Show again sent the rule's grain names the payer and the reason only: the one rule in
+            # force for them, whatever its grain (never a guess between two)
+            mine = rows(f"SELECT code, modifier, reason FROM hide_rules WHERE payer_group=? AND signal=? AND {_rules_in_force()}",
+                        (pg, rule["signal"]))
+            if len(mine) > 1:
+                raise HTTPException(409, "This payer has more than one rule for that reason: open the Hidden list again and pick one.")
+            if mine:
+                rule = hide_rule_of(dict(mine[0], payer_group=pg, signal=rule["signal"]))
+                entry.update(code=rule["code"], modifier=rule["modifier"], reason=rule["reason"])
+        conds, params = ["payer_group=?", "signal=?"], [pg, rule["signal"]]
+        for k in HIDE_GRAIN:
+            if k in have:
+                conds.append(f"COALESCE({k},'*')=?")
+                params.append(rule[k])
+            elif rule[k] != "*":
+                raise HTTPException(404, "No such rule.")
+        if not (have and one(f"SELECT 1 FROM hide_rules WHERE {' AND '.join(conds)} AND {_rules_in_force()}", tuple(params))):
             raise HTTPException(404, "No such rule.")
-        _record_action({"kind": "hide_rule", "op": "remove", "payer_group": pg, "signal": sig, "actor": user})
+        _record_action(dict(entry, op="remove"))
         return {"ok": True}
-    from .actions import NEVER_HIDDEN
+    if rule["signal"] == "*" and rule["code"] == "*" and rule["reason"] == "*":
+        raise HTTPException(400, "Name a reason, a code or the payer's reason code: a whole payer is never hidden.")
     if sig in NEVER_HIDDEN:
         raise HTTPException(400, "Claims the payer never answered are not hidden for a payer: each one is money nobody has "
                                  "asked for yet. Let them go one at a time, with a note.")
-    if not one("SELECT 1 FROM findings WHERE payer_group=? AND signal=? LIMIT 1", (pg, sig)):
+    cond, params = hide_sql(rule, alias="f")
+    if not one(f"SELECT 1 FROM findings f WHERE {cond} LIMIT 1", tuple(params)):
         raise HTTPException(404, "Nothing of that kind for that payer.")
     # a policy decision for a payer: the owner's, as the Providers tab asks for it (wrong tries counted the same way)
     st = owner_state(request)
@@ -5093,13 +5814,13 @@ def hide_add(request: Request, body: dict = Body(default={}), user: str = Depend
     if confirm is None:
         raise HTTPException(400, "Type the number of items it lets go, to confirm.")
     skip: list[str] = []                    # items with a fax going out now: left out of the hide, and named in its entry
-    size = _hide_size(pg, sig, skip)
+    size = _hide_size(pg, rule["signal"], skip, rule)
     if confirm != size["n"]:
         raise Refused(409, "changed", f"The count changed: it lets go {size['n']} items now, not {confirm}. Look at the numbers again.", **size)
-    before = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
-    _record_action({"kind": "hide_rule", "op": "add", "payer_group": pg, "signal": sig, "actor": _owner_actor(user), "note": note.strip(),
-                    **({"skip": skip} if skip else {})})
-    after = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
+    count = f"SELECT COUNT(*) n FROM findings f WHERE {cond} AND f.status='open'"
+    before = (one(count, tuple(params)) or {}).get("n") or 0
+    _record_action(dict(entry, op="add", actor=_owner_actor(user), note=note.strip(), **({"skip": skip} if skip else {})))
+    after = (one(count, tuple(params)) or {}).get("n") or 0
     return {"ok": True, "hidden": before - after, **({"left_out": len(skip)} if skip else {})}
 
 
@@ -5220,3 +5941,12 @@ def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends
         return email_packet(conn, packet_id, to, note)
     finally:
         conn.close()
+
+
+from . import api_uploads  # noqa: E402  (unit A2: large files in pieces and the EMA export checklist, remitwatch/api_uploads.py)
+app.include_router(api_uploads.router)
+
+from . import api_ema  # noqa: E402  (unit C2: Today's EMA figures, the Data tab, the owner's write-off policy table)
+app.include_router(api_ema.router)
+from . import api_results  # noqa: E402  (unit R: the Results tab, the scoreboard Today shows, the daily spot checks)
+app.include_router(api_results.router)

@@ -59,9 +59,15 @@ KEY_COLUMNS = ("claim_id", "bill_id", "bill_item_id")      # one of these ties a
 
 
 def detect_family(columns: list[str]) -> str:
-    """Which of EMA's three reports the columns are, or 'unknown'. A report whose rows name no claim or bill (an AR or
-    a production report also has a Claim Status column) is none of them."""
-    cols = {c.lower().strip() for c in columns}
+    """Which of EMA's exports the columns are, or 'unknown'. EMA's two reports come first: 'production' or 'ar_report'
+    when the columns are the Production (collections) report's or the A/R report's (remitwatch.ema_reports reads those,
+    never this module). Then the three weekly exports. A layout whose rows name no claim or bill is none of them."""
+    from .ema_reports import detect_report      # here, not at the top: ema_reports imports this module
+
+    rep = detect_report(columns)
+    if rep:
+        return rep
+    cols = {str(c).lower().strip() for c in columns}
     canon = {CANON.get(c) for c in cols}
     if not canon & set(KEY_COLUMNS):
         return "unknown"
@@ -174,6 +180,30 @@ MAX_SHEET_XML = 512 * 1024 * 1024       # a workbook's sheets, unpacked, at most
 
 class TooLarge(ValueError):
     """The file is larger, or shaped to look larger, than the reader takes in one piece; the message says so plainly."""
+
+
+class IsReport(ValueError):
+    """The file is EMA's A/R or Production report: remitwatch.ema_reports reads it, never the export reader here (a
+    Production report is 160-206 MB of CSV, and reading it whole as an export would hold well over a gigabyte)."""
+
+
+REPORT_MESSAGE = ("This is EMA's A/R or Production report. RemitWatch reads it as a report (remitwatch.ema_reports), "
+                  "not as an export.")
+
+
+def _refuse_report(path: str) -> None:
+    """Raise IsReport when the file is one of EMA's two reports, before any of it is read whole. A report whose columns
+    break a rule (a column named twice) is a report all the same."""
+    from .ema_reports import ReportRefused, recognize
+
+    try:
+        rec = recognize(path, os.path.basename(path))
+    except ReportRefused:
+        rec = True
+    if rec:
+        raise IsReport(REPORT_MESSAGE)
+
+
 TEXT_EXPORTS = (".csv", ".tsv")
 # rows with none of these say nothing about a claim, a bill, a patient or a day: a totals line or a footer
 ROW_KEYS = ("claim_id", "bill_id", "bill_item_id", "patient_id", "service_date", "transaction_date", "posted_date", "bill_created",
@@ -264,6 +294,10 @@ def _raw_rows(path: str, data: bytes) -> list[list]:
         unpacked = 0                    # openpyxl says what is wrong with it
     if unpacked > MAX_SHEET_XML:
         raise TooLarge("The workbook is too large to read in one piece once unpacked. Export a shorter date range.")
+    from .ema_reports import zip_refusal      # here: ema_reports imports this module
+    bad = zip_refusal(data)             # any part (the shared strings too: openpyxl holds them whole) far past an export's size
+    if bad is not None:
+        raise TooLarge(bad.message)
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     try:
         ws = wb.worksheets[0]
@@ -311,7 +345,9 @@ def header_row(raw: list[list]) -> int:
 def read_export_detail(path: str) -> dict:
     """Everything read_export returns, and what the file holds above and around its rows: {'rows', 'family', 'sha256',
     'header_index', 'columns' (as the file names them), 'canon' (the names they map to), 'above' (non-empty lines above the
-    column names: the report's title and filters), 'format'}. First sheet only."""
+    column names: the report's title and filters), 'format'}. First sheet only. EMA's A/R and Production reports are
+    refused (IsReport) before the file is read whole."""
+    _refuse_report(path)
     with open(path, "rb") as fh:
         data = fh.read()
     sha = hashlib.sha256(data).hexdigest()
@@ -339,6 +375,9 @@ def read_export_detail(path: str) -> dict:
         seen[label] = n + 1
         names.append(label if n == 0 else f"{label}.{n}")       # a repeated header gets a numeric suffix
     family = detect_family(names)
+    from .ema_reports import REPORTS
+    if family in REPORTS:               # a header the first look missed (far down the sheet): still never read as an export
+        raise IsReport(REPORT_MESSAGE)
     canon = []
     for c in names:
         key = c.lower().strip()
@@ -415,11 +454,35 @@ def iter_rows(path: str, account: dict | None = None) -> Iterator[dict]:
         yield row
 
 
+REPORT_ONLY_EXTS = (".csv", ".tsv", ".zip", ".gz")      # in a folder, files of these kinds are taken only when they are reports
+
+
+def is_report_file(path: str) -> bool:
+    """Whether a file is one of EMA's two reports (or a zip or gzip holding one), from its first bytes."""
+    from . import ema_reports as er
+
+    name = os.path.basename(path)
+    try:
+        if er.is_plain_zip(path):
+            return bool(er.recognize_zip(path, name))
+        return er.recognize(path, name) is not None
+    except er.ReportRefused:
+        return True                     # a report all the same: it is read (and refused) as one
+    except (OSError, ValueError):
+        return False
+
+
 def iter_export_paths(root: str) -> Iterator[str]:
+    """The files under a folder the EMA loader takes: every .xlsx (an export or a report), and a .csv, .tsv, .zip or .gz
+    only when it is one of EMA's reports (an export comes as .csv only by upload)."""
     for dirpath, _dirs, files in os.walk(root):
-        for n in files:
-            if n.lower().endswith(".xlsx") and not n.startswith("~$"):        # a CSV export comes in only by upload
-                yield os.path.join(dirpath, n)
+        for n in sorted(files):
+            if n.startswith(("~$", ".")):
+                continue
+            p = os.path.join(dirpath, n)
+            low = n.lower()
+            if low.endswith(".xlsx") or (low.endswith(REPORT_ONLY_EXTS) and is_report_file(p)):
+                yield p
 
 
 if __name__ == "__main__":  # smoke test

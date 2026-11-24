@@ -35,13 +35,14 @@ def test_open_findings_without_a_deadline_still_show_as_work(tmp_path):
     found = {r[0]: (r[1], r[2], r[3]) for r in st.conn.execute(
         "SELECT signal, actionable, appeal_deadline, status FROM findings WHERE category='denial'")}
     assert set(found) == {"DENIED_AUTH", "DENIED_NONCOVERED", "DENIED_TIMELY_FILING", "DENIED_DUPLICATE_UNPAID"}, found
-    assert all(v[1] is None for k, v in found.items() if k != "DENIED_AUTH") and all(v[2] == "open" for v in found.values())
+    # Fix B (review finding 19): a review-type denial now carries the payer's window from its remittance, so none of the
+    # four is undated any more; what this test guards stays the same: every one of them shows as work
+    assert all(v[1] for v in found.values()) and all(v[2] == "open" for v in found.values())
     b = insights.brief(st.conn, today=today.isoformat())
     st.close()
     kinds = {t["key"]: t["n"] for t in b["work"]["types"]}
     assert set(found) <= getattr(insights, "WORK_SIGNALS", set(found))     # the brief has a kind written for every one of them
-    # the three with no filing date are not hidden: the home screen counts them as items to decide (paid in the last
-    # 120 days) and as items with no filing date
+    # none is hidden: all four are work inside their window (before finding 19 three were counted as undated, to decide)
     assert b["work"]["total"]["n"] + b["work"]["expired_n"] + b["work"]["undated_n"] == 4, \
         f"four open denials; the brief shows {b['work']['total']['n']} as work, {b['work']['expired_n']} expired, {b['work']['undated_n']} undated ({kinds})"
-    assert b["decide"]["n"] == 3 and b["work"]["undated_n"] == 3
+    assert b["work"]["total"]["n"] == 4 and b["work"]["undated_n"] == 0

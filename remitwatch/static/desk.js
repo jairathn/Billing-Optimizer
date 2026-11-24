@@ -4,20 +4,33 @@
 // Every number you can click opens a list whose count line shows that same number (/api/desk counts through the list's
 // own filter). Loaded after today.js; uses its helpers and index.html's.
 
-// claims no payer answered are never hidden for a payer (actions.NEVER_HIDDEN): each is let go one at a time
-const NEVER_HIDDEN = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER']);
-// One at a time, and with a note: this money may not have been asked for yet. The list's Let go leaves these claims out
-// and says so (bindBulk). Let go or Lost in an item's own panel asks why and sends the answer as its note (letGoNote).
+// Never hidden for a payer (actions.NEVER_HIDDEN, which the server enforces): a claim no payer answered or that never got
+// to one, and money nobody has asked for yet or that is owed back (a payment EMA never posted, a second payer never billed,
+// a credit). Each is let go one at a time.
+const NEVER_HIDDEN = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER', 'NOT_SENT', 'REMIT_NOT_POSTED', 'SECONDARY_NOT_BILLED', 'CREDIT_BALANCE']);
+// One at a time, and with a note. The list's Let go leaves these out and says so (bindBulk). Let go or Lost in an item's own
+// panel asks why and sends the answer as its note (letGoNote); so does every other Let go and Lost, one item or many.
 const ONE_AT_A_TIME = NEVER_HIDDEN;
-const leftOutLine = n => `Let go leaves out ${pl(n, 'claim')} with no answer from the payer or rejected before the payer. Open ${n===1?'it':'each one'} to let it go, with a note.`;
-// The note for letting one of those claims go, or marking it lost. Returns the note; null when the person gave none
-// (nothing is changed then); undefined for every other item or status, which needs none.
+const CLAIM_CHASES = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER']);         // claims no payer answered, in the words below
+const ONE_WHY = {NOT_SENT: 'EMA shows this claim never went out', REMIT_NOT_POSTED: 'The payer paid this and EMA has not posted it',
+  SECONDARY_NOT_BILLED: 'The second payer was never billed for this', CREDIT_BALANCE: 'This is money owed back (a credit)'};
+const leftOutLine = (n, kinds) => (kinds || []).every(k => CLAIM_CHASES.has(k))
+  ? `Let go leaves out ${pl(n, 'claim')} with no answer from the payer or rejected before the payer. Open ${n===1?'it':'each one'} to let it go, with a note.`
+  : `Let go leaves out ${pl(n, 'item')} that ${n===1?'is':'are'} let go one at a time (no answer from the payer, never sent, a payment not posted, a second payer never billed, or a credit). Open ${n===1?'it':'each one'} to let it go, with a note.`;
+// The reason for letting an item go, or marking it lost: money is let go only by a person with a reason (or the owner's
+// policy table), and the server holds to it. Returns the reason; null when the person gave none (nothing is changed then);
+// undefined for any other status, which needs none. Asking for it is the confirmation.
 function letGoNote(signal, status){
-  if(!ONE_AT_A_TIME.has(signal) || !['dismissed','lost'].includes(status)) return undefined;
-  const typed = prompt(`${status === 'lost' ? 'Mark this claim lost' : 'Let go of this claim'}?\n\nNo answer from a payer is on file for it, so this money may not have been asked for yet. It leaves the list${status === 'lost' ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`);
+  if(!['dismissed','lost'].includes(status)) return undefined;
+  const claim = CLAIM_CHASES.has(signal), one = ONE_AT_A_TIME.has(signal), lost = status === 'lost';
+  const typed = prompt(claim
+    ? `${lost ? 'Mark this claim lost' : 'Let go of this claim'}?\n\nNo answer from a payer is on file for it, so this money may not have been asked for yet. It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`
+    : one ? `${lost ? 'Mark this item lost' : 'Let go of this item'}?\n\n${ONE_WHY[signal] || 'Nobody has asked for this money yet'}, so it is let go only by a person, with a note. It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`
+    : `${lost ? 'Mark this item lost' : 'Let go of this item'}? It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history; required):`);
   if(typed === null) return null;
-  const note = typed.trim();
-  if(!note){ alert('Not changed. A claim with no answer from a payer needs a note that says why.'); return null; }
+  const note = String(typed).trim();
+  if(!note){ alert(claim ? 'Not changed. A claim with no answer from a payer needs a note that says why.' : one ? 'Not changed. This item needs a note that says why.'
+    : 'Not changed. Letting an item go, or marking it lost, needs a reason.'); return null; }
   return note;
 }
 const DESKS = {
@@ -25,22 +38,32 @@ const DESKS = {
   bundling:   {cat:'bundling', title:'Bundling & modifiers', intro:'Visits, procedures and add-ons paid $0 because the payer folded them into another service.'},
   downcoding: {cat:'downcoding', title:'Downcoding', intro:'Visits paid at a lower level than billed, and procedure codes the payer changed.'},
   contracts:  {cat:'underpayment', title:'Contracts & underpayment', intro:"Claims paid below the payer's own usual rate, and contract rates that sit below Medicare."},
-  worklist:   {cat: MONEY_CATS, title:'Worklist', intro:'Every item from the four claim pages in one list, soonest filing date first.'},
+  worklist:   {cat: MONEY_CATS, title:'Worklist', intro:'Every item from the four claim pages in one list, what is worth most first.'},
 };
 const BADGE_CAT = {denials:'denial', bundling:'bundling', downcoding:'downcoding', contracts:'underpayment'};
+// The tiles go by the item's state (remitwatch.states): what to work now (with the follow-ups whose day has come), what of
+// it closes within 7 days, what has no filing date and needs a person to say what it is, and what waits on the payer. The
+// items that need no work (done, accepted, expired, can't be checked) are one click away under the tiles, never gone.
 const DESK_TILES = [
-  ['week',    'Closes in 7 days', {deadline:'week', status:'open,in_progress'}],
-  ['valid',   'Window open',      {deadline:'valid', status:'open,in_progress'}],
-  ['decide',  'To decide',        {deadline:'decide', status:'open,in_progress'}],
-  ['sent',    'Sent, waiting',    {deadline:'', status:'appealed'}],
-  ['expired', 'Window closed',    {deadline:'expired', status:'open,in_progress'}],
+  ['todo',      'Work now',         {state:'todo', status:'all', deadline:''}],
+  ['todo_week', 'Closes in 7 days', {state:'todo', status:'all', deadline:'week'}],
+  ['todo_decide','To decide',       {state:'todo', status:'all', deadline:'decide'}],
+  ['waiting',   'Waiting',          {state:'waiting', status:'all', deadline:''}],
 ];
+const DESK_QUIET = [['done','Done','paid or settled, with proof'], ['accepted','Accepted','let go, lost or the owner\'s policy'],
+  ['st_expired','Expired','past every window'], ['cant_check','Can\'t be checked','the money reaches no source we read']];
+const QUIET_STATE = {done:'done', accepted:'accepted', st_expired:'expired', cant_check:'cant_check'};
+const WL_STATES = [['todo','Work now and follow-ups due'],['work_now','Work now'],['followup_due','Follow-ups due'],['waiting','Waiting'],['done','Done'],
+  ['accepted','Accepted'],['expired','Expired'],['cant_check','Can\'t be checked'],['','Any state']];
+const WL_EMA = [['','Anything EMA shows'],['auto_written_off','EMA wrote it off when the denial posted'],['written_off','Written off in EMA'],
+  ['contractual','Written off as contractual'],['paid_other','Paid by another payer in EMA'],['on_ar','On EMA\'s A/R'],['ema_only','Only in EMA\'s reports'],
+  ['worked','Worked in EMA'],['unworked','Nobody has worked these']];
 // the instruction for each kind of work (the brief carries the same words; these cover an older server)
 const KIND_SHORT = {fix:'Correct it in EMA and resend it the way the item says.', auth:'Find the authorization and appeal, or ask for a retro-auth.',
   note:'Send the appeal letter with the visit note from EMA.', rule:'Send the appeal letter; it cites the coding rule.',
   rate:'Ask the payer to reprocess at its usual rate.', check:'Decide: other payer, the patient, appeal, or let go.'};
 const ROWS = 20;
-const DESK_DEFAULTS = {kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:'', min:'', year:'', handling:''};
+const DESK_DEFAULTS = {kind:'', payer:'', status:'all', deadline:'', state:'todo', ema:'', q:'', sort:'value', signal:'', paid:'', min:'', year:'', handling:''};
 const ALERT_FLOOR = 50000;          // a payer change worth less than $500 takes no line on a category page
 const CHANGE_WORDS = {RAMP:'ramping up', RISING:'climbing', RESUMED:'back again'};
 const BULK_WORDS = {in_progress:'Mark started', appealed:'Mark sent', dismissed:'Let go', open:'Back to To do'};
@@ -51,14 +74,32 @@ function shortOf(b, sig){ const l = labelOf(b, sig); return l.short || l.label; 
 function kindLine(b, k){ return kindOf(b, k).short || KIND_SHORT[k] || ''; }
 function foldIsOpen(key){ try { return localStorage.getItem('rw:fold:'+key) === '1'; } catch(e){ return false; } }
 function foldRemember(key, open){ try { localStorage.setItem('rw:fold:'+key, open ? '1' : '0'); } catch(e){} }
-function tileOf(f){ return DESK_TILES.find(([k, l, s]) => s.deadline === (f.deadline||'') && s.status === f.status); }
+function tileOf(f){ return DESK_TILES.find(([k, l, s]) => s.deadline === (f.deadline||'') && s.status === f.status && s.state === (f.state||'')); }
 function viewName(f){
   const d = (WL_DEADLINES.find(x=>x[0]===(f.deadline||''))||['',''])[1], s = (WL_STATUSES.find(x=>x[0]===f.status)||['',f.status])[1];
-  return [d, f.status === 'open,in_progress' ? '' : s].filter(Boolean).join(' · ');
+  const st = f.state ? (WL_STATES.find(x=>x[0]===f.state)||['',f.state])[1] : '';
+  return [st, d, ['open,in_progress','all'].includes(f.status) ? '' : s].filter(Boolean).join(' · ');
+}
+// a desk's filter: the defaults, then what was chosen. An older link that names a status or a filing date and no state
+// (Today's steps, the guide, the red number on a tab, Bigger wins) lists by those. One that asks for the work closing soon
+// (To do, or To do and started, closing within 7 or 30 days: Today's step 1 and the red number on a tab) lists the work
+// now and the follow-ups due among them, never an item that only waits on the payer, and its number is counted the same
+// way (/api/brief). Any other keeps every state, as the number beside it was counted.
+const TODO_LINK = new Set(['open', 'open,in_progress', 'in_progress']);
+const SOON_LINK = new Set(['week', 'month']);
+function deskFilter(key){
+  const given = state.filt[key] || {}, f = Object.assign({}, DESK_DEFAULTS, given);
+  if(!('state' in given) && ('status' in given || 'deadline' in given)){
+    f.state = TODO_LINK.has(f.status) && SOON_LINK.has(f.deadline || '') ? 'todo' : '';
+    if(!('sort' in given)) f.sort = 'deadline';
+  }
+  return f;
 }
 // one line while the payment feed is behind: an item on the list may already be paid. The day is how far the remittances
-// reach for most payers (the Data tab's feed check), not the newest payment of any one: one stray file does not move it
+// reach for most payers (the Data tab's feed check), not the newest payment of any one: one stray file does not move it.
+// Left out while the blind-spot bar under the tabs says it, in dollars (index.html blindBar): the same news once
 function dataLine(b){
+  if(state.blind && state.blind.blind) return '';
   const h = (b.health||[]).find(x=>!x.ok && x.key==='feed');
   return h ? `<div class="oneline"><span class="sev-medium">●</span> Payments after ${esc(longDate((h.feed||b.feed_date||b.newest_payment||'').slice(0,10)))} are not all in yet; some items may already be paid. <a href="#data" class="go-data">Data</a></div>` : '';
 }
@@ -82,23 +123,25 @@ function badgeOpen(key){ state.filt[key] = {deadline:'week', status:'open,in_pro
 // ---------------------------------------------------------------- one category page
 async function deskTab(v, key){
   const run = state.run;              // a newer render may start while this one waits; then this one writes nothing shared
-  const D = DESKS[key], b = await brief();
-  if(run !== state.run) return;
-  if(!b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
-  const f = Object.assign({}, DESK_DEFAULTS, state.filt[key]||{});
+  const D = DESKS[key];
+  // the brief (labels, kinds of work) and the page's own answers are asked together: the first rows wait on none of them
+  // in turn. The brief the page's first load already asked for is reused (state.briefP), never asked twice
+  const briefNow = (state.briefP || Promise.resolve(null)).then(x => x || brief());
+  const f = deskFilter(key);
   state.lim = state.lim || {}; const lim = state.lim[key] || ROWS;
   const typed = String(f.q||'').slice(0,200);
   let sent = ''; try { sent = encodeURIComponent(typed); } catch(e){ sent = encodeURIComponent(typed.replace(/[\uD800-\uDFFF]/g,'')); }
   const find = Object.assign({cache:'no-store'}, sent ? {headers:{'X-Search':sent}} : {});
-  const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min, year:f.year, handling:f.handling};
+  const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min, year:f.year, handling:f.handling, state:f.state, ema:f.ema};
   const listUrl = n => '/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit:n, offset:0}));
   // the tiles count under the chosen kind of work and reason; the kinds of work under the chosen tile, payment window and search
-  const [dk, res, why, payers] = await Promise.all([
-    api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal, year:f.year, handling:f.handling}), find),
+  const [b, dk, res, why, payers] = await Promise.all([briefNow,
+    api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal, year:f.year, handling:f.handling, state:f.state, ema:f.ema, tileset:'state'}), find),
     api(listUrl(lim), find),
     f.kind ? api('/api/worklist/counts?'+qs(Object.assign({}, scope, {signal:'', kind:f.kind})), find) : Promise.resolve(null),
     payerList()]);
   if(run !== state.run) return;
+  if(!b || !b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
   // the drawer walks this list, and fetches the next rows by itself at the end of it
   state.worklist = res.items.map(r=>r.finding_id); state.wlTotal = res.total; state.wlKey = key;
   state.wlNext = async () => {
@@ -112,19 +155,20 @@ async function deskTab(v, key){
   };
   const T = dk.tiles, z = {n:0, cents:0}, t = k => T[k] || z;
   const tile = tileOf(f), onTile = k => tile && tile[0] === k && !f.paid;
-  const closed = ['expired','missed'].includes(f.deadline), waiting = f.status === 'appealed';
-  const tiles = DESK_TILES.filter(([k]) => ['week','valid','expired'].includes(k) || t(k).n || onTile(k)).map(([k, label]) => {
-    const x = t(k), cls = k==='week' ? (x.n?'t-red':'t-ok') : k==='decide' ? 't-amber' : k==='expired' ? 't-grey' : '';
-    const sub = k==='week' ? `${pl(t('month').n, 'item')} in 30 days`
-      : k==='decide' ? `no filing date${t('older').n ? ` · <a href="#" class="see-older">+${num(t('older').n)} older</a>` : ''}`
-      : k==='sent' ? (t('followup').n ? `<a href="#" class="see-followup due-now">${num(t('followup').n)} to follow up</a>` : 'waiting on the payer')
-      : k==='expired' ? (t('missed').n ? `<a href="#" class="see-missed">${num(t('missed').n)} closed in the last 30 days</a>` : 'for the record')
-      : 'you can still get back';
+  const closed = ['expired','missed'].includes(f.deadline) || ['done','accepted','expired','cant_check'].includes(f.state);
+  const waiting = f.status === 'appealed' || f.state === 'waiting';
+  const tiles = DESK_TILES.filter(([k]) => ['todo','todo_week','waiting'].includes(k) || t(k).n || onTile(k)).map(([k, label]) => {
+    const x = t(k), cls = k==='todo_week' ? (x.n?'t-red':'t-ok') : k==='todo_decide' ? 't-amber' : k==='waiting' ? '' : '';
+    const sub = k==='todo' ? (t('followup_due').n ? `${num(t('followup_due').n)} follow-up${t('followup_due').n===1?'':'s'} due included` : 'needs a person this week')
+      : k==='todo_week' ? 'filing window closes soon'
+      : k==='todo_decide' ? 'no filing date: say what it is'
+      : (t('followup_due').n ? `<a href="#" class="see-followup due-now">${num(t('followup_due').n)} to follow up</a>` : 'the payer still has time');
     return `<div class="tile ${cls} ${onTile(k)?'on':''}" role="button" tabindex="0" aria-pressed="${onTile(k)}" data-tile="${k}"><span class="t-l">${label}</span>
-      <span class="t-v">${k==='week'&&!x.n ? 'None' : num(x.n)}<small>${x.n ? short$(x.cents) : ''}</small></span><span class="t-s">${sub}</span></div>`; }).join('');
-  const parts = ['valid','decide','older','expired'], sumC = parts.reduce((a,k)=>a+t(k).cents,0), all = t('all');
-  const allTip = `Window open ${num(t('valid').n)} + to decide ${num(t('decide').n)} + no filing date, older ${num(t('older').n)} + window closed ${num(t('expired').n)}`
-    + (all.cents !== sumC ? `. ${money(all.cents - sumC)} of it is claims whose windows closed inside routine-rate patterns that still have claims open.` : '');
+      <span class="t-v">${k==='todo_week'&&!x.n ? 'None' : num(x.n)}<small>${x.n ? short$(x.cents) : ''}</small></span><span class="t-s">${sub}</span></div>`; }).join('');
+  // the items that need no work, by state: findable, never gone
+  const quiet = DESK_QUIET.filter(([k]) => t(k).n || f.state === QUIET_STATE[k]).map(([k, label, hint]) => `<a href="#" class="see-state ${f.state===QUIET_STATE[k]?'on':''}" data-state="${QUIET_STATE[k]}" title="${esc(hint)}">${esc(label)} ${num(t(k).n)}</a>`);
+  const all = t('all');
+  const allTip = 'Every item to do, whatever its state or filing window (open, started, sent).';
   const only = [f.kind ? kindOf(b, f.kind).label : '', f.signal ? shortOf(b, f.signal) : ''].filter(Boolean).join(' · ');
   // what to do, one row per kind of work under the chosen tile
   const kinds = dk.scope.kinds, single = kinds.length === 1;
@@ -149,23 +193,26 @@ async function deskTab(v, key){
   if(f.paid) chips.push(chip('paid', `Paid in the last ${esc(f.paid)} days`));
   if(f.year) chips.push(chip('year', `Year ${esc(f.year)}`));
   if(f.handling === 'written_off') chips.push(chip('handling', 'Written off in EMA, still workable'));
+  if(f.ema) chips.push(chip('ema', esc((WL_EMA.find(x=>x[0]===f.ema)||['',f.ema])[1])));
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
   // a reason this payer is known not to pay: one click takes it off the lists (and keeps new ones off)
   if(f.signal && f.payer && !closed && !waiting && !NEVER_HIDDEN.has(f.signal)) chips.push(`<button class="ghost small" id="hideRule" title="Its open items go to Let go with your note, and new ones will too. Undo it under Hidden.">Hide “${esc(shortOf(b, f.signal))}” for ${esc(f.payer)}</button>`);
-  if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Window open">✕</button></span>`);
+  if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Work now">✕</button></span>`);
   const sel = (name, label, opts, cur) => `<select data-f="${name}" aria-label="${label}">${opts.map(([val,l])=>`<option value="${esc(val)}" ${String(cur)===val?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
   const plist = payers.concat(f.payer && !payers.includes(f.payer) ? [f.payer] : []);
-  const orders = [['deadline','Soonest first'],['shortfall','Largest first'],['payer','By payer']].concat(waiting?[['sent','Oldest sent first']]:[]);
-  const startLbl = closed || !res.items.length ? '' : f.sort === 'sent' ? 'Start with the oldest sent' : f.sort === 'shortfall' ? 'Start with the largest' : f.sort === 'deadline' ? 'Start with what closes first' : 'Start with the first item';
+  const orders = [['value','Worth most first'],['deadline','Soonest first'],['shortfall','Largest first'],['payer','By payer']].concat(waiting?[['sent','Oldest sent first']]:[]);
+  const startLbl = closed || !res.items.length ? '' : f.sort === 'sent' ? 'Start with the oldest sent' : f.sort === 'shortfall' ? 'Start with the largest' : f.sort === 'deadline' ? 'Start with what closes first' : f.sort === 'value' ? 'Start with what is worth most' : 'Start with the first item';
   const moreOpen = !!(state.moreF && state.moreF[key]);
   const oneKind = !!f.kind || single;
   const bulkSet = closed ? ['dismissed','open'] : waiting ? ['open','dismissed'] : ['in_progress','appealed','dismissed','open'];
+  // appeals faxed in bulk only where the site allows it (REMITWATCH_BULK_APPEAL): no button that can only say it is paused
+  const bulk = typeof bulkOn === 'function' && bulkOn();
   v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">${esc(D.title)}</h1> <span class="muted">${esc(D.intro)}</span></div>
-      ${startLbl || !(closed || waiting) ? `<div class="ph-go">${closed || waiting ? '' : '<button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax">Appeal everything appealable</button>'}${startLbl ? `<button class="primary" id="startFirst">${startLbl}</button>` : ''}</div>` : ''}</div>
+      ${startLbl || (bulk && !(closed || waiting)) ? `<div class="ph-go">${closed || waiting || !bulk ? '' : '<button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax">Appeal everything appealable</button>'}${startLbl ? `<button class="primary" id="startFirst">${startLbl}</button>` : ''}</div>` : ''}</div>
     ${dataLine(b)}
     ${f.deadline === 'followup' && (b.follow_ups||{}).note ? `<div class="note sev-medium">${esc(b.follow_ups.note)}</div>` : ''}
     <div class="tiles">${tiles}</div>
-    ${key==='worklist' ? (only ? `<div class="small muted allopen">Counting ${esc(only)} only.</div>` : '') : `<div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}<a href="#" class="see-all" title="${esc(allTip)}">Everything open, any window: ${num(all.n)} · ${money(all.cents)}</a></div>`}
+    <div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}${quiet.length ? `Need no work: ${quiet.join(' · ')}. ` : ''}${key==='worklist' ? '' : `<a href="#" class="see-all" title="${esc(allTip)}">Everything to do, any window: ${num(all.n)} · ${money(all.cents)}</a>`}</div>
     <div class="todo-chips" aria-label="What to do">${kinds.map(k=>`<button class="seg ${f.kind===k.key?'on':''}" data-kind="${k.key}"><span>${esc(kindOf(b,k.key).label)} <span class="cnt">${num(k.n)}</span></span><span class="seg-sub">${money(k.cents)}</span></button>`).join('')}</div>
     ${f.kind || single ? `<div class="howline"><b>What to do:</b> ${esc(doText(f.kind || kinds[0].key))}</div>` : ''}
     <div class="ph-what">${f.kind ? reasonChips : ''}${single && !f.payer ? pileRows(kinds[0]) : ''}</div>
@@ -178,8 +225,8 @@ async function deskTab(v, key){
     <div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>${chips.join('')}<span id="hiddenLine" class="small muted"></span>
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
-    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES,f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
-    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
+    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('state','State',WL_STATES,f.state||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
+    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting || !bulk ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
     <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item shown"></th><th>Closes</th><th>Patient</th>${f.payer?'':'<th>Payer</th>'}<th>What happened</th><th class="num">Amount</th></tr></thead>
     <tbody>${res.items.map(r=>rowHtml(b, r, {oneKind, onePayer: !!f.payer, oneSignal: !!f.signal})).join('')}</tbody></table></div>
     ${res.items.length ? '' : `<div class="empty">Nothing here. ${chips.length ? 'Remove a filter above, or pick' : 'Pick'} another box at the top.</div>`}
@@ -191,12 +238,11 @@ async function deskTab(v, key){
   const keyed = (el, fn) => { el.onclick = fn; el.onkeydown = e => { if((e.key==='Enter'||e.key===' ') && e.target===el){ e.preventDefault(); fn(e); } }; };
   v.querySelectorAll('[data-tile]').forEach(el=>keyed(el, e=>{ if(e.target.closest && e.target.closest('a')) return;
     const k = el.dataset.tile, s = DESK_TILES.find(x=>x[0]===k)[2];
-    set(Object.assign({paid:'', q:''}, s, {sort: k==='decide' ? 'shortfall' : (k==='sent' ? 'sent' : 'deadline')}), `[data-tile="${k}"]`); }));
+    set(Object.assign({paid:'', q:''}, s, {sort: k==='todo_decide' ? 'shortfall' : (k==='todo_week' ? 'deadline' : 'value')}), `[data-tile="${k}"]`); }));
   const link = (sel, patch, focus) => v.querySelectorAll(sel).forEach(a=>a.onclick=e=>{ e.preventDefault(); e.stopPropagation(); set(Object.assign({paid:'', q:''}, patch), focus); });
-  link('.see-missed', {deadline:'missed', status:'open', sort:'deadline'}, '#listHead');
-  link('.see-older', {deadline:'older', status:'open,in_progress', sort:'shortfall'}, '#listHead');
-  link('.see-followup', {deadline:'followup', status:'appealed', sort:'sent'}, '#listHead');
-  link('.see-all', {deadline:'', status:'open,in_progress', sort:'deadline'}, '#listHead');
+  link('.see-followup', {state:'followup_due', status:'all', deadline:'', sort:'deadline'}, '#listHead');
+  link('.see-all', {state:'', deadline:'', status:'open,in_progress', sort:'deadline'}, '#listHead');
+  v.querySelectorAll('.see-state').forEach(a=>a.onclick=e=>{ e.preventDefault(); e.stopPropagation(); set({paid:'', q:'', state:a.dataset.state, status:'all', deadline:'', sort:'shortfall'}, '#listHead'); });
   v.querySelectorAll('.todo-row').forEach(r=>keyed(r, e=>{ if(e.target.closest && e.target.closest('a.pile')) return;
     set({kind: f.kind===r.dataset.kind ? '' : r.dataset.kind, signal:''}, `.todo-row[data-kind="${r.dataset.kind}"]`); }));
   v.querySelectorAll('.todo-chips [data-kind]').forEach(bt=>bt.onclick=()=>set({kind: f.kind===bt.dataset.kind ? '' : bt.dataset.kind, signal:''}, `.todo-chips [data-kind="${bt.dataset.kind}"]`));
@@ -213,9 +259,11 @@ async function deskTab(v, key){
     }
     // 'Oldest sent first' belongs to the sent list: leaving it goes back to soonest first
     if((patch.sort || f.sort) === 'sent' && (patch.status || f.status) !== 'appealed') patch.sort = 'deadline';
+    // a state chosen with a status or filing date left from an older view: the state decides, any status
+    if(el.dataset.f === 'state' && el.value && f.status === 'open,in_progress' && f.deadline === 'valid'){ patch.status = 'all'; patch.deadline = ''; }
     set(patch, `select[data-f="${el.dataset.f}"]`); });
   v.querySelectorAll('[data-clear]').forEach(bt=>bt.onclick=()=>set({[bt.dataset.clear]: ''}, '#listHead'));
-  v.querySelectorAll('[data-reset]').forEach(bt=>bt.onclick=()=>set({deadline:'valid', status:'open,in_progress', sort:'deadline'}, '#listHead'));
+  v.querySelectorAll('[data-reset]').forEach(bt=>bt.onclick=()=>set({state:'todo', deadline:'', status:'all', sort:'value'}, '#listHead'));
   v.querySelectorAll('input[data-f="q"]').forEach(q=>q.onkeydown = e => { if(e.key==='Enter') set({q: q.value}, 'input[data-f="q"]'); });
   if(state.focusQ){ const q = v.querySelector('input[data-f="q"]'); if(q) q.focus(); state.focusQ = false; }
   v.querySelector('#moreF').onclick = () => { state.moreF = Object.assign({}, state.moreF, {[key]: !moreOpen}); const m = v.querySelector('.more-f'); m.hidden = moreOpen; v.querySelector('#moreF').setAttribute('aria-expanded', String(!moreOpen)); };
@@ -255,10 +303,11 @@ function bindRows(v){
 function bindBulk(v){
   const bulk = v.querySelector('#bulk'), bulkN = v.querySelector('#bulkN'); if(!bulk) return;
   const picked = () => [...v.querySelectorAll('.sel:checked')].map(x=>x.value);
-  // ticked claims that Let go leaves out: each is let go from its own panel, with a note (ONE_AT_A_TIME)
-  const leftOut = () => [...v.querySelectorAll('.sel:checked')].filter(x => { const tr = x.closest('tr.row'); return !!tr && ONE_AT_A_TIME.has(tr.dataset.signal); }).map(x=>x.value);
+  // ticked items that Let go leaves out: each is let go from its own panel, with a note (ONE_AT_A_TIME)
+  const leftRows = () => [...v.querySelectorAll('.sel:checked')].map(x => x.closest('tr.row')).filter(tr => !!tr && ONE_AT_A_TIME.has(tr.dataset.signal));
+  const leftOut = () => leftRows().map(tr => tr.dataset.id), leftKinds = () => leftRows().map(tr => tr.dataset.signal);
   const sync = () => { const n = picked().length, out = leftOut().length, line = v.querySelector('#bulkLeftOut'); bulk.hidden = !n; bulkN.textContent = n + ' selected';
-    if(line) line.textContent = out ? leftOutLine(out) : ''; };
+    if(line) line.textContent = out ? leftOutLine(out, leftKinds()) : ''; };
   v.querySelectorAll('.sel').forEach(cb=>cb.onchange=sync);
   const all = v.querySelector('#selAll'); if(all) all.onchange = e => { v.querySelectorAll('.sel').forEach(cb=>cb.checked = e.target.checked); sync(); };
   const fx = v.querySelector('#bulkFax');
@@ -275,11 +324,16 @@ function bindBulk(v){
       if(keep.length < ids.length && !confirm(`${pl(ids.length-keep.length, 'item')} ${ids.length-keep.length===1?'has':'have'} a closed filing window and will be left out: nothing to send there.${keep.length?'':' Nothing else is ticked.'}`)) return;
       ids = keep; if(!ids.length) return;
     }
+    let notes = null;
     if(bt.dataset.bulk==='dismissed'){
-      const out = new Set(leftOut());
+      const out = new Set(leftOut()), kinds = leftKinds();
       ids = ids.filter(id=>!out.has(id));
-      if(!ids.length){ alert(`Nothing let go. ${leftOutLine(out.size)}`); return; }
-      if(!confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size) : ''}`)) return;
+      if(!ids.length){ alert(`Nothing let go. ${leftOutLine(out.size, kinds)}`); return; }
+      // one reason for all of them, kept in each item's history (the server refuses a Let go with none)
+      const typed = prompt(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size, kinds) : ''}\n\nWhy (kept in each item's history; required):`);
+      if(typed === null) return;
+      notes = String(typed).trim();
+      if(!notes){ alert('Not changed. Letting items go needs a reason.'); return; }
     }
     if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
     if(bt.disabled) return;
@@ -288,7 +342,7 @@ function bindBulk(v){
     const shown = {}; v.querySelectorAll('.sel:checked').forEach(x => { const tr = x.closest('tr.row'); if(tr && tr.dataset.status) shown[x.value] = tr.dataset.status; });
     const seen = Object.fromEntries(ids.filter(i => shown[i]).map(i => [i, shown[i]]));
     let out;
-    try { out = await post('/api/findings/bulk-status', {ids, status: bt.dataset.bulk, seen}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    try { out = await post('/api/findings/bulk-status', Object.assign({ids, status: bt.dataset.bulk, seen}, notes ? {notes} : {})); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
     bulkLeftAlone(out);
     state.brief = null; render(); });
 }
@@ -308,15 +362,27 @@ async function exportCsv(params, find, key){      // fetched, not linked: the se
 }
 // a tick box and five columns: no status column (a pill under the amount when the status is not To do), the date in a tooltip.
 // An item already sent, paid or let go shows that in grey instead of a filing date in red.
+// the words for an item's state (remitwatch.states), the same everywhere on the site
+const STATE_LABEL = {work_now:'Work now', waiting:'Waiting', done:'Done', accepted:'Accepted', expired:'Expired', cant_check:"Can't be checked"};
+const AUTO_WO = {auto_written_off:'Auto write-off', written_off_while_pending:'Written off while pending', lost_to_timely_filing:'Lost to late filing'};
 function rowHtml(b, r, o){
   o = o || {};
   const due = r.next_deadline || r.appeal_deadline, c = closesText(due), lb = labelOf(b, r.signal), est = /not confirmed/.test(r.deadline_basis||'');
   const live = !r.status || r.status === 'open' || r.status === 'in_progress';
-  const when = live ? `<span class="${c.cls}" title="${esc(due ? 'File by '+due+(est?' (estimated rule: confirm it in the payer agreement)':'')+(r.next_deadline&&r.next_deadline!==r.appeal_deadline?'; the first of its claims':'') : 'No filing date')}">${esc(c.text)}${est&&due?'<sup class="muted">*</sup>':''}</span>`
+  // the payer's own limit, where the date shown is a safer, earlier one (detection's legal_deadline)
+  const limit = r.legal_deadline && r.legal_deadline !== due ? `; the payer's own limit is ${r.legal_deadline}` : '';
+  const ws = r.work_state;
+  const when = ws === 'waiting' && r.follow_up_on ? `<span class="${daysUntil(r.follow_up_on) <= 0 ? 'due-now' : 'muted'}" title="${esc('Waiting on the payer. Follow up on ' + r.follow_up_on + (r.state_basis ? ': ' + r.state_basis : ''))}">follow up ${esc(longDate(r.follow_up_on))}</span>`
+    : live ? `<span class="${c.cls}" title="${esc(due ? 'File by '+due+(est?' (estimated rule: confirm it in the payer agreement)':'')+(r.next_deadline&&r.next_deadline!==r.appeal_deadline?'; the first of its claims':'')+limit : 'No filing date')}">${esc(c.text)}${est&&due?'<sup class="muted">*</sup>':''}</span>`
     : `<span class="muted">${esc(r.status === 'appealed' && r.appealed_at ? 'sent ' + longDate(String(r.appealed_at).slice(0,10)) : String(STATUS_WORDS[r.status]||r.status).toLowerCase())}</span>`;
   const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${pl(r.window_lines, 'line')} in range</div>`
     : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
-  const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>` : '';
+  // a person's status, or for an item that needs no work its state (done, accepted, expired, can't be checked)
+  const quietState = ws && !['work_now','waiting'].includes(ws) ? STATE_LABEL[ws] || ws : '';
+  const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`
+    : quietState ? `<div><span class="st st-${esc(ws)}" title="${esc(r.state_basis||'')}">${esc(quietState)}</span></div>` : '';
+  // EMA closed the line with no person working it (amendment 8): said on the row
+  const auto = AUTO_WO[r.ema_outcome] ? `<span class="chip hint" title="${esc(r.ema_outcome === 'auto_written_off' ? "EMA's posting rule wrote off the denial the day the remittance posted; nobody worked this line" : r.ema_outcome === 'lost_to_timely_filing' ? 'Written off for late filing after an earlier denial nobody fixed' : 'Written off the day it posted while the payer still asked for something')}">${esc(AUTO_WO[r.ema_outcome])}</span>` : '';
   // the biller wrote it off in EMA: money given up, though the window may still be open
   const wo = r.written_off_cents ? `<div class="small"><span class="chip hint" title="${esc(money2(r.written_off_cents))} of the money in dispute is written off (or moved to the patient) in EMA${r.written_off_on ? ', as of ' + esc(r.written_off_on) : ''}">written off in EMA</span></div>` : '';
   const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
@@ -325,10 +391,16 @@ function rowHtml(b, r, o){
     <td class="day">${when}</td>
     <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
     ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}
-    <td class="what" title="${esc(lb.label)}">${o.oneSignal ? '' : `${o.oneKind ? '' : kindBadge(b, kindFor(b, r))+' '}${esc(shortOf(b, r.signal))}`}<div class="small muted">${code}</div>${r.hint?`<div class="small"><span class="chip hint">${esc(r.hint)}</span></div>`:''}</td>
-    <td class="num">${amt}${pill}${wo}</td></tr>`;
+    <td class="what" title="${esc(lb.label)}">${o.oneSignal ? '' : `${o.oneKind ? '' : kindBadge(b, kindFor(b, r))+' '}${esc(shortOf(b, r.signal))}`}<div class="small muted">${code}</div>${r.hint || auto ? `<div class="small">${auto}${r.hint?`<span class="chip hint">${esc(r.hint)}</span>`:''}</div>`:''}</td>
+    <td class="num" title="${esc(amountBasis(r))}">${amt}${pill}${wo}</td></tr>`;
 }
 
+// where an amount comes from, on hover (every dollar figure says its basis; an estimate says so)
+function amountBasis(r){
+  const from = r.source === 'ema' ? "From EMA's postings (no remittance carries it)" : "From the payer's remittance (835)";
+  const est = r.expected_cents != null ? ', against the payer\'s usual rate or the charge: an estimate until the payer pays' : '';
+  return from + est + (r.recovery_basis ? `. Worth about ${money2(r.expected_value_cents)}: ${r.recovery_basis}` : '') + '.';
+}
 // At most two lines of money fixed once or payer behaviour. Never a claim, never a status button.
 function fixOnce(key, b){
   const causes = b.causes||[];
@@ -566,14 +638,24 @@ async function emaBatch(btn, box){
 // Hiding a reason for a payer is a policy decision: first what it lets go (open items, dollars, how many still inside their
 // filing window, and every future one), then a reason typed by the person, the number of items typed back, and the owner's
 // password where the site has one. Nothing is filled in for them.
-async function hideReason(payer, signal, label, after){
+async function hideReason(payer, signal, label, after, item){
   let p;
   try { p = await api('/api/hide/preview?' + qs({payer_group: payer, signal})); } catch(e){ alert('Could not count them: ' + e.message); return; }
+  // from an item's panel: what the archive saw happen to earlier items like this one (same payer, code and payer's reason),
+  // the figure to read before hiding (/api/hide?patterns=1, archive_rules.hide_patterns)
+  let seen = '';
+  if(item){
+    try { const pats = (await api('/api/hide?patterns=1')).patterns || [], code = item.billed_code || item.procedure_code || '';
+      const q = pats.find(x => x.payer_group === payer && x.code === code && x.reason === (item.carc || ''));
+      if(q && q.all) seen = `The archive saw ${pl(q.paid_later, 'earlier item')} of ${num(q.all)} like this one (same payer, code ${esc(code)} and reason ${esc(item.carc)}) paid later.`; }
+    catch(e){ seen = ''; }
+  }
   const box = typeof faxModal === 'function' ? faxModal(`Hide “${label}” for ${payer}?`, '') : null;
   if(!box) return;
   box.insertAdjacentHTML('beforeend', `<div class="small" style="margin:8px 0">It lets go <b>${pl(p.n, 'open item')}</b> now, worth <b>${money2(p.cents)}</b>.
       <b>${pl(p.in_window_n, 'item')}</b> of them (${money2(p.in_window_cents)}) ${p.in_window_n === 1 ? 'is' : 'are'} still inside ${p.in_window_n === 1 ? 'its' : 'their'} filing window.
       Every future item of this reason for ${esc(payer)} is let go too. Anything someone has worked stays; Show again under Hidden undoes it.
+      ${seen ? `<b>${seen}</b>` : ''}
       ${p.in_flight_n ? `<b>${pl(p.in_flight_n, 'item')}</b> with a fax going out now ${p.in_flight_n === 1 ? 'is' : 'are'} left out and stay${p.in_flight_n === 1 ? 's' : ''} on the list.` : ''}</div>
     <label class="small" style="display:block;margin:6px 0">Why this payer does not pay these (shown on each item)<br><textarea id="hdNote" rows="2" maxlength="300" style="width:100%"></textarea></label>
     <label class="small" style="display:block;margin:6px 0">Type the number of items it lets go (${esc(String(p.n))}) to confirm<br><input id="hdCount" inputmode="numeric" autocomplete="off" style="width:120px"></label>
@@ -615,7 +697,9 @@ function hiddenManage(rules){
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
   $('#modalBox').querySelectorAll('[data-unhide]').forEach(b => b.onclick = async () => {
     const r = rules[+b.dataset.unhide];
-    try { await post('/api/hide', {payer_group: r.payer_group, signal: r.signal, remove: true}); } catch(e){ alert('Not saved: ' + e.message); return; }
+    // the rule as the list shows it, at its own grain (code, modifier, the payer's reason code): never only payer and reason
+    try { await post('/api/hide', {payer_group: r.payer_group, signal: r.signal, code: r.code || '*', modifier: r.modifier || '*', reason: r.reason || '*', remove: true}); }
+    catch(e){ alert('Not saved: ' + e.message); return; }
     $('#modal').classList.remove('open'); state.brief = null; state.dirty = true; render();
   });
 }
@@ -627,5 +711,5 @@ function hideDrawerHtml(f){
 }
 function bindHideDrawer(f, d){
   const a = d.querySelector('#hideFromItem'); if(!a) return;
-  a.onclick = e => { e.preventDefault(); hideReason(f.payer_group, f.signal, a.dataset.label, () => { closeDetail(); render(); }); };
+  a.onclick = e => { e.preventDefault(); hideReason(f.payer_group, f.signal, a.dataset.label, () => { closeDetail(); render(); }, f); };
 }

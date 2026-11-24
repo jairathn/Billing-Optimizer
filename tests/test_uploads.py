@@ -301,7 +301,9 @@ def test_an_upload_lands_where_the_same_files_from_dropbox_land(tmp_path, monkey
     client = FakeClient(files)
     monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: client)
     feed = cycle(feed_db)
-    assert feed["ingest"] == {"remits": 1, "ema": 3, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []} and "detect" in feed
+    counts = {k: v for k, v in feed["ingest"].items() if k != "ema_files"}         # ema_files: what each export held (the words)
+    assert counts == {"remits": 1, "ema": 3, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []} and "detect" in feed
+    assert sorted(f["family"] for f in feed["ingest"].get("ema_files", [])) in ([], ["charge_lines", "claim_status", "era_lines"])
     # the manual route: the same files, uploaded, read by the next cycle (no Dropbox there)
     for path, data in files.items():
         r = site.up(os.path.basename(path), data)
@@ -498,14 +500,18 @@ def test_notes_are_matched_by_patient_and_date_or_by_a_person(site, monkeypatch)
     import remitwatch.api as api
     nid = attached["note"]["note_id"]
     path, sha = table(site.db, f"SELECT path, sha256 FROM uploaded_notes WHERE note_id='{nid}'")[0]
-    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=True) is None
+    # before: nothing wrong with the note it rests on (first=False: before a first fax the packet is also built again when
+    # another note for the visit was matched after it, here the progress note attached above, which counts only when that
+    # fell in a later second than the build: timestamps are whole seconds)
+    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,))) is None
     assert c.post(f"/api/uploads/notes/{nid}/remove", headers=XHR).json() == {"removed": True}
     assert not os.path.exists(path) and c.get(f"/api/uploads/notes/{nid}/file").status_code == 404
     assert len(c.get(f"/api/packets?finding_id={fid}").json()) == 3            # each packet built stays
     assert table(site.db, f"SELECT status FROM uploads WHERE upload_id='{sha}'") == [("removed",)]
     assert table(site.db, f"SELECT 1 FROM uploaded_notes WHERE note_id='{nid}'") == []
-    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=True) \
-        == "The note it was built from was taken back."
+    for first in (False, True):
+        assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=first) \
+            == "The note it was built from was taken back."
     # a note view, for checking it is the right one
     gid = good["note"]["note_id"]
     v = c.get(f"/api/uploads/notes/{gid}/file")
@@ -1058,7 +1064,8 @@ def test_a_report_queued_before_the_page_refused_it_says_once_why_it_is_not_read
     assert uploads.ingest_queued(store, log=lambda *a: None)["uploads"] == 1
     [item] = uploads.history(store.conn)
     assert item["status"] == "failed" and len(item["lines"]) == 1, item["lines"]
-    assert item["lines"][0].startswith("Not read: it is none of the three EMA exports") and "Not read: Not read" not in item["lines"][0]
+    # the loader's own words (remitwatch.dropbox_sync), whatever they are, once
+    assert item["lines"][0].startswith("Not read: it is none of the") and "Not read: Not read" not in item["lines"][0]
     assert "Claim & Claim Status export" not in item["lines"][0] and p.exists()
     # any other failure keeps its own line under what the file held
     lines = uploads.describe({"kind": "ema", "report": "Claim & Claim Status", "rows": 3, "format": "csv", "error": "The kept file is gone."}, "failed")
@@ -1125,13 +1132,19 @@ def test_the_page_and_its_guide_need_the_login(site, monkeypatch):
     assert site.c.post("/api/uploads", params={"name": "x.csv"}, content=b"a", headers=XHR).status_code == 401
     # where files go, said as it is: a visit note leaves the server inside its appeal packet (and for the review)
     assert "A visit note leaves it only inside the appeal packet built from it" in page.text and "never emailed or sent elsewhere" not in page.text
+    # the page's script (static/upload.js) is served like the page, and the page loads it
+    js = site.c.get("/static/upload.js")
+    assert js.status_code == 200 and '<script src="/static/upload.js"></script>' in page.text
     # one wait at a time while files are queued, however often the page refreshes
-    assert "clearTimeout(refresh.t);" in page.text and "setTimeout(refresh, 15000);" not in page.text.replace("refresh.t = h.queued ? setTimeout(refresh, 15000)", "")
-    # the file's name goes in a header once the server says it reads one, never in the address a log keeps
-    assert "info.name_header ? {} : {name: file.name}" in page.text and "X-File-Name" in page.text
-    # the dashboard links the page only where uploads are taken
+    assert "clearTimeout(refresh.t);" in js.text and "setTimeout(refresh, 15000);" not in js.text.replace("refresh.t = h.queued ? setTimeout(refresh, 15000)", "")
+    # the file's name always goes in a header, never in the address a log keeps (not even before GET /api/uploads answers)
+    assert "x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));" in js.text
+    assert "{name: file.name}" not in js.text and "q.set('name'" not in js.text and "?name=" not in js.text
+    # the dashboard links the page where uploads are taken: visit notes on a server, EMA's reports on both hosts
     index = open(os.path.join(os.path.dirname(api.__file__), "static", "index.html")).read()
-    assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !m.uploads;" in index
+    assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !(m.uploads || m.report_uploads);" in index
+    monkeypatch.setattr(api, "PASSWORD", "")
+    assert site.c.get("/api/meta").json()["report_uploads"] is True
 
 
 def test_the_guide_never_sends_anyone_to_download_remittances_in_the_portal(site):
@@ -1158,7 +1171,7 @@ def test_taking_a_note_back_says_its_packet_is_not_faxed(site):
     """The confirmation used to say a packet built from the note "stays with its item", and the appeal then faxed it with
     the note taken back. Such a packet is no longer faxed (test_notes_are_matched_by_patient_and_date_or_by_a_person,
     tests/test_fax.py), and the page says so."""
-    page = site.c.get("/upload").text
+    page = site.c.get("/static/upload.js").text          # the page's script asks before a note is taken back
     assert ("Take this note back? Its file is deleted from the server. A packet built from it is not faxed from now on. "
             "The next appeal builds it again from the note in its place.") in page
     assert "stays with its item" not in page
@@ -1191,7 +1204,16 @@ def test_vercel_keeps_working_and_says_uploads_belong_to_the_server(tmp_path, mo
 def test_caddy_takes_large_uploads_only_on_the_upload_route():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     text = open(os.path.join(root, "deploy", "Caddyfile")).read()
-    assert "@uploads path /api/uploads /api/uploads/*" in text and "@other not path /api/uploads /api/uploads/*" in text
+    wide = "@uploads path /api/uploads /api/uploads/*" in text and "@other not path /api/uploads /api/uploads/*" in text
+    # the narrower form asked of the deploy files' owner (wire/needs_A2.md, section F): only POST /api/uploads takes 260 MiB,
+    # a piece of a large file at most 5 MiB, everything else (the JSON routes among them) 20 MB
+    narrow = re.search(r"@uploads \{\s*method POST\s*path /api/uploads\s*\}", text) and "@pieces path /api/uploads/chunk" in text
+    assert wide or narrow
+    if narrow:
+        pieces = text[text.index("request_body @pieces"):]
+        n, unit = re.search(r"max_size (\d+)(MiB|MB)", pieces).groups()
+        assert uploads.CHUNK_BYTES + 64 * 1024 < int(n) * (1024 * 1024 if unit == "MiB" else 1000 * 1000) <= 20 * 1000 * 1000
+        assert re.search(r"@other \{\s*not \{\s*method POST\s*path /api/uploads\s*\}\s*not path /api/uploads/chunk\s*\}", text)
     big = text[text.index("request_body @uploads"):text.index("@other")]
     small = text[text.index("request_body @other"):]
     assert re.search(r"max_size 20Mi?B", small[:60])

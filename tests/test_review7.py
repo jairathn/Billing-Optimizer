@@ -109,6 +109,10 @@ def test_older_undated_items_open_exactly_what_today_counts(tmp_path, monkeypatc
     add_file(tmp_path, db, [clm(pcn(2), "1", sv("99213", "150.00", "0.00", cas="CAS*CO*96*150.00~", dos=new_dos), dos=new_dos)], new_paid)
     st = Store(db)
     Detector(st, run_id="r7").run()
+    # the two non-covered denials have no filing date here, whatever the detector's dating rule (since checkpoint 1bb8071
+    # it dates them from their remittances: detect.END_DATED_CATEGORIES): this test is about undated items
+    st.conn.execute("UPDATE findings SET appeal_deadline=NULL WHERE carc='96'")
+    st.conn.commit()
     st.close()
     tc, auth = client(monkeypatch, db)
     b = tc.get("/api/brief", auth=auth).json()

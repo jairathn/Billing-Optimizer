@@ -55,7 +55,9 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "7"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
+SERVING_BUILD = "9"                 # bump when SERVING_TABLES changes: a copy made by another build is made again (7: the
+                                    # release's heirs, or push 2's EMA reports; 8: what the A/R's billing notes say, and the
+                                    # 835 claims of whole bills; 9: both together)
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -419,15 +421,19 @@ def _epoch(v) -> float | None:
     return None
 
 
-def _ingest_batch(store, items: list[tuple], log) -> dict:
+def _ingest_batch(store, items: list[tuple], log, *, wait_reason: str | None = None) -> dict:
     """Write a batch of downloaded files to scratch space, hand them to the loaders, and clean up. Each item is
-    (name, bytes) or (name, bytes, file time): the loaders keep the newest copy when a payer sends a payment twice, and
-    newest must mean the file's own date, not the order this run happened to read it in."""
+    (name, bytes), (name, bytes, file time) or (name, bytes, file time, origin): the loaders keep the newest copy when a
+    payer sends a payment twice, and newest must mean the file's own date, not the order this run happened to read it in.
+    The origin (Dropbox id, path, content hash, size) goes with an EMA report into its catalog row, so a report kept
+    waiting can be fetched again by its Dropbox id. A Production report never reaches this batch on purpose (it takes the
+    run's slot, ProductionSlot); one that does waits, with `wait_reason`."""
     from .dropbox_sync import ingest_new_files
     d = os.path.join(runtime.tmp_dir(), "batch")
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d, exist_ok=True)
     paths = []
+    origins: dict = {}
     for i, item in enumerate(items):
         name, data, when = item[0], item[1], (item[2] if len(item) > 2 else None)
         # each file in a folder of its own, under its real name: the loaders record the file name, and the link step reads it
@@ -439,9 +445,12 @@ def _ingest_batch(store, items: list[tuple], log) -> dict:
         if when:
             os.utime(p, (when, when))
         paths.append(p)
+        if len(item) > 3 and item[3]:
+            origins[p] = item[3]
     unread: list[str] = []
     try:
-        res = ingest_new_files(store, paths, log=log, unread=unread)
+        res = ingest_new_files(store, paths, log=log, unread=unread, origins=origins, via="dropbox",
+                               wait_reason=wait_reason or PRODUCTION_LATER)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     if unread:
@@ -516,10 +525,532 @@ def ingest_zip(store, client, root: str, deadline: float, out: dict, log) -> Non
         out["remaining"] = out.get("remaining", 0) + 1
 
 
-def sync_and_ingest(store, client, state, deadline: float, full: bool = False, log=print) -> dict:
+# --------------------------------------------------------------------------- EMA's reports on a serverless host
+#
+# The A/R report is small and read in the batch like any export. The Production report is not: a run applies at most one
+# Production file (ProductionSlot), from a file of 60 MB or less as stored (a zipped or gzipped CSV, or a weekly
+# posted-date pull), into the posting ledger kept gzipped in the state folder (ema_ledger.LedgerHandle). The attempt is
+# written to the state folder before the file is read, so a run the platform stops still counts it (three, and the
+# file is held). After the file is applied the ledger's summaries are refreshed and saved in this order: the ledger
+# (released by the refresh as soon as Part A no longer needs it), its revision in the store's meta, the store, the
+# dashboard's copy, then the Dropbox position; detection runs in the next invocation (more=True). A run that died
+# between the ledger's save and the store's is repaired by the next (repair_ledger). A raw Production CSV larger than
+# 60 MB is recognised from its first 64 KB and kept waiting with what to do about it.
+
+PRODUCTION_LATER = ("This site reads one Production file per run; this one is read in a following run, which starts by "
+                    "itself.")
+from .ema_reports import BIG_CSV_REASON as BIG_REPORT_REASON      # noqa: E402  (one wording: a raw CSV too big for this site)
+BIG_GZ_REASON = ("Too big to read on this site even compressed (over 60 MB): let the server read it, or export a shorter date "
+                 "range (a Production export by posted date, the last five weeks, is about 20 MB).")
+APPLY_PENDING = "ema:apply_pending"     # a Production file was being applied when the run stopped: the next run repairs
+REPORT_FIRST_TEXT = (".csv", ".tsv", ".txt")
+
+
+def _origin(e: dict) -> dict:
+    """Where a report came from in Dropbox: kept in its catalog row (never served), to fetch it again by id."""
+    return {"dropbox_id": e.get("id") or e.get("path_lower"), "path": e.get("path_display"), "content_hash": e.get("content_hash"),
+            "size": e.get("size")}
+
+
+def report_kind(data: bytes, name: str) -> str | None:
+    """Which EMA report a downloaded file is or holds: 'production' (a Production report, or a zip holding one),
+    'ar_report', 'refused' (a report whose columns break a rule), or None."""
+    from . import ema_reports as er
+    try:
+        if er.is_plain_zip(data):
+            recs = er.recognize_zip(data, name)
+            if any(r.report == "production" for r in recs):
+                return "production"
+            return "ar_report" if recs else None
+        rec = er.recognize(data, name)
+    except er.ReportRefused:
+        return "refused"
+    except Exception:       # noqa: BLE001  (not something recognition can open: not a report)
+        return None
+    return rec.report if rec else None
+
+
+def _gunzip_head(head: bytes, n: int = 65536) -> bytes:
+    try:
+        return zlib.decompressobj(31).decompress(head, n)
+    except zlib.error:
+        return b""
+
+
+def _already_uploaded(conn: sqlite3.Connection, content_hash: str | None) -> bool:
+    """A report read (or held) from an upload whose original bytes have this Dropbox content hash: the same file in the
+    data folder is not read again."""
+    if not content_hash:
+        return False
+    try:
+        return conn.execute("SELECT 1 FROM ema_report_files WHERE origin LIKE ? AND status IN "
+                            "('current','partly_replaced','replaced','superseded','held','discarded') LIMIT 1",
+                            (f'%"content_hash": "{content_hash}"%',)).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _held_to_apply(conn: sqlite3.Connection) -> list[dict]:
+    """Held reports a person chose to apply: read again (holds skipped, never refusals)."""
+    try:
+        cur = conn.execute("SELECT * FROM ema_report_files WHERE status='held' AND decision='apply' ORDER BY received_at, file_id")
+    except sqlite3.Error:
+        return []
+    names = [d[0] for d in cur.description]
+    out = []
+    for r in cur.fetchall():
+        d = dict(zip(names, r))
+        try:
+            d["origin"] = json.loads(d.get("origin") or "{}")
+        except ValueError:
+            d["origin"] = {}
+        out.append(d)
+    return out
+
+
+def production_ids(path: str, name: str) -> list[str]:
+    """The catalog ids of the Production report(s) a file is or holds: the SHA-256 of a report's own bytes (a zip's
+    member's, a gzip's unpacked bytes)."""
+    from . import ema_reports as er
+    from .intake import hash_file
+    if er.is_plain_zip(path):
+        return [er._member_id(path, r.member) for r in er.recognize_zip(path, name) if r.report == "production"]
+    with open(path, "rb") as fh:
+        gz = fh.read(2) == b"\x1f\x8b"
+    return [hash_file(path, True).sha256()] if gz else [er.file_id_of(path)]
+
+
+class ProductionSlot:
+    """A serverless run's one Production file: apply() reads it into the ledger (or keeps it waiting), finish() refreshes
+    the store's summaries and saves the ledger. Every caller with a Production report in hand (the intake folder, the
+    Dropbox delta, the reports waiting by Dropbox id) goes through it."""
+
+    def __init__(self, store, state, *, deadline: float, log=print):
+        self.store, self.state, self.deadline, self.log = store, state, deadline, log
+        self.handle = None
+        self.used = False
+        self.pending: list[str] | None = None       # file ids applied, waiting for finish()
+        self.saved: list[str] = []                  # file ids whose attempts go once the store image is saved
+        self.drop: list[str] = []                   # Production files whose kept upload copy goes once all is saved
+        self.seq0: int | None = None
+        self.out: dict = {}
+
+    def _wait(self, path: str, rec, *, via: str, origin: dict, name: str, reason: str, log=None) -> dict:
+        from . import ema_reports as er
+        kw = {"name": name} if _takes(er.ingest_file, "name") else {}
+        if _takes(er.ingest_file, "wait_reason"):
+            kw["wait_reason"] = reason
+        return er.ingest_file(self.store, path, rec, via=via, origin=origin, ledger=None, log=log or self.log, **kw)
+
+    def apply(self, path: str, rec=None, *, file_id: str | None = None, origin: dict, name: str, via: str = "dropbox",
+              leave: bool = False, log=None) -> dict:
+        """Read one Production report into the ledger, or keep it waiting: when this host does not read Production (the
+        switch), when the run has applied one already or has too little time left (`leave`: return intake.later() so
+        an intake pair stays where it is), or when three runs have started it without finishing (it is held). `log`
+        replaces the run's own for this file (an upload's lines name its upload id, never its file name)."""
+        from . import ema_ledger, ema_reports as er
+        from .intake import later
+        conn = self.store.conn
+        say = log or self.log
+        if not er.reads("production"):
+            return self._wait(path, rec, via=via, origin=origin, name=name, reason="", log=say)
+        if self.used or time.time() > self.deadline:
+            if leave:
+                return later(PRODUCTION_LATER)
+            return self._wait(path, rec, via=via, origin=origin, name=name, reason=PRODUCTION_LATER, log=say)
+        try:
+            fids = production_ids(path, name) or ([file_id] if file_id else [])
+        except er.ReportRefused as exc:
+            # it unpacks to far more than any export (a gzip or zip bomb): set aside under its own bytes, never read
+            return er._record_refusal(self.store, er.file_id_of(path), exc, path=path, rec=None, via=via, origin=origin,
+                                      log=say)
+        self.handle = self.handle or ema_ledger.LedgerHandle(self.state)
+        h = self.handle
+        if fids and all((er._catalog_row(conn, f) or {}).get("status") in er.DONE_STATUSES for f in fids):
+            # every report in it is in the ledger already: a run applied it and stopped before saving the store, and
+            # repair_ledger brought the catalog back. It is 'already' (its rows and origin restored), never held, and the
+            # attempts of that run go
+            for f in fids:
+                if h.attempts(f):
+                    h.clear_attempt(f)
+            return self._wait(path, rec, via=via, origin=origin, name=name, reason="", log=say)
+        if any(h.attempts(f) >= ema_ledger.MAX_ATTEMPTS for f in fids):
+            res = self._wait(path, rec, via=via, origin=origin, name=name, reason=ema_ledger.ATTEMPT_HOLD_REASON, log=say)
+            for f in fids:
+                ema_ledger.hold_slow_file(self.store, f)
+            say(f"  EMA Production {name}: held after {ema_ledger.MAX_ATTEMPTS} runs that did not finish reading it")
+            return dict(res, status="held", reason=ema_ledger.ATTEMPT_HOLD_REASON)
+        if er.stored_salt(conn) is None:
+            # The store's key salt is made now, and the store image saved with it before the ledger is keyed with it: a
+            # run that died after saving the ledger and before saving the store would otherwise leave a store with no
+            # salt, the next run would make another, and the ledger (keyed for the lost one) would be emptied and every
+            # Production file read again. Once per host: the A/R usually makes the salt first.
+            er.key_salt(conn)
+            save_raw(self.state, self.store)
+            say("  EMA: the store's key salt was made and saved before the posting ledger")
+        for f in fids:
+            h.note_attempt(f)               # in the state folder, before a byte of it is read
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (APPLY_PENDING, ",".join(fids)))
+        self.used = True
+        lg = h.open()
+        self.seq0 = lg.seq()
+        kw = {"name": name} if _takes(er.ingest_file, "name") else {}
+        try:
+            res = er.ingest_file(self.store, path, rec, via=via, origin=origin, ledger=lg, deadline=self.deadline, log=say, **kw)
+        except BaseException:
+            h.discard()
+            raise
+        members = res.get("members") if res.get("status") == "zip" else [res]
+        statuses = {m.get("status") for m in members or []}
+        if "waiting" in statuses or lg.seq() == self.seq0:
+            # stopped at the time limit (the attempt stands), or nothing changed in the ledger (held, refused, already)
+            h.discard()
+            if "waiting" not in statuses:
+                for f in fids:
+                    h.clear_attempt(f)
+                conn.execute("DELETE FROM meta WHERE key=?", (APPLY_PENDING,))
+            if statuses <= {"already"}:
+                self.used = False           # nothing was read: another file may take the slot
+            return res
+        self.pending = fids
+        return res
+
+    def finish(self, out: dict) -> bool:
+        """After a file was applied: refresh the store's EMA summaries from the ledger, releasing (saving) the ledger to
+        the state folder as soon as Part A no longer needs it; then clear the attempts and leave detection to the next
+        invocation. Returns whether a file was applied."""
+        from . import ema_ledger
+        if not self.pending or self.handle is None or self.handle.ledger is None:
+            return False
+        h, conn = self.handle, self.store.conn
+        try:
+            drop = list(h.ledger.copies_to_drop())
+        except Exception:       # noqa: BLE001  (a kept copy stays: nothing depends on its going)
+            drop = []
+        tat: dict = {}
+
+        def release():
+            # the payers' answer times from every claim in the ledger, read while it is still open (detection, in the next
+            # run, reads meta ema:turnaround; the ledger is not opened there)
+            try:
+                from . import ema_checks
+                t = time.time()
+                ema_checks.turnaround(conn, ledger=h.ledger)
+                tat["seconds"] = round(time.time() - t, 1)
+            except Exception as exc:       # noqa: BLE001  (the kept lines' answer times stand in)
+                tat["error"] = type(exc).__name__
+            return h.save()
+        try:
+            r = ema_ledger.refresh(self.store, h.ledger, log=self.log, release=release)
+            if h.ledger is not None:        # nothing to recompute: the ledger is saved all the same (it changed)
+                h.save(conn)
+        except Exception as exc:       # noqa: BLE001
+            h.discard()
+            out["ema_apply"] = {"error": type(exc).__name__}
+            return False                    # APPLY_PENDING stays: the next run brings the catalog in line (repair_ledger)
+        if tat.get("seconds") is not None:
+            _stamp_turnaround(conn)         # read from the ledger the refresh has just recorded
+        conn.execute("DELETE FROM meta WHERE key=?", (APPLY_PENDING,))
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
+        conn.commit()
+        out["ema_apply"] = {"files": len(self.pending), "refresh_seconds": r.get("seconds"),
+                            "part_a": bool(r.get("part_a")), "part_b": bool(r.get("part_b"))}
+        self.saved, self.pending = list(self.pending), None
+        self.drop = drop
+        return True
+
+    def clear_attempts(self) -> None:
+        """Once the store image is saved (the ledger was saved before it), the files read this run no longer count an
+        attempt. A run that dies before this keeps them: the next run finds the file in the ledger ('already')."""
+        if self.handle is not None:
+            for f in self.saved:
+                self.handle.clear_attempt(f)
+        self.saved = []
+
+    def drop_copies(self) -> int:
+        """After the saves: the kept upload copies (intake/done/<pair>) of Production files that newer files replaced whole
+        (REMITWATCH_EMA_REPORT_KEEP of them, as on the server) are deleted from the state folder. The catalog row and the
+        done sidecar stay. Never a file outside intake/done/."""
+        n = 0
+        for fid in self.drop:
+            r = self.store.conn.execute("SELECT origin FROM ema_report_files WHERE file_id=?", (fid,)).fetchone()
+            try:
+                sp = (json.loads(r[0]) if r and r[0] else {}).get("state_path")
+            except ValueError:
+                sp = None
+            if not sp or not sp.startswith("intake/done/") or sp.endswith(".json"):
+                continue
+            try:
+                if self.state.meta(sp):
+                    self.state.delete(sp)
+                    n += 1
+            except Exception:       # noqa: BLE001  (tried again after the next Production file)
+                pass
+        self.drop = []
+        if n:
+            self.log(f"  {n} kept upload cop{'y' if n == 1 else 'ies'} of replaced Production files removed")
+        return n
+
+
+def _stamp_turnaround(conn) -> None:
+    """The answer times read from the ledger before the refresh recorded its new revision belong to that revision: they
+    are stamped with it, so the next run keeps them (ema_checks reads them again from the kept lines otherwise)."""
+    from . import ema_checks
+    key = getattr(ema_checks, "TURNAROUND_KEY", "ema:turnaround")
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    try:
+        stored = json.loads(r[0]) if r and r[0] else None
+    except ValueError:
+        stored = None
+    if not isinstance(stored, dict) or stored.get("charge_basis") != "ledger" or not hasattr(ema_checks, "_ledger_rev"):
+        return
+    stored["ledger_rev"] = ema_checks._ledger_rev(conn)
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(stored)))
+    conn.commit()
+
+
+def _takes(fn, arg: str) -> bool:
+    import inspect
+    try:
+        return arg in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def copy_howto(state, conn) -> bool:
+    """Copy the state folder's "How we pull this in our EMA" boxes (uploads.HOWTO_STATE) into the store's meta
+    (uploads.HOWTO_META) when they differ. Not committed here. True when the store changed."""
+    from . import uploads
+    doc = uploads.howto_read_state(state)
+    if doc is None:
+        return False
+    if uploads.howto_read_conn(conn) == doc:
+        return False
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (uploads.HOWTO_META, json.dumps(doc)))
+    return True
+
+
+def repair_ledger(store, state, log=print) -> dict | None:
+    """A run that saved the ledger and stopped before saving the store left the store behind the ledger (their revisions
+    differ), and one that stopped while applying a file left meta ema:apply_pending: the ledger is opened, the catalog
+    brought in line with it and the summaries refreshed (ema_ledger.refresh), and detection asked of the next run. The
+    ledger is saved again only if the refresh changed it (retention). None when there is nothing to repair."""
+    from . import ema_ledger
+    conn = store.conn
+    pending = conn.execute("SELECT 1 FROM meta WHERE key=?", (APPLY_PENDING,)).fetchone() is not None
+    h = ema_ledger.LedgerHandle(state)
+    try:
+        behind = h.behind(conn)
+    except Exception:       # noqa: BLE001  (the state folder did not answer: the next run looks again)
+        return None
+    if not (behind or pending):
+        return None
+    if h.state_rev() is None:           # no ledger was ever saved: nothing it could put right
+        conn.execute("DELETE FROM meta WHERE key=?", (APPLY_PENDING,))
+        conn.commit()
+        return {"repaired": False}
+    lg = h.open()
+    seq0 = lg.seq()
+
+    def release():
+        if lg.seq() != seq0:
+            return h.save()
+        rev = h.rev
+        h.discard()
+        return rev
+    try:
+        r = ema_ledger.refresh(store, lg, log=log, release=release)
+        if h.ledger is not None:
+            if lg.seq() != seq0:
+                h.save(conn)
+            else:
+                h.discard()
+                if h.rev:
+                    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ema_ledger.META_REV, h.rev))
+    except BaseException:
+        h.discard()
+        raise
+    conn.execute("DELETE FROM meta WHERE key=?", (APPLY_PENDING,))
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
+    conn.commit()
+    log("  EMA posting ledger: the store was behind it after an interrupted run; brought in line")
+    return {"repaired": True, "part_a": bool(r.get("part_a")), "part_b": bool(r.get("part_b")), "seconds": r.get("seconds")}
+
+
+def _write_tmp(name: str, data: bytes, folder: str) -> str:
+    os.makedirs(folder, exist_ok=True)
+    p = os.path.join(folder, os.path.basename(name.replace("\\", "/")) or "file")
+    with open(p, "wb") as fh:
+        fh.write(data)
+    return p
+
+
+def apply_production_items(store, slot: ProductionSlot, items: list[tuple[dict, bytes]], log) -> dict:
+    """Production reports fetched from Dropbox in this run: each through the slot (one is read, the rest wait with their
+    Dropbox origin, to be fetched again by id). A file whose read failed waits too: its attempt counts, and after three
+    it is held."""
+    from . import ema_reports as er
+    out = {"ema": 0, "failed": [], "changed": False}
+    d = os.path.join(runtime.tmp_dir(), "production")
+    for e, data in items:
+        shutil.rmtree(d, ignore_errors=True)
+        name = e.get("name") or "file"
+        p = _write_tmp(name, data, d)
+        origin = _origin(e)
+        try:
+            res = slot.apply(p, None, origin=origin, name=name, via="dropbox")
+        except Exception as exc:       # noqa: BLE001  (never the message: a converter's message can hold a cell)
+            out["failed"].append(f"{name} (could not be read: {type(exc).__name__})")
+            log(f"  EMA report ERROR {name}: {type(exc).__name__}")
+            for fid in production_ids(p, name) or [hashlib.sha256(data).hexdigest()]:
+                er.record_waiting(store.conn, file_id=fid, report="production", source_name=name, via="dropbox", origin=origin,
+                                  reason="Reading stopped before the end; it is read again by a following run.")
+            out["changed"] = True
+            continue
+        finally:
+            del data
+        members = res.get("members") if res.get("status") == "zip" else [res]
+        if any(m.get("status") in ("current", "superseded") for m in members or []):
+            out["ema"] += 1
+        out["changed"] = True
+    shutil.rmtree(d, ignore_errors=True)
+    return out
+
+
+def reread_waiting(store, client, state, slot: ProductionSlot | None, *, deadline: float, log=print) -> dict:
+    """The reports the catalog keeps waiting (and held files a person chose to apply), fetched again where they are kept:
+    by Dropbox id, or from the state folder for an upload. A Production report goes through the slot; one larger than
+    60 MB as stored waits for a zipped copy or an upload (its reason says so). A file that changed in Dropbox since is
+    read as it is now; one that is gone closes its entry; one that turns out to be no report drops an entry the
+    clean-up of misread exports queued (ema_reports.confirm_misread)."""
+    from . import ema_reports as er
+    from .dropbox_sync import DropboxNotFound
+    conn = store.conn
+    out = {"read": 0, "ema": 0, "gone": 0, "later": 0, "changed": False}
+    seen: set = set()
+    d = os.path.join(runtime.tmp_dir(), "waiting")
+    for w in er.waiting(conn) + _held_to_apply(conn):
+        if w["file_id"] in seen:
+            continue
+        seen.add(w["file_id"])
+        if not er.reads(w.get("report") or ""):
+            continue
+        o = w.get("origin") or {}
+        if (_stored_size(state, o) or 0) > MAX_FILE_BYTES:
+            continue                        # a raw CSV too large for this site: a zipped copy or an upload closes it
+        prod = w.get("report") == "production"
+        if prod and slot is not None and slot.used:
+            out["later"] += 1
+            continue
+        if time.time() > deadline:
+            out["later"] += 1
+            break
+        shutil.rmtree(d, ignore_errors=True)
+        try:
+            if o.get("state_path"):
+                chunks = state.get_chunks(o["state_path"])
+                if chunks is None:
+                    er.supersede_waiting(conn, w["file_id"], reason="The uploaded file is no longer kept; upload it again.")
+                    out["gone"] += 1
+                    out["changed"] = True
+                    continue
+                os.makedirs(d, exist_ok=True)
+                p = os.path.join(d, os.path.basename(o["state_path"]).split("__", 1)[-1] or "file")
+                with open(p, "wb") as fh:
+                    for c in chunks:
+                        fh.write(c)
+            elif o.get("dropbox_id") and client is not None:
+                data, meta = client.download_bytes(o["dropbox_id"])
+                sha = hashlib.sha256(data).hexdigest()
+                if (meta or {}).get("content_hash") and o.get("content_hash") and meta["content_hash"] != o["content_hash"] \
+                        and not str(w["file_id"]).startswith("dropbox:") and not o.get("member") and sha != w["file_id"]:
+                    er.supersede_waiting(conn, w["file_id"], reason="The file changed in Dropbox before it was read again; "
+                                                                     "the newer copy is read instead.")
+                    o = dict(o, content_hash=meta["content_hash"], size=meta.get("size"))
+                p = _write_tmp(os.path.basename(o.get("path") or w.get("source_name") or "file"), data, d)
+                del data
+            else:
+                continue
+        except DropboxNotFound:
+            er.supersede_waiting(conn, w["file_id"], reason="The file is no longer in Dropbox.")
+            out["gone"] += 1
+            out["changed"] = True
+            continue
+        except Exception as exc:       # noqa: BLE001  (a download that may work next time)
+            log(f"  EMA report {w.get('source_name')}: could not be fetched again ({type(exc).__name__})")
+            continue
+        name = o.get("name") or os.path.basename(p)
+        kind = report_kind_path(p, name)
+        if kind is None:
+            er.confirm_misread(store, w["file_id"], None)
+            er.confirm_misread(store, er.file_id_of(p), None)
+            out["changed"] = True
+            continue
+        out["read"] += 1
+        try:
+            if kind == "production" and slot is not None:
+                res = slot.apply(p, None, origin=o, name=name, via=w.get("via") or "dropbox")
+            else:
+                kw = {"name": name} if _takes(er.ingest_file, "name") and o.get("state_path") else {}
+                res = er.ingest_file(store, p, via=w.get("via") or "dropbox", origin=o, log=log, **kw)
+        except Exception as exc:       # noqa: BLE001
+            log(f"  EMA report ERROR {w.get('source_name')}: {type(exc).__name__}")
+            continue
+        members = res.get("members") if res.get("status") == "zip" else [res]
+        if any(m.get("status") in ("current", "superseded") for m in members or []):
+            out["ema"] += 1
+            if str(w["file_id"]).startswith("dropbox:"):
+                er.supersede_waiting(conn, w["file_id"], reason="A copy of it was read.", replaced_by=(members[0] or {}).get("file_id"))
+        out["changed"] = True
+    shutil.rmtree(d, ignore_errors=True)
+    return out
+
+
+def _stored_size(state, origin: dict) -> int | None:
+    """What fetching a waiting report again costs this site: the bytes as they are kept. An upload's kept copy is stored
+    compressed (a 206 MB CSV is a 15 MB gzip), so its origin's original size never decides it: the size its intake
+    recorded ('stored'), else the kept copy's own size in the state folder. A Dropbox file is fetched as it is (its size)."""
+    if origin.get("state_path"):
+        if origin.get("stored") is not None:
+            return int(origin["stored"])
+        try:
+            m = state.meta(origin["state_path"]) if state is not None else None
+        except Exception:       # noqa: BLE001  (the state folder did not answer: the fetch says so)
+            m = None
+        return int(m["size"]) if m and m.get("size") is not None else None
+    return origin.get("size")
+
+
+def report_kind_path(path: str, name: str) -> str | None:
+    """report_kind for a file on disk (a zip is opened, not read whole)."""
+    from . import ema_reports as er
+    try:
+        if er.is_plain_zip(path):
+            recs = er.recognize_zip(path, name)
+            if any(r.report == "production" for r in recs):
+                return "production"
+            return "ar_report" if recs else None
+        rec = er.recognize(path, name)
+    except er.ReportRefused:
+        return "refused"
+    except Exception:       # noqa: BLE001
+        return None
+    return rec.report if rec else None
+
+
+REFIND_KEY = "ema:refind_v1"        # the first run of a build that reads EMA's reports lists the whole folder once
+
+
+def sync_and_ingest(store, client, state, deadline: float, full: bool = False, log=print, *,
+                    slot: ProductionSlot | None = None) -> dict:
     """Pull what is new in the data folder and ingest it, stopping at the deadline. The Dropbox position (cursor) is only
     advanced when everything it listed was handled, so a run that stops early is simply repeated: files already taken
-    are recognised by id and content hash and skipped without a download."""
+    are recognised by id and content hash and skipped without a download.
+
+    EMA's reports: the first run of a build that reads them lists the whole folder once (meta ema:refind_v1), because
+    the position moved past report files an older build did not read (a .csv was not even fetched). A Production report
+    goes through the run's slot (one per run); a raw report CSV over 60 MB is recognised from its first 64 KB and kept
+    waiting with what to do about it; every report keeps its Dropbox origin in the catalog."""
     from .dropbox_sync import permanent_download_error, wanted
     conn = store.conn
     root = os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data")
@@ -531,17 +1062,23 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
         ingest_zip(store, client, root, deadline, out, log)
         if out["remaining"]:
             return out
+    # a listing of the whole folder (the first load's, or the one-time look for report files an older build passed)
+    # sets the flag once it is complete
+    refind = conn.execute("SELECT 1 FROM meta WHERE key=?", (REFIND_KEY,)).fetchone() is None
+    if refind and cursor:
+        out["mode"] = "full (once: report files an older build passed)"
     try:
-        entries = list(client.list_continue(cursor) if cursor else client.list_folder(root, recursive=True))
+        entries = list(client.list_continue(cursor) if cursor and not refind else client.list_folder(root, recursive=True))
     except RuntimeError as exc:
         if cursor and _cursor_reset(exc):       # Dropbox dropped the position: list the folder afresh
-            return sync_and_ingest(store, client, state, deadline, full=True, log=log)
+            return sync_and_ingest(store, client, state, deadline, full=True, log=log, slot=slot)
         raise
     new_cursor = getattr(client, "last_cursor", None)
     seen_id = {r[0]: r[1] for r in conn.execute("SELECT id, content_hash FROM dropbox_seen")}
     seen_hash = {h for h in seen_id.values() if h}
     prefix = _state_prefix(state)
     todo, mark = [], []
+    ema_changed = False
     for e in entries:
         out["listed"] += 1
         if not wanted(e) or (prefix and (e.get("path_lower") or "").startswith(prefix)):
@@ -554,10 +1091,20 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
             mark.append((eid, h, e.get("path_display"), _now()))       # same bytes already ingested under another name
             continue
         if (e.get("size") or 0) > MAX_FILE_BYTES:
-            # a file this large would be read whole beside the store; no remittance or export is anywhere near it
+            # a file this large is not downloaded here. An EMA report among them (a raw Production CSV) is recognised from
+            # its first bytes and kept waiting, with what to do about it; anything else is noted as too large
+            big = _big_report(store, client, e, out, log)
+            if big is None:
+                # its first bytes could not be fetched (a timeout, a busy server): not remembered, and the position
+                # stays, so the next run looks at it again
+                out["download_errors"] += 1
+                continue
+            if big:
+                ema_changed = True
+            else:
+                out["errors"] += 1
+                out["failed"].append(f"{e.get('name')} (too large)")
             mark.append((eid, h, e.get("path_display"), _now()))
-            out["errors"] += 1
-            out["failed"].append(f"{e.get('name')} (too large)")
             continue
         todo.append(e)
     if mark:
@@ -576,7 +1123,7 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
         chunk = todo[i:i + 400]
         with ThreadPoolExecutor(max_workers=12) as ex:
             got = list(ex.map(fetch, chunk))
-        items, item_rows, rows = [], [], []
+        items, item_rows, rows, prod = [], [], [], []
         for e, data in got:
             if isinstance(data, Exception):
                 log(f"  download failed {e.get('name')}: {data}")
@@ -588,28 +1135,84 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
                 else:
                     out["download_errors"] += 1         # a timeout or a busy server: try again on a later run
                 continue
-            items.append((e.get("name") or "file", data, _epoch(e.get("client_modified") or e.get("server_modified"))))
-            item_rows.append((e.get("id") or e.get("path_lower"), e.get("content_hash"), e.get("path_display"), _now()))
-        out["downloaded"] += len(items)
+            row = (e.get("id") or e.get("path_lower"), e.get("content_hash"), e.get("path_display"), _now())
+            name = e.get("name") or "file"
+            if slot is not None and name.lower().endswith(_REPORT_ENDINGS) and report_kind(data, name) == "production":
+                prod.append((e, data))          # the run's one Production file, or kept waiting by its Dropbox id
+                rows.append(row)
+                continue
+            items.append((name, data, _epoch(e.get("client_modified") or e.get("server_modified")), _origin(e)))
+            item_rows.append(row)
+        got = None
+        out["downloaded"] += len(items) + len(prod)
         if items:
             part = _ingest_batch(store, items, log)
             _add(out, part)
+            ema_changed = ema_changed or bool(part.get("ema_changed"))
             out["failed"] += [f"{n} (could not be read)" for n in part.get("failed") or []]
-            # A report none of the readers reads yet (an A/R or a production report) is not remembered as seen, as it is
-            # not recorded in the store either: a later listing of the whole folder hands it over again, to the reader
-            # made for it by then. A listing of what changed does not name it again, so it is not fetched every run.
             left = set(part.get("unread_items") or [])
             item_rows = [r for n, r in enumerate(item_rows) if n not in left]
+        items = None
+        if prod:
+            pr = apply_production_items(store, slot, prod, log)
+            out["ema"] += pr["ema"]
+            out["failed"] += pr["failed"]
+            ema_changed = ema_changed or pr["changed"]
+        prod = None
         conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)", rows + item_rows)
         conn.commit()
     # A file that was fetched is remembered in the store whether or not it could be read, so the store must be saved.
-    out["seen_changed"] = bool(out["downloaded"] or out["failed"] or mark)
+    out["seen_changed"] = bool(out["downloaded"] or out["failed"] or mark or ema_changed)
+    out["ema_changed"] = ema_changed
     out["failed"] = out["failed"][:20]
     # The position moves on when everything listed was handled. A file that could not be read does not hold it back (it
     # is remembered and skipped until it changes); only a download that may work next time does.
     if not out["remaining"] and not out["download_errors"] and new_cursor and (out["listed"] or not cursor):
         out["cursor"] = new_cursor
+        if refind:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (REFIND_KEY, _now()))
+            conn.commit()
+            out["seen_changed"] = out["seen_changed"] or bool(cursor)
     return out
+
+
+_REPORT_ENDINGS = (".xlsx", ".csv", ".tsv", ".txt", ".zip", ".gz")
+
+
+def _big_report(store, client, e: dict, out: dict, log) -> bool | None:
+    """A file over the size this site downloads: when its first 64 KB show an EMA report (a raw Production CSV, or a
+    gzip of one), it is kept waiting in the catalog under its Dropbox content hash, with its origin and what to do about
+    it, and is not counted as an error. An upload of the same bytes already read makes it 'already'. False when it is no
+    report (it is 'too large'); None when its first bytes could not be fetched this time (the next run looks again)."""
+    from . import ema_reports as er
+    from .dropbox_sync import peek, permanent_download_error
+    name = e.get("name") or "file"
+    low = name.lower()
+    gz = low.endswith(".gz")
+    if not (low.endswith(REPORT_FIRST_TEXT) or gz):
+        return False
+    try:
+        head = peek(client, e.get("id") or e["path_lower"], er.PEEK_BYTES)
+    except Exception as exc:       # noqa: BLE001
+        log(f"  {name}: could not look at its first bytes ({type(exc).__name__})")
+        return False if permanent_download_error(exc) else None
+    if gz:
+        head = _gunzip_head(head)
+    try:
+        rec = er.recognize(head, name[:-3] if gz else name)
+    except er.ReportRefused:
+        rec = None
+    if not rec:
+        return False
+    if _already_uploaded(store.conn, e.get("content_hash")):
+        log(f"  {name}: already read (the same file was uploaded in the app)")
+        return True
+    er.record_waiting(store.conn, file_id=er.provisional_id(e.get("content_hash") or e.get("id")), report=rec.report,
+                      source_name=name, via="dropbox", origin=_origin(e), reason=BIG_GZ_REASON if gz else BIG_REPORT_REASON,
+                      size=e.get("size"))
+    out["ema_waiting"] = out.get("ema_waiting", 0) + 1
+    log(f"  EMA report {name}: too big to read here; kept waiting")
+    return True
 
 
 def _cursor_reset(exc: Exception) -> bool:
@@ -657,6 +1260,21 @@ def has_new_files(state, client) -> bool:
 # --------------------------------------------------------------------------- the dashboard's copy
 
 DETAIL = "claim_key IN (SELECT claim_key FROM main.findings WHERE claim_key IS NOT NULL)"
+
+
+def _whole_bills() -> str:
+    """Every 835 claim of a bill that has an item (any submission of the bill: a corrected claim, a second payer's answer),
+    not only the item's own claim, so the dashboard's copy can work out an item's state from the whole bill as the server
+    does (needs_D: about 22,700 claims, 63,100 lines and 108,300 adjustments against 21,600, 30,500 and 52,800; the copy
+    grows from about 152 MB to 188 MB on the real archive). Plain SQL only (ema_reports.bill_sql), so the copy can be
+    built on any connection."""
+    from .ema_reports import bill_sql
+    pcn = "patient_control_number"
+    return (f"claim_key IN (SELECT c.claim_key FROM main.claims c WHERE c.{pcn} IS NOT NULL AND {bill_sql('c.' + pcn)} IN "
+            f"(SELECT {bill_sql('f.' + pcn)} FROM main.findings f WHERE f.{pcn} IS NOT NULL))")
+
+
+BILLS = _whole_bills()
 SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     # table, column whitelist (None = every shared column), filter
     ("findings", None, None), ("payer_rates", None, None), ("fee_table", None, None), ("provider_tiers", None, None),
@@ -667,8 +1285,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     ("files", "sha256,kind,ingested_at", None),
     ("transactions", "transaction_key,source_name,payer_name,payer_id,payer_contact_phone,payer_contact_url,payment_method,"
                      "payment_amount_cents,payment_date,trace_number,production_date,payee_npi,superseded", None),
-    ("claims", None, f"{DETAIL} OR patient_control_number IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
-    ("lines", None, DETAIL), ("adjustments", None, DETAIL), ("remarks", None, DETAIL),
+    ("claims", None, f"{DETAIL} OR {BILLS} OR patient_control_number IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
+    ("lines", None, f"{DETAIL} OR {BILLS}"), ("adjustments", None, f"{DETAIL} OR {BILLS}"), ("remarks", None, f"{DETAIL} OR {BILLS}"),
     ("ema_rows", None, "claim_id IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
     ("line_links", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
     ("line_handling", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
@@ -680,6 +1298,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     # reasons hidden for a payer (actions.apply_hide_rule)
     ("hide_rules", None, None),
     ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
+    # when each EMA export and report was pulled (the claim view's "as of" day): names, times and counts, no patient data
+    ("ema_sources", None, None),
 ]
 
 
@@ -705,6 +1325,7 @@ def empty_serving(path: str) -> None:
 
 def meta_summary(conn: sqlite3.Connection) -> dict:
     """The figures the dashboard header shows, computed on the full store (the serving copy holds only part of it)."""
+    from . import ema_reports
     conn.row_factory = sqlite3.Row
     one = lambda sql: dict(conn.execute(sql).fetchone())      # noqa: E731
     return {
@@ -712,7 +1333,17 @@ def meta_summary(conn: sqlite3.Connection) -> dict:
         "remits": one("SELECT COUNT(*) n, MIN(payment_date) first_payment, MAX(payment_date) last_payment, SUM(payment_amount_cents) total_cents FROM transactions WHERE superseded=0"),
         "lines": one("SELECT COUNT(*) n, MIN(service_date) first_dos, MAX(service_date) last_dos FROM lines"),
         "ema": [dict(r) for r in conn.execute("SELECT family, COUNT(*) n, MIN(service_date) first_dos, MAX(service_date) last_dos FROM ema_rows GROUP BY family")],
+        "ema_reports": ema_reports.coverage(conn),          # "EMA as of" in the header: the reports on file
     }
+
+
+def serving_tables(conn: sqlite3.Connection) -> list[tuple[str, str | None, str | None]]:
+    """What the dashboard's copy holds: SERVING_TABLES and EMA's report tables (remitwatch.ema_reports.serving_tables:
+    no origin, no key or keyed hash, only the claim numbers the pages can show), with the meta filter that also leaves
+    out the key salt."""
+    from . import ema_reports
+    out = [(t, c, ema_reports.SERVING_META_FILTER if t == "meta" else w) for t, c, w in SERVING_TABLES]
+    return out + list(ema_reports.serving_tables(conn))
 
 
 def build_serving(conn: sqlite3.Connection, path: str) -> int:
@@ -722,7 +1353,7 @@ def build_serving(conn: sqlite3.Connection, path: str) -> int:
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.execute("ATTACH DATABASE ? AS s", (path,))
     try:
-        for table, cols, where in SERVING_TABLES:
+        for table, cols, where in serving_tables(conn):
             if table not in have:
                 continue
             src = [r[1] for r in conn.execute(f"PRAGMA main.table_info({table})")]
@@ -1088,6 +1719,35 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         mem = {"load": peak_mb()}
         out["memory_mb"] = mem
 
+        # EMA's reports: the clean-up of report rows an older build read as exports (once per host; rows go only once
+        # the fetched file is seen to be a report), and the repair of a run that saved the ledger and not the store
+        from . import ema_reports, intake
+        ema_dirty = False
+        try:
+            mig = ema_reports.migrate_misread(store, serverless=True, log=log)
+            if not mig.get("skipped"):
+                ema_dirty = True
+                if mig.get("candidates"):
+                    out["ema_migrate"] = {k: v for k, v in mig.items() if isinstance(v, int)}
+        except Exception as exc:       # noqa: BLE001
+            out["ema_migrate"] = {"error": type(exc).__name__}
+        try:
+            rep = repair_ledger(store, state, log=log)
+            if rep:
+                out["ema_repair"] = rep
+                ema_dirty = True
+        except Exception as exc:       # noqa: BLE001
+            out["ema_repair"] = {"error": type(exc).__name__}
+        # the practice's "How we pull this in our EMA" boxes (the Upload page keeps them in the state folder): a copy in the
+        # store, so a move to the server keeps them
+        howto_changed = False
+        try:
+            howto_changed = copy_howto(state, conn)
+        except Exception as exc:       # noqa: BLE001
+            out["ema_howto"] = {"error": type(exc).__name__}
+        # one Production file per run, read in the time it leaves for its summaries and the saves (75 s)
+        slot = ProductionSlot(store, state, deadline=t0 + budget - 75, log=log)
+
         # Is the dashboard's copy the one built from this store? A run that died between the two saves leaves it behind.
         data_rev = (conn.execute("SELECT value FROM meta WHERE key='cloud:data_rev'").fetchone() or [None])[0]
         mark = _read_json(state, SERVING_MARK)
@@ -1095,6 +1755,25 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
 
         journal = read_actions(state)
         done, left, wrote = apply_actions(conn, journal) if journal else ([], [], False)
+
+        # uploads cut off part-way (their pieces and records, after a day) go at every run, not only when someone opens the
+        # Upload page (a cut-off report can hold patient data)
+        try:
+            from .uploads import state_uploads
+            swept = {k: v for k, v in (state_uploads(state).sweep() or {}).items() if v}
+            if swept:
+                out["uploads_swept"] = swept
+        except Exception as exc:       # noqa: BLE001  (tried again by the next run)
+            out["uploads_sweep"] = {"error": type(exc).__name__}
+        # what people uploaded in the app (remitwatch.intake): read before the Dropbox folder
+        up_in: dict = {}
+        try:
+            up_in = intake.process_state(store, state, production=lambda p, rec, **kw: slot.apply(p, rec, via="upload", leave=True, **kw),
+                                         deadline=t0 + budget * 0.5, max_bytes=MAX_FILE_BYTES, defer_close=True, log=log)
+        except Exception as exc:       # noqa: BLE001
+            up_in = {"error": type(exc).__name__}
+        if up_in.get("pairs") or up_in.get("error") or up_in.get("remaining"):
+            out["intake"] = {k: v for k, v in up_in.items() if k not in ("results", "to_close")}
 
         # TriZetto first (remitwatch.trizetto): the remittances straight from the clearinghouse, the freshest source
         tz: dict = {}
@@ -1111,11 +1790,24 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         ingest: dict = {"skipped": "Dropbox credentials are not configured"}
         if client is not None:
             # leave room for detection and for saving: ingestion gets at most half of the budget
-            ingest = sync_and_ingest(store, client, state, deadline=t0 + budget * 0.5, full=full, log=log)
-        out["ingest"] = {k: v for k, v in ingest.items() if k not in ("cursor", "remit_stats", "seen_changed")}
+            ingest = sync_and_ingest(store, client, state, deadline=t0 + budget * 0.5, full=full, log=log, slot=slot)
+        out["ingest"] = {k: v for k, v in ingest.items() if k not in ("cursor", "remit_stats", "seen_changed", "ema_changed")}
+        # reports kept waiting: fetched again by their Dropbox id (or from the state folder, for an upload)
+        rr: dict = {}
+        try:
+            rr = reread_waiting(store, client, state, slot, deadline=t0 + budget * 0.5, log=log)
+        except Exception as exc:       # noqa: BLE001
+            rr = {"error": type(exc).__name__}
+        if rr.get("read") or rr.get("gone") or rr.get("error"):
+            out["ema_waiting"] = rr
+        applied = slot.finish(out)          # the Production file read this run: summaries, then the ledger saved
         n_ingested = sum((src.get(k) or 0) for src in (ingest, tz) for k in ("remits", "ema", "claims_837"))
+        n_ingested += int(up_in.get("read") or 0) + int(rr.get("ema") or 0)
         ingested = n_ingested > 0
-        remaining = (ingest.get("remaining") or 0) > 0 or (tz.get("remaining") or 0) > 0
+        remaining = ((ingest.get("remaining") or 0) > 0 or (tz.get("remaining") or 0) > 0 or (up_in.get("remaining") or 0) > 0
+                     or (rr.get("later") or 0) > 0)
+        ema_dirty = bool(ema_dirty or getattr(store, "ema_changed", False) or up_in.get("changed") or rr.get("changed")
+                         or applied or "ema_apply" in out)
         mem["ingest"] = peak_mb()
         # a release that changed which copies of a remittance stand decides them again once, new files or not: the store is
         # then saved and analysed as after new files
@@ -1134,11 +1826,23 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         has_lines = conn.execute("SELECT 1 FROM lines LIMIT 1").fetchone() is not None
         # a release that changed the rules re-analyses the archive once, even when no new file has arrived
         from .detect import DETECT_VERSION
-        last_version = conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone() if has_run else None
+        # the newest run; of two that finished within the same second, the one written last
+        last_version = conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC, rowid DESC LIMIT 1").fetchone() \
+            if has_run else None
         rules_changed = bool(last_version) and last_version[0] != DETECT_VERSION
-        need_detect = has_lines and (ingested or pending or force_detect or not has_run or rules_changed)
+        # a status, hide or write-off policy a person set since the last run (the journal above): the stored states catch up
+        from .pipeline import people_changed_since_detection
+        people = bool(has_run) and people_changed_since_detection(conn)
+        if people:
+            out["people_changed"] = True
+        need_detect = has_lines and (ingested or pending or force_detect or not has_run or rules_changed or people)
         ran_detect = False
-        if need_detect and not remaining:
+        if applied:
+            # a Production file was read: its summaries are in the store, and detection runs in a fresh invocation
+            # (clean memory: this one held the ledger and the file)
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
+            out["deferred"] = "detection"
+        elif need_detect and not remaining:
             last = conn.execute("SELECT value FROM meta WHERE key='cloud:detect_seconds'").fetchone()
             estimate = float(last[0]) if last else 60.0
             left_s = budget - (time.time() - t0)
@@ -1204,16 +1908,38 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         # a TriZetto sign-in hold set or ended is on Today's data checks, and the /setup test reads the server's key from the
         # dashboard's copy (trust on first use): either makes the copy again
         shown_changed = bool(ran_detect or ran_activity or folded or alerts_changed or (progressed and not existed)
-                             or tz.get("hold_changed") or tz.get("hostkey"))
+                             or tz.get("hold_changed") or tz.get("hostkey") or ema_dirty)
         if shown_changed:
             data_rev = str(int(data_rev or 0) + 1)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
             conn.commit()
-        if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed"):
+        if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed") or ema_dirty \
+                or howto_changed:
             t2 = time.time()
             meta = save_raw(state, store, log, status=out)      # a lost answer leaves its pending record in this run's status
             out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
             out[IMAGE_KEY] = meta.get(IMAGE_KEY)        # recorded in status.json at the save; the run's status keeps it
+            slot.clear_attempts()           # the Production file read this run is in the saved ledger and store
+        # the uploads read this run go to intake/done/ now that what they changed is saved (a run stopped before this
+        # point reads them again: 'already' once applied)
+        intake.close_state_pairs(state, up_in.get("to_close") or [])
+        # read uploads kept past their time go (never a held, waiting or live report's copy, nor each report's newest)
+        try:
+            kept = intake.retain_done_state(store, state, log=log)
+            if kept.get("removed") or kept.get("error"):
+                out["intake_retain"] = kept
+        except Exception as exc:       # noqa: BLE001  (tried again by the next run)
+            out["intake_retain"] = {"error": type(exc).__name__}
+        # an upload finished while this run went on (its own request to start a run was turned away by this run's lock):
+        # a follow-up run reads it now, not tomorrow
+        try:
+            left_pairs = 0 if up_in.get("error") else len(intake.state_pending(state))
+        except Exception:       # noqa: BLE001  (the next scheduled run reads it)
+            left_pairs = 0
+        if left_pairs:
+            out["intake_waiting"] = left_pairs
+        if applied:
+            slot.drop_copies()
         if shown_changed or serving_stale:
             out["serving"] = save_serving(state, conn)
             state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "build": SERVING_BUILD, "at": _now()}).encode())
@@ -1248,7 +1974,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                     out["report_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
                 marks["last_report"] = _now()
                 _write_json(state, MARKS, marks)
-        out["more"] = bool(remaining or "deferred" in out)
+        out["more"] = bool(remaining or "deferred" in out or left_pairs)
         out["progress"] = bool(progressed or ran_detect or ran_activity)
         out["changed"] = bool(shown_changed or progressed)
         try:

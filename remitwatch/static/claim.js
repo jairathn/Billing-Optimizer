@@ -64,7 +64,7 @@ async function openClaim(id, backTo){
       : `${f.remit_date ? 'on the remittance of '+longDate(f.remit_date) : ''}${f.remit_payer ? ' from '+f.remit_payer : ''}`;
     return `<tr class="row ${f.finding_id===backTo?'picked':''}" tabindex="0" data-fid="${esc(f.finding_id)}"><td>${esc(labelOf(b, f.signal).label || f.signal)}<div class="small muted">${esc([f.procedure_code, where].filter(Boolean).join(' · '))}${f.stale?' · no longer found by the current rules':''}</div></td>
       <td class="day">${live && d0 ? `<span class="${ct.cls}">${esc(ct.text)}</span>` : (d0 ? `<span class="muted">${esc(longDate(d0))}</span>` : '<span class="muted">no date</span>')}</td>
-      <td><span class="st st-${esc(f.status)}">${esc(STATUS_WORDS[f.status]||f.status)}</span></td><td class="num">${(f.via==='pattern'?f.claim_cents:f.shortfall_cents) ? money2(f.via==='pattern'?f.claim_cents:f.shortfall_cents) : '–'}</td></tr>`; };
+      <td><span class="st st-${esc(f.status)}">${esc(STATUS_WORDS[f.status]||f.status)}</span>${f.work_state && typeof XP_STATE !== 'undefined' && XP_STATE[f.work_state] ? ` <span class="xs ${XP_STATE[f.work_state][1]}">${XP_STATE[f.work_state][0]}</span>` : ''}</td><td class="num">${(f.via==='pattern'?f.claim_cents:f.shortfall_cents) ? money2(f.via==='pattern'?f.claim_cents:f.shortfall_cents) : '–'}</td></tr>`; };
   const remitHtml = (r, i) => `<details class="dfold" ${i===c.remits.length-1?'open':''}><summary>${esc(longDate(r.payment_date))} · ${esc(r.payer_name||'')} · <b>${esc(r.status_words)}</b> · charged ${money2(r.charge_cents)} · paid ${money2(r.paid_cents)} · ${esc(r.patient_control_number)}</summary>
       <div class="small muted" style="margin:4px 0">${claimFacts(r)}</div>
       <div class="small muted" style="margin:0 0 4px">Payer claim number ${esc(r.payer_claim_control_number||'–')} · ${esc(r.payment_method||'')} ${r.trace_number?'trace '+esc(r.trace_number):''} · patient owes ${money2(r.patient_responsibility_cents)}${r.rendering_provider_npi?' · NPI '+esc(r.rendering_provider_npi):''} · file ${esc(r.source_name||'')}</div>
@@ -79,6 +79,8 @@ async function openClaim(id, backTo){
   const body = `${backTo ? `<button class="ghost" id="claimBack">‹ Back to the item</button>` : ''}
     ${emaOnly ? `<div class="note">No remittance in the files yet${lastEma && lastEma.claim_status ? `; EMA says ${esc(lastEma.claim_status)}${lastEma.posted_date||lastEma.transaction_date ? ' as of '+esc(longDate(String(lastEma.posted_date||lastEma.transaction_date).slice(0,10))) : ''}` : ''}.</div>` : ''}
     ${unanswered.length && !emaOnly ? `<div class="small muted">In EMA with no remittance in the files: ${unanswered.map(esc).join(', ')}.</div>` : ''}
+    ${c.story && typeof xpStoryHtml === 'function' ? xpStoryHtml(c.story, []) : ''}${c.story_error ? `<div class="small muted">${esc(c.story_error)}</div>` : ''}
+    ${c.ema_block && typeof xpEmaHtml === 'function' ? xpEmaHtml(c.ema_block) : ''}
     <h3 class="small">Items found on this claim${open ? ` (${num(open)} open)` : ''}</h3>
     ${c.findings.length ? `<div class="scroll"><table class="small"><tbody>${c.findings.map(itemRow).join('')}</tbody></table></div>` : '<div class="small muted">Nothing on this claim needed a person.</div>'}
     ${(c.taken_back||[]).length ? `<h3 class="small">Money taken back or held over that names this claim</h3><div class="scroll"><table class="small"><thead><tr><th>Date</th><th>Payer</th><th>What</th><th class="num">Amount</th><th>Reference</th></tr></thead>

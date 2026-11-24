@@ -205,6 +205,12 @@ def ddl(compact: bool = False) -> str:
     return "\n".join(ln for ln in DDL.splitlines() if keep(ln))
 
 
+def _ema_schema(conn: sqlite3.Connection) -> None:
+    """The tables of EMA's A/R and Production reports (remitwatch.ema_reports owns their definition)."""
+    from .ema_reports import ensure_schema      # here: ema_reports imports codes and ema_exports, never this module
+    ensure_schema(conn)
+
+
 def connect(db_path: str, compact: bool = False) -> sqlite3.Connection:
     if db_path != ":memory:":
         os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
@@ -446,6 +452,8 @@ class Store:
         self.db_path = db_path
         self.compact = compact
         self.conn = connect(db_path, compact)
+        _ema_schema(self.conn)
+        self.ema_changed = False            # set by remitwatch.ema_reports when the report catalog changed
         self._cols = {t: table_columns(self.conn, t) for t in
                       ("transactions", "claims", "lines", "adjustments", "remarks", "plb", "problems", "files", "ema_rows")}
         self._known_fingerprints: set[str] | None = None
@@ -459,6 +467,7 @@ class Store:
             store.conn.deserialize(data)
             store.conn.row_factory = sqlite3.Row
             store.conn.executescript(ddl(True))         # tables added since the image was written
+            _ema_schema(store.conn)                     # the EMA report tables keep their indexes (they are small)
             store.conn.execute("UPDATE transactions SET superseded=0 WHERE superseded IS NULL")
             store.conn.commit()
             store._cols = {t: table_columns(store.conn, t) for t in store._cols}

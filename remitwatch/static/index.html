@@ -18,6 +18,7 @@ button.primary{background:var(--accent);color:var(--accent-ink);border-color:var
 button{cursor:pointer}
 nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
 nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;cursor:pointer}
+#blindBar:empty{display:none}
 nav a.active{background:var(--chip);color:var(--ink);font-weight:600}
 main{padding:16px;max-width:1500px;margin:0 auto}
 #swingBar{max-width:1500px;margin:0 auto;padding:0 16px}
@@ -114,6 +115,18 @@ button:disabled{opacity:.5;cursor:default}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .k-fix{color:#9ec0ff}:root:not([data-theme="light"]) .k-auth{color:#c7a8ff}:root:not([data-theme="light"]) .k-note{color:#6fdcb6}:root:not([data-theme="light"]) .k-rule{color:#a9b0ff}:root:not([data-theme="light"]) .k-rate{color:#f5b878}:root:not([data-theme="light"]) .k-check{color:#c0c9d4}:root:not([data-theme="light"]) .k-chase{color:#ff9c8a}}
 :root[data-theme="dark"] .k-fix{color:#9ec0ff}:root[data-theme="dark"] .k-auth{color:#c7a8ff}:root[data-theme="dark"] .k-note{color:#6fdcb6}:root[data-theme="dark"] .k-rule{color:#a9b0ff}:root[data-theme="dark"] .k-rate{color:#f5b878}:root[data-theme="dark"] .k-check{color:#c0c9d4}:root[data-theme="dark"] .k-chase{color:#ff9c8a}
 .due-now{color:var(--bad);font-weight:650}.due-soon{color:var(--warn);font-weight:600}
+.k-bill{background:rgba(14,122,92,.10);color:#0e7a5c}.k-post{background:rgba(31,95,191,.10);color:#1849a9}
+/* an item's state and what EMA did to its line: the same words everywhere (remitwatch.states) */
+.xs{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;background:var(--chip);color:var(--ink)}
+.xs-now{background:rgba(180,35,24,.12);color:var(--bad)}.xs-wait{background:rgba(31,95,191,.13);color:var(--accent)}.xs-done{background:rgba(6,118,71,.14);color:var(--good)}
+.xs-quiet{background:var(--soft);color:var(--muted)}.xs-warn{background:rgba(181,71,8,.13);color:var(--warn)}
+.st-done{background:rgba(6,118,71,.14)}.st-accepted,.st-expired{background:var(--soft)}.st-cant_check{background:rgba(181,71,8,.13)}
+.xp-verdict{margin:6px 0 2px;font-weight:550}.xp-steps{margin:4px 0}.xp-steps ol{margin:4px 0;padding-left:20px}.xp-steps li{margin:3px 0}
+.xp-more{display:inline-block;vertical-align:top}.xp-more>summary{display:inline-block;padding:6px 8px;list-style:none}.xp-more[open]>summary{color:var(--ink)}
+.xp-log label{display:block;margin:3px 0}table.xp-story tr.has-item{background:var(--chip)}table.xp-story td{vertical-align:top}
+a.see-state.on{font-weight:650;color:var(--ink)}
+.keys{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px}.keys kbd{font:12px ui-monospace,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;background:var(--soft)}
+@media(max-width:640px){#keysBtn{display:none}}
 .panel-head{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;margin-bottom:6px}.panel-head h2{margin:0}
 .batch{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
 .batch:last-child{border-bottom:0}
@@ -149,7 +162,7 @@ table.calc-fall tr.calc-total td{border-top:2px solid var(--ink)}
 .lab-card .lab-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer}
 .lab-impact{margin:4px 0}
 .sheet h2{margin-top:0}
-@media print{header,nav,#drawer,.no-print,#calcCtl,.panel:not(.sheet){display:none !important} body{background:#fff} .sheet{border:0}}
+@media print{header,nav,#blindBar,#drawer,.no-print,#calcCtl,.panel:not(.sheet){display:none !important} body{background:#fff} .sheet{border:0}}
 .more-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
 .more-card{display:flex;flex-direction:column;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--ink);text-decoration:none}
 .more-card:hover{border-color:var(--accent)}
@@ -179,7 +192,7 @@ table.wl input.sel,#selAll{width:20px;height:20px}
 nav a .bdg{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:var(--bad);color:var(--accent-ink);font-size:11px;font-weight:700;text-align:center;line-height:16px}
 nav a .bdg[hidden]{display:none}
 nav .gap{flex:1 1 12px}nav a.ref{font-size:13px}
-@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]),nav .gap{display:none}nav a{padding:6px 8px}
+@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]):not([data-tab=results]),nav .gap{display:none}nav a{padding:6px 8px}
   nav[data-cur=progress] a[data-tab=more],nav[data-cur=data] a[data-tab=more],nav[data-cur=providers] a[data-tab=more]{background:var(--chip);color:var(--ink);font-weight:600}}
 .mid-only{display:none}@media(min-width:641px) and (max-width:1359px){.mid-only{display:flex}}
 a.pile{color:var(--muted);text-decoration:none}a.pile:hover{text-decoration:underline;color:var(--accent)}
@@ -242,6 +255,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
   <div class="fresh"><div id="feedChip"></div><div id="fresh">loading…</div></div>
   <input id="claimFind" type="search" maxlength="200" placeholder="Find a claim" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line">
   <button id="guideBtn" class="ghost" title="What this site does and how to use it">How this works</button>
+  <button id="keysBtn" class="ghost" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
   <a id="uploadLink" href="/upload" hidden class="small" title="Bring EMA's exports, remittance files and visit notes in by hand">Upload from EMA</a>
   <button id="bellBtn" title="alerts">Alerts</button>
   <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
@@ -251,6 +265,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 </header>
 <nav id="nav"></nav>
 <div id="swingBar" hidden></div>
+<div id="blindBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
 <main id="view"></main>
 <div id="drawer"></div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
@@ -259,6 +274,9 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
 <script src="/static/today.js"></script>
+<script src="/static/results.js"></script>
+<script src="/static/data.js"></script>
+<script src="/static/policy.js"></script>
 <script src="/static/desk.js"></script>
 <script src="/static/claim.js"></script>
 <script src="/static/calc_model.js"></script>
@@ -272,9 +290,10 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 // Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
 // right in smaller type. The analysis pages are under More (and open by their address).
 const TABS = [['today','Today'],['denials','Denials'],['bundling','Bundling & modifiers'],['downcoding','Downcoding'],['contracts','Contracts & underpayment'],
-  ['fees','Fees & takebacks'],['worklist','Worklist'],['faxes','Faxes'],['wins','Bigger wins'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
-const REF_TABS = new Set(['progress','data','providers','calculator','more']);
-const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates']];
+  ['fees','Fees & takebacks'],['worklist','Worklist'],['faxes','Faxes'],['wins','Bigger wins'],['results','Results'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
+const REF_TABS = new Set(['results','progress','data','providers','calculator','more']);
+// pages opened by their address or from More, not from the main row; the owner's write-off policy table is one (static/policy.js)
+const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates'],['policy','Write-off policy']];
 const ALIASES = {appeals:'worklist'};        // the earlier Appeals queue is the Worklist
 const NEEDS_SUMMARY = new Set(['overview','explorer','payers']);
 const SIGNAL_HELP = {
@@ -349,7 +368,8 @@ const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);       // never a name every object has (constructor, __proto__, toString)
 function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || own(ALIASES, k); }
 function initNav(){
-  $('#nav').innerHTML = TABS.map(([k,l])=>`${k==='progress'?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
+  const firstRef = (TABS.find(t=>REF_TABS.has(t[0]))||[])[0];       // the reference tabs stand apart, to the right
+  $('#nav').innerHTML = TABS.map(([k,l])=>`${k===firstRef?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
     state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
@@ -361,6 +381,7 @@ function initNav(){
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
   $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
   $('#guideBtn').onclick = ()=>openGuide();
+  $('#keysBtn').onclick = ()=>keysSheet();
   $('#claimFind').onkeydown = e=>{ if(e.key==='Enter'){ e.preventDefault(); findClaim(e.target.value); } };
 }
 async function loadMeta(){
@@ -368,7 +389,7 @@ async function loadMeta(){
   const m = state.meta, r = m.remits||{}, runs = (m.runs||[])[0];
   $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?runs.finished_at.replace('T',' ').slice(0,16):'never'} · files ${m.files?m.files.n:0}`;
   $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
-  $('#uploadLink').hidden = !m.uploads;            // a server only: Vercel keeps the Dropbox folder
+  $('#uploadLink').hidden = !(m.uploads || m.report_uploads);     // visit notes by hand on a server; EMA's reports on both hosts
 }
 async function loadSummary(){
   state.summary = await api('/api/summary?'+qs({year:state.year,status:state.status}));
@@ -385,6 +406,7 @@ async function render(){
   $('#nav').dataset.cur = state.tab;            // between 641 and 1,359 px More stands for Progress, Data and Providers
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
   const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
+  blindBar();                                    // the blind-spot banner on every page; Today and Data draw their own
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
   if(!own(DESKS, state.tab) && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; state.wlKey = null; }   // "item 3 of 50" means something on a list page only
@@ -393,13 +415,31 @@ async function render(){
   const old = $('#view'), v = old.cloneNode(false);      // an older run still holds the old node and can only write into that
   old.replaceWith(v);
   v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
+  // Results (static/results.js), the Data tab (static/data.js, the page's own data(v) until then) and the write-off policy
+  // table (static/policy.js) come from their own scripts: a page whose script is not on this site says so instead
   const pages = {today: todayTab, denials: x=>deskTab(x,'denials'), bundling: x=>deskTab(x,'bundling'), downcoding: x=>deskTab(x,'downcoding'),
-    contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), faxes: faxesTab, wins: winsTab, more: moreTab, overview, payers, data,
+    contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), faxes: faxesTab, wins: winsTab, more: moreTab, overview, payers,
+    data: (typeof dataTab === 'function' ? dataTab : data), results: (typeof resultsTab === 'function' ? resultsTab : notHere('Results')),
+    policy: (typeof policyTab === 'function' ? policyTab : notHere('Write-off policy')),
     alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab, calculator: calculatorTab};
   const fn = own(pages, state.tab) ? pages[state.tab] : todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
 }
+// The blind-spot banner (today.js tdBlindBanner, GET /api/ema/blind) under the tabs of every page but Today and the Data tab,
+// which draw their own, so it shows on every page and never twice. Asked once in ten minutes: it changes with a run only.
+async function blindBar(){
+  const el = $('#blindBar'), own = () => ['today','data'].includes(state.tab);
+  if(!el || typeof tdBlindBanner !== 'function') return;
+  if(own()){ el.innerHTML = ''; return; }
+  if(state.blind === undefined || Date.now() - (state.blindAt||0) > 600000){
+    state.blindAt = Date.now();
+    try { state.blind = await api('/api/ema/blind'); } catch(e){ state.blind = null; state.blindAt = 0; }   // a failed ask (a cold start) is asked again on the next page
+  }
+  if(own()){ el.innerHTML = ''; return; }        // the page changed to Today or Data while it was asked
+  await tdBlindBanner(el, state.blind);
+}
+function notHere(title){ return async v => { v.innerHTML = `<div class="panel"><h2>${esc(title)}</h2><div class="note">This page is not on this site yet. Reload in a few minutes; if it stays like this, the site needs its next update.</div></div>`; }; }
 function sumBy(rows, key){ const m={}; rows.forEach(r=>{m[r[key]]=(m[r[key]]||0)+(r.shortfall_cents||0);}); return m; }
 function sigRows(sigs){ return state.summary.by_signal.filter(r=>sigs.includes(r.signal)); }
 function total(rows){ return rows.reduce((a,r)=>a+(r.shortfall_cents||0),0); }
@@ -579,12 +619,47 @@ function closeDetail(){
   const d = $('#drawer'); if(!d.classList.contains('open')) return;
   d.classList.remove('open'); d.inert = true;
   state.detailSeq = (state.detailSeq||0) + 1; state.detailId = null;
+  if(/^#item=/.test(location.hash)) history.replaceState(null, '', '#' + state.tab);       // the address names the page again
   const back = state.detailFrom; state.detailFrom = null;
   if(state.dirty){ state.dirty = false; if(state.tab==='today' || state.tab==='fees' || DESKS[state.tab]){       // statuses changed: redraw the list behind
     render().then(()=>{ const r = document.querySelector('#view tr.row') || document.querySelector('#view button'); if(r) r.focus(); }); return; } }
   if(back && back.isConnected) back.focus();
 }
-document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
+// Escape closes what is on top: a window (the shortcuts, a fax preview, a letter, a bulk send) first, then the item's panel
+document.addEventListener('keydown', e=>{ if(e.key!=='Escape') return;
+  if($('#modal').classList.contains('open')){ $('#modal').classList.remove('open'); return; }
+  if($('#drawer').classList.contains('open')) closeDetail(); });
+// Keyboard shortcuts for working a list (shown by ? and the ? button): j and k move through the list, or through the items
+// with an item open; Enter or o opens one; s marks it sent; l lets it go (it asks why); / goes to the search box.
+const KEYS = [['j','Next item'],['k','Previous item'],['Enter or o','Open the item'],['s','Mark it sent'],['l','Let it go (asks why)'],['/','Search the list'],['Esc','Close the item'],['?','These shortcuts']];
+function keysSheet(){
+  $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Keyboard shortcuts</h2><button id="closeM" aria-label="Close">✕</button></div>
+    <div class="keys" style="margin-top:10px">${KEYS.map(([k, w])=>`<span>${k.split(' or ').map(x=>`<kbd>${esc(x)}</kbd>`).join(' or ')}</span><span>${esc(w)}</span>`).join('')}</div>`;
+  $('#modal').classList.add('open'); $('#closeM').onclick = ()=>$('#modal').classList.remove('open'); $('#closeM').focus();
+}
+document.addEventListener('keydown', e=>{
+  if(e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target, typing = t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable);
+  if(typing || $('#modal').classList.contains('open')) return;
+  const open = $('#drawer').classList.contains('open'), d = $('#drawer');
+  const press = sel => { const b = d.querySelector(sel); if(b && !b.disabled){ b.click(); return true; } return false; };
+  if(e.key === '?'){ e.preventDefault(); keysSheet(); return; }
+  if(e.key === '/'){ const q = [...document.querySelectorAll('#view input[data-f="q"]')].find(x=>x.offsetParent!==null) || $('#claimFind'); if(q){ e.preventDefault(); q.focus(); } return; }
+  if(open){
+    // s and l use the next step's own button, else the status bar's (each asks what it needs: Let go always asks why)
+    const hint = text => { const el = d.querySelector('#xpErr') || d.querySelector('.st-err'); if(el) el.textContent = text; };
+    if(e.key === 'j'){ e.preventDefault(); press('#nextItem'); }
+    else if(e.key === 'k'){ e.preventDefault(); press('#prevItem'); }
+    else if(e.key === 's'){ e.preventDefault(); press('[data-xp="mark_sent"]') || press('#sentNext') || press('[data-st="appealed"]') || hint('Nothing to mark sent here.'); }
+    else if(e.key === 'l'){ e.preventDefault(); press('[data-xp="let_go"]') || press('#letGoNext') || press('[data-st="dismissed"]') || hint('This item cannot be let go from here.'); }
+    return;
+  }
+  const rows = [...document.querySelectorAll('#view tr.row[data-id]')]; if(!rows.length) return;
+  const i = rows.indexOf(document.activeElement);
+  if(e.key === 'j'){ e.preventDefault(); (rows[Math.min(rows.length - 1, i + 1)] || rows[0]).focus(); }
+  else if(e.key === 'k'){ e.preventDefault(); (rows[Math.max(0, i - 1)] || rows[0]).focus(); }
+  else if(e.key === 'o' && i >= 0){ e.preventDefault(); openDetail(rows[i].dataset.id); }
+});
 // The first rows of an item's Claim details: who the claim is about, then its claim IDs. A claim no payer has answered is
 // known only from EMA's rows (from_ema): it has no remittance, so no payer claim number, and the line above the fold
 // already gives its EMA claim ID, so its Claim row is left out.
@@ -606,20 +681,31 @@ async function openDetail(id, opts){
   state.detailId = id;
   const d = $('#drawer'); d.classList.add('open'); d.inert = false; d.innerHTML='<div class="muted">loading…</div>';
   const from = document.activeElement; if(from && from.closest && from.closest('#view')) state.detailFrom = from.closest('tr.row') || from;
-  const r = await api('/api/findings/'+id); if(seq !== state.detailSeq) return;
+  state.detailId = id;
+  // the address names the item, so it can be passed on: #item=<finding id> opens this panel (the page under it stays)
+  if(location.hash !== '#item=' + id) history.replaceState(null, '', '#item=' + encodeURIComponent(id));
+  // the story, verdict and next step come in their own answer, so the item's own facts show at once
+  const told = api('/api/findings/'+encodeURIComponent(id)+'/explain').catch(e=>({explain_error: 'What to do could not be worked out just now ('+(e.message||'no answer')+').'}));
+  let r; try { r = await api('/api/findings/'+encodeURIComponent(id)); }
+  catch(e){ if(seq !== state.detailSeq) return;
+    // its money has a new number since the page was drawn (a newer run): open it under that number
+    if(e.code === 'changed' && e.body && e.body.heir && e.body.heir !== id) return openDetail(e.body.heir, opts);
+    d.innerHTML = `<div class="dr-head"><div><h2>Item not found</h2><div class="small muted">${e.status === 404 ? 'This item is no longer on the lists.' : 'The site did not answer just now: try again in a moment.'}</div></div><button id="closeD" aria-label="Close">✕</button></div><div class="note">It may have been closed and removed by a newer run. Find a claim (top of the page) finds it by its claim ID.</div>`; const c = d.querySelector('#closeD'); if(c) c.onclick = closeDetail; return; }
+  if(seq !== state.detailSeq) return;          // another item was opened meanwhile: the newest open wins
   const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
-  if(!state.brief){ try { await brief(); } catch(e){} }        // the plain labels and the kinds of work
+  state.detailR = r; state.detailF = f; state.detailX = null;      // the panel's answers: a packet built here redraws its box
+  if(!state.brief){ try { await (state.briefP || brief()); } catch(e){} }        // the plain labels and the kinds of work
   if(seq !== state.detailSeq) return;
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
   const ex = drawerExtras(f, r), plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : f.title;
   const letter = f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal) ? `<button id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>` : '';
-  const noteWork = !!state.brief && kindFor(state.brief, f) === 'note' && ['open','in_progress'].includes(f.status);
-  d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')}</div></div><button id="closeD" aria-label="Close">✕</button></div>
-    ${whatToDoHtml(f, letter) || (letter ? `<div class="actions">${letter}</div>` : '')}
+  d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')} <span id="xpChips">${typeof xpChips === 'function' ? xpChips(f, f.work_state) : ''}</span></div></div><button id="closeD" aria-label="Close">✕</button></div>
+    <div id="xpSlot"><div class="todo-box"><span class="muted small">Working out what to do…</span></div></div>
+    ${letter ? `<div class="actions" id="letterRow">${letter}</div>` : ''}
     ${typeof faxDrawerHtml === 'function' ? faxDrawerHtml(f, r) : ''}
     ${typeof hideDrawerHtml === 'function' ? hideDrawerHtml(f) : ''}
-    <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
+    <div class="statusbar"><span class="small muted">Status: <b>${esc(STATUS_WORDS[f.status]||f.status)}</b> · change to</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].filter(([s])=>s!==f.status).map(([s,l])=>`<button class="ghost small" data-st="${s}">${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
     ${!f.claim_key && !f.line_key && f.patient_control_number ? `<div class="small" style="margin:6px 0">EMA claim ID <b>${esc(f.patient_control_number)}</b>${f.service_date ? ' · date of service ' + esc(f.service_date) : ''}${(f.evidence||{}).sent ? ' · sent ' + esc(f.evidence.sent) : ''} · no remittance from the payer for it</div>` : ''}
@@ -647,13 +733,16 @@ async function openDetail(id, opts){
     ${(r.handling||[]).length?`<div class="small"><b>How EMA handled it:</b> ${r.handling.map(x=>esc((x.carc||'')+' '+(x.adjustment_status||'')+' '+money2(x.adjustments_cents)+' on '+(x.transaction_date||''))).join(' · ')}</div>`:''}
     ${(r.ema||[]).length?`<h3 class="small">ModMed EMA rows for this claim</h3><table class="small"><thead><tr><th>Family</th><th>DOS</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adj</th><th>Status / handling</th></tr></thead><tbody>${r.ema.slice(0,40).map(e=>`<tr><td>${esc(e.family)}${e.activity_type?' · '+esc(e.activity_type):''}</td><td>${esc(e.service_date)}</td><td>${esc(e.cpt)}${mods(e.modifiers)}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc(e.claim_status||'')} ${e.carc?'· '+esc(e.carc):''} ${e.adjustment_status?'· '+esc(e.adjustment_status):''} ${e.denial_category?'· '+esc(e.denial_category):''}</td></tr>`).join('')}</tbody></table>`:'<div class="small muted">No EMA export rows for this claim (annual exports not loaded).</div>'}`:''}
     </details>
-    ${ex.builder ? `<details class="dfold" ${noteWork?'open':''}><summary>Build the appeal from the visit note</summary>${ex.builder}</details>` : ''}
+    <div id="xpStorySlot"></div><div id="xpEmaSlot"></div><div id="xpWhy" hidden></div>
+    ${ex.builder ? `<details class="dfold" id="builderFold"><summary>Build the appeal from the visit note</summary>${ex.builder}</details>` : ''}
     <details class="dfold"><summary>Technical details</summary><div class="small muted">${esc(f.title)} · ${esc(f.signal)} · ${esc(f.severity)} · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
     <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre></details>`;
   d.dataset.fid = id;
   state.walkUntil = opts && opts.walk ? Date.now() + WALK_GUARD_MS : 0;
   d.querySelector('#closeD').onclick=closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
+  // the verdict, the next step and the story, when they come: or, if they cannot be worked out, the item's What to do box
+  told.then(x => { if(!panelShows(seq, id) || !d.contains(d.querySelector('#xpSlot'))) return; xpFill(f, r, x || {}, d, id); });
   const bar = [...d.querySelectorAll('[data-st]')];
   const what = `${plain}${f.payer_group ? ' · ' + f.payer_group : ''}${f.shortfall_cents ? ' · ' + money2(f.shortfall_cents) : ''}`;
   bar.forEach(b=>b.onclick=async()=>{
@@ -677,7 +766,7 @@ async function openDetail(id, opts){
   const oc = d.querySelector('#openClaim'); if(oc) oc.onclick = e => { e.preventDefault(); openClaim(r.bill, id); };
   d.querySelectorAll('a.claim-link').forEach(a => a.onclick = e => { e.preventDefault(); openClaim(a.dataset.claim, id); });
   bindDrawerExtras(id, d);
-  if(typeof bindFaxDrawer === 'function'){ bindFaxDrawer(id, d, seq, what); tieFaxHtml(d, id, seq); }
+  if(typeof bindFaxDrawer === 'function'){ bindFaxDrawer(id, d, seq, what, r); tieFaxHtml(d, id, seq); }
   if(typeof bindHideDrawer === 'function') bindHideDrawer(f, d);
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);
@@ -695,6 +784,47 @@ async function openDetail(id, opts){
     $('#copyE').onclick=()=>navigator.clipboard.writeText(p.evidence);
   };
 }
+
+// The item's verdict, next step, story and EMA block (features.js), or the What to do box when they cannot be worked out.
+// After a button that changes the item, the next one in the list opens (as "Mark sent and open the next" does), or the
+// item again with its new state.
+function xpFill(f, r, x, d, id){
+  const slot = d.querySelector('#xpSlot');
+  if(!x.explain || typeof xpBoxHtml !== 'function'){
+    slot.innerHTML = whatToDoHtml(f, '') + (x.explain_error ? `<div class="small muted">${esc(x.explain_error)}</div>` : '');
+    bindWhatToDo(f, d);
+    const kind = state.brief ? kindFor(state.brief, f) : '', b = d.querySelector('#builderFold');
+    if(b && kind === 'note' && ['open','in_progress'].includes(f.status)) b.open = true;      // no next step to open it: open as before
+  } else {
+    state.detailX = x;
+    xpRedrawBox(id, d);
+    d.querySelector('#xpStorySlot').innerHTML = xpStoryHtml(x.explain.story, (x.explain.verdict || {}).rows);
+  }
+  d.querySelector('#xpEmaSlot').innerHTML = xpEmaHtml(x.ema_block) + (x.ema_block_error ? `<div class="small muted">${esc(x.ema_block_error)}</div>` : '');
+  if(state.meta && state.meta.decisions) xpDecisions(id, d.querySelector('#xpWhy'));      // the run's decision log, where this build keeps one
+}
+// The next step's box, drawn again with the panel's answers as they are now (a packet built in the panel moves its main
+// button on to the fax). Where the box offers the appeal itself (its packet, its fax), the panel's other ways to the same
+// appeal (the letter button, the fax box's own button) step aside: one main button per item.
+function xpRedrawBox(id, d){
+  const f = state.detailF, r = state.detailR, x = state.detailX, slot = d.querySelector('#xpSlot');
+  if(!f || !r || !x || !x.explain || !slot || state.detailId !== id) return;
+  const walk = async () => { const ids = state.worklist || [], i = ids.indexOf(id);
+    if(i >= 0 && i < ids.length - 1) return openDetail(ids[i + 1]);
+    if(i >= 0 && state.wlNext){ try { await state.wlNext(); } catch(e){} const nx = (state.worklist || [])[i + 1]; if(nx) return openDetail(nx); }
+    openDetail(id); };
+  slot.innerHTML = xpBoxHtml(f, x, r);
+  const shown = xpEffective(f, x).explain;
+  const ch = d.querySelector('#xpChips'); if(ch) ch.innerHTML = xpChips(f, (shown.verdict || {}).state || f.work_state);
+  const offers = ((shown.next_step || {}).buttons || []).some(k => k === 'build_packet' || k === 'fax_payer');
+  const lr = d.querySelector('#letterRow'); if(lr) lr.hidden = offers;
+  const fr = d.querySelector('#fxOneRow'); if(fr && f.status !== 'appealed') fr.hidden = offers;
+  xpBind(f, x, r, d, st => (['appealed','dismissed','resolved','lost'].includes(st) ? walk() : openDetail(id)));
+  const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { const i = (state.worklist||[]).indexOf(id); if(i > 0) openDetail(state.worklist[i-1]); };
+  const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => walk();
+}
+// #item=<finding id>: the item's panel, over whatever page is open (a finding id in a message is one click away)
+function itemFromHash(){ const m = /^#item=([A-Za-z0-9_-]{1,80})$/.exec(location.hash); return m ? m[1] : null; }
 
 // Opening the site looks for new remittances when nothing has for a few hours (TriZetto, Dropbox), then redraws the page
 // once the run has finished and brought newer payments: paid claims leave the lists without anyone pressing Sync.
@@ -714,7 +844,8 @@ async function freshen(){
     return;
   }
 }
-window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(tabOpen(h) && h!==state.tab){ state.tab=h; render(); } });
+window.addEventListener('hashchange', ()=>{ const item = itemFromHash(); if(item){ if(item !== state.detailId) openDetail(item); return; }
+  const h=location.hash.slice(1); if(tabOpen(h) && h!==state.tab){ state.tab=h; render(); } });
 // Leaving the page locks what the owner's password opened. A browser may keep the page as it was and bring it back
 // on Back: it must come back locked, with nothing left on it.
 window.addEventListener('pagehide', ()=>{ if(typeof pvForget === 'function') pvForget(); const v=$('#view'); if(v) v.innerHTML=''; sweepCharts(); });   // always: the calculator's figures can be in memory with no owner password set
@@ -723,9 +854,13 @@ window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
   try { await loadMeta(); } catch(e){ if(!state.meta) $('#fresh').textContent='no data loaded yet'; }
-  brief().catch(()=>{});        // the 7-day badges on the category tabs
-  await refreshHeader();
+  // the brief (the 7-day badges on the category tabs, the labels) is asked once: the first page and the panel wait on this
+  // same answer. The bell and the feed chip fill in when theirs come; the first rows never wait for them
+  state.briefP = brief().catch(()=>null).finally(()=>{ state.briefP = null; });
+  refreshHeader();
+  const item = itemFromHash();
   if(!state.run) render();       // a click while the first answer was slow has drawn the page already
+  if(item) openDetail(item);     // a link to one item: its panel over Today
   setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);
   freshen();
 })();

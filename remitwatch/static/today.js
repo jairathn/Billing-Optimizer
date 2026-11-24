@@ -3,9 +3,9 @@
 // desk.js. Loaded after features.js and before the page's own script; uses its helpers (api, esc, money, money2, state,
 // render, openDetail, setFindingStatus).
 
-const KIND_STYLE = {fix:'k-fix', auth:'k-auth', note:'k-note', rule:'k-rule', rate:'k-rate', chase:'k-chase', check:'k-check'};
+const KIND_STYLE = {fix:'k-fix', auth:'k-auth', note:'k-note', rule:'k-rule', rate:'k-rate', chase:'k-chase', check:'k-check', bill:'k-bill', post:'k-post'};
 const STATUS_WORDS = {open:'To do', in_progress:'Started', appealed:'Sent', resolved:'Paid', lost:'Lost', dismissed:'Let go'};
-const OWNER_OF = {fix:'Billing', auth:'Front desk', note:'Clinicians and coder', rule:'Billing', rate:'Billing', check:'Front desk and billing'};
+const OWNER_OF = {fix:'Billing', auth:'Front desk', note:'Clinicians and coder', rule:'Billing', rate:'Billing', check:'Front desk and billing', bill:'Billing', post:'Payment posting'};
 const GUIDE_KEY = 'rw:guide:v1';
 
 function guideSeen(){ try { return localStorage.getItem(GUIDE_KEY) === '1'; } catch(e){ return false; } }
@@ -70,23 +70,95 @@ function bindGuide(v){
   const close = () => { guideDone(); g.remove(); };
   g.querySelector('#guideClose').onclick = close;
   g.querySelector('#guideOk').onclick = close;
-  g.querySelector('#guideGo').onclick = () => { guideDone(); goWork({deadline:'valid', sort:'deadline', first:'1'}); };
+  // the first item to work: in Work now (never one that waits on the payer or a question for the owner), soonest first
+  g.querySelector('#guideGo').onclick = () => { guideDone(); goWork({state:'todo', deadline:'valid', sort:'deadline', first:'1'}); };
 }
 function openGuide(){ guideReset(); if(state.tab !== 'today'){ state.tab = 'today'; location.hash = 'today'; } render(); }
 
 // ---------------------------------------------------------------- Today
 async function todayTab(v){
+  // The plan comes from the brief and is drawn as soon as the brief answers. EMA's counts by state (/api/ema/today), the
+  // money scoreboard (/api/results/scoreboard) and the five EMA exports' ages (/api/ema/exports) each fill their own
+  // place when their answer comes: a slow one never holds the plan back, a failed one says so in one line, and step 1
+  // never says all clear before an answer says no feed is behind
+  const tdP = api('/api/ema/today').catch(()=>null), sbP = api('/api/results/scoreboard').catch(()=>null),
+    exP = api('/api/ema/exports').catch(()=>null);
   const b = await brief(true);
   if(!b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
-  const w = b.work.total, bad = (b.health||[]).filter(h=>!h.ok);
-  const top = b.batches[0], dec = b.decide, fu = b.follow_ups, done = b.done || {};
+  const look = {blind: undefined};       // undefined: no answer yet; null: none came back; true or false: what it said
+  const w = b.work.total;
+  const done = b.done || {};
   // the day the lists count by (the brief's), not the browser's: the header and "closes today" agree
   const day = new Date(siteDay()+'T12:00:00Z').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric', timeZone:'UTC'});
+  const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED','SWING'].includes(a.kind) && a.severity!=='info').slice(0,3);   // a big change in one run has the banner above every page
+  const missed = b.missed || {};
+  // a phone: the scoreboard and the counts by state stay above the plan; the lines after them (what is not on today's
+  // list, what else waits, the exports' ages) come right below it, so the plan's first step is on the first screen
+  const narrow = tdNarrow(), side = '<div id="tdMoreSlot"></div><div id="tdEmaSlot"></div>';
+  v.innerHTML = `${guideSeen() ? '' : guideHtml(b)}
+    <div id="tdBlind"></div>
+    <div id="tdHealth">${tdHealthHtml(b, look.blind)}</div>
+    <div class="today-head"><div><div class="muted small">${esc(day)}</div><h1 class="page-title">Today's plan</h1></div>
+      <div class="donebox"><span>Moved on today <b>${done.today_n||0}</b></span><span>This week <b>${pl(done.week_n, 'item')}</b>, ${money(done.week_cents||0)} sent or paid</span>${(b.recovered||{}).year_cents ? `<span>Paid back in ${esc(b.recovered.year)} <b>${money(b.recovered.year_cents)}</b></span>` : ''}</div></div>
+    <div id="tdScoreSlot"></div>
+    <div id="tdCountsSlot"></div>
+    ${narrow ? '' : side}
+    <div class="plan" id="tdPlan">${tdPlanHtml(tdSteps(b, look))}</div>
+    ${narrow ? side : ''}
+    <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.</span></div>
+      <div class="batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>
+      ${b.batches.length > 8 ? `<button class="ghost" id="allBatches">Show all ${b.batches.length} batches</button>` : ''}</div>
+    ${alerts.length ? `<div class="panel"><div class="panel-head"><h2>What changed</h2><span class="muted small">Payer behaviour that moved recently.</span></div>${alerts.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">Look into it</button></div>`).join('')}<a href="#alerts" class="small">All alerts</a></div>` : ''}
+    <div class="panel wins-teaser"><div class="panel-head"><h2>Bigger wins</h2><span class="muted small">Fixed once, collected on every future claim.</span></div>${winsTeaser(b)}<button id="goWins">Open Bigger wins</button></div>
+    ${missed.n ? `<div class="missed small muted">Missed in the last ${missed.days} days: ${Number(missed.n).toLocaleString()} items worth ${money(missed.cents)} passed their filing window without anyone working them. <a href="#" id="seeMissed">See them</a></div>` : ''}`;
+  bindGuide(v);
+  tdBindPlan(v, b, look);
+  tdBindLinks(v.querySelector('#tdHealth'));
+  bindBatches(v, b);
+  const all = v.querySelector('#allBatches'); if(all) all.onclick = () => { v.querySelector('#batchList').innerHTML = batchRows(b, b.batches); bindBatches(v, b); all.remove(); };
+  v.querySelectorAll('.seeA').forEach(bt=>bt.onclick=()=>{ const a = alerts.find(x=>x.alert_id===bt.dataset.id); if(a && typeof seeAlert==='function') seeAlert(a); });
+  const gw = v.querySelector('#goWins'); if(gw) gw.onclick = () => { state.tab='wins'; location.hash='wins'; render(); };
+  const sm = v.querySelector('#seeMissed'); if(sm) sm.onclick = e => { e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
+  // what the blind spot says decides step 1 and whether the health banner repeats a stale feed
+  const seen = blind => { look.blind = blind;
+    const h = v.querySelector('#tdHealth'); if(h){ h.innerHTML = tdHealthHtml(b, blind); tdBindLinks(h); }
+    tdBindPlan(v, b, look, true); };
+  await Promise.all([
+    sbP.then(sb => { const el = v.querySelector('#tdScoreSlot'); if(el){ el.innerHTML = tdScoreHtml(sb); tdBindScore(el, sb); } }),
+    tdP.then(async td => {
+      const el = v.querySelector('#tdCountsSlot'), bb = v.querySelector('#tdBlind');
+      if(td){
+        if(el){ el.innerHTML = tdStatesHtml(td); tdBindCounts(el, td); }
+        const more = v.querySelector('#tdMoreSlot'); if(more){ more.innerHTML = tdMoreHtml(td); tdBindCounts(more, td); }
+        if(bb){ bb.innerHTML = tdBlindHtml(td.blind); tdBindLinks(bb); }
+        seen(!!(td.blind && td.blind.blind));
+        return;
+      }
+      // the counts did not come back (a store busy with a run, a cold start): the blind spot is asked on its own, as every
+      // other page asks it, and nothing is ticked as clear while it is not known
+      if(el) el.innerHTML = `<div class="oneline sev-medium" id="tdCountsFail">Today's EMA counts did not come back. Reload in a minute.</div>`;
+      const bl = await tdBlindBanner(bb);
+      seen(bl ? !!bl.blind : null);
+    }),
+    Promise.all([tdP, exP]).then(([td, ex]) => { const el = v.querySelector('#tdEmaSlot');
+      if(el){ el.innerHTML = (td || ex) ? tdEmaLine(td, ex) : ''; tdBindLinks(el); } }),
+  ]);
+}
+
+// the plan's steps from the brief. Step 1 is ticked "nothing closes this week" only once the blind spot is known to be
+// clear (look.blind === false) and the self-check's line is not up
+function tdSteps(b, look){
+  const blind = look.blind === true;
+  const held = look.blind !== false || !!((state.meta || {}).selfcheck_banner);
+  const w = b.work.total, top = b.batches[0], dec = b.decide, fu = b.follow_ups;
   const byKind7 = (b.work.types||[]).filter(t=>t.due7_n).sort((x,y)=>y.due7_cents-x.due7_cents);
   const steps = [];
-  steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${Number(w.due7_n).toLocaleString()} items worth ${money(w.due7_cents)} have a filing window that closes within 7 days.`,
-      chips: byKind7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' '), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
-    : {n:1, title:'Nothing closes this week', line: w.due30_n ? `${w.due30_n} items worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:true, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
+  // never "all clear" while blind: what closes is what the files on hand show
+  // on a phone the three kinds worth most and how many more, so Start stays on the first screen; the list has them all
+  const kinds7 = tdNarrow() && byKind7.length > 3 ? byKind7.slice(0, 3) : byKind7, more7 = byKind7.length - kinds7.length;
+  steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${pl(w.due7_n, 'item')} worth ${money(w.due7_cents)} ${w.due7_n===1?'has':'have'} a filing window that closes within 7 days.`,
+      chips: kinds7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' ') + (more7 ? ` <span class="muted small">and ${more7} more</span>` : ''), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
+    : {n:1, title: blind ? 'Nothing closes this week in the payments on file' : 'Nothing closes this week', line: w.due30_n ? `${pl(w.due30_n, 'item')} worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:!held, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
   // money the biller wrote off in EMA while the payer can still be asked for it: the quiet loss
   const wo = b.written_off || {};
   if(wo.n) steps.push({n:steps.length+1, title:'Work what EMA wrote off', line:`${pl(wo.n, 'item')} worth ${money(wo.cents)} ${wo.n===1?'was':'were'} written off in EMA but ${wo.n===1?'is':'are'} still inside the filing window${(wo.payers||[])[0] ? ` (most: ${esc(wo.payers[0].payer_group)}, ${money(wo.payers[0].cents)})` : ''}. Work ${wo.n===1?'it':'them'}, and reverse the write-off in EMA when the payer pays.`,
@@ -95,39 +167,172 @@ async function todayTab(v){
   const na = (b.no_answer || {}).chase || {}, rj = (b.no_answer || {}).rejected || {};
   if(na.n) steps.push({n:steps.length+1, title:'Chase claims the payer never answered', line:`${pl(na.n, 'claim')} worth ${money(na.cents)} ${na.n===1?'was':'were'} sent and never answered: look ${na.n===1?'it':'them'} up on the payer's portal or call${na.first_deadline ? `; the first one's date is ${esc(longDate(na.first_deadline))}` : ''}.${rj.n ? ` ${Number(rj.n).toLocaleString()} more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit).` : ''}`,
       chips: kindBadge(b, 'chase'), btn:`Chase them (${na.n})`, go:{kind:'chase', sort:'deadline'}});
-  if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`${fu.n} items sent to the payer more than ${fu.days} days ago are still unpaid (${money(fu.cents)}). Check the portal or call.${fu.note ? ' <b>' + esc(fu.note) + '</b>' : ''}`, btn:`Follow up (${fu.n})`, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
-  if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}: ${top.n} items on ${top.claims} claims, ${money(top.cents)}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
+  if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`${pl(fu.n, 'item')} sent to the payer more than ${fu.days} days ago ${fu.n===1?'is':'are'} still unpaid (${money(fu.cents)}). Check the portal or call.${fu.note ? ' <b>' + esc(fu.note) + '</b>' : ''}`, btn:`Follow up (${fu.n})`, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
+  if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}: ${pl(top.n, 'item')} on ${pl(top.claims, 'claim')}, ${money(top.cents)}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
       chips: kindBadge(b, top.kind), btn:'Open the batch', go:{kind: top.kind, payer: top.payer_group, sort:'deadline'}});
   const older_n = Math.max(0, (b.work.undated_n||0) - (dec ? dec.n : 0)), older_c = Math.max(0, (b.work.undated_cents||0) - (dec ? dec.cents : 0));
-  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`${dec.n} items worth ${money(dec.cents)} paid in the last ${dec.days||120} days${dec.since ? ` (since ${esc(longDate(dec.since))})` : ''} need a person to say what they are (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${pl(older_n, 'older one')} (${money(older_c)})</a> ${older_n===1?'has':'have'} no filing date either.`:''}`, btn:`Look at them (${dec.n})`, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
+  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`${pl(dec.n, 'item')} worth ${money(dec.cents)} paid in the last ${dec.days||120} days${dec.since ? ` (since ${esc(longDate(dec.since))})` : ''} need a person to say what they are (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${pl(older_n, 'older one')} (${money(older_c)})</a> ${older_n===1?'has':'have'} no filing date either.`:''}`, btn:`Look at them (${dec.n})`, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
   else if(older_n) steps.push({n:steps.length+1, title:'Items with no filing date', line:`${pl(older_n, 'item')} worth ${money(older_c)} ${older_n===1?'has':'have'} no filing date: a person has to say what they are.`, btn:'Look at them', go:{deadline:'older', status:'open,in_progress', sort:'shortfall'}});
-  const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED','SWING'].includes(a.kind) && a.severity!=='info').slice(0,3);   // a big change in one run has the banner above every page
-  const missed = b.missed || {};
-  v.innerHTML = `${guideSeen() ? '' : guideHtml(b)}
-    ${bad.length ? `<div class="banner"><b>Before you start:</b> ${esc(bad[0].title)}. ${esc(bad[0].detail||'')} <a href="#data" class="go-data">How to fix</a>${bad.length>1?` · <a href="#data" class="go-data">${bad.length-1} more data ${bad.length-1===1?'check':'checks'}</a>`:''}</div>` : ''}
-    <div class="today-head"><div><div class="muted small">${esc(day)}</div><h1 class="page-title">Today's plan</h1></div>
-      <div class="donebox"><span>Moved on today <b>${done.today_n||0}</b></span><span>This week <b>${pl(done.week_n, 'item')}</b>, ${money(done.week_cents||0)} sent or paid</span>${(b.recovered||{}).year_cents ? `<span>Paid back in ${esc(b.recovered.year)} <b>${money(b.recovered.year_cents)}</b></span>` : ''}</div></div>
-    <div class="plan">${steps.map(s=>`<div class="step ${s.done?'is-done':''}"><div class="num">${s.done?'✓':s.n}</div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div>${s.chips?`<div class="chips">${s.chips}</div>`:''}</div>${s.btn?`<button class="${s.done?'':'primary'}" data-step="${s.n}">${esc(s.btn)}</button>`:''}</div>`).join('')}</div>
-    <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.${smallLine(b)}</span></div>
-      <div class="batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>
-      ${b.batches.length > 8 ? `<button class="ghost" id="allBatches">Show all ${b.batches.length} batches</button>` : ''}</div>
-    ${alerts.length ? `<div class="panel"><div class="panel-head"><h2>What changed</h2><span class="muted small">Payer behaviour that moved recently.</span></div>${alerts.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">Look into it</button></div>`).join('')}<a href="#alerts" class="small">All alerts</a></div>` : ''}
-    <div class="panel wins-teaser"><div class="panel-head"><h2>Bigger wins</h2><span class="muted small">Fixed once, collected on every future claim.</span></div>${winsTeaser(b)}<button id="goWins">Open Bigger wins</button></div>
-    ${missed.n ? `<div class="missed small muted">Missed in the last ${missed.days} days: ${Number(missed.n).toLocaleString()} items worth ${money(missed.cents)} passed their filing window without anyone working them. <a href="#" id="seeMissed">See them</a></div>` : ''}`;
-  bindGuide(v);
-  v.querySelectorAll('[data-step]').forEach(bt=>bt.onclick=()=>{ const s = steps.find(x=>String(x.n)===bt.dataset.step); if(s) goWork(s.go); });
-  bindBatches(v, b);
-  const all = v.querySelector('#allBatches'); if(all) all.onclick = () => { v.querySelector('#batchList').innerHTML = batchRows(b, b.batches); bindBatches(v, b); all.remove(); };
-  v.querySelectorAll('.go-data').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab='data'; location.hash='data'; render(); });
-  v.querySelectorAll('.seeA').forEach(bt=>bt.onclick=()=>{ const a = alerts.find(x=>x.alert_id===bt.dataset.id); if(a && typeof seeAlert==='function') seeAlert(a); });
-  const gw = v.querySelector('#goWins'); if(gw) gw.onclick = () => { state.tab='wins'; location.hash='wins'; render(); };
-  const sm = v.querySelector('#seeMissed'); if(sm) sm.onclick = e => { e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
-  v.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'older', status:'open,in_progress', sort:'shortfall'}); });
+  return steps;
 }
-function smallLine(b){
-  const w = b.work || {}, n = w.small_n || 0; if(!n) return '';
-  const pct = Math.round(100 * (w.small_cents || 0) / Math.max(1, (w.total || {}).cents || 0));
-  return ` ${Number(n).toLocaleString()} of the items are worth less than ${money(w.small_under || 2000)} each (${money(w.small_cents)} together, ${pct}% of the money): the Worklist's amount filter hides them.`;
+function tdPlanHtml(steps){
+  return steps.map(s=>`<div class="step ${s.done?'is-done':''}"><div class="num">${s.done?'✓':s.n}</div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div>${s.chips?`<div class="chips">${s.chips}</div>`:''}</div>${s.btn?`<button class="${s.done?'':'primary'}" data-step="${s.n}">${esc(s.btn)}</button>`:''}</div>`).join('');
+}
+function tdBindPlan(v, b, look, redraw){
+  const el = v.querySelector('#tdPlan'); if(!el) return;
+  const steps = tdSteps(b, look);
+  if(redraw) el.innerHTML = tdPlanHtml(steps);
+  el.querySelectorAll('[data-step]').forEach(bt=>bt.onclick=()=>{ const s = steps.find(x=>String(x.n)===bt.dataset.step); if(s) goWork(s.go); });
+  el.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'older', status:'open,in_progress', sort:'shortfall'}); });
+}
+// the data checks that are not right: while a feed is behind, the blind-spot banner says so in dollars, so the health
+// banner does not say it a second time (and holds those checks back until the blind spot is known)
+function tdHealthHtml(b, blind){
+  const bad = (b.health||[]).filter(h=>!h.ok && !((blind === true || blind === undefined) && TD_BLIND_KEYS.has(h.key)));
+  return bad.length ? `<div class="banner"><b>Before you start:</b> ${esc(bad[0].title)}.${tdNarrow() ? '' : ' ' + esc(bad[0].detail||'')} <a href="#data" class="go-data">How to fix</a>${bad.length>1?` · <a href="#data" class="go-data">${bad.length-1} more data ${bad.length-1===1?'check':'checks'}</a>`:''}</div>` : '';
+}
+
+// ---------------------------------------------------------------- Today: the blind spot, the scoreboard, the counts by state
+// The health checks the blind-spot banner already says, in dollars, while a feed is behind
+const TD_BLIND_KEYS = new Set(['feed', 'ema_ar_stale', 'ema_production_stale']);
+// [figure, label, one-line hint under the number, the longer words on hover]
+const TD_SCORE = [['recovered_cents', 'Recovered', 'came back after flagging', 'Money that came back on items RemitWatch flagged or worked'],
+  ['lost_cents', 'Lost to deadlines', 'windows closed, unworked', 'Items whose last window closed while they waited for work'],
+  ['at_risk_cents', 'At risk in 14 days', 'windows closing soon', 'Items to work now whose window closes within 14 days'],
+  ['given_up_cents', 'Given up without a decision', 'written off, nobody decided', 'Written off with no person deciding and no owner policy covering it']];
+const TD_STATES = [['todo', 'Work now', 'to work, follow-ups due included', 'Items that need a person; the follow-ups that came due included'],
+  ['followup_due', 'Follow-ups due', 'the payer had its time', "Part of Work now: work was done and the payer's usual time to answer has passed"],
+  ['waiting', 'Waiting', 'on the payer', 'Sent or worked; the payer still has time to answer']];
+const TD_QUIET = [['done', 'done'], ['accepted', 'accepted'], ['expired', 'expired'], ['cant_check', "can't be checked"]];
+// where a link into the Data tab lands (data.js scrolls to it once its panels are drawn)
+const TD_DATA = {post: 'dtPostList', refund: 'dtRefundList'};
+// a phone (640 px or less): the figures in two compact lines, so the plan's first step stays on the first screen
+function tdNarrow(){ return typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth <= 640; }
+
+// What the site cannot check while a feed (the remittances, EMA's A/R or Production report) is behind, in dollars. Any page
+// may show it: tdBlindBanner(el) asks the site, or takes the answer it already has, and gives back what it showed.
+function tdBlindHtml(bl){
+  if(!bl || !bl.blind) return '';
+  const lines = (bl.lines && bl.lines.length) ? bl.lines : [bl.basis || 'A feed is behind: what arrived since is not checked.'];
+  // each part its own dollars and what they rest on; one figure only when there is one part
+  const parts = (bl.parts || []).filter(p => p.cents);
+  const head = parts.length > 1 ? `: ${parts.map(p => `<span title="${esc(p.basis || '')}">${money(p.cents)} ${esc(p.words || '')}</span>`).join(' and ')}`
+    : (bl.cents ? `: <span title="${esc((parts[0] || {}).basis || bl.basis || '')}">${money(bl.cents)}</span> the site cannot check` : '');
+  const anchor = (bl.feeds || []).some(f => f.stale && f.feed === '835') ? 'dtMissing' : 'dtReports';
+  const go = `<a href="#data" class="go-data" data-anchor="${anchor}">What to do</a>`;
+  // on a phone the headline keeps its dollars and the link; why folds away, so the plan stays on the first screen
+  if(tdNarrow()) return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${head}.</b> ${go}<details style="margin-top:4px"><summary>Why</summary>${lines.map(esc).join(' ')}</details></div>`;
+  return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${head}.</b> ${lines.map(esc).join(' ')} ${go}</div>`;
+}
+async function tdBlindBanner(el, given){
+  if(!el) return undefined;
+  let bl = given;
+  if(bl === undefined){ try { bl = await api('/api/ema/blind'); } catch(e){ return undefined; } }
+  el.innerHTML = tdBlindHtml(bl);
+  tdBindLinks(el);
+  return bl;
+}
+// into the Data tab, landing on what the link names; on the Data tab itself, a scroll to it (no redraw)
+function tdGoData(anchor){
+  if(state.tab === 'data' && anchor && typeof document !== 'undefined'){ const el = document.querySelector('#' + anchor); if(el && el.scrollIntoView){ el.scrollIntoView({block:'start'}); return; } }
+  state.dataAnchor = anchor || null; state.tab = 'data'; location.hash = 'data'; render();
+}
+function tdBindLinks(el){
+  if(!el) return;
+  el.querySelectorAll('.go-data').forEach(a=>a.onclick=e=>{ if(e) e.preventDefault(); tdGoData(a.dataset.anchor || null); });
+  el.querySelectorAll('.go-policy').forEach(a=>a.onclick=e=>{ if(e) e.preventDefault(); state.tab='policy'; location.hash='policy'; render(); });
+}
+const TD_EST = ' (an estimate)';
+function tdTile(key, label, hint, x, cls, more, basis){
+  const n = x && x.n != null ? x.n : null;
+  const upper = x && x.upper_n ? ` Not in this total: up to ${money(x.upper_cents)} EMA wrote off on ${pl(x.upper_n, 'item')} no rate prices (the charge less what was paid).` : '';
+  const title = [more || hint, basis || '', upper.trim()].filter(Boolean).join(' ');
+  return `<div class="tile ${cls||''}" role="button" tabindex="0" data-td="${esc(key)}" title="${esc(title)}"><span class="t-l">${esc(label)}</span>
+    <span class="t-v">${n == null ? '–' : Number(n).toLocaleString()}${n ? `<small>${short$(x.cents)} est.</small>` : ''}</span><span class="t-s">${esc(hint)}</span></div>`;
+}
+function tdScoreHtml(sb){
+  // unit R's scoreboard: a figure the route does not give yet shows a dash, never a zero
+  const s = sb || {}, basis = s.basis || {};
+  if(tdNarrow()) return `<div class="oneline td-compact" id="tdScore" aria-label="The money scoreboard">${TD_SCORE.map(([k, label, hint, more]) => {
+    const c = s[k], key = k.replace(/_cents$/, '');
+    return `<a href="#" data-score="${esc(key)}" title="${esc(basis[key] || more)}">${esc(label)} <b>${c == null ? '–' : money(c)}</b></a>`; }).join(' · ')}</div>`;
+  return `<div class="tiles" id="tdScore" aria-label="The money scoreboard">${TD_SCORE.map(([k, label, hint, more]) => {
+    const c = s[k], key = k.replace(/_cents$/, '');
+    return `<div class="tile ${k==='lost_cents'&&c?'t-red':''}${k==='at_risk_cents'&&c?' t-amber':''}" role="button" tabindex="0" data-score="${esc(key)}" title="${esc(basis[key] || more)}">
+      <span class="t-l">${esc(label)}</span><span class="t-v">${c == null ? '–' : money(c)}</span><span class="t-s">${esc(hint)}</span></div>`; }).join('')}</div>`;
+}
+function tdStatesHtml(td){
+  if(!td.ready) return '';
+  const st = td.states || {}, aw = td.auto_written_off, un = td.unworked, bs = td.basis || {};
+  const aT = ["EMA's posting rule wrote the denial off the day it posted, nobody worked it, and its safe date to appeal has not passed", bs.auto_written_off || ''].join(' ');
+  const uT = `No work in EMA or here in the 21 days to ${longDate(un ? un.data_through : '')}. ${bs.unworked || ''}`;
+  if(tdNarrow()){
+    const one = (key, label, x) => x ? `<a href="#" data-td="${key}" title="${esc(key === 'unworked' ? uT : key === 'auto_written_off' ? aT : (bs.shortfall || ''))}">${esc(label)} <b>${Number(x.n||0).toLocaleString()}</b>${x.n ? ' ' + short$(x.cents) + ' est.' : ''}</a>` : '';
+    const cells = TD_STATES.map(([k, label]) => one(k, label, st[k])).concat([one('auto_written_off', 'Auto write-offs still appealable', aw), one('unworked', 'Nobody has worked these', un)]).filter(Boolean);
+    return `<div class="oneline td-compact" id="tdStates" aria-label="Items by state">${cells.join(' · ')}</div>`;
+  }
+  return `<div class="tiles" id="tdStates" aria-label="Items by state">
+      ${TD_STATES.map(([k, label, hint, more]) => tdTile(k, label, hint, st[k], k==='followup_due' && (st[k]||{}).n ? 't-amber' : '', more, bs.shortfall)).join('')}
+      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', "written off by EMA's rule, unworked", aw, aw.n ? 't-red' : '', aT) : ''}
+      ${un ? tdTile('unworked', 'Nobody has worked these', 'of Work now, nothing done in 21 days', un, '', uT) : ''}
+    </div>`;
+}
+// what is not on today's list, the money that is not claim work, and the patterns that wait for the owner: one line
+function tdMoreHtml(td){
+  if(!td.ready) return '';
+  const st = td.states || {}, bs = td.basis || {};
+  const quiet = TD_QUIET.filter(([k]) => (st[k]||{}).n).map(([k, word]) => `<a href="#" data-td="${k}">${Number(st[k].n).toLocaleString()} ${esc(word)}</a>`);
+  const other = td.other || {}, post = other.post || {}, refund = other.refund || {}, dc = td.decide || {};
+  const also = [post.n ? `<a href="#" data-td="post" title="${esc(bs.post || '')}">${esc(pl(post.n, 'payment'))} to post in EMA</a>` : '',
+    refund.n ? `<a href="#" data-td="refund" title="${esc(bs.refund || '')}">${esc(pl(refund.n, 'credit'))} to refund</a>` : ''].filter(Boolean);
+  // codes a payer almost never pays: out of Work now until the owner decides (PLAN decision 14), never out of sight
+  const decide = dc.patterns ? `<a href="#policy" class="go-policy" title="${esc(bs.payer_policy || '')}">${esc(pl(dc.patterns, 'write-off pattern'))} worth ${money(dc.cents)} (est.) ${dc.patterns===1?'waits':'wait'} for the owner's decision</a>` : '';
+  if(!quiet.length && !also.length && !decide) return '';
+  return `<div class="oneline">${quiet.length ? 'Not on today\'s list: ' + quiet.join(', ') + '.' : ''}${also.length ? ' Also: ' + also.join(', ') + '.' : ''}${decide ? ' ' + decide + '.' : ''}</div>`;
+}
+function tdEmaLine(td, ex){
+  const parts = [];
+  ((ex && ex.exports) || []).forEach(e => { if(e.waiting) parts.push(`${esc(e.title)}: uploaded, waiting to be read`);
+    else if(e.overdue){
+      // the age is of what RemitWatch read: a file that arrived and is held or not read yet has none (needs_A2 F.5)
+      const age = e.age_days != null ? esc(pl(e.age_days, 'day')) + ' old' : e.held ? 'the newest file is held' : (e.unread || e.stuck || e.arrived) ? 'none read yet' : 'never arrived';
+      parts.push(`<span class="sev-high">${esc(e.title)}: ${age}</span>`); }
+    else if(e.stuck) parts.push(`${esc(e.title)}: an upload has not been read yet`); });
+  const rm = td && td.remits_missing;
+  // the run's own judgment of last month (ema_checks data health), said in words: the month by name, the dollars
+  const missing = rm && rm.ok === false ? `<a href="#data" class="go-data" data-anchor="dtMissing">${rm.month && rm.cents != null
+    ? `EMA posted ${money(rm.cents)} of insurance payments in ${rwMonth(rm.month)} with no remittance` : esc(rm.title || 'Payments with no remittance')}</a>` : '';
+  // a report that waits says why and what to do (the catalog's own words); a held one needs a person's decision, unless
+  // someone chose Apply since the newest run (then it waits for the next run)
+  const names = {ar_report: 'The A/R report', production: 'A Production report'};
+  const waits = ((td && td.reports_waiting) || []).map(w => `${esc(names[w.report] || 'A report')} waits: ${esc(w.reason || 'the next run reads it')}`)
+    .filter((t, i, a) => a.indexOf(t) === i);
+  const held = td && td.reports_held ? `<a href="#data" class="go-data" data-anchor="dtReports">${esc(pl(td.reports_held, 'EMA report'))} ${td.reports_held === 1 ? 'waits' : 'wait'} for a decision</a>` : '';
+  const pending = td && td.reports_pending ? `<a href="#data" class="go-data" data-anchor="dtReports">${esc(pl(td.reports_pending, 'EMA report'))} ${td.reports_pending === 1 ? 'waits' : 'wait'} for the next run</a>` : '';
+  const extra = [held, pending].concat(waits).filter(Boolean);
+  if(!parts.length && !missing && !extra.length) return ex && (ex.exports||[]).length ? `<div class="oneline">EMA's exports are up to date (A/R within 8 days, Production within 14, the weekly exports within 8).</div>` : '';
+  return `<div class="oneline">${parts.length ? `EMA's exports: ${parts.join(' · ')}. <a href="/upload">Upload</a>` : ''}${parts.length && missing ? ' · ' : ''}${missing}`
+    + `${extra.length ? `${parts.length || missing ? ' · ' : ''}${extra.join(' · ')}` : ''}</div>`;
+}
+// each count opens the list it was counted with: a state opens the Worklist in the Worklist's own order (the same list
+// whichever door), the payments to post and the credits to refund open their lists on the Data tab
+function tdBindCounts(el, td){
+  const st = (td && td.states) || {}, other = (td && td.other) || {};
+  const goOf = k => (st[k] || (td||{})[k] || other[k] || {}).go;
+  el.querySelectorAll('[data-td]').forEach(x => { const key = x.dataset.td, go = goOf(key); if(!go) return;
+    const open = e => { if(e) e.preventDefault();
+      if(TD_DATA[key]){ tdGoData(TD_DATA[key]); return; }
+      goWork(Object.assign({}, go)); };
+    x.onclick = open; x.onkeydown = e => { if(e.key === 'Enter' || e.key === ' ') open(e); }; });
+  tdBindLinks(el);
+}
+function tdBindScore(el, sb){
+  el.querySelectorAll('[data-score]').forEach(x => { const key = x.dataset.score, o = ((sb||{}).open||{})[key];
+    const open = e => { if(e) e.preventDefault();
+      if(o && typeof o === 'object'){ goWork(o); return; }
+      state.resultsOpen = key; const h = (typeof o === 'string' && o.startsWith('#')) ? o.slice(1) : 'results';
+      state.tab = h.split('/')[0]; location.hash = h; render(); };
+    x.onclick = open; x.onkeydown = e => { if(e.key === 'Enter' || e.key === ' ') open(e); }; });
 }
 function batchRows(b, rows){
   if(!rows.length) return '<div class="muted">No open work inside a filing window.</div>';
@@ -183,7 +388,7 @@ function whatToDoHtml(f, letter){
     <div class="small muted">You need: ${esc(f.signal === 'REJECTED_PRE_PAYER' ? ((f.evidence||{}).not_sent ? "EMA's print batch (print and mail the claim, or send it electronically)" : "EMA and the rejection's reason (on the clearinghouse's rejection report)") : (k.needs||''))}</div>`}
     <div class="todo-err sev-high small" id="todoErr" role="alert"></div>
     <div class="actions todo-actions">${more && !waiting && !shut ? `<button class="primary" id="sentNext" data-to="appealed">Mark sent and open the next</button>` : ''}
-      ${more && !waiting && !shut && decide ? `<button id="letGoNext" title="Billed to the patient or another payer, the payer was right, or not worth pursuing">Let go and open the next</button>` : ''}
+      ${more && !waiting && !shut && decide ? `<button id="letGoNext" title="Billed to the patient or another payer, or the payer was right">Let go and open the next</button>` : ''}
       ${shut ? '' : (letter||'')}${i>0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div></div>`;
 }
 function bindWhatToDo(f, d, seq){
@@ -270,6 +475,7 @@ const MORE_PAGES = [
   ['alerts','Alerts','Payers behaving differently from their own past, new and acknowledged.'],
   ['progress','Progress','What came back after a fix or appeal, and what is being worked.', 'mid-only'],
   ['data','Data','Whether the numbers can be trusted, and who fixes what.', 'mid-only'],
+  ['policy','Write-off policy','Denials written off in EMA, by payer, code and reason: pursue or accept each pattern.'],
   ['providers','Providers','What each clinician is doing, behind the owner\'s password where one is set.', 'mid-only'],
 ];
 async function moreTab(v){

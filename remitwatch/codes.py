@@ -60,6 +60,8 @@ CARC: dict[str, str] = {
     "B16": "New patient qualifications were not met", "B20": "Procedure/service partially or fully furnished by another provider",
     "B22": "Payment adjusted based on the diagnosis", "B23": "Procedure billed is not authorized per your CLIA certification",
     "P1": "State-mandated requirement for property and casualty", "W1": "Workers compensation state fee schedule",
+    "114": "Procedure/product not approved by the Food and Drug Administration", "B9": "Patient is enrolled in a Hospice",
+    "177": "Patient has not met the required eligibility requirements", "288": "Referral absent",
 }
 
 # --------------------------------------------------------------------------- RARC
@@ -101,6 +103,9 @@ RARC: dict[str, str] = {
     "N781": "Alert: patient is a Medicaid/QMB beneficiary; do not bill", "N782": "Alert: patient is a Medicaid/QMB beneficiary; review patient liability",
     "N793": "Alert: service must be billed with the appropriate modifier", "N807": "Payment adjustment based on the Merit-based Incentive Payment System (MIPS)",
     "N822": "Missing procedure modifier(s)", "N823": "Incomplete/invalid procedure modifier(s)",
+    "MA63": "Missing/incomplete/invalid principal diagnosis", "MA67": "Correction to a prior claim",
+    "N104": "This claim/service is not payable under our claim jurisdiction area",
+    "N89": "Alert: payment information for this claim has been forwarded to more than one other payer",
 }
 
 # --------------------------------------------------------------------------- code attributes
@@ -210,7 +215,9 @@ PAYER_RULES: list[tuple[str, str, str]] = [
     (r"^AETNA", "Aetna", "commercial"),
     (r"CIGNA.*(MEDICARE|SUPPLEMENT)", "Cigna Medicare Supplement", "supplement"),
     (r"^CIGNA", "Cigna", "commercial"),
-    (r"WELLCARE|AMBETTER", "WellCare / Ambetter (Centene)", "medicare_advantage"),
+    # Ambetter is Centene's marketplace (individual) plan, never Medicare Advantage or Medicaid whatever CLP06 says
+    (r"AMBETTER", "Ambetter (Centene)", "commercial"),
+    (r"WELLCARE", "WellCare / Ambetter (Centene)", "medicare_advantage"),
     (r"TRICARE", "Tricare", "tricare"),
     (r"UMWA", "UMWA Health & Retirement Funds", "commercial"),
     (r"MUTUAL OF OMAHA|MEDICO|GREAT AMERICAN LIFE|AMERICAN ENTERPRISE|BANKERS FIDELITY|WELLABE|PHYSICIANS MUTUAL|"
@@ -267,7 +274,7 @@ def pos_class(pos: str | None) -> str:
 # so every deadline shown by the dashboard is an estimate. A window the payer states in months or years ("months") is
 # counted in calendar months to the same day of the month (window_end); "days" stays its length in days, for reading only.
 APPEAL_RULES: list[dict] = [
-    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "months": 24, "verified": True,
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "months": 24, "verified": True, "legal": {"years": 2},
      "label": "Anthem commercial: Claim Payment Reconsideration within two years of the EOP issue date; "
               "Claim Payment Appeal within 90 days of the reconsideration decision",
      "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual, effective September 1, 2026, Claim Payment Disputes"},
@@ -277,17 +284,17 @@ APPEAL_RULES: list[dict] = [
     {"match": r"^Anthem", "kinds": {"medicaid"}, "days": 90, "verified": True,
      "label": "Anthem Kentucky Medicaid: payment appeal within 90 calendar days of the remittance date",
      "source": "Anthem Kentucky Medicaid Provider Manual, payment appeals"},
-    {"match": r"^(UnitedHealthcare|UHC)(?! Integrated)", "kinds": None, "days": 365, "months": 12, "verified": True,
+    {"match": r"^(UnitedHealthcare|UHC)(?! Integrated)", "kinds": None, "days": 365, "months": 12, "verified": True, "legal": {"months": 12},
      "label": "UnitedHealthcare: reconsideration and appeal together within 12 months of the original EOB or PRA (one window for both steps)",
      "source": "UnitedHealthcare Administrative Guide 2026, chapter 10 (revised May 13, 2026); uhcprovider.com appeals page"},
-    {"match": r"^(UMR|Optum|Surest|UHC Integrated)", "kinds": None, "days": 365, "months": 12, "verified": False,
+    {"match": r"^(UMR|Optum|Surest|UHC Integrated)", "kinds": None, "days": 365, "months": 12, "verified": False, "legal": {"months": 12},
      "label": "UnitedHealthcare-administered plan: 12 months from the original EOB or PRA, as for UnitedHealthcare",
      "source": "UnitedHealthcare Administrative Guide 2026 (the plan's own rules not checked)"},
     {"match": r"^Humana", "kinds": {"medicaid"}, "days": 120, "verified": False,
      "label": "Humana Medicaid: 120 days used. Humana Healthy Horizons in Kentucky takes an appeal of a denial or reduction within 120 days "
               "(KRS 205.534) and a contracted-rate dispute within 24 months; the Indiana plan allows 60 days. The remittance does not say which plan",
      "source": "Humana Healthy Horizons in Kentucky appeals page (2026) and KRS 205.534; Humana Healthy Horizons in Indiana provider manual (2026)"},
-    {"match": r"^Humana", "kinds": None, "days": 540, "months": 18, "verified": True,
+    {"match": r"^Humana", "kinds": None, "days": 540, "months": 18, "verified": True, "legal": {"months": 18},
      "label": "Humana: claim dispute within 18 months of receiving the original claim determination (counted here from the remittance date)",
      "source": "Humana Provider Manual 2026 (773902ALL0725), claims disputes, for all products"},
     {"match": r"^Aetna", "kinds": None, "days": 180, "verified": False,
@@ -297,6 +304,13 @@ APPEAL_RULES: list[dict] = [
      "label": "Cigna: payment review within 180 days of the initial payment or denial",
      "source": "Cigna reference guide (as reported in research)"},
 ]
+# The payer's own limit where the due date shown is a safer, earlier one (the answer key compared each window with its
+# document): Medicare's 120 days run from the receipt of the remittance, presumed 5 days after it (42 CFR 405.942: 125
+# days from the remittance); CMS's 2026 guidance gives Medicare Advantage reconsiderations 65 days; a window in months or
+# years ends on the same calendar day (18 months is not 540 days, two years across a leap day is 731). The safe date stays
+# the item's due date; the legal one is shown beside it ("file by <due>; the payer's limit is <legal>").
+APPEAL_LEGAL_DEFAULTS: dict[str, dict] = {"medicare": {"days": 125}, "medicare_advantage": {"days": 65}}
+FEP_LEGAL = {"months": 6}           # federal employee plans: 6 months (5 CFR 890.105)
 APPEAL_DEFAULTS: dict[str, tuple[int, str]] = {
     "medicare": (120, "Medicare Part B: redetermination within 120 days of receipt of the remittance (42 CFR 405.942), which is presumed "
                       "received 5 days after its date (405.942(a)(1)), so the date shown is 125 days after the remittance"),
@@ -326,7 +340,7 @@ CORRECTED_RULES: list[dict] = [
      "label": "Medicare Part B takes no corrected claims: ask for a reopening (a clerical error, including a wrong or missing modifier) within 1 year of the initial determination (42 CFR 405.980)",
      "source": "42 CFR 405.980(b); CMS Claims Processing Manual ch. 34 sec. 10.4; CGS reopening and redetermination job aid, December 2025"},
     {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 120, "receipt_days": MEDICARE_RECEIPT_DAYS, "clock": "remit",
-     "verified": True,
+     "verified": True, "legal": {"days": 125},
      "label": "Medicare Part B: information or records the claim lacked go in a redetermination within 120 days of receipt of the remittance "
               "(42 CFR 405.942; presumed received 5 days after its date, so 125 days after it); a reopening takes no documents",
      "source": "42 CFR 405.942; CGS reopening and redetermination job aid, December 2025 (documentation is not reviewed in a reopening)"},
@@ -365,7 +379,7 @@ def corrected_rule(payer_group: str | None, payer_kind: str | None, rarcs: str |
             continue
         if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
             return dict({k: r[k] for k in ("days", "clock", "label", "source", "verified")}, months=r.get("months"),
-                        receipt_days=r.get("receipt_days", 0))
+                        receipt_days=r.get("receipt_days", 0), legal=r.get("legal"))
     return None
 
 
@@ -375,14 +389,40 @@ def appeal_rule(payer_group: str | None, payer_kind: str | None, plan: str | Non
     grp, kind = payer_group or "", payer_kind or "other"
     if plan and "FEDERAL EMPLOYEE" in plan.upper():
         return {"days": 180, "verified": False, "source": "conservative default for the Federal Employee Program", "months": None, "receipt_days": 0,
+                "legal": FEP_LEGAL,
                 "label": "Federal Employee Program: 180 days used as a conservative window; confirm the provider dispute period with the local Blue plan"}
     for r in APPEAL_RULES:
         if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
             return {"days": r["days"], "label": r["label"], "source": r["source"], "verified": r["verified"], "months": r.get("months"),
-                    "receipt_days": 0}
+                    "receipt_days": 0, "legal": r.get("legal")}
     days, label = APPEAL_DEFAULTS.get(kind, APPEAL_DEFAULTS["other"])
     return {"days": days, "label": label, "source": "default by payer type", "verified": kind == "medicare", "months": None,
-            "receipt_days": APPEAL_DEFAULT_RECEIPT.get(kind, 0)}
+            "receipt_days": APPEAL_DEFAULT_RECEIPT.get(kind, 0), "legal": APPEAL_LEGAL_DEFAULTS.get(kind)}
+
+
+def _add_months(d, months: int):
+    """The same calendar day `months` later (the month's last day when it has no such day)."""
+    import calendar
+    y, m = divmod(d.month - 1 + months, 12)
+    y, m = d.year + y, m + 1
+    return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def legal_deadline(start: str | None, rule: dict | None) -> str | None:
+    """The payer's own limit for a window that starts on `start` (ISO date), from the rule's 'legal' spec ({'days': n},
+    {'months': n} or {'years': n}); None when the rule has none (the due date shown is the payer's own limit)."""
+    from datetime import date as _date, timedelta as _td
+    spec = (rule or {}).get("legal")
+    if not spec or not start:
+        return None
+    try:
+        d = _date.fromisoformat(str(start)[:10])
+    except ValueError:
+        return None
+    if spec.get("days"):
+        return (d + _td(days=int(spec["days"]))).isoformat()
+    months = int(spec.get("months") or 0) + 12 * int(spec.get("years") or 0)
+    return _add_months(d, months).isoformat() if months else None
 
 
 # The limit for a claim's first filing, counted from the date of service: a claim the payer has no record of (never
@@ -487,10 +527,15 @@ LEGAL = {
 MEDICARE_SAME_DAY_EM = {"effective": "2027-01-01", "pct": 0.80, "confirmed": True}
 
 
+FIXED_KIND_GROUPS = frozenset({"Ambetter (Centene)"})
+
+
 def payer_group_kind(name: str | None, cfi: str | None) -> tuple[str, str]:
     """Payer group and kind for a claim: the payer name rules refined by the claim filing indicator (CLP06).
     Medicare Advantage and Medicaid products that share a commercial payer's name get their own group."""
     grp, kind = normalize_payer(name)
+    if grp in FIXED_KIND_GROUPS:
+        return grp, kind            # a plan whose kind its claim filing indicator misreports
     refined = payer_kind_from_cfi(cfi, kind)
     if refined == "medicare" and kind in ("supplement", "commercial", "medicare_advantage", "medicaid"):
         refined = kind          # supplement and commercial carriers sometimes label their claims MB; they are not Medicare itself

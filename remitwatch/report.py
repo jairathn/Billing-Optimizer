@@ -5,6 +5,7 @@ Writes a Markdown report to data/reports/ and optionally emails it (SMTP).
 """
 from __future__ import annotations
 
+import json
 import os
 import smtplib
 from datetime import datetime, timezone
@@ -122,12 +123,61 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     for r in fix:
         lines.append(f"- {r['signal']}: {r['n']} lines, {money(r['cents'])}")
     lines.append("")
+    lines += ema_section(store)
     info = q("SELECT title FROM findings WHERE category='info' AND COALESCE(stale,0)=0 ORDER BY signal, year")
     if info:
         lines.append("## Context")
         for r in info:
             lines.append(f"- {r['title']}")
     return "\n".join(lines)
+
+
+def _meta(store: Store, key: str):
+    try:
+        r = store.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return json.loads(r[0]) if r and r[0] else None
+    except (ValueError, TypeError, Exception):     # noqa: BLE001  (a store without the table, or an unreadable value)
+        return None
+
+
+def ema_section(store: Store) -> list[str]:
+    """What EMA's A/R and Production reports add (counts and dollars only): the work nobody has touched, what EMA showed
+    paid this week (items closed), claims that never left EMA, payments EMA never posted, automatic write-offs still
+    appealable, and the A/R accounted for. Empty until the practice sends the reports."""
+    wiring = _meta(store, "ema:wiring") or {}
+    if not wiring.get("on"):
+        return []
+    q = store.query
+    cols = {r["name"] for r in q("PRAGMA table_info(findings)")}
+    if "ema_outcome" not in cols:
+        return []
+    out = ["## From EMA's reports"]
+    unworked = _meta(store, "ema:unworked") or {}
+    if unworked:
+        out.append(f"- Untouched work inside its window: {unworked.get('n', 0):,} items, {money(unworked.get('cents'))} "
+                   f"(EMA's postings through {unworked.get('data_through') or 'the newest data'})")
+    week = q("""SELECT COUNT(*) n, COALESCE(SUM(recovered_cents),0) cents FROM findings WHERE status='resolved' AND COALESCE(stale,0)=0
+                AND auto_note IS NOT NULL AND (auto_note LIKE 'EMA shows%' OR auto_note LIKE 'Rebilled to%')
+                AND status_changed_at >= datetime('now','-7 days')""")[0]
+    out.append(f"- Closed this week because EMA shows them paid: {week['n']:,} items, {money(week['cents'])}")
+    for sig, words in (("NOT_SENT", "Claims that never left EMA"), ("REMIT_NOT_POSTED", "Payments on an 835 that EMA never posted")):
+        r = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE signal=? AND COALESCE(stale,0)=0
+                 AND status IN ('open','in_progress')""", (sig,))[0]
+        out.append(f"- {words}: {r['n']:,}, {money(r['cents'])}")
+    auto = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE ema_outcome='auto_written_off'
+                AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') AND appeal_deadline >= date('now')""")[0]
+    out.append(f"- Written off automatically by EMA and still appealable: {auto['n']:,} items, {money(auto['cents'])}")
+    acc = _meta(store, "ema:ar_accounted") or {}
+    if acc.get("buckets"):
+        labels = acc.get("labels") or {}
+        total = acc.get("total") or {}
+        out.append(f"- The insurance A/R of {acc.get('as_of') or 'the newest pull'}: {total.get('n', 0):,} rows, {money(total.get('cents'))}"
+                   + ("" if acc.get("adds_up") else " (the buckets do not add up: tell the maintainer)"))
+        for key, b in acc["buckets"].items():
+            if b.get("n"):
+                out.append(f"  - {labels.get(key, key)}: {b['n']:,}, {money(b.get('cents'))}")
+    out.append("")
+    return out
 
 
 def save_report(text: str, out_dir: str = "data/reports") -> str:

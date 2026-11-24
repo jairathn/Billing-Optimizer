@@ -1,7 +1,7 @@
 """The Data tab's list (static/index.html) and docs/MISSING_DATA.md ask for ModMed's all-patient EHI export ("every
 claim, submission, ERA link, adjustment and payment for the whole history in one consistent form"). Nothing in the code
-reads it: the sync downloads only .rmt/.835/.era/.edi/.xlsx/.txt/.x12/.dat files, and ingest_new_files routes .xlsx to
-the EMA reader and X12 to the 835/837 readers and skips everything else, so the pipe-delimited export is skipped. The
+reads it: ingest_new_files routes EMA's exports and reports (recognised by their header row) to the EMA readers and X12 to
+the 835/837 readers and skips everything else, so the pipe-delimited export is skipped (.txt or .csv alike). The
 appointment export on the same list says "Nothing on this site reads it yet"; the EHI export does not. Invented data only."""
 from __future__ import annotations
 
@@ -18,13 +18,17 @@ from remitwatch.store import Store  # noqa: E402
 
 
 def test_the_ehi_export_is_asked_for_but_nothing_reads_it(tmp_path):
-    ehi = tmp_path / "claim_submission.txt"
-    ehi.write_text("claim_id|submission_date|payer_id\nCB0000001C017|2026-09-01|ANTHM\n")
-    st = Store(str(tmp_path / "s.sqlite"))
-    out = ingest_new_files(st, [str(ehi)], log=lambda *a: None)
-    st.close()
-    assert (out["skipped"], out["ema"], out["remits"], out["claims_837"]) == (1, 0, 0, 0)
-    assert ".csv" not in WANTED_EXT and ".zip" not in WANTED_EXT
+    # The sync now downloads .csv, .tsv and .zip files too (EMA's A/R and Production reports arrive that way, recognised by
+    # their header row: ema_reports). The pipe-delimited EHI export is no such report, so it is still skipped, whatever
+    # its extension.
+    assert ".txt" in WANTED_EXT and ".csv" in WANTED_EXT
+    for name in ("claim_submission.txt", "claim_submission.csv"):
+        ehi = tmp_path / name
+        ehi.write_text("claim_id|submission_date|payer_id\nCB0000001C017|2026-09-01|ANTHM\n")
+        st = Store(str(tmp_path / f"s_{name}.sqlite"))
+        out = ingest_new_files(st, [str(ehi)], log=lambda *a: None)
+        st.close()
+        assert (out["skipped"], out["ema"], out["remits"], out["claims_837"]) == (1, 0, 0, 0), name
     page = open(os.path.join(REPO, "remitwatch", "static", "index.html"), encoding="utf-8").read()
     items = re.findall(r"<li>(.*?)</li>", page, flags=re.S)
     ehi_item = next(i for i in items if "EHI export" in i)

@@ -38,7 +38,8 @@ def test_open_work_is_grouped_by_the_kind_of_work_and_what_falls_due(tmp_path):
     causes = {c["signal"]: c for c in b["causes"]}
     assert causes["DENIED_MISSING_MODIFIER"]["n90"] == 3 and causes["DENIED_AUTH"]["work"] == "auth"
     # "chase": claims EMA shows sent that no payer answered (detect.run_ema_open_claims)
-    assert [t["key"] for t in b["work_types"]] == ["fix", "auth", "note", "rule", "rate", "chase", "check"]
+    # "bill" (a second payer nobody billed) and "post" (a payment EMA never posted) come from EMA's reports (push 2)
+    assert [t["key"] for t in b["work_types"]] == ["fix", "auth", "note", "rule", "rate", "chase", "bill", "post", "check"]
     assert b["labels"]["DENIED_AUTH"]["label"] == "Denied: no authorization" and b["statuses"]["appealed"] == "Sent"
     st.close()
 

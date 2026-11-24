@@ -300,8 +300,11 @@ def test_claims_nobody_answered_are_let_go_one_at_a_time_with_a_note(chase):
     notes = conn.execute("SELECT note FROM finding_events WHERE finding_id=? AND kind='manual' ORDER BY id DESC LIMIT 1", (na,)).fetchone()[0]
     conn.close()
     assert notes == "Paid by the patient at the desk" and _status(db, na) == "dismissed" and _status(db, rej) == "lost"
-    # an ordinary item is let go as before, a note or not
-    assert c.post(f"/api/findings/{other}/status", json={"status": "dismissed"}, headers=XHR).status_code == 200
+    # an ordinary item is let go with a reason too (review C1: money is let go only by a person with a reason), and an item
+    # that is not there is still not found
+    r = c.post(f"/api/findings/{other}/status", json={"status": "dismissed"}, headers=XHR)
+    assert r.status_code == 400 and "needs a reason" in r.json()["detail"] and _status(db, other) == "in_progress"
+    assert c.post(f"/api/findings/{other}/status", json={"status": "dismissed", "notes": "billed to the patient"}, headers=XHR).status_code == 200
     assert c.post("/api/findings/no-such-item/status", json={"status": "dismissed"}, headers=XHR).status_code == 404
 
 
@@ -564,3 +567,96 @@ def test_a_move_onto_a_server_with_its_own_data_never_points_at_force(server, mo
     assert cli.main(["--db", server.db, "import-cloud"]) == 1
     out = capsys.readouterr().out
     assert "already keeps its own data" in out and "--force" not in out
+
+
+# --------------------------------------------------------------------------- one item sent from its panel (review C1)
+from tests.test_fax import PAYER_FAX, site  # noqa: E402,F401  (the fax world: a fake line records what would go out)
+
+
+def _ready_to_fax(site, monkeypatch, **cols):
+    """The rate item of the fax world, its payer's appeal number saved, the remittances current, and its row set to cols."""
+    import remitwatch.api as api_mod
+    monkeypatch.setattr(api_mod, "_data_behind_days", lambda: 0)
+    assert site.c.post("/api/faxes/payer", json={"payer_group": "Anthem / BCBS", "number": PAYER_FAX}, headers=XHR).status_code == 200
+    fid = site.ids["UNDERPAID_VS_OWN_RATE"]               # a rate letter: no visit note needed, so nothing else holds it
+    conn = sqlite3.connect(site.db)
+    conn.execute(f"UPDATE findings SET {', '.join(k + '=?' for k in cols)} WHERE finding_id=?", (*cols.values(), fid))
+    conn.commit()
+    conn.close()
+    return fid
+
+
+def _failed_try(db, fid):
+    conn = sqlite3.connect(db)
+    conn.execute("""INSERT INTO faxes (fax_key, direction, finding_id, payer_group, number, purpose, level, provider, provider_id, status,
+                                       pages, error, created_at, updated_at) VALUES ('try-1','out',?,'Anthem / BCBS','8005550142','appeal',1,
+                                       'fake','F9999','failed',2,'busy','2026-11-12T10:00:00+00:00','2026-11-12T10:05:00+00:00')""", (fid,))
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("block,state", [("paid", "done"), ("credit", "work_now"), ("reprocessed", "work_now"), (None, "done"),
+                                         (None, "accepted")])
+def test_send_again_never_faxes_a_line_found_paid_credited_reprocessed_or_closed_since(site, monkeypatch, block, state):  # noqa: F811
+    """Review C1 (high): "Send the appeal again" (an item marked Sent whose every fax failed) skipped the appeal_block
+    check, which ran only while the item was open or started. A failed appeal the run since found paid, credited,
+    reprocessed or closed must never go."""
+    fid = _ready_to_fax(site, monkeypatch, status="appealed", appealed_at="2026-11-12T10:00:00+00:00", work_state=state, appeal_block=block)
+    _failed_try(site.db, fid)
+    r = site.c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR).json()
+    assert r["status"] == "held" and r["code"] == "blocked" and site.line.sent == {}, (block, state, r)
+
+
+def test_send_again_still_goes_when_it_waits_only_on_its_own_failed_fax(site, monkeypatch):  # noqa: F811
+    """The "waiting" its own failed fax's Marked Sent gives it does not stop the second try: that is what sending again is for."""
+    fid = _ready_to_fax(site, monkeypatch, status="appealed", appealed_at="2026-11-12T10:00:00+00:00", work_state="waiting", appeal_block="waiting")
+    _failed_try(site.db, fid)
+    r = site.c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR).json()
+    assert r["status"] == "sent" and len(site.line.sent) == 1, r
+
+
+@pytest.mark.parametrize("block", ["settled_in_ema", "likely_paid"])
+def test_a_line_ema_shows_settled_or_the_archive_shows_likely_paid_goes_only_after_a_person_checked(site, monkeypatch, block):  # noqa: F811
+    """Review C1 (medium): the one-item send held only paid, credit, reprocessed and waiting; a line EMA shows settled, or
+    the archive shows likely paid (orchestrator decision 4: check first), was faxed. It is held until the person says they
+    checked it is still unpaid ("checked"), then it goes."""
+    fid = _ready_to_fax(site, monkeypatch, status="open", work_state="work_now", appeal_block=block)
+    r = site.c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR).json()
+    assert r["status"] == "held" and r["code"] == "check_first" and r["block"] == block and site.line.sent == {}, r
+    r = site.c.post("/api/appeals/send", json={"finding_id": fid, "checked": True}, headers=XHR).json()
+    assert r["status"] == "sent" and len(site.line.sent) == 1, r
+
+
+def test_one_item_inside_the_payers_own_limit_is_sent_from_its_panel(site, monkeypatch):  # noqa: F811
+    """Review C1 (high), orchestrator decision 2: an item past its safe date but inside the payer's own limit is appealed
+    one at a time from its panel; the send held it as expired on the safe date alone. Past both dates it is held, and the
+    message names the date that closed."""
+    import datetime as dt
+    today = dt.datetime.now(dt.timezone.utc).date()
+    day = lambda n: (today + dt.timedelta(days=n)).isoformat()     # noqa: E731
+    fid = _ready_to_fax(site, monkeypatch, status="open", work_state="work_now", appeal_block=None, appeal_deadline=day(-3), legal_deadline=day(-1))
+    r = site.c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR).json()
+    assert r["status"] == "held" and r["code"] == "expired" and day(-1) in r["reason"] and "own limit" in r["reason"], r
+    conn = sqlite3.connect(site.db)
+    conn.execute("UPDATE findings SET legal_deadline=? WHERE finding_id=?", (day(60), fid))
+    conn.commit()
+    conn.close()
+    r = site.c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR).json()
+    assert r.get("code") != "expired" and r["status"] == "sent" and len(site.line.sent) == 1, r
+
+
+def test_the_note_match_reads_its_body_after_the_sign_in(server, monkeypatch):
+    """needs_A2 F.2 (the A2 security review): a Body() parameter is read and parsed before the sign-in, so anyone could
+    make the server parse a large body on POST /api/uploads/notes/{id}/match. With a password set and no login, a
+    malformed or oversized body is refused by the sign-in (401), never parsed first (422); signed in, a bad body is a 400
+    and an oversized one a 413, and a good one is answered as before."""
+    monkeypatch.setattr(server.api, "PASSWORD", "a-long-enough-password")
+    path = "/api/uploads/notes/" + "a" * 24 + "/match"
+    hdr = dict(XHR, **{"Content-Type": "application/json"})
+    assert server.c.post(path, content=b"{not json", headers=hdr).status_code == 401
+    assert server.c.post(path, content=b"[" * 100_000, headers=hdr).status_code == 401
+    me = dict(hdr, **basic("biller", "a-long-enough-password"))
+    assert server.c.post(path, content=b"{not json", headers=me).status_code == 400
+    assert server.c.post(path, content=b" " * 70_000, headers=me).status_code == 413
+    r = server.c.post(path, json={"pick": 0}, headers=dict(XHR, **basic("biller", "a-long-enough-password")))
+    assert r.status_code == 400 and "note" in r.json()["detail"].lower()      # no such note: the route itself answers

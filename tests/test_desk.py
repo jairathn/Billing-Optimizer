@@ -51,7 +51,11 @@ def _client(tmp_path, monkeypatch):
     st = Store(db)
     Detector(st, run_id="desk").run()
     money = "category IN ('denial','bundling','downcoding','underpayment') AND signal != 'SECOND_RATE'"
-    # the detector gives one of these no filing date: the whole claim denied as filed too late (CO-29), an item to decide
+    # one of these has no filing date: the whole claim denied as filed too late (CO-29), an item to decide. The pages are
+    # tested on an undated item whatever the detector's dating rule (since checkpoint 1bb8071 it dates such a denial from its
+    # remittance: detect.END_DATED_CATEGORIES), so the fixture makes it undated itself
+    st.conn.execute(f"UPDATE findings SET appeal_deadline=NULL WHERE {money} AND carc='29'")
+    st.conn.commit()
     assert [r[0] for r in st.query(f"SELECT carc FROM findings WHERE {money} AND appeal_deadline IS NULL")] == ["29"]
     # The items changed below are picked among the dated ones, in an order that does not move with the day: the four denied
     # lines by claim, then the whole claims by reason. (A finding's id is a hash of keys built from today's dates, so an
@@ -432,10 +436,12 @@ const step = async (name, say, fn) => { ctx.state.brief = BRIEF; asked.length = 
   await step('rows', [], async () => p.v.querySelectorAll('tr.row').map(tr => tr.dataset.signal));
   await step('bar, all four ticked', [], async () => { p.tick(all); return { n: text(p, '#bulkN'), line: text(p, '#bulkLeftOut') }; });
   await step('bar, the two denials ticked', [], async () => { p.tick(['d1', 'd2']); return { n: text(p, '#bulkN'), line: text(p, '#bulkLeftOut') }; });
-  await step('bulk let go, all four ticked', [true], async () => { p.tick(all); await p.press('[data-bulk="dismissed"]'); });
+  await step('bulk let go, all four ticked', ['not ours to chase'], async () => { p.tick(all); await p.press('[data-bulk="dismissed"]'); });
   p = page();
   await step('bulk let go, the two unanswered ticked', [true], async () => { p.tick(['c1', 'c2']); await p.press('[data-bulk="dismissed"]'); });
-  await step('bulk let go, the two denials ticked', [true], async () => { p.tick(['d1', 'd2']); await p.press('[data-bulk="dismissed"]'); });
+  await step('bulk let go, the two denials ticked', [' the payer was right '], async () => { p.tick(['d1', 'd2']); await p.press('[data-bulk="dismissed"]'); });
+  await step('bulk let go, the two denials ticked, no reason', ['  '], async () => { p.tick(['d1', 'd2']); await p.press('[data-bulk="dismissed"]'); });
+  await step('bulk let go, the two denials ticked, cancelled', [null], async () => { p.tick(['d1', 'd2']); await p.press('[data-bulk="dismissed"]'); });
   p = page();
   await step('bulk mark started, all four ticked', [], async () => { p.tick(all); await p.press('[data-bulk="in_progress"]'); });
   p = page();
@@ -450,12 +456,15 @@ const step = async (name, say, fn) => { ctx.state.brief = BRIEF; asked.length = 
   await step('panel lost, rejected, blank note', [''], () => set('c2', 'lost', 'REJECTED_PRE_PAYER'));
   await step('panel lost, unanswered, with a note', ['proof of timely filing refused'], () => set('c1', 'lost', 'NO_ANSWER'));
   await step('panel sent, unanswered', [], () => set('c1', 'appealed', 'NO_ANSWER'));
-  await step('panel let go, a denial, confirmed', [true], () => set('d2', 'dismissed', 'DENIED_AUTH'));
-  await step('panel let go, a denial, not confirmed', [false], () => set('d2', 'dismissed', 'DENIED_AUTH'));
+  await step('panel let go, a denial, with a reason', ['the payer was right'], () => set('d2', 'dismissed', 'DENIED_AUTH'));
+  await step('panel let go, a denial, cancelled', [null], () => set('d2', 'dismissed', 'DENIED_AUTH'));
+  await step('panel let go, a denial, blank reason', ['  '], () => set('d2', 'dismissed', 'DENIED_AUTH'));
   await step('panel lost, a denial, blank note', [''], () => set('d2', 'lost', 'DENIED_AUTH'));
+  await step('panel lost, a denial, with a reason', ['upheld on appeal'], () => set('d2', 'lost', 'DENIED_AUTH'));
   await step('let go and next, unanswered, blank note', [''], () => drawer(ITEMS[0]).querySelector('#letGoNext').onclick());
   await step('let go and next, unanswered, with a note', ['a duplicate of a paid claim'], () => drawer(ITEMS[0]).querySelector('#letGoNext').onclick());
-  await step('let go and next, a denial, confirmed', [true], () => drawer(ITEMS[3]).querySelector('#letGoNext').onclick());
+  await step('let go and next, a denial, with a reason', ['billed to the patient'], () => drawer(ITEMS[3]).querySelector('#letGoNext').onclick());
+  await step('let go and next, a denial, blank reason', [''], () => drawer(ITEMS[3]).querySelector('#letGoNext').onclick());
   await step('texts', [], async () => ({ intro: vm.runInContext('DESKS.denials.intro', ctx), help: vm.runInContext('({NO_ANSWER: SIGNAL_HELP.NO_ANSWER, REJECTED_PRE_PAYER: SIGNAL_HELP.REJECTED_PRE_PAYER})', ctx) }));
   // what an item's panel says is needed: a claim rejected on the way, or one EMA shows still in its print batch, never sent
   const need = ev => (ctx.whatToDoHtml(Object.assign(item('c2', 'REJECTED_PRE_PAYER', 'correct_and_resubmit'), { evidence: ev }), null).match(/You need: ([^<]*)</) || [])[1];
@@ -485,21 +494,27 @@ def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_step
     as the note; without one nothing changes. Every other item, and every other button, works as before."""
     s = page_steps
     # a list's change carries the status each ticked row showed, and a panel's walk the status it showed (hotfix 2, H3)
-    bulk = lambda ids, status: [{"path": "/api/findings/bulk-status", "body": {"ids": ids, "status": status, "seen": {i: "open" for i in ids}}}]   # noqa: E731
+    bulk = lambda ids, status, **kw: [{"path": "/api/findings/bulk-status", "body": dict({"ids": ids, "status": status, "seen": {i: "open" for i in ids}}, **kw)}]  # noqa: E731
     one = lambda fid, **body: [{"path": f"/api/findings/{fid}/status", "body": body}]                                    # noqa: E731
     left_out = "Let go leaves out 2 claims with no answer from the payer or rejected before the payer. Open each one to let it go, with a note."
     # each row carries its reason; with such claims ticked the bar says what Let go will leave out
     assert s["rows"]["got"] == ["NO_ANSWER", "REJECTED_PRE_PAYER", "DENIED_MEDICAL_NECESSITY", "DENIED_AUTH"]
     assert s["bar, all four ticked"]["got"] == {"n": "4 selected", "line": left_out}
     assert s["bar, the two denials ticked"]["got"] == {"n": "2 selected", "line": ""}
-    # the list's Let go: the two denials go, the two unanswered claims stay, and the question says so
+    # the list's Let go: the two denials go, the two unanswered claims stay, and the question says so; one reason, required,
+    # goes with all of them (review C1: money is let go only by a person with a reason)
+    why = "\n\nWhy (kept in each item's history; required):"
     mixed = s["bulk let go, all four ticked"]
-    assert mixed["sent"] == bulk(["d1", "d2"], "dismissed")
-    assert mixed["asked"] == ["confirm: Let go of 2 items? They leave the list and count as let go. " + left_out]
+    assert mixed["sent"] == bulk(["d1", "d2"], "dismissed", notes="not ours to chase")
+    assert mixed["asked"] == ["prompt: Let go of 2 items? They leave the list and count as let go. " + left_out + why]
     only = s["bulk let go, the two unanswered ticked"]
     assert only["sent"] == [] and only["asked"] == ["alert: Nothing let go. " + left_out]
     plain = s["bulk let go, the two denials ticked"]
-    assert plain["sent"] == bulk(["d1", "d2"], "dismissed") and plain["asked"] == ["confirm: Let go of 2 items? They leave the list and count as let go."]
+    assert plain["sent"] == bulk(["d1", "d2"], "dismissed", notes="the payer was right")
+    assert plain["asked"] == ["prompt: Let go of 2 items? They leave the list and count as let go." + why]
+    blank = s["bulk let go, the two denials ticked, no reason"]
+    assert blank["sent"] == [] and blank["asked"][1:] == ["alert: Not changed. Letting items go needs a reason."]
+    assert s["bulk let go, the two denials ticked, cancelled"]["sent"] == []
     assert s["bulk mark started, all four ticked"]["sent"] == bulk(["c1", "c2", "d1", "d2"], "in_progress")             # nothing else leaves them out
     # the item's own panel: Let go and Lost ask why, and a blank answer changes nothing
     for name in ("panel let go, unanswered, cancelled", "panel let go, unanswered, blank note", "panel lost, rejected, blank note",
@@ -516,12 +531,19 @@ def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_step
     assert lost["sent"] == one("c1", status="lost", notes="proof of timely filing refused") and lost["asked"][0].startswith("prompt: Mark this claim lost?")
     assert s["let go and next, unanswered, with a note"]["sent"] == one("c1", status="dismissed", notes="a duplicate of a paid claim", seen_status="open")
     assert s["panel sent, unanswered"]["sent"] == one("c1", status="appealed") and s["panel sent, unanswered"]["asked"] == []
-    # any other item: the plain confirmation, and Lost keeps its optional note
-    confirm = ["confirm: Let go of this item? It leaves the list and counts as let go."]
-    assert s["panel let go, a denial, confirmed"]["sent"] == one("d2", status="dismissed") and s["panel let go, a denial, confirmed"]["asked"] == confirm
-    assert s["panel let go, a denial, not confirmed"]["sent"] == [] and s["panel let go, a denial, not confirmed"]["got"] is False
-    assert s["panel lost, a denial, blank note"]["sent"] == one("d2", status="lost")
-    assert s["let go and next, a denial, confirmed"]["sent"] == one("d2", status="dismissed", seen_status="open") and s["let go and next, a denial, confirmed"]["asked"] == confirm
+    # any other item: Let go and Lost ask why too, and a blank or cancelled answer changes nothing (review C1)
+    ask = ["prompt: Let go of this item? It leaves the list and counts as let go.\n\nWhy (kept in the item's history; required):"]
+    nope = "alert: Not changed. Letting an item go, or marking it lost, needs a reason."
+    got = s["panel let go, a denial, with a reason"]
+    assert got["sent"] == one("d2", status="dismissed", notes="the payer was right") and got["asked"] == ask
+    assert s["panel let go, a denial, cancelled"]["sent"] == [] and s["panel let go, a denial, cancelled"]["got"] is False
+    assert s["panel let go, a denial, blank reason"]["sent"] == [] and s["panel let go, a denial, blank reason"]["asked"][1:] == [nope]
+    assert s["panel lost, a denial, blank note"]["sent"] == [] and s["panel lost, a denial, blank note"]["asked"][1:] == [nope]
+    assert s["panel lost, a denial, blank note"]["asked"][0].startswith("prompt: Mark this item lost? It leaves the list.")
+    assert s["panel lost, a denial, with a reason"]["sent"] == one("d2", status="lost", notes="upheld on appeal")
+    nxt = s["let go and next, a denial, with a reason"]
+    assert nxt["sent"] == one("d2", status="dismissed", notes="billed to the patient", seen_status="open") and nxt["asked"] == ask
+    assert s["let go and next, a denial, blank reason"]["sent"] == [] and s["let go and next, a denial, blank reason"]["asked"][1:] == [nope]
     # the page draws what the stand-in assumed: the bar holds the line, and the panel's status buttons pass the item's reason
     static = os.path.join(os.path.dirname(insights.__file__), "static")
     desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()

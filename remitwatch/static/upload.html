@@ -9,10 +9,10 @@
 @media (prefers-color-scheme: dark){:root{--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{max-width:980px;margin:0 auto;padding:20px 16px 60px}
+main{max-width:1180px;margin:0 auto;padding:20px 16px 60px}
 h1{font-size:22px;margin:8px 0 4px}
 h2{font-size:16px;margin:0 0 8px}
-h3{font-size:14px;margin:14px 0 4px}
+h3{font-size:15px;margin:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:14px}
 .muted{color:var(--muted)}.small{font-size:13px}
 table{width:100%;border-collapse:collapse}
@@ -20,27 +20,44 @@ th{text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:6px
 td{padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:top;font-size:14px}
 td.num,th.num{text-align:right;white-space:nowrap}
 .ok{color:var(--good)}.no{color:var(--bad)}.warn{color:var(--warn)}
-button,input{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+button,input,textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
 button{cursor:pointer}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button:disabled{opacity:.5;cursor:default}
 a{color:var(--accent)}
 .top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
-.drop{display:block;position:relative;border:2px dashed var(--line);border-radius:10px;padding:26px 16px;text-align:center;background:var(--soft);cursor:pointer}
+.drop{display:block;position:relative;border:2px dashed var(--line);border-radius:10px;padding:22px 16px;text-align:center;background:var(--soft);cursor:pointer}
 .drop.over{border-color:var(--accent)}
 .drop:focus-within{outline:2px solid var(--accent);outline-offset:2px}
 .drop input{position:absolute;width:1px;height:1px;opacity:0}
-.card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px}
+.card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px;overflow-wrap:anywhere}
 .card .name{font-weight:600;word-break:break-all}
 .card ul{margin:6px 0 0;padding-left:18px}.card li{margin:3px 0;font-size:14px}
-.chip{display:inline-block;font-size:12px;border-radius:999px;padding:1px 8px;background:var(--soft);color:var(--muted);margin-left:6px;white-space:nowrap}
+.chip{display:inline-block;font-size:12px;border-radius:999px;padding:1px 8px;background:var(--soft);color:var(--muted);margin-left:6px;white-space:nowrap;font-weight:600}
 .chip.ok{color:var(--good)}.chip.no{color:var(--bad)}.chip.warn{color:var(--warn)}
-.bar{height:6px;background:var(--soft);border-radius:3px;overflow:hidden;margin-top:6px}.bar>div{height:100%;background:var(--accent);width:0}
+.bar{height:6px;background:var(--soft);border-radius:3px;overflow:hidden;margin-top:6px}.bar>div{height:100%;background:var(--accent);width:0;transition:width .2s}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
 .guide ol{padding-left:20px;margin:6px 0}.guide li{margin:8px 0}
 .guide b{font-weight:600}
 details summary{cursor:pointer;font-weight:600}
 .attach{position:relative;display:inline-block}
 .attach input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.export{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:14px 22px;border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:10px}
+.export.over{border-color:var(--accent);background:var(--soft)}
+.export dl{display:grid;grid-template-columns:110px minmax(0,1fr);gap:4px 10px;margin:8px 0 0;font-size:14px}
+.export dt{color:var(--muted);font-size:13px}.export dd{margin:0}
+.export dd ul{margin:0;padding-left:18px}
+.export .cols{font-size:13px;margin:4px 0 0;padding-left:18px;columns:2;column-gap:18px}
+.export .cols li{break-inside:avoid;margin:2px 0}
+.howto{border-left:3px solid var(--line);padding:2px 0 2px 12px}
+.howto .text{white-space:pre-wrap;font-size:14px;margin:4px 0}
+.howto .ask{font-size:14px;color:var(--warn);margin:4px 0}
+.howto textarea{width:100%;min-height:120px;resize:vertical}
+.howto .theirs{border:1px solid var(--line);border-radius:6px;background:var(--soft);padding:6px 10px;margin:6px 0}
+.howto input{width:100%;max-width:260px}
+.hist{font-size:13px;margin-top:6px}.hist .v{border-top:1px solid var(--line);padding:6px 0;white-space:pre-wrap}
+.status-line{font-size:14px;margin-top:4px}
+.big{font-size:14px}
+@media (max-width:760px){.export{grid-template-columns:1fr}.export .cols{columns:1}.export dl{grid-template-columns:1fr}.export dt{margin-top:4px}}
 @media (max-width:640px){td.hide-sm,th.hide-sm{display:none}}
 </style>
 </head>
@@ -48,20 +65,30 @@ details summary{cursor:pointer;font-weight:600}
 <main>
   <div id="swingBar" hidden></div>
   <div class="top"><h1>Upload from EMA</h1><a href="/">Back to the dashboard</a></div>
-  <div class="muted">Until ModMed approves the API connection, EMA's side comes in by hand: run the reports in EMA, save them, and drop them here. They go through the same reading and analysis as the files from Dropbox, and visit notes reach appeals as notes read from EMA would. Files stay on the practice's server with the rest of RemitWatch's data.</div>
+  <div class="muted">Until ModMed approves an API connection, EMA's side reaches RemitWatch as reports exported by hand. Each week, pull the five exports below from EMA and drop them here (or put them in the Dropbox folder). They go through the same reading and analysis as the files from Dropbox. Large reports are fine: this page compresses them and sends them in pieces, and a broken upload carries on where it stopped.</div>
 
-  <div id="away" class="panel" hidden><h2>Not on this site</h2><div id="awayMsg"></div></div>
+  <div class="panel" id="exportsPanel">
+    <div class="top"><h2 style="margin:0">EMA exports RemitWatch needs</h2><span class="small muted" id="exportsNote"></span></div>
+    <div class="small muted" style="margin-top:4px">Each row says what the export is for, how to filter it, the columns it must have, and when it last arrived. Drop a file on its row (or use its Upload button): the page first checks it is that export and that no column is missing, before anything is sent.</div>
+    <div id="exports"><div class="muted small" style="margin-top:10px">Loading the checklist…</div></div>
+  </div>
+
+  <div class="panel">
+    <label class="drop" id="drop" tabindex="-1">
+      <input type="file" id="files" multiple accept=".xlsx,.csv,.tsv,.txt,.zip,.835,.837,.edi,.rmt,.era,.x12,.dat,.pdf,.docx,.rtf,.html,.htm">
+      <div><b>Drop files here</b>, or <span style="color:var(--accent);text-decoration:underline">choose files</span></div>
+      <div class="small muted" style="margin-top:4px" id="dropHint">EMA's reports and exports (Excel or CSV, any size), remittance (835) and claim (837) files, a .zip of those, and visit notes (PDF, Word or text). Several at once is fine.</div>
+    </label>
+    <div id="now"></div>
+  </div>
+
+  <div class="panel" id="recentPanel" hidden><h2>Reports and large files you sent</h2>
+    <div class="small muted">The last 30 days. An upload that was cut off carries on when you choose the same file again.</div>
+    <div id="recent" class="small"></div></div>
+
+  <div id="away" class="panel" hidden><h2>Visit notes</h2><div id="awayMsg" class="small"></div></div>
 
   <div id="here" hidden>
-    <div class="panel">
-      <label class="drop" id="drop" tabindex="-1">
-        <input type="file" id="files" multiple accept=".xlsx,.csv,.tsv,.txt,.zip,.835,.837,.edi,.rmt,.era,.x12,.dat,.pdf,.docx,.rtf,.html,.htm">
-        <div><b>Drop files here</b>, or <span style="color:var(--accent);text-decoration:underline">choose files</span></div>
-        <div class="small muted" style="margin-top:4px">EMA exports (Excel or CSV), remittance (835) and claim (837) files, a .zip of those, and visit notes (PDF, Word or text). Several at once is fine.</div>
-      </label>
-      <div id="now"></div>
-    </div>
-
     <div class="panel"><div class="top"><h2 style="margin:0">Waiting to be read</h2><button id="runNow">Read them now</button></div>
       <div id="cycle" class="small" style="margin-top:6px">…</div></div>
 
@@ -69,155 +96,22 @@ details summary{cursor:pointer;font-weight:600}
       <div class="small muted">Open items that rest on the visit note, inside their filing window, with no appeal packet yet, soonest first. Save each note from EMA as a PDF and drop it above (RemitWatch reads the patient's name and the date of service from it), or attach it on its row.</div>
       <div id="needed" class="small" style="margin-top:8px">…</div></div>
 
-    <div class="panel"><h2>Uploaded</h2><div id="hist" class="small">…</div></div>
+    <div class="panel"><h2>Other files uploaded</h2><div id="hist" class="small">…</div></div>
   </div>
 
-  <div class="panel guide" id="guide"><h2>Getting each file out of EMA</h2>
-    <div class="small muted">Run these from EMA's reports as the practice already does for the Dropbox folder: the same three reports, saved and dropped here instead. Excel (.xlsx) is best; CSV works too. Pick the date range by date of service.</div>
-    <h3>Every week (say Monday): three reports, the last six weeks by date of service</h3>
-    <ol>
-      <li><b>Encounter &amp; Charge Lines</b>, in its full layout. It must carry these columns: Service Date, Patient ID, Bill ID, Bill Creation Date, Claim ID, Bill Item Identifier, CPT/Product, Modifiers, Units, Charges, Insurance Payments, Activity Type, Primary Provider, Payer and Location. Insurance Payments is what lets RemitWatch close an item EMA shows as paid; Patient ID ties a visit billed to two payers to one patient and finds its note.</li>
-      <li><b>ERA &amp; Payment Line Adjustments</b> (the ERA &amp; Payment Lines report): Claim ID, CPT, Service Date, Reason Code, RARC Code, Adjustment Status and Subtype, Adjustments, Payments and Transaction Date. It says what the biller did with each adjustment (written off, moved to the patient).</li>
-      <li><b>Claim &amp; Claim Status</b>, with the <b>Patient ID</b> column added: Claim ID, Claim Status, Denial Amount, Denial Category and the reason codes. A claim EMA shows as rejected or still waiting has no remittance, so without Patient ID nothing says whose it is.</li>
-    </ol>
-    <div class="small">Why six weeks: a visit shows up in a report only once its bill exists, so a week pulled the day it ends misses every visit billed later. Repeating six weeks each time catches them; RemitWatch keeps each row once, so the overlap never counts twice. After each upload the summary says what was new, what it had already, and what it left out (the report's title lines, a totals line) and why. If a column it uses is missing, the summary names it.</div>
-    <h3>When remittances stop coming</h3>
+  <div class="panel guide" id="guide"><h2>The weekly routine</h2>
+    <div class="small">Every Monday (one named person, with a backup), pull the five exports in the checklist above and drop them here, or put them in the Dropbox folder. The A/R report and the Production report come with every column and no filter but the date. The three weekly exports (<b>Encounter &amp; Charge Lines</b> in its full layout, <b>ERA &amp; Payment Line Adjustments</b>, and <b>Claim &amp; Claim Status</b> with the <b>Patient ID</b> column) are pulled by posting or transaction date for the last five weeks where EMA allows it, else for the last six weeks by date of service. Encounter &amp; Charge Lines must carry Patient ID, Bill Creation Date, Claim ID and Insurance Payments: Insurance Payments is what lets RemitWatch close an item EMA shows as paid. Why the weeks overlap: a visit shows up only once its bill exists, so a week pulled the day it ends misses every visit billed later. Repeating the weeks catches them, and RemitWatch keeps each row once, so the overlap never counts twice. Write the practice's own steps in each row's "How we pull this in our EMA" box: RemitWatch never guesses EMA's menus.</div>
+    <h3 style="margin-top:14px">If ModMed offers an API</h3>
+    <div class="small">Ask for: each payment and adjustment posting by line, with the check or EFT number, the posted date and the reason code; A/R balances by line; claim status with its dates; and charges with the claim ID and modifiers. Ask too whether EMA can send these reports on a schedule to a secure place (SFTP or a shared folder), not by email.</div>
+    <h3 style="margin-top:14px">When remittances stop coming</h3>
     <div class="small">The Data tab says when the newest remittance is days old. Ask TriZetto in writing (the portal's Contact Us) to re-send the missing ERA (835) files to the RemitWatch login (docs/TRIZETTO_REQUEST.md, point 4). Do not download them in the portal yourself, not even archived ones: that can send them to ModMed again. ERA files you already have can be dropped here (a .zip of them is fine). A remittance RemitWatch has already is recognised by its content and not counted twice.</div>
-    <h3>Visit notes, as items need them</h3>
-    <div class="small">For each row under "Visit notes appeals are waiting for": in EMA open the patient's visit on that date of service, and print or save the signed note as a PDF (one PDF per visit). Drop the PDFs here together; each is matched by the patient's name and the date of service it states, and the summary says which visit it went to. A note that states the patient's EMA Patient ID (or record number) goes into the appeal by itself. One that matches only by name and date waits for a person: two patients can share a name and a visit day, so open the item and confirm the note there, or attach it with the row's Attach note button. A scanned page (a picture, no text) cannot be read either way: attach it with the row's Attach note button. When a note fits more than one visit, pick the right one under Uploaded. Then the item's appeal goes as it would with a note from EMA: open it, or use Appeal everything appealable.</div>
-    <h3>What happens to the files</h3>
-    <div class="small">Each file is kept on the practice's server, in the same protected place as RemitWatch's store. The files themselves are never emailed. Exports and remittance files never leave the server. A visit note leaves it only inside the appeal packet built from it: faxed to the payer, or emailed where the practice has allowed that. When the note review is switched on, the note is also read by that review. Exports and remittance files are read by the next cycle, which starts within about a minute; the worklist updates when its analysis finishes (a few minutes). Uploading the same file again changes nothing.</div>
+    <h3 style="margin-top:14px">Visit notes, as items need them</h3>
+    <div class="small">For each row under "Visit notes appeals are waiting for": in EMA open the patient's visit on that date of service, and print or save the signed note as a PDF (one PDF per visit). Drop the PDFs here together; each is matched by the patient's name and the date of service it states, and the summary says which visit it went to. A note that states the patient's EMA Patient ID (or record number) goes into the appeal by itself. One that matches only by name and date waits for a person: two patients can share a name and a visit day, so open the item and confirm the note there, or attach it with the row's Attach note button. A scanned page (a picture, no text) cannot be read either way: attach it with the row's Attach note button. When a note fits more than one visit, pick the right one under Other files uploaded. Then the item's appeal goes as it would with a note from EMA: open it, or use Appeal everything appealable. Visit notes are uploaded on the practice's own server.</div>
+    <h3 style="margin-top:14px">What happens to the files</h3>
+    <div class="small">Before a file is sent, this page works out its checksum (SHA-256). Large files go in pieces of 4 MB, each checked as it arrives, and the whole file is checked against that checksum at the end: a file that does not arrive whole is not kept, nor one no export EMA makes looks like (one that unpacks to hundreds of times its size, or has a line longer than a megabyte). On the practice's server each file is kept in the same protected place as RemitWatch's store; on the Vercel site, reports and exports go to the private Dropbox folder RemitWatch keeps its data in. The files themselves are never emailed. Exports and remittance files never leave RemitWatch's storage. A visit note leaves it only inside the appeal packet built from it: faxed to the payer, or emailed where the practice has allowed that. When the note review is switched on, the note is also read by that review. Reports and exports are read by the next cycle; what each held, and what it replaced, then shows here. Uploading the same file again changes nothing: RemitWatch knows a file by its checksum, the same way whether it was uploaded or found in the Dropbox folder.</div>
   </div>
 </main>
-<script>
-const $ = s => document.querySelector(s);
-const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const money = c => '$' + ((c || 0) / 100).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
-const day = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'}) : '';
-const when = d => d ? new Date(d).toLocaleString(undefined, {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '';
-let info = {show_phi: false};
-
-async function api(path, opts){
-  opts = opts || {};
-  if(opts.method === 'POST') opts.headers = Object.assign({'X-Requested-With': 'remitwatch', 'Content-Type': 'application/json'}, opts.headers || {});
-  const r = await fetch(path, Object.assign({cache: 'no-store', credentials: 'same-origin'}, opts));
-  let j = null; try { j = await r.json(); } catch(e) {}
-  if(!r.ok){ const e = new Error((j && j.detail) || r.statusText); e.status = r.status; throw e; }
-  return j;
-}
-
-// one file at a time, its bytes as the body: a large export shows how far it has got. The file's name (often the
-// patient's, for a note) goes in a header where the server reads one, so it is never in an address a log keeps.
-function send(file, findingId){
-  return new Promise((resolve, reject) => {
-    const x = new XMLHttpRequest();
-    const q = new URLSearchParams(info.name_header ? {} : {name: file.name}); if(findingId) q.set('finding_id', findingId);
-    x.open('POST', '/api/uploads' + (q.toString() ? '?' + q.toString() : ''));
-    if(info.name_header) x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
-    x.setRequestHeader('X-Requested-With', 'remitwatch');
-    x.setRequestHeader('Content-Type', 'application/octet-stream');
-    x.upload.onprogress = e => { if(e.lengthComputable && send.onprogress) send.onprogress(e.loaded / e.total); };
-    x.onload = () => { let j = null; try { j = JSON.parse(x.responseText); } catch(e) {}
-      if(x.status >= 200 && x.status < 300) resolve(j); else reject(new Error((j && j.detail) || ('the server answered ' + x.status))); };
-    x.onerror = () => reject(new Error('the connection failed'));
-    x.send(file);
-  });
-}
-
-const CHIP = {queued: ['to be read', 'warn'], done: ['read', 'ok'], already: ['already in RemitWatch', ''], rejected: ['not read', 'no'], failed: ['failed', 'no'],
-  matched: ['note matched', 'ok'], choose: ['pick its visit', 'warn'], unmatched: ['note not matched yet', 'warn'], zip: ['zip', ''], removed: ['taken back', '']};
-const chip = s => { const c = CHIP[s] || [s, '']; return `<span class="chip ${c[1]}">${esc(c[0])}</span>`; };
-const linesHtml = ls => (ls || []).length ? `<ul>${ls.map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : '';
-
-function noteTools(n){
-  if(!n) return '';
-  const pick = (n.candidates || []).map((c, i) => `<button data-pick="${i}" data-note="${esc(n.note_id)}">Visit of ${esc(day(c.service_date))}${c.patient ? ' · ' + esc(c.patient) : ''} · claim ${esc((c.claims || []).join(', '))}${(c.payers || []).length ? ' · ' + esc(c.payers.join(', ')) : ''}</button>`).join(' ');
-  return `<div class="row">${n.status === 'choose' ? pick : ''}<a href="/api/uploads/notes/${esc(n.note_id)}/file" target="_blank" rel="noopener">View the note</a>
-    <button data-remove="${esc(n.note_id)}" class="small">Take it back</button></div>`;
-}
-
-function resultCard(file, r){
-  const status = r.status === 'zip' ? 'zip' : r.status;
-  const files = (r.files || []).map(f => `<div class="card"><div class="name">${esc(f.name)} ${chip(f.status)}</div>${linesHtml(f.lines)}${noteTools(f.note)}</div>`).join('');
-  return `<div class="name">${esc(file.name)} ${chip(status)}</div>${linesHtml(r.lines)}${noteTools(r.note)}${files}`;
-}
-
-async function upload(list){
-  const box = $('#now');
-  for(const file of list){
-    const card = document.createElement('div'); card.className = 'card';
-    card.innerHTML = `<div class="name">${esc(file.name)} <span class="chip">sending</span></div><div class="bar"><div></div></div>`;
-    box.prepend(card);
-    const bar = card.querySelector('.bar>div');
-    send.onprogress = p => { bar.style.width = Math.round(p * 100) + '%'; };
-    try { card.innerHTML = resultCard(file, await send(file)); }
-    catch(e){ card.innerHTML = `<div class="name">${esc(file.name)} ${chip('failed')}</div><ul><li>${esc(e.message)}</li></ul>`; }
-    bindNoteTools(card);
-  }
-  send.onprogress = null;
-  refresh();
-}
-
-function bindNoteTools(el){
-  el.querySelectorAll('[data-pick]').forEach(b => b.onclick = async () => {
-    try { const r = await api(`/api/uploads/notes/${b.dataset.note}/match`, {method: 'POST', body: JSON.stringify({pick: Number(b.dataset.pick)})});
-      b.closest('.card').querySelector('ul').innerHTML = (r.lines || []).map(l => `<li>${esc(l)}</li>`).join(''); b.parentNode.querySelectorAll('[data-pick]').forEach(x => x.remove()); refresh(); }
-    catch(e){ alert('Not saved: ' + e.message); }
-  });
-  el.querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => {
-    if(!confirm('Take this note back? Its file is deleted from the server. A packet built from it is not faxed from now on. The next appeal builds it again from the note in its place.')) return;
-    try { await api(`/api/uploads/notes/${b.dataset.remove}/remove`, {method: 'POST', body: '{}'}); b.closest('.card').remove(); refresh(); }
-    catch(e){ alert('Not removed: ' + e.message); }
-  });
-}
-
-async function refresh(){
-  let h;
-  try { h = await api('/api/uploads'); } catch(e){ $('#hist').textContent = e.message; return; }
-  if(!h.server){ $('#away').hidden = false; $('#awayMsg').textContent = h.message; $('#here').hidden = true; return; }
-  info = h; $('#here').hidden = false;
-  const c = h.cycle || {};
-  $('#cycle').innerHTML = (h.queued ? `<b>${h.queued} file${h.queued === 1 ? '' : 's'}</b> to be read by the next cycle. ` : 'Nothing is waiting. ')
-    + (c.running ? `A cycle is running (since ${esc(when(c.since))}).` : c.last_finished ? `The last cycle finished ${esc(when(c.last_finished))}${c.last_error ? ' with an error: ' + esc(c.last_error) : ''}.` : '')
-    + (c.next && !c.running && h.queued ? ` The next starts by ${esc(when(c.next))}, sooner after an upload.` : '');
-  $('#runNow').disabled = !h.queued || c.running;
-  const items = h.items || [];
-  $('#hist').innerHTML = items.length ? items.map(u => `<div class="card"><div class="name">${esc(u.name)} ${chip(u.status === 'done' && u.note ? u.note.status : u.status)}
-      <span class="muted small" style="font-weight:400">${esc(when(u.uploaded_at))}${u.uploaded_by ? ' by ' + esc(u.uploaded_by) : ''}${u.parent ? ' · from a zip' : ''}</span></div>${linesHtml(u.lines)}${u.status === 'removed' ? '' : noteTools(u.note)}</div>`).join('')
-    : '<div class="muted">Nothing uploaded yet.</div>';
-  bindNoteTools($('#hist'));
-  clearTimeout(refresh.t);                       // one wait at a time, however often the page asks again
-  refresh.t = h.queued ? setTimeout(refresh, 15000) : null;
-  needed();
-}
-
-async function needed(){
-  let n;
-  try { n = await api('/api/uploads/needed?limit=100'); } catch(e){ $('#needed').textContent = e.message; return; }
-  if(!n.items.length){ $('#needed').innerHTML = '<div class="muted">None: every open item that rests on the visit note has its packet.</div>'; return; }
-  const phi = info.show_phi;
-  $('#needed').innerHTML = `<div class="muted" style="margin-bottom:4px">${n.total} item${n.total === 1 ? '' : 's'}; an uploaded note covers ${n.covered}.${n.total > n.items.length ? ' The first ' + n.items.length + ' are shown.' : ''}</div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Closes</th><th>Visit</th><th>Claim ID</th>${phi ? '<th>Patient</th>' : ''}<th class="hide-sm">Payer</th><th class="hide-sm">Code</th><th class="num">Amount</th><th>Note</th></tr></thead>
-    <tbody>${n.items.map(i => `<tr><td>${esc(day(i.appeal_deadline)) || '<span class="muted">unknown</span>'}</td><td>${esc(day(i.service_date))}</td><td>${esc(i.claim_id || '')}</td>${phi ? `<td>${esc(i.patient || '')}</td>` : ''}
-      <td class="hide-sm">${esc(i.payer_group || '')}</td><td class="hide-sm">${esc(i.code || '')}</td><td class="num">${money(i.cents)}</td>
-      <td>${i.note === 'found' ? '<span class="ok">uploaded</span>' : i.note === 'ambiguous' ? '<span class="warn">uploaded: confirm or pick it in the item</span>'
-        : `<span class="attach"><button class="small">Attach note</button><input type="file" data-fid="${esc(i.finding_id)}" accept=".pdf,.docx,.txt,.rtf,.html,.htm" aria-label="Attach the visit note for claim ${esc(i.claim_id || '')}"></span>`}</td></tr>`).join('')}</tbody></table></div>`;
-  $('#needed').querySelectorAll('input[data-fid]').forEach(inp => inp.onchange = async () => {
-    const f = inp.files[0]; if(!f) return;
-    const cell = inp.closest('td'); cell.textContent = 'sending…';
-    try { const r = await send(f, inp.dataset.fid); cell.innerHTML = r.status === 'rejected' ? `<span class="no">${esc(r.reason)}</span>` : '<span class="ok">uploaded</span>'; refresh(); }
-    catch(e){ cell.innerHTML = `<span class="no">${esc(e.message)}</span>`; }
-  });
-}
-
-const drop = $('#drop');
-['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
-['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
-drop.addEventListener('drop', e => { if(e.dataTransfer.files.length) upload([...e.dataTransfer.files]); });
-$('#files').onchange = () => { const l = [...$('#files').files]; $('#files').value = ''; if(l.length) upload(l); };
-$('#runNow').onclick = async () => { $('#runNow').disabled = true; try { await api('/api/sync/run', {method: 'POST', body: '{}'}); $('#cycle').textContent = 'Started: the files are read within about a minute.'; setTimeout(refresh, 20000); } catch(e){ $('#cycle').textContent = e.message; } };
-refresh();
-</script>
+<script src="/static/upload.js"></script>
 <script src="/static/swing.js"></script>
 <script>swingLoad(document.getElementById('swingBar'));</script>
 </body>

@@ -52,6 +52,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 from . import ema_ledger as el
 from . import ema_reports as er
 from .codes import EM_CODES, appeal_rule, filing_rule
+from .codes import legal_deadline as _legal_deadline
 from .ema_reports import status_class  # noqa: F401  (re-exported: the spec's ema_checks.status_class)
 
 # ----------------------------------------------------------------------------------------------------------- constants
@@ -63,6 +64,7 @@ POLICY_KEY = "ema:writeoff_policy"          # owner decision O11: {pattern: {dec
 UNWORKED_KEY = "ema:unworked"
 UNPOSTED_KEY = "ema:unposted"
 C7_KEY = "ema:denial_as_contractual"
+C5_LEFT_OUT_KEY = "ema:c5_left_out"      # EMA-only denials a rule left out, by rule: counts, dollars, reasons
 
 # An item's EMA outcome, from the postings on its own line. Precedence (amendment 8.1, strict reading): paid after >
 # patient > paid before > lost to timely filing > written off while pending > auto written off > the other write-offs >
@@ -115,16 +117,23 @@ UNPOSTED_POSTED = (-3, 21)
 UNPOSTED_HIGH = 100_000
 DIFF_MIN, DIFF_SHARE, SHORT_MIN = 100, 0.005, 2_500
 OFFSET_DAYS = 60                    # a payer's over- and under-postings this close offset
+# PLB reasons by which a payer keeps money it owes (a recovery, a return, a balance carried forward, a levy): a remittance
+# they bring to $0 moved its money all the same, so it is not an informational copy
+OFFSET_PLB = frozenset({"WO", "72", "FB", "J1", "WU", "OB", "L3", "50", "IR", "LE", "GO", "BD", "B2"})
 MANY_PAYER_GROUPS = ("Medicare Supplement carriers", "Self-funded plan TPAs")    # within one, only the payer's name says who
 
 # C5
 DENIAL_MIN = 500
+# a payer's policy, not a denial to appeal line by line: the code paid on this share or less of this many answered lines
+POLICY_SINCE, POLICY_MIN_ANSWERED, POLICY_MAX_PAID_SHARE = "2025-01-01", 20, 0.05
 PAID_SINCE_SHARE = 0.50
 FALLBACK_SHARE = 0.45
 HIGH_DAYS, HIGH_EXPECTED = 30, 10_000
 
 # C6
 CLOSE_SHARE, SHORT_SHARE = 0.50, 0.95
+PAID_OUTCOMES = ("paid_after", "paid_after_other", "paid_after_partial", "paid_before")
+CREDIT_MIN = 100                # a line more than $1 in credit
 
 # C7
 AS_CONTRACTUAL_MIN, AS_CONTRACTUAL_LINES, AS_CONTRACTUAL_HIGH = 100_000, 10, 2_500_000
@@ -242,12 +251,23 @@ def _bill(pcn: Any) -> str | None:
     return er.bill_of_claim(pcn) if pcn else None
 
 
+def _full_store(conn: sqlite3.Connection) -> bool:
+    """Whether this is the whole store (it holds the key salt): the figures are worked out from its tables. The dashboard's
+    copy (cloud.build_serving) holds part of the store and never the salt: there the pages read what detection stored
+    (meta ema:reconcile, ema:c1_cells, ema:unposted, ema_ar.bucket), and nothing is written."""
+    return er.stored_salt(conn) is not None
+
+
 def _prepare(conn: sqlite3.Connection) -> None:
-    """The EMA tables and the SQL functions the checks use (the store's own salt; made on first use)."""
-    er.ensure_schema(conn)
-    er.register_functions(conn)
+    """The EMA tables and the SQL functions the checks use. Never writes to a database that has no key salt (the
+    dashboard's copy): the salt is never made here (the readers make it), and the schema is brought up to date only on
+    the whole store, or where the EMA tables are missing altogether."""
+    if _full_store(conn) or not _table(conn, "ema_report_files"):
+        er.ensure_schema(conn)
+    er.register_functions(conn, create=False)
     conn.create_function("rw_ckey", 1, el.check_key, deterministic=True)
     conn.create_function("rw_is_facility", 1, lambda c: 1 if er.is_facility_claim(c) else 0, deterministic=True)
+    conn.create_function("rw_payer_family", 1, _family, deterministic=True)
 
 
 _FAMILY_ALIASES = {"unitedhealthcare": "uhc", "united": "uhc", "uhc": "uhc", "aarp": "uhc", "bcbs": "anthem", "blue": "anthem"}
@@ -635,7 +655,35 @@ def classify_checks(conn: sqlite3.Connection) -> dict:
         used_t.add(tk)
         pairs.append((tk, chk, payer))
     c.executemany("UPDATE ema_checks SET cause = 'misnumbered', pair_trace = ? WHERE check_no = ? AND payer = ?", pairs)
-    out["pairs"] = len(pairs)
+    # 1b. misnumbered in part: EMA posted part of an 835 under its own number and the rest under another. A check of the
+    # same payer family, in the same window, within $1 of what that 835 still lacks in EMA, is that rest (C4 then sees
+    # the 835 posted in full and C1 does not count the money as having no remittance)
+    c.execute("DROP TABLE IF EXISTS temp.ec_short")
+    c.execute("""CREATE TEMP TABLE ec_short AS
+        SELECT t.transaction_key AS tk, t.payment_date AS paid_on, CAST(rw_payer_family(rw_payer_group(t.payer_name)) AS TEXT) AS fam,
+               COALESCE(t.claim_paid_total_cents, 0) - x.ema AS short
+        FROM transactions t JOIN (SELECT trace_key AS tk, SUM(ins_paid) AS ema FROM ema_checks WHERE trace_key IS NOT NULL
+                                  GROUP BY trace_key) x ON x.tk = t.transaction_key
+        WHERE COALESCE(t.superseded, 0) = 0 AND COALESCE(t.claim_paid_total_cents, 0) - x.ema > ?""", (MISNUMBER_CENTS,))
+    c.execute("CREATE INDEX temp.ix_ec_short ON ec_short(fam, paid_on)")
+    cand = c.execute(f"""SELECT e.check_no, e.payer, u.tk,
+                                abs(julianday(u.paid_on) - julianday(e.first_posted)) AS dd, abs(u.short - e.ins_paid) AS da
+                         FROM ema_checks e JOIN temp.ec_short u ON u.fam = rw_payer_family(e.payer_group)
+                              AND u.paid_on BETWEEN date(e.first_posted, '-{MISNUMBER_BEFORE} days') AND date(e.first_posted, '+{MISNUMBER_AFTER} days')
+                              AND abs(u.short - e.ins_paid) <= {MISNUMBER_CENTS}
+                         WHERE e.match = 'none' AND COALESCE(e.ins_paid, 0) > 0 AND e.cause IS NULL AND e.first_posted BETWEEN ? AND ?
+                         ORDER BY dd, da, e.check_no, e.payer, u.tk""", (first, end)).fetchall()
+    part_pairs = []
+    for chk, payer, tk, _dd, _da in cand:
+        if (chk, payer) in used_c or tk in used_t:
+            continue
+        used_c.add((chk, payer))
+        used_t.add(tk)
+        part_pairs.append((tk, chk, payer))
+    c.executemany("UPDATE ema_checks SET cause = 'misnumbered', pair_trace = ? WHERE check_no = ? AND payer = ?", part_pairs)
+    _drop(c, "ec_short")
+    out["pairs"] = len(pairs) + len(part_pairs)
+    out["pairs_in_part"] = len(part_pairs)
     # 2. separate_payee: the check's dollars on the ASC's facility claims
     c.execute("DROP TABLE IF EXISTS temp.ec_sep")
     c.execute("""CREATE TEMP TABLE ec_sep AS
@@ -682,24 +730,41 @@ def classify_checks(conn: sqlite3.Connection) -> dict:
     n, cents = c.execute("""SELECT COUNT(*), SUM(ins_paid) FROM ema_checks WHERE match IN ('exact', 'loose')
                             AND first_posted BETWEEN ? AND ?""", (first, end)).fetchone()
     out["matched"] = {"checks": n, "cents": cents or 0}
+    out["payer_equivalence"] = len(learn_payer_equivalence(c))
     return out
 
 
+C1_CELLS_KEY = "ema:c1_cells"
+
+
+def _c1_cells(conn: sqlite3.Connection) -> dict:
+    """C1's figures by month, matched or not, cause and payer group (checks and dollars), and per month what EMA posted
+    as insurance payments in all and on checks: the small table c1_summary adds up (stored by reconcile_summary for the
+    dashboard's copy, which holds only the checks no 835 carries)."""
+    cells = [[m, int(matched or 0), cause, grp, n, cents] for m, matched, cause, grp, n, cents in conn.execute(
+        """SELECT substr(first_posted, 1, 7), match IN ('exact', 'loose'), COALESCE(cause, ''), COALESCE(payer_group, ''),
+                  COUNT(*), COALESCE(SUM(ins_paid), 0)
+           FROM ema_checks WHERE first_posted IS NOT NULL AND COALESCE(ins_paid, 0) <> 0 GROUP BY 1, 2, 3, 4""")]
+    paid = {m: c for m, c in conn.execute("""SELECT month, COALESCE(SUM(cents), 0) FROM ema_months WHERE measure = 'ins_paid'
+                                             GROUP BY month""") if m}
+    on_checks = {m: c for m, c in conn.execute("""SELECT substr(first_posted, 1, 7), COALESCE(SUM(ins_paid), 0) FROM ema_checks
+                                                  WHERE first_posted IS NOT NULL GROUP BY 1""") if m}
+    return {"cells": cells, "paid": paid, "on_checks": on_checks}
+
+
 def c1_summary(conn: sqlite3.Connection, date_from: str | None = None, date_to: str | None = None) -> dict:
-    """C1 by month, cause and payer group (dollars and checks only), for /api/ema/reconcile and the Data tab."""
+    """C1 by month, cause and payer group (dollars and checks only), for /api/ema/reconcile and the Data tab, over the
+    whole months the range touches. On the dashboard's copy it is added up from the cells detection stored."""
     _prepare(conn)
-    where, args = ["first_posted IS NOT NULL"], []
-    if date_from:
-        where.append("first_posted >= ?")
-        args.append(date_from)
-    if date_to:
-        where.append("first_posted <= ?")
-        args.append(date_to)
-    w = " AND ".join(where)
+    data = _c1_cells(conn) if _full_store(conn) else (_meta(conn, C1_CELLS_KEY, None) or {})
+    lo, hi = (date_from or "")[:7], (date_to or "")[:7]
+
+    def inside(m: Any) -> bool:
+        return bool(m) and (not lo or m >= lo) and (not hi or m <= hi)
     out: dict = {"months": {}, "causes": {}, "payers": {}, "matched_cents": 0, "unmatched_cents": 0}
-    for month, matched, cause, grp, n, cents in conn.execute(
-            f"""SELECT substr(first_posted, 1, 7), match IN ('exact', 'loose'), COALESCE(cause, ''), payer_group, COUNT(*),
-                       SUM(ins_paid) FROM ema_checks WHERE {w} AND COALESCE(ins_paid, 0) <> 0 GROUP BY 1, 2, 3, 4""", args):
+    for month, matched, cause, grp, n, cents in data.get("cells") or []:
+        if not inside(month):
+            continue
         cents = cents or 0
         m = out["months"].setdefault(month, {"matched": 0, "unmatched": 0, "causes": {}})
         if matched:
@@ -717,19 +782,10 @@ def c1_summary(conn: sqlite3.Connection, date_from: str | None = None, date_to: 
         p[key] = p.get(key, 0) + cents
     # insurance payments EMA posted with no check number at all: no remittance can be matched to them. ema_months holds
     # whole months, so both sides are taken over the whole months the range touches
-    mw, cw, margs = ["measure = 'ins_paid'"], ["first_posted IS NOT NULL"], []
-    if date_from:
-        mw.append("month >= ?")
-        cw.append("substr(first_posted, 1, 7) >= ?")
-        margs.append(date_from[:7])
-    if date_to:
-        mw.append("month <= ?")
-        cw.append("substr(first_posted, 1, 7) <= ?")
-        margs.append(date_to[:7])
-    all_paid = conn.execute(f"SELECT COALESCE(SUM(cents), 0) FROM ema_months WHERE {' AND '.join(mw)}", margs).fetchone()[0]
-    on_checks = conn.execute(f"SELECT COALESCE(SUM(ins_paid), 0) FROM ema_checks WHERE {' AND '.join(cw)}", margs).fetchone()[0]
-    out["no_check_cents"] = (all_paid or 0) - (on_checks or 0)
-    out["posted_cents"] = all_paid or 0
+    all_paid = sum(c or 0 for m, c in (data.get("paid") or {}).items() if inside(m))
+    on_checks = sum(c or 0 for m, c in (data.get("on_checks") or {}).items() if inside(m))
+    out["no_check_cents"] = all_paid - on_checks
+    out["posted_cents"] = all_paid
     return out
 
 
@@ -818,7 +874,7 @@ def _proto(signal: str, category: str, severity: str, actionable: str, title: st
     return out
 
 
-def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None) -> list[dict]:
+def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save: bool = True) -> list[dict]:
     """C4: the 835 payments EMA did not post. One REMIT_NOT_POSTED item per 835 payment (not superseded) dated within 365
     days that Production covers (a current service-date box holding every claim's service date with an as_of at least
     21 days after the payment, or posted-date boxes covering 3 days before to 21 days after it), when either:
@@ -827,51 +883,91 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None) -> li
       - EMA posted less under it than its claims paid (CLP04, never the deposit) by $25 or more ("posted short").
     Differences of one payer that offset within 60 days (EMA posted one payment's money under another of its checks, or
     left out both a takeback and the payment that replaced it) are reported, never itemized. A difference counts only
-    above max($1, 0.5%). Needs Production at most 14 days old: an absence proves nothing otherwise. The summary goes to
-    meta ema:unposted (counts and dollars only)."""
+    above max($1, 0.5%). An 835 EMA may have posted under a check number a spreadsheet damaged (scientific notation) is
+    not listed: it is counted apart (H7 holds a file with many of them). Needs Production at most 14 days old: an absence
+    proves nothing otherwise. With `save`, the summary (counts and dollars) and the CSV's rows (no patient data) go to
+    meta ema:unposted, which the dashboard's copy reads."""
     _prepare(conn)
     fr = freshness(conn, today)
     t = fr["today"]
     summary: dict = {"as_of": fr["production_as_of"], "fresh": fr["production_fresh"], "n": 0, "cents": 0, "short_n": 0,
-                     "short_cents": 0, "offset_n": 0, "offset_cents": 0, "over_n": 0, "over_cents": 0, "by_group": {},
-                     "by_month": {}}
-    if not fr["production_fresh"] or not _table(conn, "transactions"):
-        _set_meta(conn, UNPOSTED_KEY, summary)
-        conn.commit()
+                     "short_cents": 0, "offset_n": 0, "offset_cents": 0, "over_n": 0, "over_cents": 0, "damaged_n": 0,
+                     "damaged_cents": 0, "elsewhere_n": 0, "elsewhere_cents": 0, "informational_n": 0, "informational_cents": 0,
+                     "unfunded_n": 0, "unfunded_cents": 0, "by_group": {}, "by_month": {}, "rows": []}
+    if not _full_store(conn) or not fr["production_fresh"] or not _table(conn, "transactions"):
+        if save and _full_store(conn):
+            _set_meta(conn, UNPOSTED_KEY, summary)
+            conn.commit()
         return []
     boxes = fr["boxes"]
     since = _add(t, -UNPOSTED_DAYS)
     _unmatched_traces(conn)
-    paired = {r[0] for r in conn.execute("SELECT DISTINCT pair_trace FROM ema_checks WHERE pair_trace IS NOT NULL")}
+    paired_cents = {tk: cents or 0 for tk, cents in conn.execute(
+        "SELECT pair_trace, SUM(ins_paid) FROM ema_checks WHERE pair_trace IS NOT NULL GROUP BY pair_trace")}
+    paired = set(paired_cents)
+    damaged = [(chk, grp, posted, cents or 0) for chk, grp, posted, cents in conn.execute(
+        """SELECT check_no, payer_group, first_posted, ins_paid FROM ema_checks WHERE COALESCE(damaged, 0) = 1
+           AND COALESCE(ins_paid, 0) > 0 AND first_posted IS NOT NULL""")]
     conn.execute("DROP TABLE IF EXISTS temp.ec_tt")
     conn.execute("""CREATE TEMP TABLE ec_tt AS SELECT trace_key AS tk, SUM(ins_paid) AS ema FROM ema_checks
                     WHERE trace_key IS NOT NULL GROUP BY trace_key""")
     conn.execute("CREATE INDEX temp.ix_ec_tt ON ec_tt(tk)")
-    rows = conn.execute("""SELECT t.transaction_key, t.payment_date, rw_payer_group(t.payer_name), rw_payer_kind(t.payer_name),
+    # a remittance that moved no money (BPR04 'NON', or a $0 deposit) unless a recovery the payer took (PLB WO, 72, ...) used
+    # the money up: an informational copy (a plan's administrator reporting what the plan pays), never money to post
+    offset_sql = (f"""EXISTS (SELECT 1 FROM plb p WHERE p.transaction_key = t.transaction_key
+                              AND upper(COALESCE(p.reason_code, '')) IN ({','.join("'" + c + "'" for c in sorted(OFFSET_PLB))}))"""
+                  if _table(conn, "plb") else "0")
+    rows = conn.execute(f"""SELECT t.transaction_key, t.payment_date, rw_payer_group(t.payer_name), rw_payer_kind(t.payer_name),
                                   t.payer_name, COALESCE(t.claim_paid_total_cents, 0), t.payment_amount_cents, t.trace_number, x.ema,
-                                  t.transaction_key IN (SELECT tk FROM temp.ec_ut)
+                                  t.transaction_key IN (SELECT tk FROM temp.ec_ut),
+                                  (upper(COALESCE(t.payment_method, '')) = 'NON' OR COALESCE(t.payment_amount_cents, 0) = 0)
+                                      AND NOT {offset_sql}
                            FROM transactions t LEFT JOIN temp.ec_tt x ON x.tk = t.transaction_key
                            WHERE COALESCE(t.superseded, 0) = 0 AND t.payment_date >= ? AND t.trace_number IS NOT NULL
                              AND trim(t.trace_number) <> ''
                            ORDER BY t.payment_date, t.transaction_key""", (since,)).fetchall()
     diffs = []
-    for tk, paid_on, grp, kind, payer, paid, deposit, trace, ema, unmatched in rows:
+    for tk, paid_on, grp, kind, payer, paid, deposit, trace, ema, unmatched, informational in rows:
         if unmatched and tk in paired:
             continue                    # C1 paired it with an EMA check under another number
         if not unmatched and ema is None:
             continue                    # matched by a key no EMA check carries as its trace (another payment of that trace)
-        posted = 0 if unmatched else (ema or 0)
+        if unmatched and damaged and _damaged_could_hold(damaged, trace, grp, paid_on, paid):
+            summary["damaged_n"] += 1
+            summary["damaged_cents"] += paid
+            continue                    # EMA may have posted it under a number a spreadsheet changed: never itemized
+        posted = 0 if unmatched else (ema or 0) + paired_cents.get(tk, 0)       # the rest under a misnumbered check
         diff = paid - posted
         if abs(diff) <= max(DIFF_MIN, DIFF_SHARE * abs(paid)):
             continue
         diffs.append({"tk": tk, "paid_on": paid_on, "grp": grp, "kind": kind, "payer": payer, "paid": paid, "deposit": deposit,
-                      "trace": trace, "posted": posted, "diff": diff, "unmatched": bool(unmatched), "left": diff})
+                      "trace": trace, "posted": posted, "diff": diff, "unmatched": bool(unmatched), "left": diff,
+                      "informational": bool(informational) and diff > 0})
     dates = _claim_dates_of(conn, [d["tk"] for d in diffs])
     for d in diffs:
         info = dates.get(d["tk"]) or {"svcs": [], "pcns": []}
         d["covered"] = _remit_covered(boxes, d["paid_on"], info["svcs"])
         d["svcs"], d["pcns"] = info["svcs"], sorted(set(info["pcns"]))
     diffs = [d for d in diffs if d["covered"]]
+    # an informational remittance whose every paid claim another, funded 835 also paid (the plan's own payment beside its
+    # administrator's copy), or whose amounts EMA holds under any check: the money is accounted for, nothing to post or chase
+    info = [d for d in diffs if d["informational"]]
+    if info:
+        done = _funded_twins(conn, info)
+        done |= _posted_elsewhere(conn, [d for d in info if d["tk"] not in done], any_check=True)
+        for d in info:
+            if d["tk"] in done:
+                summary["informational_n"] += 1
+                summary["informational_cents"] += d["diff"]
+        diffs = [d for d in diffs if d["tk"] not in done]
+    # a payment EMA posted under another check number: every claim of the trace has EMA insurance payments of its amount
+    # (within $1) on its own EMA claims, 7 days before to 120 days after the 835's date. Not "never posted": counted apart
+    elsewhere = _posted_elsewhere(conn, [d for d in diffs if d["unmatched"]])
+    for d in diffs:
+        if d["tk"] in elsewhere:
+            summary["elsewhere_n"] += 1
+            summary["elsewhere_cents"] += d["diff"]
+    diffs = [d for d in diffs if d["tk"] not in elsewhere]
     # differences of one payer that offset within 60 days are one payment posted under another number
     who = lambda d: d["payer"] if d["grp"] in MANY_PAYER_GROUPS else d["grp"]      # noqa: E731
     by_payer: dict[str, list] = defaultdict(list)
@@ -909,7 +1005,22 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None) -> li
               "ema_posted_cents": d["posted"], "payment_date": d["paid_on"], "production_as_of": fr["production_as_of"],
               "covered_by": d["covered"], "offset_cents": d["diff"] - left}
         payer = d["payer"] or d["grp"]
-        if d["unmatched"]:
+        if d["informational"]:
+            # an informational remittance reported the claims paid and moved no money, and no funded 835 or EMA posting
+            # shows the payment: the money never arrived. Never "post it": ask the payer for it (R14, PM case C54)
+            if left <= UNPOSTED_MIN_CENTS:
+                continue
+            title = (f"{payer} reported {_usd(d['paid'])} paid on {d['paid_on']} (trace ending {_tail(d['trace'])}) on an "
+                     "informational remittance that moved no money: the payment never arrived")
+            ev.update(informational=True, payment_method="NON" if not (d["deposit"] or 0) else "other")
+            ev["steps"] = [f"Ask {payer} (or the plan behind it) whether the payment it reported was issued: date, amount, EFT trace or check number.",
+                           "If it was issued, find the deposit and post it in EMA under that trace.",
+                           "If it was not, ask them to issue it; the patient's share it reported can be billed meanwhile."]
+            hint = (f"The remittance was informational only (no money moved) and no payment followed: ask {payer} for the payment it reported; "
+                    "there is nothing to post yet")
+            summary["unfunded_n"] += 1
+            summary["unfunded_cents"] += left
+        elif d["unmatched"]:
             if left <= UNPOSTED_MIN_CENTS:
                 continue
             title = f"Paid {_usd(d['paid'])} by {payer} on {d['paid_on']} (trace ending {_tail(d['trace'])}): not posted in EMA"
@@ -937,16 +1048,144 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None) -> li
         out.append(_proto("REMIT_NOT_POSTED", "fees", "high" if left >= UNPOSTED_HIGH else "medium", "review", title,
                           key_parts=(d["tk"],), claim=claim, expected=left, shortfall=left, evidence=ev, source="835",
                           hint=hint))
+        summary["rows"].append([ev["trace_tail"], d["paid_on"], d["payer"], d["grp"], ev["claims"], f"{left / 100:.2f}",
+                                "never_arrived" if ev.get("informational") else "short" if ev.get("short") else "not_posted"])
     _drop(conn, "ec_tt", "ec_ut", "ec_ck")
-    _set_meta(conn, UNPOSTED_KEY, summary)
-    conn.commit()
+    if save:
+        _set_meta(conn, UNPOSTED_KEY, summary)
+        conn.commit()
     return out
 
 
+def _funded_twins(conn: sqlite3.Connection, diffs: list[dict]) -> set[str]:
+    """The informational 835 payments (transaction keys) among these whose every paid claim (its claim id) another 835
+    paid too, for its amount within $1, from 30 days before to 90 days after: one that moved money (not BPR04 'NON', a
+    deposit above $0) and was not superseded. A plan's administrator and the plan itself report one payment twice."""
+    out: set[str] = set()
+    tks = sorted({d["tk"] for d in diffs})
+    if not tks:
+        return out
+    when = {d["tk"]: d["paid_on"] for d in diffs}
+    claims: dict[str, list] = defaultdict(list)
+    for part in _chunks(tks):
+        _temp(conn, "ec_ft2", ["tk TEXT PRIMARY KEY"], [(x,) for x in part])
+        for tk, pcn, paid in conn.execute("""SELECT transaction_key, patient_control_number, COALESCE(paid_cents, 0) FROM claims
+                                             WHERE transaction_key IN (SELECT tk FROM temp.ec_ft2)"""):
+            claims[tk].append((pcn, paid))
+    _drop(conn, "ec_ft2")
+    pcns = sorted({pcn for v in claims.values() for pcn, paid in v if pcn and paid > 0})
+    funded: dict[str, list] = defaultdict(list)
+    for part in _chunks(pcns):
+        _temp(conn, "ec_fp", ["pcn TEXT PRIMARY KEY"], [(x,) for x in part])
+        for pcn, paid, tk2, on in conn.execute("""SELECT c.patient_control_number, COALESCE(c.paid_cents, 0), t.transaction_key, t.payment_date
+                                                  FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
+                                                  WHERE c.patient_control_number IN (SELECT pcn FROM temp.ec_fp)
+                                                    AND COALESCE(t.superseded, 0) = 0 AND upper(COALESCE(t.payment_method, '')) <> 'NON'
+                                                    AND COALESCE(t.payment_amount_cents, 0) > 0"""):
+            funded[pcn].append((paid, tk2, on or ""))
+    _drop(conn, "ec_fp")
+    for tk, cl in claims.items():
+        lo, hi = _add(when.get(tk), -30) or "", _add(when.get(tk), 90) or ""
+        paid_claims = [(pcn, paid) for pcn, paid in cl if paid > 0]
+        if paid_claims and all(any(tk2 != tk and abs(p2 - paid) <= 100 and lo <= on <= hi for p2, tk2, on in funded.get(pcn or "", []))
+                               for pcn, paid in paid_claims):
+            out.add(tk)
+    return out
+
+
+def _posted_elsewhere(conn: sqlite3.Connection, diffs: list[dict], *, any_check: bool = False) -> set[str]:
+    """The 835 payments (transaction keys) among these whose every claim EMA posted, for its amount within $1, under
+    another check number no 835 carries, on the claim's own EMA claims (the map: no conflict, never the ASC's facility
+    claim), from 7 days before to 120 days after the 835's payment date. With `any_check`, a check an 835 carries counts
+    too (an informational remittance whose money came on the plan's own funded payment, which EMA posted)."""
+    out: set[str] = set()
+    tks = sorted({d["tk"] for d in diffs})
+    if not tks:
+        return out
+    when = {d["tk"]: d["paid_on"] for d in diffs}
+    claims: dict[str, list] = defaultdict(list)
+    for part in _chunks(tks):
+        _temp(conn, "ec_pe", ["tk TEXT PRIMARY KEY"], [(x,) for x in part])
+        for tk, pcn, paid in conn.execute("""SELECT c.transaction_key, c.patient_control_number, COALESCE(c.paid_cents, 0) FROM claims c
+                                             WHERE c.transaction_key IN (SELECT tk FROM temp.ec_pe)"""):
+            claims[tk].append((pcn, paid))
+    _drop(conn, "ec_pe")
+    bills = sorted({_bill(pcn) for v in claims.values() for pcn, _p in v if pcn})
+    links: dict[str, set] = defaultdict(set)
+    for part in _chunks(bills):
+        _temp(conn, "ec_peb", ["bill TEXT PRIMARY KEY"], [(b,) for b in part])
+        for b, lk in conn.execute("""SELECT bill, link FROM ema_link_map WHERE bill IN (SELECT bill FROM temp.ec_peb)
+                                     AND COALESCE(conflict, 0) = 0 AND COALESCE(facility, 0) = 0"""):
+            links[b].add(lk)
+    _drop(conn, "ec_peb")
+    pays: dict[int, list] = defaultdict(list)
+    lks = sorted({lk for v in links.values() for lk in v})
+    for part in _chunks(lks):
+        _temp(conn, "ec_pel", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for lk, posted, cents in conn.execute(f"""SELECT link, posted, SUM(COALESCE(ins_paid, 0)) FROM ema_line_payments
+                                                 WHERE link IN (SELECT link FROM temp.ec_pel) AND COALESCE(ins_paid, 0) <> 0
+                                                   {'' if any_check else 'AND COALESCE(in_835, 0) = 0'}
+                                                 GROUP BY link, posted, check_no"""):
+            pays[lk].append((posted, cents or 0))
+    _drop(conn, "ec_pel")
+    for tk, cl in claims.items():
+        paid_on = when.get(tk)
+        lo, hi = _add(paid_on, -7) or "", _add(paid_on, 120) or ""
+        ok = bool(cl)
+        for pcn, paid in cl:
+            if paid <= 0:
+                continue
+            got = sum(c for lk in links.get(_bill(pcn) or "", ()) for posted, c in pays.get(lk, []) if lo <= (posted or "") <= hi)
+            if abs(got - paid) > 100:
+                ok = False
+                break
+        if ok and any(paid > 0 for _p, paid in cl):
+            out.add(tk)
+    return out
+
+
+_SCI_CHECK = re.compile(r"^(\d)(?:\.(\d+))?E\+?(\d{1,2})$", re.I)
+
+
+def _sci_could_be(check: Any, trace: Any) -> bool:
+    """Whether a check number a spreadsheet wrote in scientific notation (9.00001E+11) could be this trace: an all-digit
+    trace of that many digits whose leading digits round to the ones shown."""
+    m = _SCI_CHECK.match(str(check or "").strip())
+    t = str(trace or "").strip().lstrip("0")
+    if not m or not t.isdigit():
+        return False
+    shown = m.group(1) + (m.group(2) or "")
+    if len(t) != int(m.group(3)) + 1 or len(shown) > len(t):
+        return False
+    k = len(shown)
+    lead = int(t[:k]) + (1 if len(t) > k and t[k] >= "5" else 0)
+    return lead == int(shown)
+
+
+def _damaged_could_hold(damaged: list[tuple], trace: Any, grp: Any, paid_on: Any, paid: int) -> bool:
+    """A check a spreadsheet damaged, first posted in the misnumbered window of this 835 (10 days before to 45 after its
+    payment), that could be it: its digits round to the damaged number, or (digits lost) the same payer group posted at
+    least the 835's amount under it."""
+    lo, hi = _add(paid_on, -MISNUMBER_AFTER) or "", _add(paid_on, MISNUMBER_BEFORE) or ""
+    for chk, g, posted, cents in damaged:
+        if not (lo <= (posted or "") <= hi):
+            continue
+        if _sci_could_be(chk, trace):
+            return True
+        if not _SCI_CHECK.match(str(chk or "").strip()) and g and g == grp and cents >= paid - MISNUMBER_CENTS:
+            return True
+    return False
+
+
 def unposted_csv(conn: sqlite3.Connection, *, today: str | None = None) -> Iterator[list]:
-    """/api/ema/unposted.csv: the 835 payments EMA has not posted (trace ending, date, payer, amount). No patient data."""
+    """/api/ema/unposted.csv: the 835 payments EMA has not posted (trace ending, date, payer, amount). No patient data.
+    Worked out on the whole store (nothing is written); on the dashboard's copy, the rows detection stored."""
     yield ["trace_ending", "payment_date", "payer", "payer_group", "claims", "amount", "kind"]
-    for p in unposted_remits(conn, today=today):
+    if not _full_store(conn):
+        for r in (_meta(conn, UNPOSTED_KEY, {}) or {}).get("rows") or []:
+            yield list(r)
+        return
+    for p in unposted_remits(conn, today=today, save=False):
         ev = p["evidence"]
         yield [ev.get("trace_tail"), ev.get("payment_date"), p["claim"].get("payer_name"), p["claim"].get("payer_group"),
                ev.get("claims"), f"{(p['expected_cents'] or 0) / 100:.2f}", "short" if ev.get("short") else "not_posted"]
@@ -959,14 +1198,12 @@ def claim_statuses(conn: sqlite3.Connection, *, claim_ids: Iterable[str] = (), l
     is claim-level and undated: it routes an item, it never closes one."""
     _prepare(conn)
     out: dict = {}
-    rank = {"ar": 2, "production": 1, "export": 0}
 
     def offer(key: Any, status: Any, source: str, as_of: Any, answered: bool | None = None) -> None:
         if key is None or status is None:
             return
         cur = out.get(key)
-        mine = (str(as_of or ""), rank[source])
-        if cur is None or mine > (str(cur["as_of"] or ""), rank[cur["source"]]):
+        if cur is None or _status_order(source, as_of) > _status_order(cur["source"], cur["as_of"]):
             out[key] = {"status": status, "class": status_class(status, answered), "source": source, "as_of": as_of}
     ids = sorted({str(x) for x in claim_ids if x})
     lks = sorted({int(x) for x in links if x is not None})
@@ -998,6 +1235,15 @@ def claim_statuses(conn: sqlite3.Connection, *, claim_ids: Iterable[str] = (), l
     return out
 
 
+_STATUS_RANK = {"ar": 2, "production": 1, "export": 0}
+
+
+def _status_order(source: Any, as_of: Any) -> tuple:
+    """Which status is newer: by the day of its as_of (an export's is a timestamp, a report's a date), the A/R first on a
+    tie, then Production, then the Claim & Claim Status export."""
+    return (str(as_of or "")[:10], _STATUS_RANK.get(source, -1))
+
+
 def _claim_id_of_links(conn: sqlite3.Connection, links: Iterable[int]) -> dict[int, str]:
     """Each claim number's claim id, from the A/R's pairs (the newest), else from the map."""
     out: dict[int, str] = {}
@@ -1027,6 +1273,20 @@ def _first_charges(conn: sqlite3.Connection, links: Iterable[int]) -> dict[int, 
     return out
 
 
+def _first_ins_paid(conn: sqlite3.Connection, links: Iterable[int]) -> dict[int, str]:
+    """Each EMA claim's first insurance payment posting (its lines' first_ins_paid)."""
+    out: dict[int, str] = {}
+    lks = sorted({x for x in links if x is not None})
+    for part in _chunks(lks):
+        _temp(conn, "ec_fip", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for lk, d in conn.execute("""SELECT link, MIN(first_ins_paid) FROM ema_lines WHERE link IN (SELECT link FROM temp.ec_fip)
+                                     AND first_ins_paid IS NOT NULL GROUP BY link"""):
+            if d:
+                out[lk] = str(d)[:10]
+    _drop(conn, "ec_fip")
+    return out
+
+
 def _bill_created(conn: sqlite3.Connection, claim_ids: Iterable[str]) -> dict[str, str]:
     out: dict[str, str] = {}
     if not _table(conn, "ema_rows"):
@@ -1046,20 +1306,21 @@ def _status_claims(conn: sqlite3.Connection, cls: str) -> dict[str, dict]:
     """Claims whose A/R rows or Production lines carry a status of this class, grouped by claim (the claim id when known,
     else 'link:<n>'), with their lines."""
     claims: dict[str, dict] = {}
-    for cid, lk, svc, cpt, amt, st, as_of, grp, kind, payer, fac in conn.execute(
+    for cid, lk, svc, cpt, amt, st, as_of, grp, kind, payer, fac, second in conn.execute(
             """SELECT claim_id, link, svc, cpt, exposure_cents, claim_status, as_of, payer_group, payer_kind,
                       CASE WHEN lower(coverage) LIKE 'secondary%' AND secondary_payer IS NOT NULL THEN secondary_payer ELSE primary_payer END,
-                      facility
+                      facility, lower(COALESCE(coverage, '')) LIKE 'secondary%'
                FROM ema_ar WHERE lower(party) LIKE 'insur%' AND status_class = ? AND (claim_id IS NOT NULL OR link IS NOT NULL)""", (cls,)):
         key = cid or f"link:{lk}"
         k = claims.setdefault(key, {"claim_id": cid, "links": set(), "lines": {}, "statuses": set(), "group": grp, "kind": kind,
-                                    "payer": payer, "facility": 0, "sources": set()})
+                                    "payer": payer, "facility": 0, "sources": set(), "secondary": False})
         if lk:
             k["links"].add(lk)
         k["lines"][(cpt, svc)] = max(k["lines"].get((cpt, svc), 0), amt or 0)
         k["statuses"].add(st)
         k["facility"] = max(k["facility"], fac or 0)
         k["sources"].add("ar")
+        k["secondary"] = k["secondary"] or bool(second)       # the claim to the second payer: what the first payer left
     for lk, svc, cpt, bal, chg, st, grp, kind, payer, fac, cid in conn.execute(
             """SELECT l.link, l.svc, l.cpt, l.balance, l.charges, l.status, l.payer_group, l.payer_kind, l.primary_payer,
                       COALESCE(l.facility, 0), l.claim_id
@@ -1069,7 +1330,7 @@ def _status_claims(conn: sqlite3.Connection, cls: str) -> dict[str, dict]:
             # a claim the A/R also lists under its id is the same claim
             key = next((k for k, v in claims.items() if lk in v["links"]), key)
         k = claims.setdefault(key, {"claim_id": cid, "links": set(), "lines": {}, "statuses": set(), "group": grp, "kind": kind,
-                                    "payer": payer, "facility": 0, "sources": set()})
+                                    "payer": payer, "facility": 0, "sources": set(), "secondary": False})
         k["links"].add(lk)
         if (cpt, svc) not in k["lines"]:
             k["lines"][(cpt, svc)] = bal if bal and bal > 0 else (chg or 0)
@@ -1104,6 +1365,24 @@ def _priced(rate: Callable | None, grp: str | None, lines: Iterable[tuple]) -> i
     return got if any_ else None
 
 
+def _paid_elsewhere_all(k: dict, paid_other: dict[tuple, dict]) -> bool:
+    """Every line of a claim (_status_claims) was paid by its own payer on another of EMA's claims for the same patient,
+    date and code."""
+    keys = list(k["lines"])
+    return bool(keys) and all(any((paid_other.get((lk, svc, cpt)) or {}).get("same") for lk in k["links"]) for (cpt, svc) in keys)
+
+
+def _paid_elsewhere_other(lines: Iterable[tuple], paid_other: dict[tuple, dict]) -> dict | None:
+    """What other payers paid on another of EMA's claims for these lines (link, date, code), for a hint."""
+    cents, payers = 0, set()
+    for key in lines:
+        got = paid_other.get(tuple(key)) or {}
+        if (got.get("cents") or 0) > (got.get("same") or 0):
+            cents += got["cents"] - (got.get("same") or 0)
+            payers.update(got.get("payers") or [])
+    return {"cents": cents, "payers": sorted(payers)} if cents > 0 else None
+
+
 def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callable | None = None,
              skip_claim_ids: Iterable[str] = ()) -> list[dict]:
     """C3b: claims that never left EMA. A claim (A/R rows or Production lines) whose newest status, across the reports,
@@ -1121,6 +1400,9 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
     statuses = claim_statuses(conn, claim_ids=[k["claim_id"] for k in claims.values() if k["claim_id"]],
                               links=[lk for k in claims.values() for lk in k["links"]])
     first_charge = _first_charges(conn, [lk for k in claims.values() for lk in k["links"]])
+    first_paid = _first_ins_paid(conn, [lk for k in claims.values() if k.get("secondary") for lk in k["links"]])
+    want = {(lk, svc, cpt): k["group"] for k in claims.values() for lk in k["links"] for (cpt, svc) in k["lines"]}
+    paid_other = _paid_on_another_claim(conn, list(want), group_of=want)
     made = _bill_created(conn, [k["claim_id"] for k in claims.values() if k["claim_id"]])
     out = []
     for key, k in sorted(claims.items()):
@@ -1128,7 +1410,8 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
             continue
         st = statuses.get(k["claim_id"]) if k["claim_id"] else None
         if st is None:
-            st = max((statuses[lk] for lk in k["links"] if lk in statuses), key=lambda s: str(s["as_of"] or ""), default=None)
+            st = max((statuses[lk] for lk in k["links"] if lk in statuses), key=lambda s: _status_order(s["source"], s["as_of"]),
+                     default=None)
         if st is None or st["class"] != "not_sent":
             continue                    # a newer report shows the claim moved on
         as_of = st["as_of"] or t
@@ -1140,18 +1423,27 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
         fc = min((first_charge[lk] for lk in k["links"] if lk in first_charge), default=None)
         clock, clock_basis = ((fc, "the first charge posting") if fc else (made.get(k["claim_id"] or ""), "the date EMA created the bill")
                               if made.get(k["claim_id"] or "") else (days_[0], "the date of service"))
+        if k.get("secondary"):
+            # the claim to the second payer could only go once the first payer had paid: its wait starts then
+            fp = min((first_paid[lk] for lk in k["links"] if lk in first_paid), default=None)
+            if fp:
+                clock, clock_basis = fp, "the first payer's payment, after which the claim to the second payer could go"
         word = (st["status"] or "").strip()
         need = INVALID_DAYS if word.lower() == "invalid" else NOT_SENT_DAYS
         age = _days(clock, as_of)
         if age is None or age < need:
             continue
         grp, kind = k["group"] or "Unknown", k["kind"] or "other"
+        if _paid_elsewhere_all(k, paid_other):
+            continue                    # every line was paid on another of EMA's claims: billed and paid there, not stuck here
         file_by, limit = _filing(grp, kind, days_[0])
         lines = sorted(k["lines"].items(), key=lambda kv: (kv[0][1] or "", kv[0][0] or ""))
         codes = sorted({c for (c, _s) in k["lines"] if c})
         label = ", ".join(codes[:5]) + ("…" if len(codes) > 5 else "")
         balance = sum(v for v in k["lines"].values() if v)
         expected = _priced(rate, grp, [(c, s, 1) for (c, s) in k["lines"]])
+        if expected and balance and expected > balance:
+            expected = balance          # never worth more than the claim's open balance (a second payer's claim: the share left)
         age_now = _days(clock, t) or age
         top = max(lines, key=lambda kv: kv[1] or 0)[0][0] if lines else None
         lk0 = min(k["links"]) if k["links"] else None
@@ -1168,7 +1460,9 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
             evidence={"codes": codes, "lines": [[c, s, v] for (c, s), v in lines], "ema_status": word,
                       "status_source": st["source"], "status_as_of": st["as_of"], "since": clock, "since_basis": clock_basis,
                       "days_waiting": age_now, "balance_cents": balance, "ema_links": sorted(k["links"]), "not_sent": True},
-            hint=f"EMA shows the claim as {word} since {clock}: send it, or fix what holds it",
+            hint=(_paid_elsewhere_note(_paid_elsewhere_other([(lk, svc, cpt) for lk in k["links"] for (cpt, svc) in k["lines"]],
+                                                             paid_other))
+                  or f"EMA shows the claim as {word} since {clock}: send it, or fix what holds it"),
             link=lk0, heir_keys=[("EMA_OPEN_CLAIM", f"link:{lk}") for lk in sorted(k["links"])] if k["claim_id"] else []))
     return out
 
@@ -1192,7 +1486,8 @@ def rejected_claims(conn: sqlite3.Connection, *, today: str | None = None, rate:
             continue
         st = statuses.get(k["claim_id"]) if k["claim_id"] else None
         if st is None:
-            st = max((statuses[lk] for lk in k["links"] if lk in statuses), key=lambda s: str(s["as_of"] or ""), default=None)
+            st = max((statuses[lk] for lk in k["links"] if lk in statuses), key=lambda s: _status_order(s["source"], s["as_of"]),
+                     default=None)
         if st is None or st["class"] != "rejected" or (_days(st["as_of"] or t, t) or 0) > PRODUCTION_FRESH_DAYS:
             continue
         days_ = sorted({svc for (_c, svc) in k["lines"] if svc})
@@ -1203,6 +1498,9 @@ def rejected_claims(conn: sqlite3.Connection, *, today: str | None = None, rate:
         codes = sorted({c for (c, _s) in k["lines"] if c})
         label = ", ".join(codes[:5]) + ("…" if len(codes) > 5 else "")
         expected = _priced(rate, grp, [(c, s, 1) for (c, s) in k["lines"]])
+        balance = sum(v for v in k["lines"].values() if v)
+        if expected and balance and expected > balance:
+            expected = balance          # never worth more than the claim's open balance (a second payer's claim: the share left)
         soon = bool(file_by) and file_by <= (_add(t, 30) or "")
         title = f"Rejected before reaching {grp} (EMA: {st['status']}): {label}"
         if k["facility"]:
@@ -1410,6 +1708,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
     bills835 = _bills_with_835(conn, {c["bill"] for c in cands if c["bill"]})
     keys = {(ln[4], ln[0], ln[1]) for c in cands for ln in lines[c["link"]] if ln[4] is not None}
     seen835 = _name_day_codes_835(conn, keys)
+    want = {(c["link"], ln[0], ln[1]): c["group"] for c in cands for ln in lines[c["link"]]}
+    paid_other = _paid_on_another_claim(conn, list(want), group_of=want)
     cid_of = _claim_id_of_links(conn, [c["link"] for c in cands])
     out = []
     for c in cands:
@@ -1419,6 +1719,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
             continue
         if any((ln[4], ln[0], ln[1]) in seen835 for ln in ls if ln[4] is not None):
             continue
+        if ls and all((paid_other.get((lk, ln[0], ln[1])) or {}).get("same") for ln in ls):
+            continue                    # its payer paid every line on another of EMA's claims: answered there
         cid = cid_of.get(lk)
         if cid and cid in skip:
             continue
@@ -1428,6 +1730,22 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
         file_by, limit = _filing(grp, kind, c["svc"])
         waited = _days(c["fc"], prod)
         expected = _priced(rate, grp, [(ln[1], ln[0], ln[3]) for ln in ls if (ln[2] or 0) > 0])
+        # charged on time: past the first-filing limit the payer still owes a claim it has, and most take proof of timely
+        # filing for one they have no record of (Medicare's year from the date of service is firm). As the weekly exports'
+        # path does, the date runs the payer's appeal window past that limit, so the item never expires on it (PM case C45)
+        rule_f = filing_rule(grp, kind)
+        early = _add(c["svc"], rule_f["earliest"]) if rule_f.get("earliest") else None
+        deadline, legal, basis = file_by, None, f"If the payer has no record of the claim, it must reach the payer by this date: {limit}"
+        if kind != "medicare" and file_by and c["fc"] and c["fc"] <= (early or file_by):
+            ap = appeal_rule(grp, kind)
+            start = max(file_by, c["due"] or file_by)
+            deadline = _add(start, ap["days"])
+            legal = _legal_deadline(start, ap)
+            by = f"by {early} where you can, and by {file_by} at the latest" if early else f"by {file_by}"
+            basis = (f"Charged on time ({c['fc']}). If the payer has no record of it, send it again {by}, the first-filing limit "
+                     f"({limit}); after that, most payers take proof of timely filing (EMA's submission date, or the clearinghouse's "
+                     f"acceptance report). The date shown runs the payer's appeal window past that limit ({ap['label']}), not "
+                     "confirmed for a claim the payer never answered")
         soon = bool(file_by) and file_by <= (_add(t, 30) or "")
         title = f"Charged {c['fc']}, no answer from {grp} in {waited} days: {label}"
         if c["facility"]:
@@ -1438,13 +1756,13 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
             claim={"patient_control_number": cid, "payer_name": c["payer"], "payer_group": grp, "payer_kind": kind,
                    "service_date": c["svc"], "year": (c["svc"] or "")[:4] or None,
                    "procedure_code": max(ls, key=lambda ln: ln[2] or 0)[1] if ls else None, "charge_cents": c["charges"] or None},
-            expected=expected, shortfall=expected, deadline=file_by,
-            basis=f"If the payer has no record of the claim, it must reach the payer by this date: {limit}",
+            expected=expected, shortfall=expected, deadline=deadline, basis=basis, legal_deadline=legal,
             evidence={"codes": codes, "lines": [[ln[1], ln[0], ln[2]] for ln in ls], "charged": c["fc"], "answer_due": c["due"],
                       "days_waiting": waited, "production_as_of": prod, "turnaround_days": c["p95"],
                       "turnaround": turnaround_text(grp, c["p95"]) + " of the charge being posted",
                       "balance_cents": c["balance"], "source": "production", "ema_link": lk},
-            hint=("No payment, $0 answer or reason code is posted in EMA for this claim: look it up on the payer's portal "
+            hint=(_paid_elsewhere_note(_paid_elsewhere_other([(lk, ln[0], ln[1]) for ln in ls], paid_other)) or
+                  "No payment, $0 answer or reason code is posted in EMA for this claim: look it up on the payer's portal "
                   "before sending it again"),
             link=lk, heir_keys=[("EMA_OPEN_CLAIM", f"link:{lk}")] if cid else []))
     return out
@@ -1461,6 +1779,80 @@ def _bills_with_835(conn: sqlite3.Connection, bills: Iterable[str]) -> set[str]:
             got.add(b)
     _drop(conn, "ec_b")
     return got
+
+
+def _paid_on_other_links(conn: sqlite3.Connection, keys: set[tuple]) -> dict[tuple, dict[int, int]]:
+    """{(name key, date, code): {EMA claim number: insurance money}} for these keys, on claims that are not the ASC's
+    facility claims: what each of EMA's claims for that patient, date and code was paid."""
+    out: dict[tuple, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    nks = sorted({k[0] for k in keys if k[0] is not None})
+    if not nks:
+        return out
+    for part in _chunks(nks):
+        _temp(conn, "ec_pk", ["name_key INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for nk, svc, cpt, lk, cents in conn.execute(
+                """SELECT y.name_key, y.svc, y.cpt, y.link, SUM(COALESCE(y.ins_paid, 0)) FROM ema_line_payments y
+                   LEFT JOIN ema_link_map m ON m.link = y.link
+                   WHERE y.name_key IN (SELECT name_key FROM temp.ec_pk) AND COALESCE(m.facility, 0) = 0
+                   GROUP BY y.name_key, y.svc, y.cpt, y.link"""):
+            if (nk, svc, cpt) in keys and cents:
+                out[(nk, svc, cpt)][lk] += cents
+    _drop(conn, "ec_pk")
+    return out
+
+
+def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple], group_of: dict | None = None) -> dict[tuple, dict]:
+    """For EMA lines (link, date, code): what insurance paid on ANOTHER of EMA's claims for the same patient, date and code
+    (never the ASC's facility claim): a resubmission, or the same service billed twice. Returns {(link, date, code):
+    {'cents': all of it, 'same': the part paid by that line's payer group (group_of), 'payers': the payer groups}}."""
+    want = sorted({tuple(x[:3]) for x in lines if x and x[0] is not None})
+    nk_of: dict[tuple, int] = {}
+    for part in _chunks(want):
+        _temp(conn, "ec_poc", ["link INTEGER", "svc TEXT", "cpt TEXT"], part, ["link, svc, cpt"])
+        for lk, svc, cpt, nk in conn.execute("""SELECT l.link, l.svc, l.cpt, l.name_key FROM temp.ec_poc x
+                                                JOIN ema_lines l ON l.link = x.link AND l.svc = x.svc AND l.cpt = x.cpt
+                                                WHERE l.name_key IS NOT NULL"""):
+            nk_of[(lk, svc, cpt)] = nk
+    _drop(conn, "ec_poc")
+    if not nk_of:
+        return {}
+    keys = {(nk, k[1], k[2]) for k, nk in nk_of.items()}
+    rows: dict[tuple, list] = defaultdict(list)
+    for part in _chunks(sorted({k[0] for k in keys})):
+        _temp(conn, "ec_pk", ["name_key INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for nk, svc, cpt, lk, grp, cents in conn.execute(
+                """SELECT y.name_key, y.svc, y.cpt, y.link, y.payer_group, SUM(COALESCE(y.ins_paid, 0)) FROM ema_line_payments y
+                   LEFT JOIN ema_link_map m ON m.link = y.link
+                   WHERE y.name_key IN (SELECT name_key FROM temp.ec_pk) AND COALESCE(m.facility, 0) = 0
+                   GROUP BY y.name_key, y.svc, y.cpt, y.link, y.payer_group"""):
+            if (nk, svc, cpt) in keys and (cents or 0) > 0:
+                rows[(nk, svc, cpt)].append((lk, grp, cents))
+        _drop(conn, "ec_pk")
+    out: dict[tuple, dict] = {}
+    for k, nk in nk_of.items():
+        grp = (group_of or {}).get(k)
+        tot = same = 0
+        payers: set = set()
+        for lk2, g2, v in rows.get((nk, k[1], k[2]), []):
+            if lk2 == k[0]:
+                continue
+            tot += v
+            if grp and grp != "Unknown" and _same_payer(grp, g2):
+                same += v
+            if g2:
+                payers.add(g2)
+        if tot > 0:
+            out[k] = {"cents": tot, "same": same, "payers": sorted(payers)}
+    return out
+
+
+def _paid_elsewhere_note(got: dict | None) -> str | None:
+    """The hint for a claim whose service was paid on another of EMA's claims by another payer (or one EMA does not name)."""
+    if not got or not got.get("cents"):
+        return None
+    who = f" by {got['payers'][0]}" if len(got.get("payers") or []) == 1 else ""
+    return (f"EMA shows {_usd(got['cents'])} paid{who} on another of its claims for this patient, date and code: check whether "
+            "this claim is still owed")
 
 
 def _name_day_codes_835(conn: sqlite3.Connection, keys: set[tuple]) -> set[tuple]:
@@ -1612,21 +2004,27 @@ def _outcome_chunk(conn, part, code_once, fr, lags, policy, has_handling) -> dic
     # the items' own remittances, as the check match compares them
     tks = sorted({f.get("transaction_key") for f in part if f.get("transaction_key")})
     own: dict[str, str] = {}
+    own_payer: dict[str, str] = {}
     for tpart in _chunks(tks):
         _temp(conn, "ec_tk", ["tk TEXT PRIMARY KEY"], [(t,) for t in tpart])
-        for tk, trace in conn.execute("SELECT transaction_key, trace_number FROM transactions WHERE transaction_key IN (SELECT tk FROM temp.ec_tk)"):
+        for tk, trace, payer in conn.execute("""SELECT transaction_key, trace_number, payer_name FROM transactions
+                                                WHERE transaction_key IN (SELECT tk FROM temp.ec_tk)"""):
             own[tk] = el.check_key(trace)
+            own_payer[tk] = payer
     lines_wanted = {(ln["link"], ln["svc"], ln["cpt"]) for v in cand.values() for _p, ln in v}
     _temp(conn, "ec_lw", ["link INTEGER", "svc TEXT", "cpt TEXT"], sorted(lines_wanted), ["link, svc, cpt"])
     pays: dict[tuple, list] = defaultdict(list)
-    for (lk, svc, cpt, chk, posted, payer, grp, cents, in835, match, cause, tdate, pdate) in conn.execute(
+    for (lk, svc, cpt, chk, posted, payer, grp, cents, in835, match, cause, tdate, pdate, pair, damaged) in conn.execute(
             """SELECT y.link, y.svc, y.cpt, y.check_no, y.posted, y.payer, y.payer_group, y.ins_paid, y.in_835,
-                      c.match, c.cause, c.trace_payment_date, t2.payment_date
+                      c.match, c.cause, c.trace_payment_date, t2.payment_date, c.pair_trace, c.damaged
                FROM temp.ec_lw w JOIN ema_line_payments y ON y.link = w.link AND y.svc = w.svc AND y.cpt = w.cpt
                LEFT JOIN ema_checks c ON c.check_no = y.check_no AND c.payer = y.payer
                LEFT JOIN transactions t2 ON t2.transaction_key = c.pair_trace"""):
+        if damaged and cause != "misnumbered":
+            cause = "damaged"           # whatever C1 made of it: a number a spreadsheet changed is most likely an 835's
         pays[(lk, svc, cpt)].append({"check": chk, "ckey": el.check_key(chk), "posted": posted, "payer": payer, "group": grp,
                                      "cents": cents or 0, "in_835": in835, "match": match, "cause": cause,
+                                     "pair": pair if cause == "misnumbered" else None,
                                      "date_835": tdate if match in ("exact", "loose") else pdate if cause == "misnumbered" else None})
     reasons: dict[tuple, list] = defaultdict(list)
     for (lk, svc, cpt, grp, code, cls, payer, contr, nonc, first, last) in conn.execute(
@@ -1639,14 +2037,15 @@ def _outcome_chunk(conn, part, code_once, fr, lags, policy, has_handling) -> dic
     lks = sorted({f["line_key"] for f in part if f.get("line_key")})
     if has_handling and lks:
         _temp(conn, "ec_lkh", ["lk TEXT PRIMARY KEY"], [(x,) for x in lks])
-        for lk_, carc in conn.execute("""SELECT line_key, carc FROM line_handling WHERE line_key IN (SELECT lk FROM temp.ec_lkh)
-                                         AND upper(COALESCE(adjustment_status, '')) = 'WRITE_OFF'"""):
-            handled[lk_].append(_carc_key(carc))
+        for lk_, carc, status in conn.execute("""SELECT line_key, carc, upper(COALESCE(adjustment_status, '')) FROM line_handling
+                                                 WHERE line_key IN (SELECT lk FROM temp.ec_lkh)"""):
+            handled[lk_].append(_carc_key(carc) + (status,))
     _drop(conn, "ec_ft", "ec_tk", "ec_lw", "ec_lkh")
     out = {}
+    same = _payer_matcher(conn, own_payer)
     for f in part:
         out[f["finding_id"]] = _outcome_of(f, targets[f["finding_id"]], cand, mapped, own, pays, reasons, handled, code_once, fr,
-                                            lags, policy)
+                                            lags, policy, same=same)
     # E16: patient money after the denial is the patient's share only when no later remittance moved it there itself
     moved = [f for f in part if out[f["finding_id"]].get("outcome") == "patient" and f.get("signal") != "EMA_DENIED"]
     if moved:
@@ -1654,7 +2053,7 @@ def _outcome_chunk(conn, part, code_once, fr, lags, policy, has_handling) -> dic
         for f in moved:
             if f["finding_id"] not in stand:
                 out[f["finding_id"]] = _outcome_of(f, targets[f["finding_id"]], cand, mapped, own, pays, reasons, handled, code_once,
-                                                    fr, lags, policy, no_patient=True)
+                                                    fr, lags, policy, no_patient=True, same=same)
     return out
 
 
@@ -1684,8 +2083,10 @@ def _moved_stands(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
     return keep
 
 
-def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr, lags, policy, no_patient: bool = False) -> dict:
+def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr, lags, policy, no_patient: bool = False,
+                same: Callable | None = None) -> dict:
     fid = f["finding_id"]
+    same = same or (lambda group, f_: _same_payer(group, f_.get("payer_group")) if f_.get("payer_group") else False)
     ema_item = f.get("signal") == "EMA_DENIED"
     bill = _bill(f.get("patient_control_number"))
     res: dict = {"link": None, "bill": bill, "as_of": None, "covered": False, "facility": 0, "shared_line": False,
@@ -1719,7 +2120,8 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     ln0 = chosen[0][1]
     res.update(link=ln0["link"], as_of=max(ln["as_of"] or "" for _k, ln in chosen) or None,
                facility=max(ln["facility"] or 0 for _k, ln in chosen), status=ln0["status"], status_class=ln0["status_class"],
-               action=ln0["action"], balance=sum(ln["balance"] or 0 for _k, ln in chosen))
+               action=ln0["action"], balance=sum(ln["balance"] or 0 for _k, ln in chosen),
+               charges=sum(ln["charges"] or 0 for _k, ln in chosen))
     if bill is None:
         res["bill"] = ln0["bill"]
     # the same code twice on the claim's date: EMA's figures are by claim, code and date, so they are not this line's own
@@ -1732,9 +2134,9 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         except Exception:       # noqa: BLE001  (a rule that cannot tell leaves the line as its own)
             once = True
         if not once:
+            # the line's figures are the code's on that date, not this line's own: the payments are still read (paid_in_ema
+            # closes every item of the code together when they cover all of them), its outcome stays 'shared_line'
             res["shared_line"] = True
-            res["outcome"] = "shared_line"
-            return res
     grp = f.get("payer_group")
     own_carc = _carc_key(f.get("carc"))[1] if f.get("carc") else None
     thr = _threshold(f)
@@ -1746,49 +2148,93 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     any_after = False
     paid_before_rows: list = []
     anchors = []
+    takeback = 0
+    own_tk = f.get("transaction_key")
+    own_paid = int(f.get("paid_cents") or 0)
     for _k, ln in chosen:
         key = (ln["link"], ln["svc"], ln["cpt"])
         prows = pays.get(key, [])
-        mine = [p["posted"] for p in prows if own_ck and p["ckey"] == own_ck]
+
+        def is_own(p: dict) -> bool:
+            # the item's own remittance: its trace, or another number C1 paired with that trace (EMA keyed it wrong)
+            return bool(own_ck and p["ckey"] == own_ck) or bool(own_tk and p.get("pair") == own_tk)
+        mine = [p["posted"] for p in prows if is_own(p)]
         if ema_item:
-            anchor, basis = ln["denial_first_posted"] or _ev(f).get("first_denial_posted") or f.get("payment_date"), "own_posting"
+            anchor, basis = _ev(f).get("first_denial_posted") or ln["denial_first_posted"] or f.get("payment_date"), "own_posting"
         elif mine:
             anchor, basis = min(mine), "own_posting"
         else:
             anchor, basis = _add(f.get("payment_date"), _lag(lags, grp, "p50")), "remit_plus_lag"
         anchors.append((anchor, basis))
         remit_day = f.get("payment_date") or anchor
-        for p in prows:
-            if own_ck and p["ckey"] == own_ck:
+        # with no posting of its own trace, the item's own payment may sit under a number EMA mistyped (or left out): an
+        # EMA-only payment of exactly its own paid amount, posted within the group's usual delay of the remittance, is
+        # taken for it, never for a later payment (it would close an underpayment with its own money)
+        prows = sorted(prows, key=lambda q: (q["posted"] or "", q["cents"] < 0, q["check"] or ""))
+        own_guess = None
+        if not mine and not ema_item and own_paid > 0 and f.get("payment_date"):
+            last = _add(f.get("payment_date"), _lag(lags, grp, "p95")) or ""
+            own_guess = next((i for i, p in enumerate(prows)
+                              if p["cents"] == own_paid and f["payment_date"] <= (p["posted"] or "") <= last
+                              and not (p["in_835"] or p["match"] in ("exact", "loose") or p["cause"] in ("misnumbered", "damaged"))),
+                             None)
+            if own_guess is not None:
+                res["own_by_amount"] = True
+        after_pos = {"835": 0, "same": 0, "other": 0}         # positive payments after the anchor not yet taken back
+        for i, p in enumerate(prows):
+            if i == own_guess:
+                continue
+            if is_own(p):
+                if p["cents"] < 0:
+                    takeback += -p["cents"]         # the item's own remittance took back an earlier payment
                 continue
             if not p["cents"]:
                 continue
             sep = p["cause"] == "separate_payee" and not (ln["facility"] or 0)
             if sep:
                 continue
-            via835 = bool(p["in_835"]) or p["match"] in ("exact", "loose") or p["cause"] == "misnumbered"
+            # a check a spreadsheet damaged is most likely an 835's: like a misnumbered one, it never closes an item
+            via835 = bool(p["in_835"]) or p["match"] in ("exact", "loose") or p["cause"] in ("misnumbered", "damaged")
             if via835:
                 when = p["date_835"] or p["posted"]
                 after = bool(when) and bool(remit_day) and when > remit_day
             else:
                 after = bool(anchor) and (p["posted"] or "") >= anchor
+                if ema_item and after and (p["posted"] or "") == anchor and not same(p["group"], f):
+                    # another payer's payment posted the day of an EMA-only denial came before it (C5's own rule): the first
+                    # payer's payment on the posting that also carried the second payer's denial never pays that denial
+                    after = False
             row = {"check": p["check"], "posted": p["posted"], "payer": p["payer"], "group": p["group"], "cents": p["cents"],
-                   "kind": "835" if via835 else "ema", "same": _same_payer(p["group"], grp) if grp else False,
-                   "link": ln["link"], "date_835": p["date_835"] if via835 else None}
+                   "kind": "835" if via835 else "ema", "same": same(p["group"], f),
+                   "link": ln["link"], "date_835": p["date_835"] if via835 else None, "svc": ln["svc"], "cpt": ln["cpt"]}
+            pool = "835" if via835 else ("same" if row["same"] else "other")
+            cents = p["cents"]
+            if after and cents < 0:
+                # a takeback after the anchor cancels a later payment first; the rest cancels one made before the item
+                back = min(-cents, after_pos[pool])
+                after_pos[pool] -= back
+                takeback += -cents - back
+                cents = -back
+                if not cents:
+                    continue
+                row = dict(row, cents=cents)
             if after:
                 any_after = True
                 res["payments"].append(row)
+                if cents > 0:
+                    after_pos[pool] += cents
                 if via835:
-                    res["paid_after_835"] += p["cents"]
+                    res["paid_after_835"] += cents
                 else:
                     after_ema.append(row)
                     if row["same"]:
-                        res["paid_after_same"] += p["cents"]
+                        res["paid_after_same"] += cents
                     else:
-                        res["paid_after_other"] += p["cents"]
+                        res["paid_after_other"] += cents
             else:
-                res["paid_before"] += p["cents"]
-                paid_before_rows.append(row)
+                res["paid_before"] += cents
+                if cents > 0:
+                    paid_before_rows.append(row)
         for z in reasons.get(key, []):
             if z["grp"] in ("", "PR"):
                 continue
@@ -1804,6 +2250,16 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
                 others_later = True
         res["patient_after"] += ln["pat_after_denial"] or 0
     res["anchor"], res["anchor_basis"] = anchors[0] if anchors else (None, None)
+    # what was paid before the item and still stands: takebacks (by the item's own remittance, or later) net it out
+    res["taken_back"] = takeback
+    res["paid_before"] = max(0, res["paid_before"] - takeback)
+    if ema_item and any("balance left" in str(b) for b in _ev(f).get("expected_basis") or []):
+        # an EMA-only denial valued at the balance the first payer left (C5, E17): that payer's payment is already taken
+        # off the item's value, so it is the share the second payer was asked for, never a payment "before" this denial
+        res["first_payer_paid"] = res["paid_before"]
+        res["paid_before"] = 0
+    if not res["paid_before"]:
+        paid_before_rows = []
     after_ema.sort(key=lambda r: (r["posted"] or "", r["check"] or ""))
     if after_ema:
         a = after_ema[0]
@@ -1829,8 +2285,11 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         # posted to it later (a reversal and a new write-off included) is a person's doing
         last_wo = max((z["last"] or z["first"] or "" for z in counted if z["cents"] or z["contr"] or z["nonc"]), default=None)
         res["written_off_when"] = "at_posting" if (first_wo and anchor0 and first_wo <= anchor0 and (last_wo or "") <= anchor0) else "later"
-        if res["written_off_when"] == "at_posting" and _has_handled(handled.get(f.get("line_key") or "", []), counted):
+        hrows = handled.get(f.get("line_key") or "", [])
+        if res["written_off_when"] == "at_posting" and _has_handled(hrows, counted):
             res["evidence_level"] = "rule_proven"
+        elif res["written_off_when"] == "at_posting" and _rule_ignored(hrows, counted):
+            res["evidence_level"] = "rule_ignored"      # the export shows EMA's rule ignored it: not an automatic write-off
         elif res["written_off_when"] == "at_posting":
             res["evidence_level"] = "posting_day"
     # the outcome (strict reading: a write-off at posting is never counted as work)
@@ -1862,7 +2321,7 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
             out = "lost_to_timely_filing"
         elif at and pending:
             out = "written_off_while_pending"
-        elif at and denial_type and nothing_after:
+        elif at and denial_type and nothing_after and res.get("evidence_level") != "rule_ignored":
             out = "auto_written_off"
         elif at:
             out = "written_off_at_posting" if denial_type or res["written_off_kind"] == "noncontractual" else "contractual_at_posting"
@@ -1887,6 +2346,13 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         out, on = "closed_unexplained", ln0.get("last_posted")
     else:
         out = "open"
+    if res["shared_line"]:
+        # EMA's line holds this code more than once: no outcome of this line's own (its payments are read together, by
+        # paid_in_ema); what was paid or written off before is the code's, perhaps another line's, never this line's proof
+        res["outcome"], res["outcome_on"] = "shared_line", None
+        res["paid_before"], res["paid_before_first"] = 0, None
+        res.update(written_off=0, written_off_kind=None, written_off_when=None, written_off_on=None, evidence_level=None, pattern=None)
+        return res
     if out in WRITE_OFF_OUTCOMES:
         # the reason that took the most; a line closed by the routine reduction alone is named by that reason (CO-45)
         top = max(counted, key=lambda z: z["cents"], default=None) or max(routine_co, key=lambda z: z["contr"] or 0, default=None)
@@ -1897,16 +2363,79 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     return res
 
 
-def _has_handled(rows: list[tuple], counted: list[dict]) -> bool:
-    """EMA's ERA-lines export recorded its posting rule writing off one of these reasons (handling WRITE_OFF)."""
+EQUIV_KEY = "ema:payer_equivalence"
+EQUIV_MIN_CHECKS, EQUIV_MIN_SHARE = 3, 0.05
+
+
+def learn_payer_equivalence(conn: sqlite3.Connection) -> dict:
+    """Which EMA payer groups are the same payer as each 835 payer, learned from the checks EMA posted under a number that
+    is exactly an 835 trace of that payer (the same money): {835 payer name: [EMA payer groups]}. A group counts when at
+    least 3 such checks and 5% of the payer's matched checks carry it (one check keyed under the wrong payer does not).
+    The two vocabularies name some payers differently (a TPA, a payer's Medicare Advantage plan), so a payment by the
+    item's own payer is not read as another payer's. Kept in meta ema:payer_equivalence; classify_checks refreshes it."""
+    out: dict[str, list] = {}
+    if not _table(conn, "transactions"):
+        return out
+    per: dict[str, Counter] = defaultdict(Counter)
+    for name, grp, n in conn.execute("""SELECT t.payer_name, c.payer_group, COUNT(*) FROM ema_checks c
+                                        JOIN transactions t ON t.transaction_key = c.trace_key
+                                        WHERE c.match = 'exact' AND c.payer_group IS NOT NULL AND t.payer_name IS NOT NULL
+                                        GROUP BY 1, 2"""):
+        per[name][grp] += n
+    for name, groups in per.items():
+        total = sum(groups.values())
+        keep = sorted(g for g, n in groups.items() if n >= EQUIV_MIN_CHECKS and n >= EQUIV_MIN_SHARE * total)
+        if keep:
+            out[name] = keep
+    _set_meta(conn, EQUIV_KEY, out)
+    conn.commit()
+    return out
+
+
+def _payer_matcher(conn: sqlite3.Connection, own_payer: dict) -> Callable[[Any, dict], bool]:
+    """same(EMA payer group, item): the item's own payer, by the group names (_same_payer) or by the EMA groups seen paying
+    the item's 835 payer's own traces (learn_payer_equivalence)."""
+    equiv = {k: set(v) for k, v in (_meta(conn, EQUIV_KEY, {}) or {}).items() if isinstance(v, list)}
+
+    def same(group: Any, f: dict) -> bool:
+        if not group:
+            return False
+        if f.get("payer_group") and _same_payer(group, f.get("payer_group")):
+            return True
+        name = own_payer.get(f.get("transaction_key") or "") or f.get("payer_name")
+        return bool(name) and group in equiv.get(name, ())
+    return same
+
+
+def _handling_for(rows: list[tuple], counted: list[dict]) -> list[str]:
+    """What EMA's ERA-lines export recorded its posting rule doing with these reasons: the handling of each matching row
+    (WRITE_OFF, IGNORE, TRANSFER_RESPONSIBILITY ...)."""
     if not rows:
-        return False
+        return []
     want = {(z["grp"], z["code"]) for z in counted if z["cents"] > 0}
     codes = {c for _g, c in want}
-    return any((g, c) in want or (not g and c in codes) for g, c in rows)
+    return [st for g, c, st in rows if (g, c) in want or (not g and c in codes)]
+
+
+def _has_handled(rows: list[tuple], counted: list[dict]) -> bool:
+    """EMA's ERA-lines export recorded its posting rule writing off one of these reasons (handling WRITE_OFF)."""
+    return "WRITE_OFF" in _handling_for(rows, counted)
+
+
+def _rule_ignored(rows: list[tuple], counted: list[dict]) -> bool:
+    """EMA's ERA-lines export has rows for these reasons and none says WRITE_OFF: its posting rule left the adjustment
+    alone, so a write-off posted the same day was someone's (or something else's), not the rule's."""
+    got = _handling_for(rows, counted)
+    return bool(got) and "WRITE_OFF" not in got
 
 
 # ------------------------------------------------------------------------------------------------------- C6: paid in EMA
+def _used(p: dict) -> tuple:
+    """The payment a closure counts as recovered, at the grain EMA posts it: the check, its posting day and the line (EMA
+    claim number, date and code). One check paying two lines of a claim is two recoveries; two items on one line share one."""
+    return (p["check"], p["posted"], p["link"], p.get("svc"), p.get("cpt"))
+
+
 def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: dict, *, closes: bool = True) -> dict[str, dict]:
     """C6 (amendment E5): close or confirm what EMA shows paid. A payment counts only when no 835 carries its check (not
     matched, not misnumbered), it is not the ASC's separate-payee money, it is on the item's own mapped line (not a
@@ -1916,13 +2445,17 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
     EMA" hint; a payment before the item's remittance gives the paid-before hint (G4), never a closure. Later payments
     an 835 carries are the archive rules' (the 835 decides). Patient payments never count.
     Returns {finding id: {'action': 'close'|'hint_other_payer'|'hint_partial'|'hint_paid_before', 'paid_cents', 'date',
-    'check_tail', 'payer', 'note', 'hint', 'used': (check, posted, link)}}. The wiring calls _mark_paid for 'close' when
+    'check_tail', 'payer', 'note', 'hint', 'used': (check, posted, link, date of service, code)}}. The wiring calls _mark_paid for 'close' when
     REMITWATCH_EMA_CLOSES is on, else sets the hint; with closes=False the note is worded as a hint."""
     out: dict[str, dict] = {}
+    shared: dict[tuple, list] = defaultdict(list)
     for f in findings:
         fid = f.get("finding_id")
         o = outcomes.get(fid)
         if not o or f.get("auto_status") or f.get("signal") in CLAIM_SIGNALS or not _wanted(f):
+            continue
+        if o.get("covered") and o.get("shared_line") and o.get("link") and o.get("lines") and not o.get("facility"):
+            shared[tuple(o["lines"][0])].append(f)
             continue
         if not o.get("covered") or o.get("shared_line") or not o.get("link"):
             continue
@@ -1940,7 +2473,17 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
             out[fid] = {"action": "close", "paid_cents": same, "date": first["posted"], "check_tail": _tail(first["check"]),
                         "payer": payer, "note": note,
                         "hint": f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} (no 835): check before marking it paid",
-                        "used": (first["check"], first["posted"], first["link"])}
+                        "used": _used(first)}
+            b = o.get("paid_before_first") or {}
+            if (f.get("category") in ("denial", "bundling") and not (f.get("paid_cents") or 0) and b
+                    and (o.get("paid_before") or 0) >= thr and (o.get("balance") or 0) < -CREDIT_MIN):
+                # the line was paid before this denial and the later payment left it in credit: a duplicate payment the payer
+                # may take back (the credit item lists it), not money recovered by working this item
+                dup = (f"Already paid: EMA shows this line paid {_usd(o['paid_before'])} by {b.get('payer') or 'insurance'} on "
+                       f"{b.get('date')}, before this denial. The {_usd(same)} posted on {first['posted']} (check ending "
+                       f"{_tail(first['check'])}) left the line in credit: it looks like a duplicate payment the payer may take "
+                       "back, so nothing is counted as recovered here")
+                out[fid].update(recover_cents=0, duplicate=True, note=dup, hint=dup)
             if not closes:
                 out[fid]["note"] = out[fid]["hint"]
         elif other > 0 and other >= thr:
@@ -1950,7 +2493,7 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
                     f"{_tail(first['check'])}): a second payer may have paid it; confirm before marking it paid")
             out[fid] = {"action": "hint_other_payer", "paid_cents": other, "date": first["posted"],
                         "check_tail": _tail(first["check"]), "payer": payer, "note": hint, "hint": hint,
-                        "used": (first["check"], first["posted"], first["link"])}
+                        "used": _used(first)}
         elif same + other > 0:
             first = min(rows, key=lambda p: (p["posted"] or "", p["check"] or ""))
             short = f.get("category") in SHORT_CATEGORIES
@@ -1958,7 +2501,7 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
                     + ("less than the shortfall" if short else "less than half of what this is expected to bring"))
             out[fid] = {"action": "hint_partial", "paid_cents": same + other, "date": first["posted"],
                         "check_tail": _tail(first["check"]), "payer": first["payer"] or first["group"], "note": hint, "hint": hint,
-                        "used": (first["check"], first["posted"], first["link"])}
+                        "used": _used(first)}
         elif (o.get("paid_before") or 0) > 0 and o.get("paid_before_first") and f.get("category") in ("denial", "bundling") \
                 and not (f.get("paid_cents") or 0):
             b = o["paid_before_first"]
@@ -1967,6 +2510,70 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
                     "check whether the denial is a duplicate or a second payer's answer")
             out[fid] = {"action": "hint_paid_before", "paid_cents": o["paid_before"], "date": b.get("date"),
                         "check_tail": b.get("check_tail"), "payer": payer, "note": hint, "hint": hint, "used": None}
+    out.update(_paid_in_ema_shared(shared, outcomes, closes))
+    # a hint, never a closure: the service paid on another of EMA's claims for the same patient, date and code (the store's
+    # copy of EMA's lines and payments is partial, so a payment it does not hold cannot be seen)
+    rest = [(f, outcomes[f["finding_id"]]) for f in findings if f.get("finding_id") in outcomes and f["finding_id"] not in out
+            and not f.get("auto_status") and not f.get("hint") and _wanted(f) and f.get("signal") not in CLAIM_SIGNALS
+            and (outcomes[f["finding_id"]].get("lines") or []) and outcomes[f["finding_id"]].get("covered")
+            and not outcomes[f["finding_id"]].get("facility") and outcomes[f["finding_id"]].get("outcome") not in PAID_OUTCOMES]
+    if rest:
+        elsewhere = _paid_on_another_claim(conn, [tuple(o["lines"][0]) for _f, o in rest])
+        for f, o in rest:
+            got = elsewhere.get(tuple(o["lines"][0])) or {}
+            if (got.get("cents") or 0) >= _threshold(f):
+                payer = got["payers"][0] if len(got.get("payers") or []) == 1 else None
+                hint = (f"EMA shows {_usd(got['cents'])} paid{' by ' + payer if payer else ''} on another of its claims for this "
+                        "patient, date and code: check whether that paid this service (a resubmission, or the service billed "
+                        "twice) before working it")
+                out[f["finding_id"]] = {"action": "hint_paid_elsewhere", "paid_cents": got["cents"], "date": None,
+                                        "check_tail": None, "payer": payer, "note": hint, "hint": hint, "used": None}
+    return out
+
+
+def _paid_in_ema_shared(shared: dict[tuple, list], outcomes: dict, closes: bool) -> dict[str, dict]:
+    """C6 for a code the claim carries more than once on the date (EMA's line holds them together): what the payer paid on
+    the code after the latest of the items' denials is compared with the sum of what each item must reach. Covering them
+    all closes each one with its part of the payment (split by what each was expected to bring); less is a partly-paid hint
+    on each; another payer's payment covering them all is the rebilled hint the wiring judges (PM case C02)."""
+    out: dict[str, dict] = {}
+    for _key, group in shared.items():
+        os_ = [outcomes[f["finding_id"]] for f in group]
+        need = sum(_threshold(f) for f in group)
+        same = min(o.get("paid_after_same") or 0 for o in os_)          # after the latest denial of the code
+        other = min(o.get("paid_after_other") or 0 for o in os_)
+        rows = [p for o in os_ for p in o.get("payments") or [] if p["kind"] == "ema"]
+        weights = [max(1, f.get("expected_cents") or f.get("shortfall_cents") or 0) for f in group]
+        total_w = sum(weights)
+        n = len(group)
+        for f, o, w in zip(group, os_, weights):
+            fid = f["finding_id"]
+            if same > 0 and same >= need and any(p["same"] for p in rows):
+                first = min((p for p in rows if p["same"]), key=lambda p: (p["posted"] or "", p["check"] or ""))
+                payer = first["payer"] or first["group"]
+                part = int(round(same * w / total_w))
+                note = (f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} for the {n} listed line(s) of {f.get('procedure_code')} "
+                        f"on this date (check ending {_tail(first['check'])}, postings through {o.get('as_of')}); this line's part is "
+                        f"{_usd(part)}. Reopen it if that payment is for something else.")
+                hint = f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} for this code and date (no 835): check before marking it paid"
+                out[fid] = {"action": "close", "paid_cents": part, "date": first["posted"], "check_tail": _tail(first["check"]),
+                            "payer": payer, "note": note if closes else hint, "hint": hint, "used": _used(first) + (fid,),
+                            "shared": n}
+            elif other > 0 and other >= need and any(not p["same"] for p in rows):
+                first = min((p for p in rows if not p["same"]), key=lambda p: (p["posted"] or "", p["check"] or ""))
+                payer = first["payer"] or first["group"]
+                part = int(round(other * w / total_w))
+                hint = (f"EMA shows {_usd(other)} paid by {payer}, another payer, on {first['posted']} for the {n} listed line(s) of this code "
+                        f"(check ending {_tail(first['check'])}): a second payer may have paid it; confirm before marking it paid")
+                out[fid] = {"action": "hint_other_payer", "paid_cents": part, "date": first["posted"], "check_tail": _tail(first["check"]),
+                            "payer": payer, "note": hint, "hint": hint, "used": _used(first) + (fid,), "shared": n}
+            elif same + other > 0 and rows:
+                first = min(rows, key=lambda p: (p["posted"] or "", p["check"] or ""))
+                hint = (f"Partly paid per EMA: {_usd(same + other)} posted for {f.get('procedure_code')} on this date ({first['posted']}, check "
+                        f"ending {_tail(first['check'])}), for {n} listed line(s) of the code: less than they are expected to bring; check "
+                        "which line it paid")
+                out[fid] = {"action": "hint_partial", "paid_cents": same + other, "date": first["posted"], "check_tail": _tail(first["check"]),
+                            "payer": first["payer"] or first["group"], "note": hint, "hint": hint, "used": None, "shared": n}
     return out
 
 
@@ -1975,10 +2582,12 @@ def written_off_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outco
     """C2 (Build 1 v2): what EMA wrote off on an item's own line. The postings counted are the payer's insurance
     adjustments (contractual or not) with a non-routine reason or the item's own reason, outside group PR, on the item's
     line, netted so reversals cancel; the total counts only above $0, and only where the claim carries the code once on
-    that date. written_off_cents = the larger of the ERA-lines figure already on the item and min(net, shortfall): the
-    two are never added. Never on the ASC's facility claims, never a payment, never a closure.
+    that date. written_off_cents = the larger of the ERA-lines figure already on the item and min(net, the item's value):
+    the two are never added. The value is the shortfall, else the expected amount, else (detect could not price the
+    item) the line's charge less what was paid on it before; written_off_basis says which. Never on the ASC's facility
+    claims, never a payment, never a closure.
     Returns {finding id: {'written_off_cents', 'written_off_on', 'written_off_source', 'written_off_kind',
-    'written_off_when', 'evidence_level'}}."""
+    'written_off_when', 'evidence_level', 'written_off_basis'}}."""
     out: dict[str, dict] = {}
     for f in findings:
         fid = f.get("finding_id")
@@ -1992,8 +2601,16 @@ def written_off_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outco
         net = o.get("written_off") or 0
         era = f.get("written_off_cents") or 0
         short = f.get("shortfall_cents") or 0
-        prod = min(net, short) if short > 0 else net
-        prod = max(0, prod)
+        expected = f.get("expected_cents") or 0
+        # the item's value caps the figure: its shortfall, else what it is expected to bring, else (an item detect could not
+        # price) what was billed on the line and not paid before it; never the line's whole write-off from every payer
+        if short > 0:
+            cap, basis = short, "shortfall"
+        elif expected > 0:
+            cap, basis = expected, "expected"
+        else:
+            cap, basis = max(0, (o.get("charges") or 0) - (o.get("paid_before") or 0) - (f.get("paid_cents") or 0)), "charge_less_paid"
+        prod = max(0, min(net, cap))
         cents = max(era, prod)
         if cents <= 0:
             continue
@@ -2003,7 +2620,7 @@ def written_off_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outco
                     "written_off_on": o.get("written_off_on") if source == "production" else f.get("written_off_on"),
                     "written_off_source": source, "written_off_kind": kind,
                     "written_off_when": o.get("written_off_when") if source == "production" else None,
-                    "evidence_level": o.get("evidence_level")}
+                    "evidence_level": o.get("evidence_level"), "written_off_basis": basis if source == "production" else "era_lines"}
     return out
 
 
@@ -2106,7 +2723,8 @@ _CLASS_WORDS = {"auth": "no authorization", "medical_necessity": "medical necess
 
 
 def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Callable | None = None,
-                ratio: Callable | None = None, has_835_finding: Callable | None = None) -> list[dict]:
+                ratio: Callable | None = None, has_835_finding: Callable | None = None,
+                paid_share: Callable | None = None) -> list[dict]:
     """C5: denials only EMA saw. Per EMA line (claim, date, code), all of:
       1. a denial: the payer's non-routine adjustments (group not PR) net to at least $5, or an A/R Denied row carries a
          denial amount and no reason was posted;
@@ -2114,21 +2732,31 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
          for that bill and date. A claim the map could not tie to a bill counts as having none only when none of its
          checks is an 835 trace and no 835 line exists for its patient, date and code (E17; the ASC's facility claims,
          whose twin carries that key, are judged by their own checks);
-      3. not paid since: insurance payments after the first denial posting are under half of what it is expected to bring.
+      3. not paid since: insurance payments after the first denial posting, and the denying payer's own payments posted that
+         same day (C6 counts them too: a line paid on the posting that carried the adjustment was paid, not denied), are
+         under half of what it is expected to bring;
+      4. not paid on another claim: insurance payments for the same patient, date and code on another of EMA's claims (a
+         resubmission; never the ASC's facility claim) are under half of it too.
     Left out: G2211, 99024 and charges of $1 or less, products, patient-side rows, voided lines, denials that net to 0.
     One EMA_DENIED item per (claim number, reason class). Expected: the usual rate x units, else EMA's allowed amount,
     else the charge x the group's paid/charge ratio, else 45% of the charge, capped at the charge; when another payer
     paid the line before the denial, the balance left at the denial (E17). Deadline: the first denial posting less the
-    group's p95 posting lag, plus the appeal window. The ASC's facility claims are titled "ASC facility claim"."""
+    group's p95 posting lag, plus the appeal window. The ASC's facility claims are titled "ASC facility claim".
+    Left out and counted (meta ema:c5_left_out): a second payer's denial when Medicaid is that payer or the first payer
+    has not paid; and a code the denying payer pays on 5% or less of at least 20 answered 2025-2026 lines (its 835s via
+    `paid_share(group, code) -> (paid, answered)`, else EMA's lines): its policy, folded into one pattern per payer and
+    code for the owner's table (pattern 'group|code||payer_policy'), listed line by line only once the owner chooses
+    'pursue'."""
     _prepare(conn)
     fr = freshness(conn, today)
     t = fr["today"]
     lags = _lags(conn)
-    rows = conn.execute(f"""SELECT {', '.join(_LINE_COLS)}, nonroutine, name_key, map_method FROM ema_lines
+    more = ("nonroutine", "name_key", "map_method", "secondary_payer", "primary_payer")
+    rows = conn.execute(f"""SELECT {', '.join(_LINE_COLS + more)} FROM ema_lines
                             WHERE COALESCE(nonroutine, 0) >= ? AND (COALESCE(flags, 0) & 17) = 0
                               AND COALESCE(status_class, '') <> 'void' AND COALESCE(charges, 0) > 100
                               AND cpt NOT IN ('G2211', '99024')""", (DENIAL_MIN,)).fetchall()
-    lines = [dict(zip(_LINE_COLS + ("nonroutine", "name_key", "map_method"), r)) for r in rows]
+    lines = [dict(zip(_LINE_COLS + more, r)) for r in rows]
     # A/R Denied rows with a denial amount and no reason posted
     ar_only = conn.execute("""SELECT a.link, a.svc, a.cpt, a.denial_cents, a.aging_date, a.payer_group, a.payer_kind, a.primary_payer,
                                      a.claim_id, a.as_of, a.facility
@@ -2139,15 +2767,18 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     ar_info = {(r[0], r[1], r[2]): r for r in ar_only}
     if extra_keys:
         _temp(conn, "ec_ax", ["link INTEGER", "svc TEXT", "cpt TEXT"], extra_keys, ["link, svc, cpt"])
-        for r in conn.execute(f"""SELECT {', '.join('l.' + c for c in _LINE_COLS)}, l.nonroutine, l.name_key, l.map_method
+        for r in conn.execute(f"""SELECT {', '.join('l.' + c for c in _LINE_COLS + more)}
                                   FROM temp.ec_ax x JOIN ema_lines l ON l.link = x.link AND l.svc = x.svc AND l.cpt = x.cpt"""):
-            ln = dict(zip(_LINE_COLS + ("nonroutine", "name_key", "map_method"), r))
-            no_adjustment = (ln["contractual"] or 0) == 0 and (ln["noncontractual"] or 0) == 0
-            if no_adjustment and (ln["flags"] or 0) & 17 == 0 and ln["status_class"] != "void" and (ln["charges"] or 0) > 100:
+            ln = dict(zip(_LINE_COLS + more, r))
+            # no payer's reason of its own was posted (a routine contractual reduction, CO-45, may stand beside the A/R's
+            # denial: 27 such Denied rows on real data were never listed)
+            no_reason = (ln["nonroutine"] or 0) < DENIAL_MIN
+            if no_reason and (ln["flags"] or 0) & 17 == 0 and ln["status_class"] != "void" and (ln["charges"] or 0) > 100:
                 ln["ar_denied"] = ar_info[(ln["link"], ln["svc"], ln["cpt"])]
                 lines.append(ln)
         _drop(conn, "ec_ax")
     if not lines:
+        _set_meta(conn, C5_LEFT_OUT_KEY, {"at": t})
         return []
     keys = sorted({(ln["link"], ln["svc"], ln["cpt"]) for ln in lines})
     reasons: dict[tuple, list] = defaultdict(list)
@@ -2174,8 +2805,33 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     by_bill = _lines_835_by_bill(conn, {ln["bill"] for ln in mapped})
     nk_keys = {(ln["name_key"], ln["svc"], ln["cpt"]) for ln in lines if not (ln["facility"] or 0) and ln["name_key"] is not None}
     seen_nk = _name_day_codes_835(conn, nk_keys)
+    paid_elsewhere = _paid_on_other_links(conn, nk_keys)
     claim_ids = _claim_id_of_links(conn, {ln["link"] for ln in lines})
     items: dict[tuple, dict] = {}
+    sec_groups: dict[str, tuple] = {}
+    left_out: dict[str, dict] = {}          # lines a rule leaves out, counted (meta ema:c5_left_out): never a silent drop
+    decisions = _meta(conn, POLICY_KEY, {}) or {}
+    ema_share: dict[tuple, list] = {}
+
+    def never_paid(grp: str, cpt: str) -> tuple | None:
+        """(paid, answered) when this payer pays the code on 5% or less of at least 20 answered 2025-2026 lines."""
+        got = None
+        if paid_share is not None:
+            try:
+                got = paid_share(grp, cpt)
+            except Exception:       # noqa: BLE001  (a rule that cannot tell decides nothing)
+                got = None
+        if not got:
+            if not ema_share:
+                for g, c, n, paid in conn.execute("""SELECT payer_group, cpt, COUNT(*), SUM(COALESCE(ins_paid, 0) > 0) FROM ema_lines
+                                                     WHERE svc >= ? AND (COALESCE(ins_answer_rows, 0) > 0 OR denial_first_posted IS NOT NULL)
+                                                     GROUP BY 1, 2""", (POLICY_SINCE,)):
+                    ema_share[(g, c)] = [paid or 0, n or 0]
+                ema_share[("", "")] = [0, 0]
+            got = ema_share.get((grp, cpt))
+        if got and got[1] >= POLICY_MIN_ANSWERED and got[0] <= POLICY_MAX_PAID_SHARE * got[1]:
+            return tuple(got)
+        return None
     for ln in lines:
         key = (ln["link"], ln["svc"], ln["cpt"])
         rs = [r for r in reasons.get(key, []) if r[0] not in ("", "PR") and r[2] not in ROUTINE_CLASSES and r[1] not in C5_SKIP_CODES]
@@ -2210,15 +2866,27 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         else:
             (g, code, cls, payer), _c = max(by_reason.items(), key=lambda kv: (kv[1], str(kv[0])))
             top = (g, code, cls, payer, _c)
-            first_denial = ln["denial_first_posted"] or min((r[6] for r in rs if r[6]), default=None)
+            # dated by the reasons that make the item (those still standing), never by an earlier reason a reversal undid,
+            # one C5 leaves out, or another payer's: that date sets the window and what "paid since" means
+            first_denial = (min((r[6] for r in rs if r[6] and by_reason[(r[0], r[1], r[2], r[3])] > 0), default=None)
+                            or min((r[6] for r in rs if r[6]), default=None) or ln["denial_first_posted"])
             dgrp, dkind = er.payer_group_of(conn, payer) if payer else (ln["payer_group"], None)
         cls = top[2]
         dgrp = dgrp or ln["payer_group"] or "Unknown"
         dkind = dkind or "other"
         # 3. not paid since; and what the line is expected to bring
-        prows = pays.get(key, [])
-        paid_after = sum(p[4] for p in prows if p[4] and first_denial and (p[1] or "") > first_denial)
-        paid_before = [p for p in prows if p[4] and first_denial and (p[1] or "") <= first_denial]
+        paid_after, paid_before = 0, []
+        for p in pays.get(key, []):
+            if not p[4] or not first_denial:
+                continue
+            day = p[1] or ""
+            # a payment of the denying payer's posted the day of its denial paid the line (C6 reads it the same way), except
+            # beside an A/R denial with no reason posted: there it is the part the payer paid, the A/R's amount the rest
+            ar_partial = bool(ar_row) and net < DENIAL_MIN
+            if day > first_denial or (day == first_denial and _same_payer(p[3], dgrp) and not ar_partial):
+                paid_after += p[4]
+            else:
+                paid_before.append(p)
         charge = ln["charges"] or 0
         units = ln["units"] or 1
         expected, basis = None, None
@@ -2239,7 +2907,28 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             else:
                 expected, basis = int(round(charge * FALLBACK_SHARE)), "45% of the charge"
         expected = min(expected, charge) if charge > 0 else expected
+        if ar_row and net < DENIAL_MIN and (ar_row[3] or 0) > 0 and expected and expected > ar_row[3]:
+            expected, basis = ar_row[3], "the denial amount on EMA's A/R"      # never worth more than the A/R says was denied
         other_first = [p for p in paid_before if not _same_payer(p[3], dgrp)]
+        # the second payer on file denied it, not the line's primary: a second payer owes only the share the first payer
+        # left, once that payer has paid. Medicaid as the second payer pays that share only up to its own rate and the member
+        # cannot be billed for it: never money to recoup (the answer key's R3; a CO-B7 there is at most an enrollment
+        # question). Its denial before the first payer paid is the order of the payers, not this line's money.
+        sec = (ln.get("secondary_payer") or "").strip()
+        if sec and dgrp and not _same_payer(dgrp, ln["payer_group"]):
+            if sec not in sec_groups:
+                sec_groups[sec] = er.payer_group_of(conn, sec)
+            sgrp, skind = sec_groups[sec]
+            if sgrp and _same_payer(dgrp, sgrp):
+                why = ("second_payer_medicaid" if "medicaid" in (skind, dkind) else
+                       None if other_first else "second_payer_before_first")
+                if why:
+                    lo = left_out.setdefault(why, {"n": 0, "cents": 0, "by_reason": {}})
+                    lo["n"] += 1
+                    lo["cents"] += expected or 0
+                    rk = f"{top[0]}-{top[1]}" if top[0] else "A/R Denied"
+                    lo["by_reason"][rk] = lo["by_reason"].get(rk, 0) + 1
+                    continue
         if other_first:
             routine_contr = (ln["contractual"] or 0) - sum(r[4] for r in rs)
             left = charge - sum(p[4] for p in paid_before) - max(0, routine_contr)
@@ -2248,6 +2937,27 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             continue
         if not expected:
             continue
+        # 4. not paid on another claim: the same patient, date and code paid on another of EMA's claims (a resubmission;
+        # never the ASC's facility claim)
+        if not (ln["facility"] or 0) and ln["name_key"] is not None:
+            got = sum(v for lk2, v in paid_elsewhere.get((ln["name_key"], ln["svc"], ln["cpt"]), {}).items() if lk2 != ln["link"])
+            if got >= PAID_SINCE_SHARE * expected:
+                continue
+        pol = never_paid(dgrp, ln["cpt"])
+        if pol:
+            # the owner's table shows the pattern whatever the decision (so it can be changed back); its lines are left out
+            # unless the owner chose to pursue them
+            key_p = f"{dgrp}|{ln['cpt']}||payer_policy"
+            decision = (decisions.get(key_p) or {}).get("decision") or "accept"
+            lo = left_out.setdefault("payer_policy", {"n": 0, "cents": 0, "patterns": {}})
+            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": pol[0], "answered": pol[1], "n": 0,
+                                                   "cents": 0, "decision": decision, "default": key_p not in decisions})
+            pt["n"] += 1
+            pt["cents"] += expected or 0
+            if decision != "pursue":
+                lo["n"] += 1
+                lo["cents"] += expected or 0
+                continue
         ik = (ln["link"], cls)
         it = items.setdefault(ik, {"lines": [], "group": dgrp, "kind": dkind, "payer": top[3], "facility": ln["facility"] or 0,
                                    "bill": ln["bill"] if ln["map_method"] != "conflict" else None, "link": ln["link"],
@@ -2296,6 +3006,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
                       "ema_status": it["status"], "facility": bool(it["facility"]), "source": "ema"},
             hint="No remittance on file: get the EOB from the payer's portal before appealing",
             link=lk, heir_keys=heirs, ema_heir_keys=[(it["bill"], x[1], x[0]) for x in ls if it["bill"]]))
+    _set_meta(conn, C5_LEFT_OUT_KEY, {"at": t, **left_out})
     return out
 
 
@@ -2384,9 +3095,15 @@ def _finding_line_keys(conn: sqlite3.Connection) -> set[tuple]:
     out: set[tuple] = set()
     if not _table(conn, "findings"):
         return out
+    have = _cols(conn, "findings")
+    if not {"patient_control_number", "service_date", "procedure_code"} <= have:
+        return out
+    pick = ", ".join(c if c in have else "NULL" for c in ("original_procedure_code", "billed_code"))
+    where = " AND claim_key IS NOT NULL" if "claim_key" in have else ""
+    where += " AND COALESCE(stale, 0) = 0" if "stale" in have else ""
     for pcn, svc, code, ocode, bcode in conn.execute(
-            """SELECT patient_control_number, service_date, procedure_code, original_procedure_code, billed_code FROM findings
-               WHERE patient_control_number IS NOT NULL AND claim_key IS NOT NULL AND COALESCE(stale, 0) = 0"""):
+            f"""SELECT patient_control_number, service_date, procedure_code, {pick} FROM findings
+                WHERE patient_control_number IS NOT NULL{where}"""):
         b = _bill(pcn)
         for c in (code, ocode, bcode):
             if c:
@@ -2495,7 +3212,8 @@ def overlays(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: dict,
         pcn = f.get("patient_control_number")
         lk = o.get("link") or f.get("ema_link")
         st = statuses.get(pcn) if pcn else None
-        if lk in statuses and (st is None or str(statuses[lk]["as_of"] or "") > str(st["as_of"] or "")):
+        if lk in statuses and (st is None or _status_order(statuses[lk]["source"], statuses[lk]["as_of"])
+                               > _status_order(st["source"], st["as_of"])):
             st = statuses[lk]
         after = f.get("payment_date") or ""
         marks: list[tuple] = []
@@ -2623,8 +3341,13 @@ def credits(conn: sqlite3.Connection, *, today: str | None = None) -> dict:
     the A/R's as_of. Medicare primary credits over 60 days (Medicare's 60-day overpayment rule) and Medicare Advantage
     credits are listed apart. Data health 'credits' is not ok on any Medicare primary credit over 60 days, or other
     credits over 60 days of $500 or more. Also the insurance-side credit balances Production shows that the A/R leaves
-    out (its lean lines only: a credit on a line paid cleanly may be pruned)."""
+    out (its lean lines only: a credit on a line paid cleanly may be pruned). On the dashboard's copy (which holds only
+    the lines the pages show) the figures detection stored in meta ema:reconcile are given."""
     _prepare(conn)
+    if not _full_store(conn):
+        stored = (_meta(conn, RECONCILE_KEY, {}) or {}).get("c8")
+        if stored:
+            return stored
     out: dict = {"insurance": {"n": 0, "cents": 0}, "patient": {"n": 0, "cents": 0}, "medicare_primary_over60": {"n": 0, "cents": 0},
                  "medicare_advantage": {"n": 0, "cents": 0}, "other_over60": {"n": 0, "cents": 0},
                  "patient_over60": {"n": 0, "cents": 0}, "by_coverage": {}, "production_not_on_ar": {"n": 0, "cents": 0,
@@ -2699,10 +3422,14 @@ def ar_accounted(conn: sqlite3.Connection, findings: Iterable[dict] | None = Non
     claims; settled since the pull (Production shows the line's balance at $0 with a posting after the A/R's as_of);
     rejected or never sent; denied (by the item on it: To do, Started, Sent; worked in EMA; or no item); pending (paid
     elsewhere, still open in EMA; past the payer's usual time with a NO_ANSWER item; or waiting); other statuses. Also the
-    line the A/R leaves out ("not in this export"), from Production, outside the total. Written to meta ema:ar_accounted.
+    line the A/R leaves out ("not in this export"), from Production, outside the total. With `save` (detection), written
+    to meta ema:ar_accounted, and each A/R row's bucket to ema_ar.bucket, so the list a bucket opens (ar_list) is the
+    same rows on the dashboard's copy, which cannot work the buckets out (it holds no keys and only part of the lines).
     `findings`: the items (finding_id, signal, status, patient_control_number, service_date, procedure_code, ema_link);
-    the store's own when None."""
+    the store's own when None. On the copy it gives what detection stored."""
     _prepare(conn)
+    if not _full_store(conn):
+        return dict(_meta(conn, AR_ACCOUNTED_KEY, None) or {}, _rows=[])
     if findings is None:
         findings = _stored_findings(conn)
     open_items: dict[tuple, str] = {}         # (bill, svc, code) -> best status among items on it
@@ -2799,6 +3526,8 @@ def ar_accounted(conn: sqlite3.Connection, findings: Iterable[dict] | None = Non
            "turnaround_groups": len(tat), "at": _now()}
     if save:
         _set_meta(conn, AR_ACCOUNTED_KEY, out)
+        conn.execute("UPDATE ema_ar SET bucket = NULL WHERE bucket IS NOT NULL")
+        conn.executemany("UPDATE ema_ar SET bucket = ? WHERE file_id = ? AND row_no = ?", [(b, f, r) for f, r, b in by_row])
         conn.commit()
     out["_rows"] = by_row
     return out
@@ -2833,32 +3562,53 @@ def _stored_findings(conn: sqlite3.Connection) -> list[dict]:
 
 def ar_list(conn: sqlite3.Connection, bucket: str, page: int = 1, *, size: int = 100) -> dict:
     """/api/ema/ar?bucket=...: one page of the A/R rows in a W4 bucket: claim id, claim number, payer group, service date,
-    code, balance, status, days since service, whether a note exists. No names."""
+    code, balance, status, days since service, whether a note exists. No names. The rows come by the buckets detection
+    stored (ema_ar.bucket), so the list holds what the W4 count it opens from counted, on the server and on the dashboard's
+    copy alike; on the whole store, an A/R read since detection is bucketed afresh (never written). `pending`: rows of an
+    A/R read since detection that the copy cannot bucket yet. Never writes."""
     if bucket not in AR_BUCKETS:
         raise ValueError("unknown bucket")
-    acc = ar_accounted(conn, save=False)
-    keys = [(f, r) for f, r, b in acc.pop("_rows") if b == bucket]
+    _prepare(conn)
     page = max(1, int(page or 1))
-    part = keys[(page - 1) * size: page * size]
-    rows = []
-    if part:
-        _temp(conn, "ec_arl", ["file_id TEXT", "row_no INTEGER"], part, ["file_id, row_no"])
-        for cid, lk, grp, svc, cpt, cents, st, as_of, note in conn.execute(
-                """SELECT a.claim_id, a.link, a.payer_group, a.svc, a.cpt, a.exposure_cents, a.claim_status, a.as_of, a.has_note
-                   FROM temp.ec_arl k JOIN ema_ar a ON a.file_id = k.file_id AND a.row_no = k.row_no ORDER BY a.svc, a.claim_id"""):
-            rows.append({"claim_id": cid, "link": lk, "payer_group": grp, "service_date": svc, "code": cpt, "balance_cents": cents,
-                         "status": st, "days": _days(svc, as_of), "has_note": bool(note)})
+    insurance = "lower(a.party) LIKE 'insur%'"
+    has_col = "bucket" in _cols(conn, "ema_ar")
+    unset = conn.execute(f"SELECT COUNT(*) FROM ema_ar a WHERE {insurance}" + (" AND a.bucket IS NULL" if has_col else "")).fetchone()[0]
+    cols = "a.claim_id, a.link, a.payer_group, a.svc, a.cpt, a.exposure_cents, a.claim_status, a.as_of, a.has_note"
+    order = "ORDER BY a.svc, a.claim_id, a.file_id, a.row_no LIMIT ? OFFSET ?"
+    pending = 0
+    if _full_store(conn) and unset:
+        acc = ar_accounted(conn, save=False)
+        keys = [(f, r) for f, r, b in acc.pop("_rows") if b == bucket]
+        count, cents = len(keys), acc["buckets"][bucket]["cents"]
+        _temp(conn, "ec_arl", ["file_id TEXT", "row_no INTEGER"], keys, ["file_id, row_no"])
+        got = conn.execute(f"""SELECT {cols} FROM temp.ec_arl k JOIN ema_ar a ON a.file_id = k.file_id AND a.row_no = k.row_no
+                               {order}""", (size, (page - 1) * size)).fetchall()
         _drop(conn, "ec_arl")
-    return {"bucket": bucket, "label": AR_BUCKET_LABELS[bucket], "page": page, "size": size, "count": len(keys),
-            "cents": acc["buckets"][bucket]["cents"], "rows": rows}
+    elif has_col:
+        pending = unset
+        count, cents = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(a.exposure_cents), 0) FROM ema_ar a WHERE {insurance} "
+                                    "AND a.bucket = ?", (bucket,)).fetchone()
+        got = conn.execute(f"SELECT {cols} FROM ema_ar a WHERE {insurance} AND a.bucket = ? {order}",
+                           (bucket, size, (page - 1) * size)).fetchall()
+    else:
+        pending, count, cents, got = unset, 0, 0, []
+    rows = [{"claim_id": cid, "link": lk, "payer_group": grp, "service_date": svc, "code": cpt, "balance_cents": c, "status": st,
+             "days": _days(svc, as_of), "has_note": bool(note)} for cid, lk, grp, svc, cpt, c, st, as_of, note in got]
+    return {"bucket": bucket, "label": AR_BUCKET_LABELS[bucket], "page": page, "size": size, "count": count, "cents": cents,
+            "rows": rows, "pending": pending}
 
 
 # ----------------------------------------------------------------------------------------- the reconcile summary
-def reconcile_summary(conn: sqlite3.Connection, *, today: str | None = None) -> dict:
-    """Everything /api/ema/reconcile shows, in counts and dollars only, written to meta ema:reconcile: freshness and map
-    coverage; C1 by month, cause and payer group (and what was posted since the remittances stopped); the C4 summary;
-    C7 by payer group and reason; C8 credits; C9 timely-filing write-offs; the G5 policy table counts; the W4 buckets."""
+def reconcile_summary(conn: sqlite3.Connection, *, today: str | None = None, save: bool = True) -> dict:
+    """Everything /api/ema/reconcile shows, in counts and dollars only: freshness and map coverage; C1 by month, cause and
+    payer group (and what was posted since the remittances stopped); the C4 summary; C7 by payer group and reason; C8
+    credits; C9 timely-filing write-offs; the G5 policy table counts; the W4 buckets; data health's remits_missing.
+    Detection calls it with `save` on the whole store: it is written to meta ema:reconcile, with the cells c1_summary adds
+    up (ema:c1_cells), for the dashboard's copy, which holds part of the store. A page calls it with save=False; on the
+    copy it gives what detection stored and never writes."""
     _prepare(conn)
+    if not _full_store(conn):
+        return _meta(conn, RECONCILE_KEY, None) or {}
     fr = freshness(conn, today)
     c1 = c1_summary(conn)
     after = conn.execute("""SELECT COUNT(*), COALESCE(SUM(ins_paid), 0) FROM ema_checks WHERE cause = 'after_feed'""").fetchone()
@@ -2878,8 +3628,11 @@ def reconcile_summary(conn: sqlite3.Connection, *, today: str | None = None) -> 
                    GROUP BY 1, 2"""):
             pol.setdefault(outcome, {})[when or "-"] = {"n": n, "cents": cents}
         out["outcomes"] = pol
-    _set_meta(conn, RECONCILE_KEY, out)
-    conn.commit()
+    out["remits_missing"] = _remits_missing(conn, fr)
+    if save:
+        _set_meta(conn, RECONCILE_KEY, out)
+        _set_meta(conn, C1_CELLS_KEY, _c1_cells(conn))
+        conn.commit()
     return out
 
 
@@ -2943,7 +3696,9 @@ def data_health(conn: sqlite3.Connection, *, today: str | None = None) -> list[d
                       "title": f"{conflicts:,} EMA claims tie to two remittance bills",
                       "detail": "" if share_c <= 0.02 else "Over 2%: some EMA claims are not used until the tie is clear.",
                       "who": "Practice administrator: tell RemitWatch's maintainer."})
-    items.append(_remits_missing(conn, fr))
+    full = _full_store(conn)
+    stored_rm = None if full else (_meta(conn, RECONCILE_KEY, {}) or {}).get("remits_missing")
+    items.append(stored_rm or _remits_missing(conn, fr))
     cr = credits(conn, today=t)
     items.append({"key": "credits", "ok": cr["ok"], "medicare_primary_over60": cr["medicare_primary_over60"],
                   "other_over60": cr["other_over60"],
