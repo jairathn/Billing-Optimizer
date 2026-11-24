@@ -992,6 +992,7 @@ def _context(conn: sqlite3.Connection, today: str) -> dict:
                 names[g] = newest
         ctx["group_last_835"] = names
     ctx["policy"] = _meta(conn, "ema:writeoff_policy", {}) or {}
+    ctx["ema_names"] = _ema_names(conn)
     return ctx
 
 
@@ -1680,6 +1681,11 @@ def paid_proof(fx: dict) -> dict | None:
                         "watch": same,
                         "text": f"Already paid: EMA shows {usd(o['paid_before'])} by {pb.get('payer') or 'insurance'} on {day(pb.get('date'))}, "
                                 "before this denial, and the line settled" + ("" if not same else "; this denial is of a duplicate")}
+        # a Medicaid plan's denial of a service another payer had paid first, or a duplicate denial of one the same payer
+        # had paid first: EMA's payments on the item's own lines, payer by payer (fix6)
+        first = paid_first_elsewhere(fx)
+        if first:
+            return first
     # an underpayment whose allowed amounts on the date and code add up to the usual rate (a line split across claims)
     if cat in SHORT and (f.get("expected_cents") or 0) > 0:
         # the payer split the line across claims of one remittance (MA15): the pieces share the line control number
@@ -1749,6 +1755,148 @@ def _close_floor(own: list[dict], pays: list[dict]) -> int:
         return 1
     co = sum(a for g, c, a in x["adj"] if g == "CO" and c in CONTRACTUAL_CARCS)
     return max(1, ((x["charge"] or 0) - co) // 2)
+
+
+# ------------------------------------------------------------------------------- paid first, by another payer or the same
+# The payer-name rules' catch-all for a name with MEDICAID in it (codes.PAYER_RULES). EMA names a company's Medicaid plan
+# "<company> Medicaid Community Plan" and the state's own program "Medicaid of <state>": both land in it, so the company a
+# name begins with is what tells them apart. On real data a Medicare Advantage company's checks are posted under such a
+# name, and read as the state's Medicaid they looked like the denying payer's own (fix6).
+MEDICAID_CATCH_ALL = "Medicaid (other)"
+
+
+def _ema_names(conn: sqlite3.Connection) -> dict[str, str]:
+    """Which payer each EMA payer name stands for, by the remittances EMA posted under it: {EMA payer name: the 835 payer
+    name of most of the checks EMA posted under that name that are exactly an 835's trace (ema_checks)}."""
+    if not _table(conn, "ema_checks") or not _table(conn, "transactions") or "trace_key" not in _cols(conn, "ema_checks"):
+        return {}
+    per: dict[str, dict] = {}
+    for name, payer, n in conn.execute("""SELECT c.payer, t.payer_name, COUNT(*) FROM ema_checks c
+                                          JOIN transactions t ON t.transaction_key = c.trace_key
+                                          WHERE c.match = 'exact' AND c.payer IS NOT NULL AND t.payer_name IS NOT NULL
+                                          GROUP BY c.payer, t.payer_name"""):
+        per.setdefault(name, {})[payer] = n
+    return {name: max(c.items(), key=lambda kv: (kv[1], kv[0]))[0] for name, c in per.items()}
+
+
+def _ema_payer_is_denier(fx: dict, p: dict) -> bool | None:
+    """Whether a payment (or $0 answer) EMA posted is the denying payer's own: its check is one of that payer's remittances
+    on the bill; else EMA posts that payer's remittances under its name (_ema_names); else its name says so (the name
+    rules, a company's plan in the Medicaid catch-all keeping the company its name begins with). None when nothing names
+    the payer. p: {'payer', 'check'}."""
+    f = fx["item"]
+    denier = f.get("payer_group") or _grp_kind(f.get("payer_name"))[0]
+    names = {x["payer"] for x in fx["r835"]["rows"] if x.get("payer") and _same_payer(row_group(x)[0], denier)}
+    if f.get("payer_name"):
+        names.add(f["payer_name"])
+    chk = p.get("check")
+    if chk:
+        for x in fx["r835"]["rows"]:
+            if x.get("trace") and _same_check(chk, x["trace"]):
+                return x.get("payer") in names
+    name = str(p.get("payer") or "")
+    m = ((fx.get("ctx") or {}).get("ema_names") or {}).get(name)
+    if m:
+        return m in names or _same_payer(_grp_kind(m)[0], denier)
+    g = _grp_kind(name)[0] if name else (p.get("group") or "")
+    if not g:
+        return None
+    if g == MEDICAID_CATCH_ALL and _family(name) != _family(g):
+        return _family(name) == _family(denier)
+    return _same_payer(g, denier)
+
+
+def paid_first_elsewhere(fx: dict) -> dict | None:
+    """A denial the payments EMA posted before it already settle, as paid_proof's proof, or None (fix6):
+    - a Medicaid plan denied a service whose first payer on EMA's claim is another plan, after a payer other than the
+      Medicaid plan paid it: Medicaid pays after other insurance and only up to its own rate, and the member cannot be
+      billed, so its denial leaves no money to recover (the rule EMA-only denials follow, ema_checks C5) ('paid_first_other_payer');
+    - a duplicate denial (CO-18, B13) of a service the same payer paid first, whatever share of a second payer is still
+      open on the line ('paid_before_duplicate').
+    Counted: the payments on the item's own EMA lines (never the surgery center's; for a claim's item, a line whose charge
+    is the claim's lines' to the cent; for a line's item, a code the claim carries once), payer by payer, posted before the
+    item's remittance and net of that payer's later takebacks, and never a payment whose remittance was reversed. Together
+    they reach half of what the item should bring. A takeback the 835s name for the claim after the first payment keeps
+    the item as work. EMA's postings decide, never its claim status; a person's status decides before any of this."""
+    f = fx["item"]
+    if f.get("category") not in ("denial", "bundling") or (f.get("paid_cents") or 0) > 0 or f.get("signal") in EMA_ONLY:
+        return None
+    own = own_rows(fx)
+    if any((x["paid"] or 0) > 0 for x in own if x["status"] != "22"):
+        return None
+    mine = str(f.get("payment_date") or "")[:10]
+    denier = f.get("payer_group") or _grp_kind(f.get("payer_name"))[0]
+    medicaid = f.get("payer_kind") == "medicaid" or "medicaid" in str(denier or "").lower()
+    dup = str(f.get("carc") or "") in DUP_CARCS
+    if not mine or not (medicaid or dup):
+        return None
+    keys = set(_service_keys(f))
+    if f.get("line_key") and not code_once(fx):
+        return None                 # EMA's line holds the code for another line of the claim as well
+    lines = []
+    for ln in fx["ema"]["lines"]:
+        if (ln["svc"], ln["cpt"]) not in keys or ln.get("facility"):
+            continue
+        if not f.get("line_key"):
+            charge = sum(x["charge"] or 0 for x in own if x.get("line_key") and x["status"] != "22" and x["svc"] == ln["svc"]
+                         and ln["cpt"] in (x["code"], x["ocode"]))
+            if charge and charge != (ln.get("charges") or 0):
+                continue            # EMA's line holds this code for other claims' lines too
+        lines.append(ln)
+    if not lines:
+        return None
+    if medicaid and not dup and not all(_ema_payer_is_denier(fx, {"payer": ln.get("primary_payer")}) is False for ln in lines):
+        return None                 # the Medicaid plan is the one EMA bills first (or EMA names no first payer)
+    reversed_traces = [x["trace"] for x in fx["r835"]["rows"] if x.get("trace") and x.get("reversed_by")]
+    counted: list[dict] = []
+    for ln in lines:
+        ps = [p for p in fx["ema"]["pays"] if p["link"] == ln["link"] and p["svc"] == ln["svc"] and p["cpt"] == ln["cpt"]
+              and (p["cents"] or 0) != 0]
+        for name in sorted({p["payer"] for p in ps}):
+            mine_ps = [p for p in ps if p["payer"] == name]
+            before = [p for p in mine_ps if (p["posted"] or "") < mine]
+            pos = [p for p in before if p["cents"] > 0]
+            if not pos or any(_same_check(p["check"], t) for p in pos for t in reversed_traces):
+                continue
+            who = _ema_payer_is_denier(fx, pos[0])
+            if who is None or who != dup:
+                continue            # a Medicaid denial counts another payer's money; a duplicate denial its own payer's
+            kept = before + [p for p in mine_ps if (p["posted"] or "") >= mine and p["cents"] < 0]
+            if sum(p["cents"] for p in kept) > 0:
+                counted += kept
+    total = sum(p["cents"] for p in counted)
+    need = _threshold(f)
+    if need <= 1:
+        # nothing says what the item should bring: half of what its own EMA lines charge
+        need = max(1, sum(ln.get("charges") or 0 for ln in lines) // 2)
+    if total <= 0 or total < need:
+        return None
+    pos = sorted((p for p in counted if p["cents"] > 0), key=lambda p: (p["posted"] or "", p["check"]))
+    first = pos[0]
+    if any(q.get("reason") in ("WO", "72") and (q.get("date") or "") >= (first["posted"] or "") for q in fx["r835"].get("plb") or []):
+        return None                 # a takeback named for the claim since: the payment may not stand
+    rows = [{"source": "production", "kind": "payment", "date": p["posted"], "payer": p["payer"], "cents": p["cents"],
+             "check_tail": p["check_tail"], "in_835": bool(p.get("in_835")), "line": f"{p['cpt']} {p['svc']}",
+             "text": (f"EMA posted {usd(p['cents'])} from {p['payer'] or 'insurance'} on {day(p['posted'])} for {p['cpt']} "
+                      f"(check ending {p['check_tail'] or '?'}" + ("" if p.get("in_835") else ", no 835") + ")"
+                      if p["cents"] > 0 else
+                      f"EMA posted a takeback of {usd(-p['cents'])} by {p['payer'] or 'insurance'} on {day(p['posted'])} for {p['cpt']}")}
+            for p in sorted(counted, key=lambda p: (p["posted"] or "", p["cpt"], p["check"]))]
+    # the words stay under the 300 characters a stored basis keeps: the checks are in the rows
+    open_ = sum(ln.get("balance") or 0 for ln in lines)
+    paid = f"EMA posted {usd(total)} on {day(first['posted'])}" + ("" if first.get("in_835") else " (no 835)")
+    if dup:
+        text = (f"Already paid: EMA posted {usd(total)} from {first['payer'] or denier} on {day(first['posted'])}"
+                + ("" if first.get("in_835") else " (no 835)") + ", before this duplicate denial: it restates that payment"
+                + (f"; the second payer's share of {usd(open_)} is still open in EMA" if open_ > 0 else ""))
+        rule = "paid_before_duplicate"
+    else:
+        text = (f"Already paid by {first['payer']}: {paid}, before this {denier} denial. As second payer, Medicaid pays only up to "
+                "its own rate and the member cannot be billed: no money to recover"
+                + (f"; {usd(open_)} is still open in EMA" if open_ > 0 else ""))
+        rule = "paid_first_other_payer"
+    return {"rule": rule, "cents": total, "date": first["posted"], "payer": first["payer"], "check_tail": first["check_tail"],
+            "source": "production", "watch": True, "text": text, "rows": rows}
 
 
 CONTRACTUAL_CARCS = frozenset({"45", "253", "144", "59", "131", "94", "237", "2", "23"})
@@ -2297,7 +2445,8 @@ def _decide(fx: dict, today: str) -> dict:
         return put("work_now", "possible_overpayment", _hint_text(hint) or "Paid twice by this payer: a possible overpayment")
     if proof and not credit and proof["rule"] != "moved_to_patient_open":
         res["appeal_block"] = "paid"
-        rows = [{"source": proof["source"], "kind": "proof", "date": proof.get("date"), "text": proof["text"]}]
+        # the payments themselves when the proof lists them (they add up to its amount), else the proof's one line
+        rows = list(proof.get("rows") or []) or [{"source": proof["source"], "kind": "proof", "date": proof.get("date"), "text": proof["text"]}]
         return put("done", proof["rule"], proof["text"], rows)
     # the 835 archive proves this denial settled (archive_rules, proven): the same payer paid the line before this answer of
     # a copy, the primary paid it and nothing is left of the share, or the practice voided the claim. That holds whatever

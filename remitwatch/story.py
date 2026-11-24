@@ -931,7 +931,8 @@ def _claim_item(conn: sqlite3.Connection, claim_key: str) -> dict:
 
 # ------------------------------------------------------------------------------------------------------- the verdict
 DONE_835_PAY = ("paid_later_835", "paid_in_full_split", "paid_as_secondary")
-DONE_PAID_BEFORE = ("paid_before_other_payer", "paid_before_duplicate", "replacement_denied_paid", "paid_before_same_payer")
+DONE_PAID_BEFORE = ("paid_before_other_payer", "paid_before_duplicate", "replacement_denied_paid", "paid_before_same_payer",
+                    "paid_first_other_payer")
 DONE_EMA_PAY = ("claim_paid_in_ema", "paid_in_full_ema", "forwarded_paid")
 WRITE_OFFS = ("auto_written_off", "written_off_while_pending", "written_off_at_posting", "contractual_at_posting",
               "written_off_later", "contractual_later")
