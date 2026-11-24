@@ -379,10 +379,15 @@ def test_an_837_claim_emas_postings_answered_is_not_chased(tmp_path, kind, monke
       28). Not listed; counted with the claims no source can show an answer to (meta ema:unanswered_unseen).
     - claim 57 (EMA claim 57), for the patient whose same visit and code Blue Cross answered as primary on claim 1 (another
       bill, the denial already listed): answered there, not chased again (the member id cannot link two payers' bills;
-      EMA's keyed name for the line can)."""
+      EMA's keyed name for the line can).
+    - claim 60, sent January 6 for the patient of claim 1 (its member id): EMA's claim 60 for that patient, day and code was
+      paid January 30, but another patient's EMA claim has the same day, code and charge, so the claim's own EMA claim
+      cannot be told by its content. The patient's name (from the member's remittances) finds it: answered, not listed.
+    - claim 63 (EMA claim 63): EMA shows it settled: Blue Cross's contractual write-down and the patient's payment of the
+      rest, nothing open, no insurance payment. Answered (before: a routine write-down alone never counted), not listed."""
     from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
     from tests import ema_fixtures as F
-    from tests.test_ema_wiring import charge, denial_world, pay
+    from tests.test_ema_wiring import adj, charge, denial_world, pay
     monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
     monkeypatch.setenv("REMITWATCH_MODE", "server")
     monkeypatch.setenv("REMITWATCH_EMA_STRICT", "1")
@@ -398,17 +403,29 @@ def test_an_837_claim_emas_postings_answered_is_not_chased(tmp_path, kind, monke
     D = dt.date
     rows = [charge(F.link_no(51), patient=1, posted=D(2026, 3, 3)), pay(F.link_no(51), "PAPER-51", 90, patient=1, posted=D(2026, 4, 10)),
             charge(F.link_no(52), cpt="99214", amount=200, patient=2, posted=D(2026, 3, 3)),
-            charge(F.link_no(57), patient=0, posted=D(2026, 3, 3))]
+            charge(F.link_no(57), patient=0, posted=D(2026, 3, 3)),
+            # claim 60's visit, paid on EMA's claim 60; another patient's EMA claim 62 has the same day, code and charge
+            charge(F.link_no(60), cpt="11102", amount=120, patient=0, svc=D(2026, 1, 5), posted=D(2026, 1, 6)),
+            pay(F.link_no(60), "PAPER-60", 70, cpt="11102", patient=0, svc=D(2026, 1, 5), posted=D(2026, 1, 30)),
+            charge(F.link_no(62), cpt="11102", amount=120, patient=2, svc=D(2026, 1, 5), posted=D(2026, 4, 30)),
+            # claim 63: Blue Cross's contractual write-down and the patient's payment of the rest, nothing open
+            charge(F.link_no(63), patient=3, posted=D(2026, 3, 3)),
+            adj(F.link_no(63), "CO-45", 100, patient=3, posted=D(2026, 3, 20), contractual=True),
+            F.production_row(link=F.link_no(63), cpt="99213", pat_paid=50, patient=3, svc=D(2026, 3, 2), posted=D(2026, 3, 25),
+                             payer="Patient")]
     ar = [F.ar_row(claim=F.claim_id(51), link=F.link_no(51), status="Payment Pending", current=0, svc=D(2026, 3, 2), patient=1),
           F.ar_row(claim=F.claim_id(52), link=F.link_no(52), status="Payment Pending", current=200, svc=D(2026, 3, 2), patient=2,
                    cpt="99214"),
-          F.ar_row(claim=F.claim_id(57), link=F.link_no(57), status="Payment Pending", current=150, svc=D(2026, 3, 2), patient=0)]
+          F.ar_row(claim=F.claim_id(57), link=F.link_no(57), status="Payment Pending", current=150, svc=D(2026, 3, 2), patient=0),
+          F.ar_row(claim=F.claim_id(63), link=F.link_no(63), status="Payment Pending", current=0, svc=D(2026, 3, 2), patient=3)]
     denial_world(s, lg, tmp_path, rows, ar_rows=ar)
     bc = ("BLUE CROSS TEST", "BCT01")
     send(s, tmp_path, [clm837(F.claim_id(51), [("99213", "150.00", "20260302")], payer=bc),
                        clm837(F.claim_id(52), [("99214", "200.00", "20260302")], payer=bc),
                        clm837(F.claim_id(53), [("11102", "120.00", "20260302")], payer=bc),
-                       clm837(F.claim_id(57), [("99213", "150.00", "20260302")], payer=bc)], "20260304")
+                       clm837(F.claim_id(57), [("99213", "150.00", "20260302")], payer=bc),
+                       clm837(F.claim_id(63), [("99213", "150.00", "20260302")], payer=bc)], "20260304")
+    send(s, tmp_path, [clm837(F.claim_id(60), [("11102", "120.00", "20260105")], payer=bc, member="MEMBER000001")], "20260106")
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
@@ -433,7 +450,9 @@ def test_a_coordination_denials_primary_answer_posted_in_ema_leaves_nothing_to_c
       saying so (EMA's posting of the secondary's answer is not the primary's).
     - claim 56, in EMA's weekly exports billed to Blue Cross: only another payer answered, as secondary (T-C2), and EMA
       shows only that payer's posting. Listed from the exports' path (before: EMA's posting of the secondary's own answer
-      read as the claim's answer, and the primary's missing remittance was dropped)."""
+      read as the claim's answer, and the primary's missing remittance was dropped).
+    - claim 59, as 54, but Medicare's payment was posted March 3, the day before the claim went to Blue Cross (the primary
+      answers first; the claim is sent to the secondary after). The primary answered: nothing to chase."""
     from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
@@ -451,7 +470,7 @@ def test_a_coordination_denials_primary_answer_posted_in_ema_leaves_nothing_to_c
     lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
     D = dt.date
     S_ = "2026-03-02"
-    for n in (54, 55):
+    for n in (54, 55, 59):
         raw_remit(s, trace=f"77700{n}1", paid_on="2026-03-12", claims=[{"pcn": F.claim_id(n), "status": "4", "member": f"MEMBER0000{n}",
                                                                      "lines": [(S_, "99213", 150, 0, [("CO", "22", 150)])]}])
         raw_remit(s, trace=f"77700{n}2", paid_on="2026-03-26", claims=[{"pcn": F.claim_id(n), "status": "2", "member": f"MEMBER0000{n}",
@@ -463,6 +482,9 @@ def test_a_coordination_denials_primary_answer_posted_in_ema_leaves_nothing_to_c
             pay(F.link_no(54), "777000542", 20, patient=1, posted=D(2026, 3, 27)),
             charge(F.link_no(55), patient=2, posted=D(2026, 3, 3)),
             pay(F.link_no(55), "777000552", 20, patient=2, posted=D(2026, 3, 27)),
+            charge(F.link_no(59), patient=3, posted=D(2026, 3, 3)),
+            pay(F.link_no(59), "PAPER-59", 90, patient=3, posted=D(2026, 3, 3), payer=F.PAYERS["medicare"]),
+            pay(F.link_no(59), "777000592", 20, patient=3, posted=D(2026, 3, 27)),
             charge(F.link_no(56), cpt="99214", amount=200, patient=3, posted=D(2026, 3, 3)),
             pay(F.link_no(56), "777000562", 30, cpt="99214", patient=3, posted=D(2026, 3, 27), payer=F.PAYERS["commercial"]),
             # Blue Cross's answers in EMA reach past April 1 (another claim's payment): its claims due by then are judged
@@ -471,14 +493,15 @@ def test_a_coordination_denials_primary_answer_posted_in_ema_leaves_nothing_to_c
     ar = [F.ar_row(claim=F.claim_id(54), link=F.link_no(54), status="Payment Pending", current=50, svc=D(2026, 3, 2), patient=1),
           F.ar_row(claim=F.claim_id(55), link=F.link_no(55), status="Payment Pending", current=130, svc=D(2026, 3, 2), patient=2),
           F.ar_row(claim=F.claim_id(56), link=F.link_no(56), status="Payment Pending", current=170, svc=D(2026, 3, 2), patient=3,
-                   cpt="99214")]
+                   cpt="99214"),
+          F.ar_row(claim=F.claim_id(59), link=F.link_no(59), status="Payment Pending", current=40, svc=D(2026, 3, 2), patient=3)]
     denial_world(s, lg, tmp_path, rows, ar_rows=ar)
     from tests.test_workable import ema
     ema(s.conn, F.claim_id(56), payer="Blue Cross Test Plan", payer_id="BCT01", service_date=S_, bill_created="2026-03-03",
         charges_cents=20000, patient_id="EMA56")
     s.conn.commit()
     bc = ("BLUE CROSS TEST", "BCT01")
-    send(s, tmp_path, [clm837(F.claim_id(n), [("99213", "150.00", "20260302")], payer=bc, member=f"MEMBER0000{n}") for n in (54, 55)],
+    send(s, tmp_path, [clm837(F.claim_id(n), [("99213", "150.00", "20260302")], payer=bc, member=f"MEMBER0000{n}") for n in (54, 55, 59)],
          "20260304")
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
