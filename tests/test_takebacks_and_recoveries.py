@@ -119,6 +119,33 @@ def test_a_recoupment_from_the_same_payer_under_another_payer_id_takes_the_payme
     w.store.close()
 
 
+def test_a_recoupment_from_the_same_payer_id_under_another_name_takes_the_payment_back(tmp_path, kind):
+    """C024 was paid by ANTHEM; the recoupment naming C024 comes under the same payer id with another name (its plan's).
+    Same payer: the payment is taken back."""
+    w = World(tmp_path, kind)
+    denied_then_paid(w)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803", payer="ANTHEM CARE PLAN",
+            plb="PLB*1777777772*20261231*WO:QCB0000300C024/77700000000012*117.60~")
+    det = w.run("r1")
+    assert standing(det, "CB0000300C024") == 0, "the payer's recoupment under its plan's name was not applied"
+    w.store.close()
+
+
+def test_a_balance_carried_under_one_payer_id_and_recovered_under_another_is_taken_once(tmp_path, kind):
+    """2026-06-10: the payer reverses C024's $117.60 and carries $27.60 forward naming C024 (FB, negative) under one payer
+    id; 2026-06-12 it pays C024 again, $90.00, under another of its ids; 2026-06-24 it recovers the $27.60 naming C024 (WO)
+    under that other id. One payer, one balance: the re-payment stands."""
+    w = World(tmp_path, kind)
+    denied_then_paid(w)
+    w.remit([visit_reversed("CB0000300C024", payer_ctl="PC300B")], "20260610", plb="PLB*1777777772*20261231*FB:123456789012345    CB0000300C024*-27.60~")
+    w.remit([visit_paid("CB0000300C024", paid="90.00", payer_ctl="PC300C")], "20260612", payer_id="00660")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260624", payer_id="00660",
+            plb="PLB*1777777772*20261231*WO:123456789012345    CB0000300C024*27.60~")
+    det = w.run("r1")
+    assert standing(det, "CB0000300C024") == 9000, "the recovery of the carried balance took the re-payment under the other id"
+    w.store.close()
+
+
 @pytest.mark.parametrize("offset", ["CS", "72"])
 def test_a_recoupment_the_same_remittance_offsets_under_the_claims_name_takes_nothing(tmp_path, kind, offset):
     """2026-08-03: the payer lists a recoupment of C024's $117.60 (WO) and, in the same remittance, an adjustment of
