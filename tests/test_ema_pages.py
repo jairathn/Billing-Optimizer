@@ -1198,7 +1198,7 @@ const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('no
 const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/].map(re => grab(html, re)).join('\n');
 const escKey = grab(html, /document\.addEventListener\('keydown', e=>\{ if\(e\.key!=='Escape'\) return;[\s\S]*?\}\);\n/);
 const keys = grab(html, /document\.addEventListener\('keydown', e=>\{\n  if\(e\.ctrlKey[\s\S]*?\n\}\);\n/);
-const redraw = grab(html, /function xpRedrawBox\(id, d\)\{[\s\S]*?\n\}\n/);
+const redraw = grab(html, /function xpRedrawBox\(id, d(, seq)?\)\{[\s\S]*?\n\}\n/);
 const cls = open => { const s = new Set(open ? ['open'] : []); return { add: k => s.add(k), remove: k => s.delete(k), contains: k => s.has(k) }; };
 const mk = extra => Object.assign({ hidden: false, innerHTML: '', textContent: '', clicked: 0, disabled: false, click() { this.clicked++; } }, extra || {});
 const modal = mk({ classList: cls(true) }), inDrawer = {};

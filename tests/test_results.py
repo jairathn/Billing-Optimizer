@@ -886,6 +886,10 @@ def _strip(d):
     d = json.loads(json.dumps(d))
     for k in ("at", "seconds", "rev", "detect_run"):
         d.pop(k, None)
+    # each weekly snapshot carries the second it was taken: two runs a second apart are the same figures
+    for snap in d.get("snapshots") or []:
+        if isinstance(snap, dict):
+            snap.pop("at", None)
     return d
 
 
