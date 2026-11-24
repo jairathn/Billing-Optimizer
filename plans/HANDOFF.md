@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 10:45 UTC.
+Last updated: 2026-11-24, 15:15 UTC.
 
 ## 1. Where things are
 
@@ -165,6 +165,18 @@ Last updated: 2026-11-24, 10:45 UTC.
       837 pass, `plans/design_837_never_answered.md`, base 2b72f47 + 6c34e08), fix4 (item amounts, base 383d99e), fix5
       (ledger and leftovers, base 0e6ef4a), fix6 (EMA paid before the denial, base 0e6ef4a). Integrate each (merge, the
       suite, push), bump DETECT_RULES once, then measure the whole on world2 with A16 and hand-trace.
+      **15:15 UTC.** All four fixers stopped at the account's 5-hour usage limit at 10:45; they were resumed at 14:55
+      after it reset (a fixer stopped that way resumes from its saved transcript with SendMessage). fix6 is merged
+      (d27ce98): a Medicaid plan's denial of a service another payer had paid first (EMA's first payer on the claim is a
+      Medicare Advantage plan; UHC's checks are posted in EMA under a 'Medicaid Community Plan' name, which the name rules
+      put in the Medicaid catch-all and C6 read as the denier's own) and a duplicate denial of a service the same payer
+      paid first are done, with the payments as proof rows. A16: already done on Work now 324 -> 249 (paid 204 -> 133),
+      closed wrongly unchanged, money left on the table +$18.42. Left from it: the Medicaid catch-all is still read as one
+      family in C6's same-payer reading and the older paid-before branch; C6 ignores the patient's copay when it compares a
+      payment with half of the expected amount (an Anthem MA 99212 fully paid with the copay stays listed); about 70 of the
+      denials carry KY Medicaid provider-enrollment reasons (B7, N570, N288): a question for the owner, no money on these
+      items. The hook-in unit (E, G, H wired into both cycles, the Data tab panels, the 1 GiB fix) started at 15:10 as a
+      background agent on branch `hook` from d27ce98.
       Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
