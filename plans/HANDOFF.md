@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 08:35 UTC.
+Last updated: 2026-11-24, 09:10 UTC.
 
 ## 1. Where things are
 
@@ -113,7 +113,15 @@ Last updated: 2026-11-24, 08:35 UTC.
       (T-C3/T-N3 a coordination denial the same payer settled as secondary, T-N6 processed to the patient on the same
       bill, T-N8 CO-151 M86), (b) money accounting (T-I1 PLB references that embed the claim id, T-I5 a reversal of a
       version not on file, T-C5/T-C6 recovered dollars and the closure's remittance). Each measures on its own private
-      copy of the world and hand-traces samples. Next after them: the 837 as a source of sends and the never-answered
+      copy of the world and hand-traces samples. (a) is merged (6c34e08): already done on Work now in scope 173 ($15,690)
+      -> 131 ($11,863); 23 of 23 hand-traced closures right; left: rule 8's patient-group items 52 ($2,540, the owner's
+      ruling), 23 moved-to-patient claim denials whose own reason puts the amount on the patient or that another payer
+      answered, 40 paid by another family, 10 voided by EMA, 6 small. Open points from it: two conventions for a recovery
+      when a payer denies as primary and pays later as secondary (archive rule 3 records $0, the new closure the payment:
+      choose one: the amount is what arrived, the Results tab attributes it); the primary's remittance behind 32 such
+      closures ($5,066) is on no list (handed to the 837 pass); another payer's answer never closes an item (a supplement's
+      PR-96 after Medicare's PR-1 stays listed). (c) the 837 pass (plans/design_837_never_answered.md) is running too.
+      Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
    4. Iterate (fix, audit, trace every disagreement by hand) until the auditor and the hand traces find no failure; then
