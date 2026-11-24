@@ -884,7 +884,13 @@ def has_proof(ev: dict) -> bool:
     if proof_money(rows) > 0:
         return True
     paid = pl.get("paid_cents")
-    return bool(pl.get("payment_date")) and isinstance(paid, (int, float)) and paid > 0 and bool(pl.get("trace") or pl.get("claim"))
+    if not (isinstance(paid, (int, float)) and paid > 0):
+        return False
+    if pl.get("payment_date") and (pl.get("trace") or pl.get("claim")):
+        return True
+    # what EMA's report shows paid by insurance on the claim (the weekly charge lines carry no payment date): the amount,
+    # the claim and the report that shows it let a person find it in EMA
+    return bool(pl.get("claim")) and bool(pl.get("source"))
 
 
 def check_closure_proof(conn: sqlite3.Connection, today: str) -> dict:

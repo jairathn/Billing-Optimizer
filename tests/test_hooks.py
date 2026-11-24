@@ -315,3 +315,232 @@ def test_a_held_run_logs_no_change_people_never_saw(tmp_path, monkeypatch):
     kinds = [x["kind"] for x in runlog.decisions_for(s.conn, fid)["items"] if x["run_id"] == "run-20261102T000000Z-bbbb"]
     assert "closed" not in kinds, kinds
     s.close()
+
+
+# ======================================================================================================================
+# 3. The server's cycle (remitwatch.pipeline.run_cycle)
+# ======================================================================================================================
+def _db(tmp_path) -> str:
+    return str(tmp_path / "data" / "remitwatch.sqlite")
+
+
+def _feed(tmp_path, paid_later: bool = False) -> str:
+    from tests.test_runlog import denial_files
+    folder = tmp_path / "feed"
+    denial_files(folder, paid_later=paid_later)
+    return str(folder)
+
+
+def _last_manifest(db: str) -> dict:
+    from remitwatch import runlog
+    sink = runlog.DirSink(runlog.logs_dir_for(db))
+    m, _events = runlog.read_run(sink, runlog.read_index(sink)[-1]["run_id"])
+    return m
+
+
+def test_every_server_cycle_writes_its_manifest_events_and_decisions(tmp_path):
+    """needs_H W1: the cycle starts its own run log: the logs folder beside the store holds the run's manifest (outcome
+    ok, its steps, the decision log's summary, the self-check's invariants and the plan) and its events, and the store's
+    run_log has the run."""
+    import glob
+    import sqlite3 as sq
+
+    from remitwatch import pipeline
+    db = _db(tmp_path)
+    lines: list = []
+    out = pipeline.run_cycle(db, sync=False, local=_feed(tmp_path), email=False, report=False, log=lines.append)
+    assert "detect" in out and out["plan"]["level"] == 0
+    m = _last_manifest(db)
+    assert m["outcome"] == "ok" and {"detect", "alerts"} <= {s["step"] for s in m["steps"]}
+    assert m["sections"]["decisions"]["by_kind"].get("raised", 0) >= 1
+    assert any(c["id"] == "closure_proof" for c in m["invariants"]) and m["self_regulation"]["level"] == 0
+    logs = os.path.dirname(db) + "/logs"
+    assert glob.glob(logs + "/runs-*.jsonl") and any("run_start" in open(p).read() for p in glob.glob(logs + "/events-*.jsonl"))
+    c = sq.connect(db)
+    assert c.execute("SELECT outcome FROM run_log WHERE run_id=?", (m["run_id"],)).fetchone()[0] == "ok"
+    c.close()
+
+
+def test_a_dropbox_listing_that_fails_twice_is_tried_again_and_read(tmp_path, monkeypatch):
+    """needs_H W8: the server's Dropbox client goes through the self-repair registry: a listing dropped twice by the
+    network is tried again and the files are read in the same cycle; repair_log has two 'retrying' rows and one
+    'repaired'."""
+    import dataclasses
+    import sqlite3 as sq
+
+    import requests
+
+    from remitwatch import dropbox_sync, pipeline, repair
+    from tests.test_remitwatch import remit
+    from tests.test_sync import FakeClient
+    from tests.test_features import clean_visits
+
+    class Flaky(FakeClient):
+        def __init__(self, files, fail):
+            super().__init__(files)
+            self.fail = fail
+
+        def list_folder(self, path, recursive=True):
+            if self.fail:
+                self.fail -= 1
+                raise requests.ConnectionError("Connection reset by peer")
+            yield from super().list_folder(path, recursive)
+    files = {"/Trizetto Data/Trizetto/r900.RMT": remit("".join(clean_visits(900, 3, "99213", "150.00", "80.00")), "240.00",
+                                                       seg_count=99, isa_ctrl="000000900", pay_date="20261113")}
+    client = Flaky(files, fail=2)
+    for k, v in {"DROPBOX_APP_KEY": "k", "DROPBOX_APP_SECRET": "s", "DROPBOX_REFRESH_TOKEN": "r", "DROPBOX_ROOT_PATH": "/Trizetto Data",
+                 "REMITWATCH_DATA_DIR": str(tmp_path / "mirror")}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: client)
+    monkeypatch.setitem(repair.REMEDIES, "network", dataclasses.replace(repair.REMEDIES["network"], delays=(0, 0, 0)))
+    db = _db(tmp_path)
+    out = pipeline.run_cycle(db, sync=True, email=False, report=False, log=lambda *a: None)
+    assert "error" not in out.get("sync", {}) and out["ingest"]["remits"] == 1 and client.fail == 0
+    c = sq.connect(db)
+    rows = [r[0] for r in c.execute("SELECT outcome FROM repair_log WHERE target='dropbox' ORDER BY id")]
+    c.close()
+    assert rows == ["retrying", "retrying", "repaired"], rows
+
+
+def test_a_trizetto_pull_is_tried_again_and_a_bug_in_its_ingest_is_raised_at_once(tmp_path, monkeypatch):
+    """needs_H P4: a whole pull is safe to repeat (files read are skipped), so a dropped connection is tried again; what
+    the ingest callback raises (a code bug) is never retried (repair.not_retried) and the cycle carries on without it."""
+    import dataclasses
+    import sqlite3 as sq
+
+    import requests
+
+    from remitwatch import pipeline, repair, trizetto
+    monkeypatch.setitem(repair.REMEDIES, "network", dataclasses.replace(repair.REMEDIES["network"], delays=(0, 0, 0)))
+    monkeypatch.setattr(trizetto, "configured", lambda: True)
+    calls = {"n": 0}
+
+    def flaky_pull(conn, handle, deadline, settings=None, log=print):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise requests.ConnectionError("Connection reset by peer")
+        return {"listed": 0, "remits": 0, "ema": 0, "claims_837": 0}
+    monkeypatch.setattr(trizetto, "pull", flaky_pull)
+    db = _db(tmp_path)
+    out = pipeline.run_cycle(db, sync=False, local=_feed(tmp_path), email=False, report=False, log=lambda *a: None)
+    assert calls["n"] == 3 and "error" not in out["trizetto"]
+    c = sq.connect(db)
+    assert [r[0] for r in c.execute("SELECT outcome FROM repair_log WHERE target='trizetto' ORDER BY id")] == ["retrying", "retrying", "repaired"]
+    c.close()
+
+    def buggy_pull(conn, handle, deadline, settings=None, log=print):
+        calls["n"] += 1
+        return handle([("r1.RMT", b"x", 0.0)])          # the ingest raises: a code bug, whatever its words
+    from remitwatch import cloud
+
+    def buggy_ingest(store, items, log):
+        raise RuntimeError("the reader timed out 503")  # a code bug whose words read like a network error
+    monkeypatch.setattr(cloud, "_ingest_batch", buggy_ingest)
+    calls["n"] = 0
+    monkeypatch.setattr(trizetto, "pull", buggy_pull)
+    out = pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    assert calls["n"] == 1 and "timed out" in out["trizetto"]["error"] and "finished" in out      # raised at once, never retried
+
+
+def test_a_scheduled_cycle_that_dies_before_its_lock_is_visible_on_the_panel(tmp_path, monkeypatch):
+    """needs_H W10 (P0a): a store that cannot be opened makes the cycle fail before its lock; with no run log yet, the
+    failure is still written as a failed run, and the panel shows it."""
+    import sqlite3 as sq
+    from datetime import timedelta
+
+    from remitwatch import pipeline, runlog
+    db = _db(tmp_path)
+    store = Store(db)
+    yesterday = runlog.utcnow() - timedelta(days=1)
+    rl = runlog.start_run("cycle", trigger="schedule", db_path=db, conn=store.conn, host="server", now=yesterday)
+    rl.finish(conn=store.conn, now=yesterday + timedelta(minutes=2))      # yesterday's good run
+    store.close()
+
+    def broken_store(path, *a, **kw):
+        raise sq.OperationalError("duplicate column name: work_state")     # a migration bug
+    monkeypatch.setattr(pipeline, "Store", broken_store)
+    with pytest.raises(sq.OperationalError):
+        pipeline.run_cycle(db, sync=False, email=False, report=False)
+    c = sq.connect(db)
+    p = runlog.panel(c, runlog.logs_dir_for(db))
+    c.close()
+    assert p["last_run"]["outcome"] == "failed" and p["last_run"]["first_error"]["type"] == "OperationalError"
+
+
+def test_the_schedulers_child_that_ends_badly_is_noted_once(tmp_path, monkeypatch):
+    """needs_H W11 (P0b): the scheduler's child exit code is noted as a failed run (its own log has the detail); a child
+    that ended well adds nothing."""
+    from remitwatch import pipeline, runlog
+    db = _db(tmp_path)
+    Store(db).close()
+    sched = pipeline.Scheduler()
+    sched.db_path = db
+    monkeypatch.setattr(sched, "argv", lambda _db: [sys.executable, "-c", "import sys; sys.exit(3)"])
+    assert sched.run_child("schedule") == 3
+    sink = runlog.DirSink(runlog.logs_dir_for(db))
+    last = runlog.read_index(sink)[-1]
+    assert last["outcome"] == "failed" and last.get("exit_code") == 3
+    n = len(runlog.read_index(sink))
+    monkeypatch.setattr(sched, "argv", lambda _db: [sys.executable, "-c", "import sys; sys.exit(0)"])
+    assert sched.run_child("schedule") == 0 and len(runlog.read_index(sink)) == n
+
+
+def test_a_cycle_past_its_memory_budget_makes_the_next_ones_spread_then_shed(tmp_path, monkeypatch):
+    """needs_G section 2: with a 1 MB budget every cycle passes 80% of it. The next cycle's plan steps up one level a
+    run (spread, archive, shed); at level 3 the provider tables, the report and the self-audit are left for a calm cycle,
+    and the plan, the regulation and what was shed are recorded."""
+    from datetime import datetime, timedelta, timezone
+
+    from remitwatch import pipeline, selfcheck
+    monkeypatch.setenv("REMITWATCH_MEMORY_BUDGET_MB", "1")
+    monkeypatch.setenv("REMITWATCH_REPORT_EVERY_DAYS", "0")             # the weekly report due at every cycle
+    db = _db(tmp_path)
+    feed = _feed(tmp_path)
+    levels, outs = [], []
+    for n in range(4):                  # cycles minutes apart, as on a server (a status is counted once, by its start)
+        monkeypatch.setattr(pipeline, "_now", lambda n=n: (datetime.now(timezone.utc) - timedelta(minutes=10 * (4 - n))).isoformat(timespec="seconds"))
+        out = pipeline.run_cycle(db, sync=False, local=feed, force_detect=True, email=False, report=None,
+                                 report_dir=str(tmp_path / "reports"), log=lambda *a: None)
+        levels.append(out["plan"]["level"])
+        outs.append(out)
+    assert levels == [0, 1, 2, 3], levels
+    assert all("report" in o for o in outs[:3])
+    last = outs[-1]
+    assert "activity" in last["plan"]["skip"] and "activity" not in last and "self_audit" not in last and "report" not in last
+    s = Store(db)
+    reg = selfcheck.meta_get(s.conn, selfcheck.K_REGULATE)
+    assert reg["plan"]["level"] == 3 and set(reg["did"]["shed"]) >= {"activity", "report", "audit"}
+    from remitwatch import activity
+    assert activity.stale(s.conn)                  # the provider tables wait for a calm cycle, and say so
+    s.close()
+
+
+def test_old_settled_bills_go_to_the_archive_in_the_cycle_and_a_reopening_comes_back(tmp_path):
+    """needs_E section 3: retention runs after detection in the server's cycle: the settled bills of three years ago
+    leave for the archive folder beside the store (a second cycle takes nothing more), the run's size is recorded, and a
+    reopening asked in the app is back, with its status, after the next cycle."""
+    import sqlite3 as sq
+
+    from remitwatch import archive, pipeline
+    from tests.test_archive import NEW, OLD, ingest, visits
+    db = _db(tmp_path)
+    s = Store(db)
+    ingest(s, tmp_path, [(visits(1, 8, OLD), "20220415"), (visits(100, 8, NEW), "20260415")])
+    s.close()
+    out = pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    assert out["archive"]["bills"] == 8, out.get("archive")
+    c = sq.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM archive_bills").fetchone()[0] == 8
+    assert len(archive.history(c)) == 1 and os.listdir(os.path.join(os.path.dirname(db), "archive"))
+    bill = c.execute("SELECT bill FROM archive_bills LIMIT 1").fetchone()[0]
+    c.close()
+    again = pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    assert "archive" not in again                                       # nothing more to take
+    c = sq.connect(db)
+    assert archive.request_restore(c, bill, actor="biller@example.test", reason="a late payment")["queued"]
+    c.close()
+    back = pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    assert back["archive_back"]["asked"] == 1
+    c = sq.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM archive_bills WHERE bill=?", (bill,)).fetchone()[0] == 0
+    c.close()

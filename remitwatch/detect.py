@@ -5275,6 +5275,7 @@ class Detector:
         try:        # reasons hidden for a payer (actions.apply_hide_rule) hide the new items they cover
             from .actions import apply_hide_rules
             if apply_hide_rules(self.conn):
+                self._restate_closed()  # their state follows at once (states.py), as the next analysis would set it
                 self.conn.commit()
         except Exception as exc:
             runlog.caught(exc, "hide_rules")
@@ -5310,6 +5311,25 @@ class Detector:
         rl = runlog.current()
         if rl is not None:
             rl.set("invariants", (self.selfcheck or {}).get("checks"))
+
+    def _restate_closed(self) -> int:
+        """Items a step after the save closed (the hide rules move new items to Let go): their state is decided again
+        (states.py: Let go by a rule is accepted), so no item reads Let go and Work now together until the next analysis
+        (the self-check's open_and_closed check would hold the run for it)."""
+        from . import states
+        cur = self.conn.execute("SELECT * FROM findings WHERE COALESCE(stale,0)=0 AND status IN ('resolved','lost','dismissed') "
+                                "AND work_state IN ('work_now','waiting')")
+        names = [d[0] for d in cur.description]
+        rows = [dict(zip(names, r)) for r in cur.fetchall()]
+        if not rows:
+            return 0
+        got = self._ema_step("restate", states.states_of, self.conn, rows,
+                             outcomes=dict(self.ema_outcomes) if self.ema_on else {}, today=self.today) or {}
+        upd = [(st.get("work_state"), st.get("follow_up_on"), (st.get("state_basis") or "")[:300] or None, st.get("appeal_block"),
+                st.get("rule"), fid) for fid, st in got.items() if st]
+        self.conn.executemany("UPDATE findings SET work_state=?, follow_up_on=?, state_basis=?, appeal_block=?, state_rule=? "
+                              "WHERE finding_id=?", upd)
+        return len(upd)
 
     def _record_decisions(self) -> None:
         """(H, remitwatch.runlog) The decision log of this run: one row per item an automatic step changed."""
@@ -5365,17 +5385,23 @@ def carry_to_heirs(c: sqlite3.Connection, moved: list[tuple[str, str]], at: str,
                 c.execute("UPDATE faxes SET doc=? WHERE fax_key=?", (json.dumps(d, default=str), key))
 
 
-def run_detection(db_path: str, run_id: str | None = None) -> dict:
+def run_detection(db_path: str, run_id: str | None = None, *, skip_activity: bool = False) -> dict:
+    """One analysis of the store at db_path, then the provider tables, unless the self-regulation left them for a calm
+    cycle (skip_activity: remitwatch.selfcheck's plan sheds them; activity.stale keeps the note that they are behind)."""
     import gc
 
-    from .activity import refresh
+    from .activity import mark_pending, refresh
     store = Store(db_path)
     try:
         det = Detector(store, run_id)
         summary = det.run()
         del det                 # the provider tables are built after the detector has given its memory back
         gc.collect()
-        refresh(store, log=lambda *_a: None)
+        if skip_activity:
+            mark_pending(store.conn)
+            store.conn.commit()
+        else:
+            refresh(store, log=lambda *_a: None)
         return summary
     finally:
         store.close()

@@ -54,29 +54,39 @@ def server_world(tmp_path, monkeypatch):
     os.makedirs(feed2)
     os.replace(p2, feed2 / "r002.RMT")
     monkeypatch.setenv("SRFAX_ACCESS_PWD", "s3cret-fax-passw0rd")
-    rl = runlog.start_run("cycle", trigger="test", db_path=db, host="server")
-    with rl.step("cycle"):
-        pipeline.run_cycle(db, sync=False, local=str(feed1), email=False, report=False, log=rl.log)
+    pipeline.run_cycle(db, sync=False, local=str(feed1), email=False, report=False, log=lambda *a: None)   # its own run log
     store = Store(db)
-    rl.finish(conn=store.conn)
     before = runlog.snapshot_items(store.conn)
     fid = next(iter(before.rows))
     store.close()
-    rl = runlog.start_run("cycle", trigger="test", db_path=db, host="server")
-    with rl.step("cycle"):
-        pipeline.run_cycle(db, sync=False, local=str(feed2), email=False, report=False, log=rl.log)
-    with rl.step("ema_waiting", contain=True, inputs={"file": "abcdef0123456789"}):
+
+    def server_world_reread(*_a, **_kw):           # the second cycle's EMA step fails with planted values (contained)
         raise ValueError(f"bad row for {FIRST} {LAST} born 02/29/1960, member {MEMBER}, MRN {MRN}")
+    from remitwatch import selfcheck
+    real_after = selfcheck.after_detection
+
+    def failing_check(conn, ctx=None, **kw):       # and a critical check fails with the closed item as its example
+        res = real_after(conn, ctx, **kw)
+        res["checks"] = list(res.get("checks") or []) + [
+            {"id": "closures_have_proof", "status": "fail", "severity": "critical", "n": 1, "examples": [fid]}]
+        return res
+
+    def held_file(conn, reg, since):               # the run's registry holds a file the reader could not read
+        reg.failed("unreadable_file", "production:abcdef0123456789", None, reason="held: the file was cut short", hold=True)
+        reg.record("unreadable_file", "production:abcdef0123456789", "held", after={"status": "held"},
+                   next_step=repair.REMEDIES["unreadable_file"].next_step)
+        return 1
+    monkeypatch.setattr(pipeline, "reread_waiting", server_world_reread)
+    monkeypatch.setattr(selfcheck, "after_detection", failing_check)
+    monkeypatch.setattr(repair, "sweep_reports", held_file)
+    pipeline.run_cycle(db, sync=False, local=str(feed2), email=False, report=False, log=lambda *a: None)
+    monkeypatch.undo()
+    monkeypatch.setenv("SRFAX_ACCESS_PWD", "s3cret-fax-passw0rd")
+    sink = runlog.DirSink(runlog.logs_dir_for(db))
+    last = runlog.read_index(sink)[-1]
+    m, _ev = runlog.read_run(sink, last["run_id"])
+    assert (m["sections"].get("decisions") or {}).get("by_kind") == {"closed": 1}     # written by the run itself
     store = Store(db)
-    assert (rl.manifest["sections"].get("decisions") or {}).get("by_kind") == {"closed": 1}     # written by the run itself
-    rl.set("invariants", {"held": False, "failing": ["closures_have_proof"],
-                          "checks": [{"id": "closures_have_proof", "status": "fail", "severity": "critical", "n": 1, "examples": [fid]},
-                                     {"id": "one_state", "status": "ok", "examples": []}]})
-    reg = repair.registry_for(rl, conn=store.conn)
-    reg.failed("unreadable_file", "production:abcdef0123456789", None, reason="held: the file was cut short", hold=True)
-    reg.record("unreadable_file", "production:abcdef0123456789", "held", after={"status": "held"},
-               next_step=repair.REMEDIES["unreadable_file"].next_step)
-    reg.save()
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:cursor', 'AAHopaque-cursor-value')")
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', 'ab' || hex(randomblob(31)))")
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('pipeline:lock', ?)",
@@ -84,10 +94,9 @@ def server_world(tmp_path, monkeypatch):
                                     "host": "a-host-name", "token": "tok"}),))
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom:note', ?)", (f"{LAST} {FIRST} 1960-02-29",))
     store.conn.commit()
-    rl.finish(conn=store.conn)
     salt = store.conn.execute("SELECT value FROM meta WHERE key='ema:key_salt'").fetchone()[0]
     store.close()
-    return {"db": db, "fid": fid, "run_id": rl.run_id, "salt": salt}
+    return {"db": db, "fid": fid, "run_id": last["run_id"], "salt": salt}
 
 
 def members(res) -> dict[str, bytes]:
@@ -104,8 +113,9 @@ def test_a_server_bundle_has_every_part_and_nothing_that_identifies_a_patient(se
     # errors: the contained error with its stack and where, the message scrubbed
     errs = json.loads(files["errors.json"])["errors"]
     e = next(x for x in errs if x["type"] == "ValueError")
-    assert e["stack"] and e["where"].startswith("tests/test_diagnose.py:") and e["step"] == "ema_waiting" and e["contained"] is True
-    assert any(f["file"] == "tests/test_diagnose.py" and f["function"] == "server_world" for f in e["stack"])   # not masked as a path
+    # where: the cycle's own frame that contained it (pipeline._ema_step); the stack goes down to the raise
+    assert e["stack"] and e["where"].startswith("remitwatch/pipeline.py:") and e["step"] == "ema_waiting" and e["contained"] is True
+    assert any(f["file"] == "tests/test_diagnose.py" and f["function"] == "server_world_reread" for f in e["stack"])   # not masked as a path
     # the failing check's example item with its decision log, dates cut to the month
     ex = json.loads(files["examples/closures_have_proof.json"])
     item = ex["items"][0]

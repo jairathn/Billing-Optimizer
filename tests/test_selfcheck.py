@@ -1483,6 +1483,25 @@ def test_a_proof_row_with_no_money_is_not_proof_of_payment(store):
     assert sorted(r["examples"]) == ["F-denial-row", "F-netted", "F-takeback", "F-zero"], r["examples"]
 
 
+def test_a_payment_emas_report_shows_names_its_amount_claim_and_report(store):
+    """detect.resolve_elsewhere closes an item EMA shows paid by insurance; the weekly charge lines give the amount, the
+    claim and the export but no payment date. That names the payment (a person checks it in EMA from the claim and the
+    report), so it is proof; one with no amount, no claim or no report is not. Found by wiring the check into detection:
+    such a closure held the run."""
+    c = store.conn
+    ema = {"payment_date": None, "claim": "ZZ00T0001C001", "paid_cents": 11760, "how": "EMA shows it paid",
+           "trace": "EMA 99214 2026-10-01", "source": "Encounter & Charge Lines.xlsx"}
+    add_item(c, "F-ema", status="resolved", work_state="done", auto_note="EMA shows it paid", evidence={"paid_later": ema})
+    add_item(c, "F-no-report", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"paid_later": dict(ema, source=None)})
+    add_item(c, "F-no-claim", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"paid_later": dict(ema, claim=None, trace=None)})
+    add_item(c, "F-nothing-paid", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"paid_later": dict(ema, paid_cents=0)})
+    r = sc.check_closure_proof(c, TODAY)
+    assert sorted(r["examples"]) == ["F-no-claim", "F-no-report", "F-nothing-paid"], r["examples"]
+
+
 def test_the_precision_guard_counts_a_service_sent_again_once(kind):
     """Two lines of one code on one claim are two units (their shortfalls add up); the same line sent again on a new claim
     is the same money (finding 12)."""

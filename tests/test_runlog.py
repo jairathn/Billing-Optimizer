@@ -970,17 +970,6 @@ def _report_files(folder) -> list[str]:
     return [p_ar, p_prod]
 
 
-def _wired_ema_step(out, key, fn, *a, **kw):
-    """pipeline._ema_step as needs_H.md asks for it: the exception is logged (with its stack, scrubbed) before it is
-    contained."""
-    try:
-        return fn(*a, **kw)
-    except Exception as exc:        # noqa: BLE001
-        runlog.caught(exc, key)
-        out[key] = {"error": type(exc).__name__}
-        return None
-
-
 def _poisoned(*_a, log=print, **_kw):
     """A step that fails with the planted values in its log line and in its error message."""
     log(f"  EMA ERROR /uploads/{UNI}/{EMA_NAME}.xlsx: could not read '{MEMBER}' born {DOB.isoformat()}")
@@ -1002,19 +991,22 @@ def test_no_planted_identifier_reaches_any_log_byte_on_a_server(tmp_path, monkey
     with open(os.path.join(ready, pair + ".json"), "w") as fh:
         json.dump({"name": f"{UNI} {EMA_NAME} AR.xlsx", "origin": "upload", "user": "staff", "sha256": hashlib.sha256(up).hexdigest(),
                    "size": len(up), "gz": False, "received_at": "2026-11-20T10:00:00+00:00", "report_hint": None}, fh)
-    monkeypatch.setattr(pipeline, "_ema_step", _wired_ema_step)
     monkeypatch.setattr(pipeline, "reread_waiting", _poisoned)
-    rl = runlog.start_run("cycle", trigger="test", db_path=db, host="server")
-    with rl.step("cycle"):
-        out = pipeline.run_cycle(db, sync=False, local=str(feed), email=False, report=False, log=rl.log)
-    with rl.step("broken", contain=True):
-        raise RuntimeError(f"{EMA_NAME} {UNI} {MEMBER} {MRN} 1960-02-29")
+    printed: list = []
+    pipeline.run_cycle(db, sync=False, local=str(feed), email=False, report=False, log=printed.append)   # its own run log
+    sink = runlog.DirSink(runlog.logs_dir_for(db))
+    m, _events = runlog.read_run(sink, runlog.read_index(sink)[-1]["run_id"])
+    assert any(e["type"] == "ValueError" and e["step"] == "ema_waiting" for e in m["errors"])   # the hook logged the contained error
+    assert any("EMA ERROR" in str(x) for x in printed)                                       # the console sees the lines,
+    assert not any(LAST in str(x) or MEMBER in str(x) or UNI in str(x) for x in printed)      # scrubbed
     store = Store(db)
     try:
         assert store.conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] >= 1
         assert store.conn.execute("SELECT COUNT(*) FROM ema_report_files").fetchone()[0] >= 2     # the reports were read
-        rl.finish(conn=store.conn, out=out)
-        assert any(e["type"] == "ValueError" for e in rl.manifest["errors"])                  # the hook logged the contained error
+        rl = runlog.start_run("cycle", trigger="test", db_path=db, host="server")
+        with rl.step("broken", contain=True):
+            raise RuntimeError(f"{EMA_NAME} {UNI} {MEMBER} {MRN} 1960-02-29")
+        rl.finish(conn=store.conn)
         files = all_log_bytes(runlog.logs_dir_for(db))
         assert any(n.endswith(".jsonl") for n in files)
         files.update(log_tables(store.conn))
