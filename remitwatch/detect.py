@@ -1416,9 +1416,13 @@ class Detector:
         both claims carry one; another member number only when EMA ties both claims to one patient), the same date and code,
         a payment still standing (a primary payment, or one covering half the expected amount), made after the denial,
         covering the units denied, for a code paid at most once per patient and date, and, for a claim-level denial, every
-        code it lists. A duplicate's denial also closes when the service was paid on another claim before it. Anything
-        short of that (a payment before the denial, another member number, fewer units, a code often paid twice in a day,
-        an adjudication to the patient's deductible, a bundled procedure paid elsewhere) is left open with a hint.
+        code it lists. A payment for one part of a service (the professional part, modifier 26, or the technical part, TC)
+        pays that part only: a 26 denial closes on a 26 payment or one for the whole service, a TC denial on a TC payment or
+        one for the whole service, and a denial of the whole service on a payment for the whole service or for both parts
+        (trace finding T-C1). A duplicate's denial also closes when the service was paid on another claim before it. Anything
+        short of that (a payment before the denial, another member number, fewer units, one part of the service, a code
+        often paid twice in a day, an adjudication to the patient's deductible, a bundled procedure paid elsewhere) is left
+        open with a hint; a payment for the other part only (a TC payment for a 26 denial) is not shown at all.
         What EMA has posted closes it too (EMA_CLOSES): insurance payments in EMA's newest charge export, or on its ERA
         lines after the denial, on every code and date the item lists (a whole claim's every code, not one of them), each
         of at least half of what that code is expected to bring, where the claim carries the code once on that date. Fewer
@@ -1467,13 +1471,24 @@ class Detector:
             if ks[0] in patients or ks[1] in patients:
                 claim_who[ck] = ks
                 mid[ck] = initial(middle)
-        paid: dict[tuple, list] = defaultdict(list)         # standing payments: (date, claim id, trace, amount, status, units, claim key)
+        # The part of a service a line bills: the professional part (26), the technical part (TC), or the whole service ("").
+        # A payment for one part pays nothing of the other (trace finding T-C1).
+        part_of = lambda ln: "26" if "26" in ln["modifiers_list"] else "TC" if "TC" in ln["modifiers_list"] else ""     # noqa: E731
+        fits = lambda p, want: not p or p in want or "" in want         # a payment for part p can pay toward these parts  # noqa: E731
+        bills = {bill_of(f["patient_control_number"]) for f in todo}
+        own_paid: dict[tuple, list] = defaultdict(list)     # (bill, code, date) -> the bill's standing payments: (status, amount, units, part)
+        paid: dict[tuple, list] = defaultdict(list)         # standing payments: (date, claim id, trace, amount, status, units, claim key, part)
         to_patient: dict[tuple, list] = defaultdict(list)   # adjudicated at $0 with the allowed amount owed by the patient
         for l in self.lines:
-            ks = claim_who.get(l["claim_key"])
-            if not ks or not l.get("service_date"):
+            if not l.get("service_date"):
                 continue
             amt = self.standing.get(l["line_key"])
+            if amt and bill_of(l["patient_control_number"]) in bills:
+                own_paid[(bill_of(l["patient_control_number"]), l.get("procedure_code"), l["service_date"])].append(
+                    (l.get("claim_status_code"), amt, abs(l.get("paid_units") or 1), part_of(l)))
+            ks = claim_who.get(l["claim_key"])
+            if not ks:
+                continue
             pr = 0 if amt else sum(a for g, _rc, a in self.adj.get(l["line_key"], []) if g == "PR")
             if not amt and not (l.get("claim_status_code") in ("1", "19") and pr > 0):
                 continue
@@ -1481,7 +1496,7 @@ class Detector:
                 key = (k, l.get("procedure_code"), l["service_date"])
                 if k and key in need:
                     row = (l.get("payment_date") or l.get("txn_payment_date") or "", l["patient_control_number"], l.get("trace_number"),
-                           amt or pr, l.get("claim_status_code"), abs(l.get("paid_units") or 1), l["claim_key"])
+                           amt or pr, l.get("claim_status_code"), abs(l.get("paid_units") or 1), l["claim_key"], part_of(l))
                     (paid if amt else to_patient)[key].append(row)
         # Codes paid more than once for a patient on a date (Mohs stages, units, fractions): a payment on another claim may
         # be for another stage or lesion. A code counts as paid once when at least 20 patient-dates had it paid and no more
@@ -1506,6 +1521,17 @@ class Detector:
             groups[last[0]] += 1
             repeats[last[0]] += len(members) > 1
         once = {code for code, g in groups.items() if g >= 20 and repeats[code] <= 0.015 * g}
+
+        def part_units(rows: list[tuple]) -> Counter:
+            """Units these payments pay, by part of the service: rows of (claim status, units, part), the primary payments'
+            units of each part (a secondary pays its share of the same units), or the secondary ones' where no primary stands."""
+            out: Counter = Counter()
+            for p in ("", "26", "TC"):
+                rs = [r for r in rows if r[2] == p]
+                out[p] = sum(r[1] for r in ([r for r in rs if r[0] in ("1", "19")] or rs))
+            return out
+        pays = lambda u, p: u[""] + (u[p] if p else min(u["26"], u["TC"]))      # units of part p paid: the whole service, or both parts  # noqa: E731
+        part_words = {"26": "the professional part (26)", "TC": "the technical part (TC)"}
         for f in todo:
             mine = f.get("payment_date") or ""
             bill = bill_of(f["patient_control_number"])
@@ -1521,6 +1547,13 @@ class Detector:
             # bill still has paid plus what other bills paid
             units: Counter = Counter({(ln["procedure_code"], ln["service_date"]): self.units_billed(f["claim_key"], ln["procedure_code"], ln["service_date"])
                                       for ln in ls})
+            # the parts of the service the item's lines bill for each code and date, with the units the claim billed of each
+            parts: dict[tuple, Counter] = defaultdict(Counter)
+            for ln in ls:
+                key, p = (ln["procedure_code"], ln["service_date"]), part_of(ln)
+                if p not in parts[key]:
+                    parts[key][p] = sum(abs(o.get("original_units") or o.get("paid_units") or 1) for o in self.lines_by_claim.get(f["claim_key"], [])
+                                        if o.get("procedure_code") == key[0] and o.get("service_date") == key[1] and part_of(o) == p)
             found: dict[tuple, dict] = defaultdict(dict)       # same patient, after the denial: can close
             weak: dict[tuple, dict] = defaultdict(dict)        # a hint only
             why_weak: dict[tuple, str] = {}
@@ -1530,23 +1563,32 @@ class Detector:
                     for e in paid.get((k, code, dos), []) if k else []:
                         if bill_of(e[1]) == bill:
                             continue
+                        if not fits(e[7], parts[(code, dos)]):
+                            continue                # a payment for the other part of the service (a TC payment for a 26 denial)
                         if not (e[4] in ("1", "19") or (per_unit and e[3] >= 0.5 * per_unit * e[5])):
                             continue
                         theirs = mid.get(e[6], "")
                         if mine_mid and theirs and mine_mid != theirs:
                             continue                # another person with the same name: a father and son
                         if other_payer and not (mine_ema and self.ema_patient.get(e[1]) == mine_ema):
-                            weak[(code, dos)][(e[1], e[0])] = e
+                            weak[(code, dos)][(e[1], e[0], e[7])] = e
                             why_weak.setdefault((code, dos), "it is the same name on another member number, and nothing ties the two claims to one patient")
                         elif not dup and e[0] <= mine:
-                            weak[(code, dos)][(e[1], e[0])] = e
+                            weak[(code, dos)][(e[1], e[0], e[7])] = e
                             why_weak.setdefault((code, dos), "that claim was paid before this denial, so the denial may be for something else")
                         else:
-                            found[(code, dos)][(e[1], e[0])] = e
-            prim_units = lambda rows: sum(e[5] for e in ([e for e in rows if e[4] in ("1", "19")] or rows))        # noqa: E731
+                            found[(code, dos)][(e[1], e[0], e[7])] = e
             per_line = exp / max(len(units), 1) if exp else None
-            covered = [key for key in units if key in found
-                       and prim_units(list(found[key].values())) + self.units_paid(self.paid_cover(bill, key[0], key[1], per_line)) >= units[key]]
+
+            def paid_units(key: tuple) -> Counter:
+                """What other bills paid of this code and date (found), plus what the item's own bill still has paid on it (as
+                paid_cover counts it: a primary payment, or a secondary one covering half the expected amount), by part."""
+                own = [(st, n, p) for st, amt, n, p in own_paid.get((bill,) + key, []) if st in ("1", "19") or (per_line and amt >= 0.5 * per_line)]
+                return part_units([(e[4], e[5], e[7]) for e in found[key].values()]) + part_units(own)
+            covered = [key for key in units if key in found and all(pays(paid_units(key), p) >= n for p, n in parts[key].items())]
+            # a denial of the whole service of which another claim paid only one part
+            half = [key for key in units if key in found and key not in covered and "" in parts[key]
+                    and {e[7] for e in found[key].values()} in ({"26"}, {"TC"})]
             best = min((e for v in found.values() for e in v.values()), key=lambda e: e[0], default=None)
             all_once = all(code in once for code, _d in units)
             if closable and best and units and len(covered) == len(units) and all_once:
@@ -1562,6 +1604,7 @@ class Detector:
                 pick = best
                 reason = ("a bundled procedure is not closed from another claim; check whether that claim paid this one" if not closable
                           else "this code can be paid more than once for a patient on a date" if not all_once
+                          else f"only {part_words[next(iter({e[7] for e in found[half[0]].values()}))]} was paid there, not the whole service" if half
                           else "the units paid there are fewer than the units denied" if any(key in found for key in units if key not in covered)
                           else "not every code on the denied claim was paid again")
                 codes_paid = sorted({code for code, _d in found})
@@ -1576,7 +1619,7 @@ class Detector:
                 f["evidence"] = json.dumps(ev, default=str)
                 continue
             owed = [e for k in (strict,) if k for key in units for e in to_patient.get((k,) + key, [])
-                    if bill_of(e[1]) != bill and e[0] > mine]
+                    if bill_of(e[1]) != bill and e[0] > mine and fits(e[7], parts[key])]
             if owed:
                 e = min(owed)
                 ev["adjudicated_elsewhere"] = {"claim": e[1], "payment_date": e[0], "patient_owes_cents": e[3]}
