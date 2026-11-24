@@ -1865,7 +1865,11 @@ def paid_first_elsewhere(fx: dict) -> dict | None:
             if sum(p["cents"] for p in kept) > 0:
                 counted += kept
     total = sum(p["cents"] for p in counted)
-    if total <= 0 or total < _threshold(f):
+    need = _threshold(f)
+    if need <= 1:
+        # nothing says what the item should bring: half of what its own EMA lines charge
+        need = max(1, sum(ln.get("charges") or 0 for ln in lines) // 2)
+    if total <= 0 or total < need:
         return None
     pos = sorted((p for p in counted if p["cents"] > 0), key=lambda p: (p["posted"] or "", p["check"]))
     first = pos[0]

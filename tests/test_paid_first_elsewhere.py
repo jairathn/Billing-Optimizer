@@ -86,25 +86,26 @@ def _history(store) -> None:
                      "lines": [("2026-02-02", "99214", 150, 90, [("CO", "45", 60)], {"allowed_cents": 9000})]} for i in range(25)])
 
 
-def _claim(store, n: int, *, payer: str, carc: str, status: str = "4", paid_on: D | None = None) -> D:
-    """Claim n: a 99214 charged $150.00 on its own day, denied whole by `payer` (claim status 4) with CO-<carc> on its 835
-    (trace = check n) six weeks after the visit. Returns the remittance's date."""
+def _claim(store, n: int, *, payer: str, carc: str, status: str = "4", paid_on: D | None = None, code: str = "99214") -> D:
+    """Claim n: a 99214 (or `code`) charged $150.00 on its own day, denied whole by `payer` (claim status 4) with CO-<carc>
+    on its 835 (trace = check n) six weeks after the visit. Returns the remittance's date."""
     paid_on = paid_on or _svc(n) + dt.timedelta(days=45)
     W.remit(store, trace=F.check_no(n), paid_on=_iso(paid_on), payer=payer, status=status,
             claims=[{"pcn": F.claim_id(n), "last": "SAMPLE", "first": "CASE",
-                     "lines": [(_iso(_svc(n)), "99214", 150, 0, [("CO", carc, 150)])]}])
+                     "lines": [(_iso(_svc(n)), code, 150, 0, [("CO", carc, 150)])]}])
     return paid_on
 
 
 def _ema(n: int, *, first: str | None = MCO, first_paid: float = 92.18, primary: str = MA, secondary: str | None = MCD,
-         denier: str = MCD, share: str = "written_off", taken_back: bool = False, extra: tuple = ()) -> tuple[list, list]:
+         denier: str = MCD, share: str = "written_off", taken_back: bool = False, extra: tuple = (), code: str = "99214"
+         ) -> tuple[list, list]:
     """EMA's claim n (its claim number n): the charge; `first` pays `first_paid` on a paper check 20 days after the visit
     (the rest of the allowed amount, $27.82 of the $150.00 when the full $92.18 is paid, is the second payer's share, and
     $30.00 is the contract's reduction); EMA posts the denial's $0 answer under `denier` two days after its remittance,
     then writes the share off (CO-B7) or leaves it open. taken_back: `first` recoups its payment after the denial."""
     svc = _svc(n)
     remit_day = svc + dt.timedelta(days=45)
-    kw = dict(patient=n % 4, svc=svc, cpt="99214", primary=primary, secondary=secondary or "None", status="Resolved/Other")
+    kw = dict(patient=n % 4, svc=svc, cpt=code, primary=primary, secondary=secondary or "None", status="Resolved/Other")
     link = F.link_no(n)
     rows = [W.charge(link, amount=150, posted=svc, **kw)]
     if first:
@@ -117,7 +118,7 @@ def _ema(n: int, *, first: str | None = MCO, first_paid: float = 92.18, primary:
     if taken_back:
         rows.append(W.pay(link, f"RECOUP{n:04d}", -first_paid, posted=remit_day + dt.timedelta(days=10), payer=first, **kw))
     rows += list(extra)
-    ar = [F.ar_row(claim=F.claim_id(n), link=link, status="Denied", denial=150, current=0, aging=remit_day, svc=svc, cpt="99214",
+    ar = [F.ar_row(claim=F.claim_id(n), link=link, status="Denied", denial=150, current=0, aging=remit_day, svc=svc, cpt=code,
                    primary=primary, secondary=secondary or "None", patient=n % 4)]
     return rows, ar
 
@@ -136,6 +137,8 @@ def _remits(store) -> None:
     for n in (37, 38):
         _claim(store, n, payer=BCBS_835, carc="16")         # Blue Cross, billed first, denies for missing information
     _claim(store, 39, payer=BCBS_835, carc="18")             # a duplicate of a claim Blue Cross paid
+    for n in (40, 41):
+        _claim(store, n, payer=STATE, carc="96", code="17110")   # a code with no rate on file: nothing says what it should bring
 
 
 def _pull(store, ledger, tmp_path, *, drop_first_paid: tuple = (), carry: D = D(2026, 5, 25), ar_too: bool = True) -> None:
@@ -165,6 +168,10 @@ def _pull(store, ledger, tmp_path, *, drop_first_paid: tuple = (), carry: D = D(
     add(_ema(38, first=MCD, first_paid=10, primary=BCBS, secondary=MCD, denier=BCBS, share="open"))
     # 39: Blue Cross paid $90.00 on a paper check, then denied a duplicate (CO-18); the second payer's share is still open
     add(_ema(39, first=BCBS, first_paid=90, primary=BCBS, secondary=OTHER, denier=BCBS, share="open"))
+    # 40, 41: no rate on file for the code, so half the line's $150.00 charge is the floor: the first payer paid $20.00 (40)
+    # or $92.18 (41) before the state's Medicaid denied it
+    add(_ema(40, first_paid=20, code="17110"))
+    add(_ema(41, code="17110"))
     rows.append(_carry(carry))
     W.load(store, ledger, tmp_path, rows, ar if ar_too else None)
 
@@ -178,8 +185,8 @@ def _by_claim(store) -> dict[str, dict]:
     return {r["patient_control_number"]: r for r in W.items(store, "category IN ('denial','bundling') AND patient_control_number LIKE 'ZZ00T%'")}
 
 
-DONE_FIRST = {F.claim_id(n) for n in (31, 32, 33)}
-WORK = {F.claim_id(n) for n in (34, 35, 36, 37, 38)}
+DONE_FIRST = {F.claim_id(n) for n in (31, 32, 33, 41)}
+WORK = {F.claim_id(n) for n in (34, 35, 36, 37, 38, 40)}
 
 
 def _states(store) -> dict[str, tuple]:
@@ -190,10 +197,11 @@ def _states(store) -> dict[str, tuple]:
 def test_a_second_payers_denial_of_a_service_the_first_payer_paid_is_done_with_its_proof(tmp_path, kind, monkeypatch):
     """31-33: the first payer's company paid $92.18 on a paper check (EMA posts it under '<company> Medicaid Community
     Plan'), then the state's Medicaid denied its copy (CO-96, CO-24, CO-109): done (off Work now, still open), the payment
-    named as the proof. 39: a duplicate denial of a claim the same payer paid, the second payer's share open: done. The rest
-    stay work: 34 (the payment taken back since), 35 (Medicaid is the plan EMA bills first), 36 (the first payer paid less
-    than half of what the service should bring), 37 and 38 (Blue Cross, billed first, denied; only the second payer paid a
-    little, after or before)."""
+    named as the proof; 41 the same on a code with no rate on file. 39: a duplicate denial of a claim the same payer paid,
+    the second payer's share open: done. The rest stay work: 34 (the payment taken back since), 35 (Medicaid is the plan
+    EMA bills first), 36 (the first payer paid less than half of what the service should bring), 40 (no rate on file, and
+    the first payer paid less than half the charge), 37 and 38 (Blue Cross, billed first, denied; only the second payer
+    paid a little, after or before)."""
     s, lg = _host(tmp_path, kind, monkeypatch)
     try:
         _world(s, lg, tmp_path)
