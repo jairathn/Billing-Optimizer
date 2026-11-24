@@ -197,6 +197,12 @@ Last updated: 2026-11-24, 15:15 UTC.
       25 never-answered claims came onto the list ($8,695, owed); 76 never-answered or rejected claims left it
       ($16,546: 43 the auditor calls owed, 33 undecided). These 76 are being hand-traced by an independent workflow
       (16:00 UTC) before the merge is trusted: any wrongly dropped claim becomes a failing test.
+      fix5 is merged (373da95, 16:08 UTC; no textual conflicts, the three fixers' tests pass together: 420): money taken
+      back is listed at any amount, reversals pair under the claim payer's joined ids, Medicare's J1 entries are read, a
+      secondary's share counts in recoveries, a whole-charge CO-45 that is no denial is not listed, one answer delivered
+      twice is one item, a second payer's claim-level denial names the primary's payment. A16 on its own run: closures
+      whose recovery differs 507 -> 123, money left on the table -$563, closed wrongly unchanged. Its open points, and
+      every other fixer's, are in `plans/next_fixes_2026-11-24.md` (the next batch, in order; determinism first).
       **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
       same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
