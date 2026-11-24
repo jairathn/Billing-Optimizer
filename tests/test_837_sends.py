@@ -124,12 +124,16 @@ def test_a_claim_only_the_837s_know_is_chased_until_a_payer_answers_it(tmp_path,
     - N07: sent three times (C017 twice, C024 on September 20), never answered: one item, on C024, from September 20.
     - N08: sent November 1, not due by November 10. N09: sent to Humana itself, which answered as secondary: answered.
     - N10: sent to Anthem; the same bill's C017 was denied by Anthem on August 20, and C024 went out after that denial:
-      the denial's work (waiting for that answer), not a second chase."""
+      the denial's work (waiting for that answer), not a second chase.
+    - N11: a post-operative visit billed at $0 (99024), never answered: nothing is owed on it. Not listed. N12: a 99214
+      beside a $0 99024: listed, with the 99214 alone."""
     s = _store(tmp_path, kind)
     send(s, tmp_path, [clm837("CB0000N01C017", V), clm837("CB0000N02C017", V), clm837("CB0000N03C017", V), clm837("CB0000N04C017", V),
                        clm837("CB0000N06C017", V), clm837("CB0000N07C017", V)], "20260901")
     send(s, tmp_path, [clm837("CB0000N05C017", V), clm837("CB0000N06C017", V, freq="8"), clm837("CB0000N07C017", V)], "20260910")
-    send(s, tmp_path, [clm837("CB0000N01C017", V), clm837("CB0000N09C017", V, payer=HUMANA)], "20260915")
+    send(s, tmp_path, [clm837("CB0000N01C017", V), clm837("CB0000N09C017", V, payer=HUMANA),
+                       clm837("CB0000N11C017", [("99024", "0.00", "20260914")]),
+                       clm837("CB0000N12C017", V + [("99024", "0.00", "20260914")])], "20260915")
     send(s, tmp_path, [clm837("CB0000N05C024", V, freq="7"), clm837("CB0000N07C024", V, freq="7"), clm837("CB0000N10C024", V, freq="7")],
          "20260920")
     send(s, tmp_path, [clm837("CB0000N08C017", V)], "20261101")
@@ -140,8 +144,9 @@ def test_a_claim_only_the_837s_know_is_chased_until_a_payer_answers_it(tmp_path,
     _remits(s, tmp_path, _visits(), "20261110")
     found = _chased(s, "t1")
     print("listed:", sorted(found))
-    assert set(found) == {"CB0000N01C017", "CB0000N04C017", "CB0000N07C024"}, (
-        f"listed {sorted(found)}: N01, N04 and N07's newest submission were sent and no payer answered them as their primary")
+    assert set(found) == {"CB0000N01C017", "CB0000N04C017", "CB0000N07C024", "CB0000N12C017"}, (
+        f"listed {sorted(found)}: N01, N04, N07's newest submission and N12 were sent and no payer answered them as their primary")
+    assert json.loads(found["CB0000N12C017"]["evidence"])["codes"] == ["99214"]
     a = found["CB0000N01C017"]
     print(a["title"], "|", a["finding_id"], a["source"], a["expected_cents"], a["shortfall_cents"])
     assert a["signal"] == "NO_ANSWER" and a["finding_id"] == _fid("837_OPEN_CLAIM", "CB0000N01C017") and a["source"] == "837"
@@ -161,7 +166,7 @@ def test_a_claim_only_the_837s_know_is_chased_until_a_payer_answers_it(tmp_path,
     # Anthem's remittance for N01 arrives (processed as primary): N01 is answered and leaves the list
     _remits(s, tmp_path, [answer("CB0000N01C017")], "20261112")
     found = _chased(s, "t2")
-    assert set(found) == {"CB0000N04C017", "CB0000N07C024"}
+    assert set(found) == {"CB0000N04C017", "CB0000N07C024", "CB0000N12C017"}
     s.close()
 
 

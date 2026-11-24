@@ -4138,7 +4138,8 @@ class Detector:
             if not cb and (any(a[4] and r[4] and a[4] == r[4] for a in ans) or any(payer_company(a[1]) in mine for a in ans)):
                 self.ema_counts["837_answered_by_its_payer"] += 1
                 continue                    # the payer the 837 named answered it (as its secondary, say)
-            items = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in lines.get(r[7], [])]
+            # a line billed at $0 (a post-operative visit) is nothing owed
+            items = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in lines.get(r[7], []) if (chg or 0) > 0]
             if not items:
                 continue
             sent = r[0]
