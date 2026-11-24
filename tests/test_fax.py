@@ -76,7 +76,10 @@ def _store(tmp_path):
     denied = ("CLP*CB0000300C017*1*223.65*0.00*0.00*12*PC300*11~NM1*QC*1*SAMPLE*PAT*Q***MI*M00000300~"
               f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~REF*1W*MEMB999888~DTM*232*20261101~"
               + svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~", dos="20261101"))
-    under = claim(202, svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~", dos="20261101"), dos="20261101")
+    # another patient: the same name on another member number, the same day and code, is the sign that a denial was
+    # possibly paid on another claim (a check first, never a bulk appeal), which this world is not about
+    under = claim(202, svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~", dos="20261101"), dos="20261101") \
+        .replace("NM1*QC*1*SAMPLE*PAT", "NM1*QC*1*OTHER*PAT", 1)
     fixit = claim(203, svc("17000", "150.00", "0.00", None, "CAS*CO*4*150.00~", dos="20261101") + "LQ*HE*N519~", dos="20261101")
     store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied, under, fixit], pay_date="20261110")
     Detector(store, run_id="t").run()
