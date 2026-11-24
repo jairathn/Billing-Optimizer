@@ -70,7 +70,7 @@ from functools import lru_cache
 from statistics import median
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .codes import carc_text, code_category, payer_group_kind, rarc_text
+from .codes import carc_text, code_category, is_unlisted, payer_group_kind, rarc_text
 
 CHUNK = 500
 PAYMENT_STATUSES = ("1", "2", "3", "19", "20", "21")
@@ -2512,7 +2512,9 @@ def _drug_actions(conn: sqlite3.Connection, want: list, arch: Archive, rates: Ma
                          if c and code_category(c) in DRUG_FAMILIES), None)
             units = a.billed_units if a else 1
             own = _own_line_price(a, arch) if a is not None and code else None
-            pick = _drug_rate(table.get((grp, code), []), f.get("service_date") or "", min_lines) if code and not own else None
+            # an unlisted drug code (J3490) can be any drug: only the payer's own price for this very line values it
+            pick = _drug_rate(table.get((grp, code), []), f.get("service_date") or "", min_lines) \
+                if code and not own and not is_unlisted(code) else None
             if own:
                 parts.append((code, units, own[0], 1, "own", [own[0]]))
             elif pick:
@@ -2520,7 +2522,7 @@ def _drug_actions(conn: sqlite3.Connection, want: list, arch: Archive, rates: Ma
         else:
             cl = arch.claims.get(f.get("claim_key"))
             for code, dos in [tuple(p) for p in _ev(f).get("unpaid") or [] if isinstance(p, (list, tuple)) and len(p) == 2]:
-                if code_category(code) not in DRUG_FAMILIES:
+                if code_category(code) not in DRUG_FAMILIES or is_unlisted(code):
                     continue
                 units = sum(x.billed_units for x in (cl.lines if cl else []) if x.code == code and x.dos == dos) or 1
                 pick = _drug_rate(table.get((grp, code), []), dos or f.get("service_date") or "", min_lines)

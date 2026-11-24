@@ -36,9 +36,12 @@ today = date.today()
 jan = date(today.year, 1, 5)
 # the clinician is a physician (Medicare visits)
 build_store(work, [claim(i, "99214", "223.65", "127.80", cfi="MB", dos=f(jan)) for i in range(1, 26)], payer="KY MEDICARE", pay_date=f(jan + timedelta(days=10))).close()
-# a payer whose name is HTML: usual $117.60, then $90.00 under a plan whose name is HTML (plan reason)
-build_store(work, [claim(100 + i, "99214", "223.65", "117.60", dos=f(jan)) for i in range(25)]
-            + [claim(200 + i, "99214", "223.65", "90.00", plan=EVIL_PLAN, dos=f(jan)) for i in range(6)], payer=EVIL_PAYER, pay_date=f(jan + timedelta(days=10))).close()
+# a payer whose name is HTML: usual $117.60, then $90.00 under a plan whose name is HTML (plan reason), paid recently: a
+# routine rate whose windows had all closed before the run would be no new item (trace finding T-N4)
+recent = today - timedelta(days=30)
+build_store(work, [claim(100 + i, "99214", "223.65", "117.60", dos=f(recent)) for i in range(25)]
+            + [claim(200 + i, "99214", "223.65", "90.00", plan=EVIL_PLAN, dos=f(recent)) for i in range(6)], payer=EVIL_PAYER,
+            pay_date=f(recent + timedelta(days=10))).close()
 # Aetna: usual $700 for 17311 in January, then $400 (a rate change) on visits paid 190 days ago (window passed) and 20 days ago
 old_pay, new_pay = today - timedelta(days=190), today - timedelta(days=20)
 build_store(work, [claim(300 + i, "17311", "1200.00", "700.00", dos=f(jan)) for i in range(25)], payer="AETNA", pay_date=f(jan + timedelta(days=10))).close()
