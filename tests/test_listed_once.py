@@ -254,6 +254,10 @@ def test_a_second_payers_whole_charge_co45_after_the_first_payer_denied_the_line
     destruction = _line("40.00", "CAS*CO*45*127.56~CAS*PR*2*10.00~", "50.00", code="17110", charge="177.56")
     co45 = _line("0.00", "CAS*CO*45*223.65~", code="99214", mods="25")
     share = _line("10.00", "CAS*OA*23*40.00~CAS*CO*45*127.56~", "10.00", code="17110", charge="177.56")
+    # the Medigap has paid the visit's code before, for another patient (a payer with no rate for a code makes no denial
+    # of it with a whole-charge CO-45: tests/test_whole_charge_co45.py)
+    _add(s, tmp_path, [claim(901, svc("99214", "223.65", "20.00", "20.00", "CAS*CO*45*203.65~", dos="20260907"), cfi="15", dos="20260907")],
+         "20260920", **MEDIGAP)
     _add(s, tmp_path, [_clp("CB0000G03C017", "1", co45 + share, paid="10.00", cfi="15", charge="401.21")], "20261008", **MEDIGAP)
     Detector(s, run_id="t0").run()
     _start(s, "CB0000G03C017")
