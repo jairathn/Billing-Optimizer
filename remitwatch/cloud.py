@@ -55,7 +55,7 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "6"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
+SERVING_BUILD = "7"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -662,6 +662,7 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     ("findings", None, None), ("payer_rates", None, None), ("fee_table", None, None), ("provider_tiers", None, None),
     ("providers", None, None), ("exposure", None, None), ("detection_runs", None, None), ("alerts", None, None),
     ("finding_events", None, None), ("progress_snapshots", None, None), ("plb", None, None),
+    ("finding_heirs", None, None),      # an item's new number, for a page drawn before the run that gave it (api._not_found)
     ("meta", None, "key NOT LIKE 'sync:cursor%' AND key NOT LIKE 'cache:%'"),
     ("files", "sha256,kind,ingested_at", None),
     ("transactions", "transaction_key,source_name,payer_name,payer_id,payer_contact_phone,payer_contact_url,payment_method,"
@@ -685,7 +686,7 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
 def empty_serving(path: str) -> None:
     """A serving database with every table and no rows, so the dashboard works (and shows nothing) before the first load."""
     from .alerts import ALERTS_DDL
-    from .detect import ensure_schema
+    from .detect import HEIRS_DDL, ensure_schema
     from .link import DDL as LINK_DDL
     from .store import connect
     if os.path.exists(path):
@@ -694,6 +695,7 @@ def empty_serving(path: str) -> None:
     c.execute("PRAGMA journal_mode=DELETE")
     ensure_schema(c)
     c.executescript(ALERTS_DDL + LINK_DDL)
+    c.execute(HEIRS_DDL)                # an item's new number, for a page drawn before the run that gave it
     activity.ensure_schema(c)
     actions_mod.ensure_fax_tables(c)
     actions_mod.ensure_hide_rules(c)

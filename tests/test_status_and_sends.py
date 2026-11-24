@@ -442,3 +442,69 @@ def test_ch10_serverless_refuses_paid_with_nothing_paid_before_the_journal(box, 
     assert len(_journal(s.state)) == n
     assert s.c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "seen_status": "open", "recovered_cents": 760},
                     headers=s.h).status_code == 200
+
+
+# =========================================================================== CH-14: an item with a new number since the page
+RENUMBERED = "This item has a new number since your page loaded: open it again from the list."
+
+
+def _renumbered(r, heir: str) -> None:
+    assert r.status_code == 409, (r.status_code, r.text)
+    j = r.json()
+    assert (j["code"], j["detail"], j.get("heir")) == ("changed", RENUMBERED, heir), j
+
+
+def test_ch14_a_panel_drawn_before_a_run_gave_its_item_a_new_number_is_told_so(tmp_path, monkeypatch):
+    """A Started item gets a new id in a run (claim files prove the billed level: tests/test_hotfix2d.py's world). Every
+    action from a panel drawn before (its status, the appeal letter, Appeal by fax, opening it again) answers 409 changed
+    with the plain message and the new number, instead of "finding not found"; nothing is changed. An id no item ever had
+    is still not found."""
+    from remitwatch import actions
+    from remitwatch.detect import Detector
+    from tests.test_hotfix2d import _claim_files_arrive, _downcode_store, _first_downcode, _site
+    s = _downcode_store(tmp_path, "file")
+    c = s.conn
+    old = _first_downcode(c)
+    actions.apply_status(c, old, "in_progress", "calling the payer", actor="biller", at="2026-11-19T15:00:00+00:00")
+    c.commit()
+    _claim_files_arrive(s)
+    Detector(s, run_id="r2").run()
+    heir = c.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (old,)).fetchone()[0]
+    s.close()
+    client, line, _api = _site(tmp_path, monkeypatch, str(tmp_path / "s.sqlite"))
+    _renumbered(client.post(f"/api/findings/{old}/status", json={"status": "appealed", "seen_status": "in_progress"}, headers=XHR), heir)
+    _renumbered(client.post(f"/api/findings/{old}/status", json={"status": "dismissed", "notes": "not worth it"}, headers=XHR), heir)
+    _renumbered(client.get(f"/api/findings/{old}"), heir)
+    _renumbered(client.get(f"/api/appeal/{old}"), heir)
+    _renumbered(client.post("/api/appeals/send", json={"finding_id": old, "stale_ok": True}, headers=XHR), heir)
+    assert line.sent == {}
+    f = client.get(f"/api/findings/{heir}").json()["finding"]
+    assert f["status"] == "in_progress"
+    r = client.post(f"/api/findings/{'0' * 24}/status", json={"status": "appealed"}, headers=XHR)
+    assert r.status_code == 404 and r.json()["detail"] == "finding not found"
+
+
+def test_ch14_serverless_a_panel_drawn_before_a_run_gave_its_item_a_new_number_is_told_so(box, monkeypatch):
+    """The same on the serverless host: the dashboard's copy knows the new number, and nothing is journaled."""
+    from tests.test_hotfix2d import SENT_AT, _claim_files_arrive, _downcode_claims, _first_downcode, _write_remits
+    root, client, state = box
+    _write_remits(root / DATA, _downcode_claims(), "d", 900)
+    assert "error" not in cycle(state, client)
+    store, _ = cloud.load_raw(state)
+    old = _first_downcode(store.conn)
+    store.close()
+    cloud.record_action(state, {"kind": "status", "finding_id": old, "status": "in_progress", "notes": "calling the payer", "actor": "biller",
+                                "at": SENT_AT})
+    store, _ = cloud.load_raw(state)
+    _claim_files_arrive(store)
+    cloud.save_raw(state, store, log=lambda *a: None)
+    store.close()
+    assert "error" not in cycle(state, client, force_detect=True)          # folds the Started, then gives the money a new id
+    store, _ = cloud.load_raw(state)
+    heir = store.conn.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (old,)).fetchone()[0]
+    store.close()
+    c, h, _api = _serve(root, monkeypatch)
+    _renumbered(c.post(f"/api/findings/{old}/status", json={"status": "appealed", "seen_status": "in_progress"}, headers=h), heir)
+    _renumbered(c.get(f"/api/findings/{old}", headers=h), heir)
+    assert state.list(cloud.ACTIONS) == []
+    assert c.get(f"/api/findings/{heir}", headers=h).json()["finding"]["status"] == "in_progress"

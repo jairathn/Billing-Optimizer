@@ -139,6 +139,44 @@ async def _refused(_request: Request, exc: Refused):
     return JSONResponse(status_code=exc.http_status, content=dict(exc.extra, detail=exc.message, code=exc.code))
 
 
+RENUMBERED = "This item has a new number since your page loaded: open it again from the list."
+
+
+def _heir_now(conn: sqlite3.Connection, finding_id: str) -> str | None:
+    """The item that carries `finding_id`'s money now, when detection gave it a new number since a page was drawn
+    (finding_heirs, followed to the newest), and that item exists; else None."""
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_heirs'").fetchone():
+            return None
+        seen, cur = {finding_id}, finding_id
+        while True:
+            r = conn.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (cur,)).fetchone()
+            if not r or not r[0] or r[0] in seen:
+                break
+            cur = r[0]
+            seen.add(cur)
+        if cur != finding_id and conn.execute("SELECT 1 FROM findings WHERE finding_id=?", (cur,)).fetchone():
+            return cur
+    except sqlite3.Error:
+        return None
+    return None
+
+
+def _not_found(finding_id: str, conn: sqlite3.Connection | None = None):
+    """No item by this id: when its money has a new number since the person's page was drawn, say so and give the new one
+    (409 changed, as for any item that changed since the page loaded); otherwise 404."""
+    own = conn is None
+    c = conn or db()
+    try:
+        heir = _heir_now(c, finding_id)
+    finally:
+        if own:
+            c.close()
+    if heir:
+        raise Refused(409, "changed", RENUMBERED, heir=heir)
+    raise HTTPException(404, "finding not found")
+
+
 @app.exception_handler(RequestValidationError)
 async def _unreadable_body(request: Request, exc: RequestValidationError):
     """A body a route cannot read (not JSON, or not the object the route takes): 400 with a plain sentence, as the status
@@ -1006,7 +1044,7 @@ def _initials(last: str | None, first: str | None) -> str:
 def finding_detail(finding_id: str, _: str = Depends(require_auth)):
     f = one("SELECT * FROM findings WHERE finding_id=?", (finding_id,))
     if not f:
-        raise HTTPException(404, "finding not found")
+        _not_found(finding_id)
     f["evidence"] = json.loads(f["evidence"]) if f.get("evidence") else {}
     from .appeals import next_step
     f["next_step"] = next_step(f)
@@ -1236,6 +1274,10 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
         for i in ids:
             cur = now.get(i)
             if cur is None:
+                if single:
+                    _not_found(i, conn)
+                if _heir_now(conn, i):
+                    out["changed"].append(i)        # its money has a new number since the list was drawn: left as it is
                 continue
             if i in flying:
                 if single:
