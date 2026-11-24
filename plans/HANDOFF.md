@@ -203,6 +203,15 @@ Last updated: 2026-11-24, 15:15 UTC.
       twice is one item, a second payer's claim-level denial names the primary's payment. A16 on its own run: closures
       whose recovery differs 507 -> 123, money left on the table -$563, closed wrongly unchanged. Its open points, and
       every other fixer's, are in `plans/next_fixes_2026-11-24.md` (the next batch, in order; determinism first).
+      fix4 is merged (32e4de6, 16:45 UTC): sizes by units and component, the payer's own rate by product class and
+      recognised tier (PROVIDER_RATE_GAP for an unexplained clinician discount), backed underpayments. Merge resolutions:
+      one pricing for every never-answered pass (fix4's price_unanswered_lines; the 837 pass's own pricer removed), and one
+      component_of (two definitions existed; the later silently won and returned None where fix4's rate tables key on '').
+      All four fixers' and the touched tests pass together (608). **Determinism measured (16:45 UTC)**: two fresh copies
+      give identical items, but consecutive cycles on one store do not: 17,829 -> 17,509 -> 17,828 items, 321
+      SECONDARY_NOT_BILLED items flipping every cycle, and a one-time settle of 34 PR-204 and coverage-date items after the
+      first cycle. Cause: the EMA line summary keeps a bill's lines by the run's own items. Fixer fix7a started 16:50
+      (release gate 4: a second cycle changes nothing).
       **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
       same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
