@@ -527,6 +527,27 @@ def test_a_coordination_denials_primary_answer_posted_in_ema_leaves_nothing_to_c
     s.close()
 
 
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_primarys_posting_is_told_by_its_payers_name_not_the_summarys_group(tmp_path, kind):
+    """EMA's payment summary can carry another payer's group on a posting (a learned alias put United Healthcare's postings
+    under 'Medicaid (other)' on the real data). A claim Medicaid KY answered as secondary, with United Healthcare's
+    payment posted on its EMA claim, was answered by its primary (nothing to chase); one with only Medicaid's own
+    postings was not."""
+    from remitwatch import ema_reports as er
+    s = _store(tmp_path, kind)
+    er.ensure_schema(s.conn)
+    s.conn.executemany("""INSERT INTO ema_line_payments (link, svc, cpt, check_no, posted, payer, payer_group, role, ins_paid, rows, in_835)
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                       [(7001, "2026-03-02", "99213", "CHK1", "2026-03-20", "United Healthcare", "Medicaid (other)", "other", 6457, 1, 0),
+                        (7001, "2026-03-02", "99213", "CHK2", "2026-04-20", "Medicaid of Kentucky", "Medicaid (other)", "secondary", 0, 1, 1),
+                        (7002, "2026-03-02", "99213", "CHK3", "2026-04-20", "Medicaid of Kentucky", "Medicaid (other)", "secondary", 0, 1, 1)])
+    s.conn.commit()
+    det = Detector(s, run_id="t", today="2026-05-03")
+    got = det._primary_posted([("CLAIM1", 7001, "2026-04-01", ["Medicaid KY"]), ("CLAIM2", 7002, "2026-04-01", ["Medicaid KY"])])
+    assert got == {"CLAIM1"}, f"answered by the primary: {sorted(got)}"
+    s.close()
+
+
 # --------------------------------------------------------------------------- the Data tab: feeds that do not agree
 
 def _health(conn, key: str) -> dict | None:

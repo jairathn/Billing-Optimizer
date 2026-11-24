@@ -3298,7 +3298,8 @@ class Detector:
                if c.execute("SELECT 1 FROM sqlite_master WHERE name='ema_checks'").fetchone() else "")
 
         def counts(cid: str, grp: str | None, payer: str | None) -> bool:
-            g = grp or (normalize_payer(payer)[0] if payer else None)
+            # the posting's own payer, by its name: the summary's payer group is its line's, the same for every posting
+            g = (normalize_payer(payer)[0] if payer else None) or grp
             if not seconds.get(cid):
                 return True
             return bool(g) and not any(ec._same_payer(g, s) or payer_company(g) == payer_company(s) for s in seconds[cid])
@@ -3349,7 +3350,8 @@ class Detector:
         for cid, grp, payer in c.execute(
                 f"""SELECT x.cid, y.payer_group, y.payer FROM temp.d837_pp x JOIN ema_line_payments y ON y.link = x.link
                     WHERE (COALESCE(y.ins_paid, 0) <> 0 OR COALESCE(y.check_no, '') <> '') {sep}"""):
-            g = grp or (normalize_payer(payer)[0] if payer else None)
+            # the posting's own payer, by its name: the summary's payer group is its line's, the same for every posting
+            g = (normalize_payer(payer)[0] if payer else None) or grp
             if g and not any(ec._same_payer(g, s) or payer_company(g) == payer_company(s) for s in groups.get(cid, [])):
                 got.add(cid)
         c.execute("DROP TABLE IF EXISTS temp.d837_pp")
