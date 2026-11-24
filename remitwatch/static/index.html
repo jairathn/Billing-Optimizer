@@ -742,7 +742,7 @@ async function openDetail(id, opts){
   d.querySelector('#closeD').onclick=closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
   // the verdict, the next step and the story, when they come: or, if they cannot be worked out, the item's What to do box
-  told.then(x => { if(!panelShows(seq, id) || !d.contains(d.querySelector('#xpSlot'))) return; xpFill(f, r, x || {}, d, id); });
+  told.then(x => { if(!panelShows(seq, id) || !d.contains(d.querySelector('#xpSlot'))) return; xpFill(f, r, x || {}, d, id, seq); });
   const bar = [...d.querySelectorAll('[data-st]')];
   const what = `${plain}${f.payer_group ? ' · ' + f.payer_group : ''}${f.shortfall_cents ? ' · ' + money2(f.shortfall_cents) : ''}`;
   bar.forEach(b=>b.onclick=async()=>{
@@ -788,16 +788,16 @@ async function openDetail(id, opts){
 // The item's verdict, next step, story and EMA block (features.js), or the What to do box when they cannot be worked out.
 // After a button that changes the item, the next one in the list opens (as "Mark sent and open the next" does), or the
 // item again with its new state.
-function xpFill(f, r, x, d, id){
+function xpFill(f, r, x, d, id, seq){
   const slot = d.querySelector('#xpSlot');
   if(!x.explain || typeof xpBoxHtml !== 'function'){
     slot.innerHTML = whatToDoHtml(f, '') + (x.explain_error ? `<div class="small muted">${esc(x.explain_error)}</div>` : '');
-    bindWhatToDo(f, d);
+    bindWhatToDo(f, d, seq);         // the panel's own mark: the walk moves on only while this panel shows this item (H1)
     const kind = state.brief ? kindFor(state.brief, f) : '', b = d.querySelector('#builderFold');
     if(b && kind === 'note' && ['open','in_progress'].includes(f.status)) b.open = true;      // no next step to open it: open as before
   } else {
     state.detailX = x;
-    xpRedrawBox(id, d);
+    xpRedrawBox(id, d, seq);
     d.querySelector('#xpStorySlot').innerHTML = xpStoryHtml(x.explain.story, (x.explain.verdict || {}).rows);
   }
   d.querySelector('#xpEmaSlot').innerHTML = xpEmaHtml(x.ema_block) + (x.ema_block_error ? `<div class="small muted">${esc(x.ema_block_error)}</div>` : '');
@@ -806,10 +806,13 @@ function xpFill(f, r, x, d, id){
 // The next step's box, drawn again with the panel's answers as they are now (a packet built in the panel moves its main
 // button on to the fax). Where the box offers the appeal itself (its packet, its fax), the panel's other ways to the same
 // appeal (the letter button, the fax box's own button) step aside: one main button per item.
-function xpRedrawBox(id, d){
+function xpRedrawBox(id, d, seq){
   const f = state.detailF, r = state.detailR, x = state.detailX, slot = d.querySelector('#xpSlot');
   if(!f || !r || !x || !x.explain || !slot || state.detailId !== id) return;
-  const walk = async () => { const ids = state.worklist || [], i = ids.indexOf(id);
+  // the panel still shows this item (hotfix 2, H1): an answer that comes after the person opened another item never
+  // moves the panel; it is said in a notice
+  const here = () => seq == null ? state.detailId === id : (typeof panelShows !== 'function' || panelShows(seq, id));
+  const walk = async () => { if(!here()) return; const ids = state.worklist || [], i = ids.indexOf(id);
     if(i >= 0 && i < ids.length - 1) return openDetail(ids[i + 1]);
     if(i >= 0 && state.wlNext){ try { await state.wlNext(); } catch(e){} const nx = (state.worklist || [])[i + 1]; if(nx) return openDetail(nx); }
     openDetail(id); };
@@ -819,7 +822,8 @@ function xpRedrawBox(id, d){
   const offers = ((shown.next_step || {}).buttons || []).some(k => k === 'build_packet' || k === 'fax_payer');
   const lr = d.querySelector('#letterRow'); if(lr) lr.hidden = offers;
   const fr = d.querySelector('#fxOneRow'); if(fr && f.status !== 'appealed') fr.hidden = offers;
-  xpBind(f, x, r, d, st => (['appealed','dismissed','resolved','lost'].includes(st) ? walk() : openDetail(id)));
+  xpBind(f, x, r, d, st => { if(!here()){ if(typeof notice === 'function') notice(`Saved: ${f.title || 'the item'} is now ${STATUS_WORDS[st] || st}.`); return; }
+    return ['appealed','dismissed','resolved','lost'].includes(st) ? walk() : openDetail(id); });
   const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { const i = (state.worklist||[]).indexOf(id); if(i > 0) openDetail(state.worklist[i-1]); };
   const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => walk();
 }

@@ -159,14 +159,20 @@ def test_a_recovery_recorded_after_a_superseded_payment_is_not_reopened(tmp_path
     store.ingest_835_paths([str(again)])
     print("superseded:", store.mark_superseded())
     run(store, "t3", "2026-06-11T09:00:00+00:00")
-    f = line_row(store)
+    # one item per service since the archive rules are wired (rule 5 folds a repeat denial into the newest): the service's
+    # open item may now be the resubmission's (C024's denial), whichever claim number it carries
+    service = lambda: rows(store, "patient_control_number IN ('CB0000300C017','CB0000300C024') AND category='denial' "   # noqa: E731
+                                  "AND COALESCE(stale,0)=0 AND status NOT IN ('dismissed')")
+    live = service()
+    assert len(live) == 1, live
+    f = live[0]
     brief([f])
     assert f["status"] == "open", "precondition: reopened once the payment no longer stands"
     apply_status(store.conn, f["finding_id"], "resolved", "Paper check 4471 from Anthem", recovered_cents=11760, actor="biller",
                  at="2026-06-20T15:00:00+00:00")
     store.conn.commit()
     run(store, "t4", "2026-06-21T09:00:00+00:00")
-    f = line_row(store)
+    f = next(r for r in rows(store, "category='denial'") if r["finding_id"] == f["finding_id"])
     brief([f])
     assert (f["status"], f["recovered_cents"]) == ("resolved", 11760), \
         f"the biller's recovery, recorded after the takeback, was reopened by the next run: {f['status']} / {f['hint']!r}"

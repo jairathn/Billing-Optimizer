@@ -1219,6 +1219,10 @@ def units_split(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: 
                         f"{len(paid_sibs) + 1} lines; the expected amount is {_usd(want)}.")
                 out.append(_close(R_UNITS, f, paid_sibs[0], 0, note, "units paid across lines of the same claim", proof, recovery=False))
             continue
+        if f.get("category") == "downcoding":
+            # its money is the level the payer cut the service to (a line swap's denied line, its replacement paid at the
+            # lower code): a payment of that lower code is the cut itself and settles nothing (merge review: $41.45 a visit)
+            continue
         if a.piece() or a.restated_cents():
             continue                    # a restatement piece, or the payer's word that it paid the line before (B13): rule 1
         ans = arch.answers_of(a)

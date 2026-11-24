@@ -329,6 +329,7 @@ FEED_META = "feed:date"         # the feed date the last analysis used, for a co
 # unanswered (run_ema_open_claims), and the Data tab's checks name each payer (insights.data_health). Each analysis saves
 # it, and the dashboard's copy carries it.
 PAYERS_BEHIND_META = "feed:payers_behind"
+EVENTS_SEEN_META = "detect:events_seen"     # the newest finding_events id the last detection run could see (Detector.run)
 # The Data tab names such a payer once its last remittance is more than PAYER_QUIET_DAYS before the day the feed reaches
 # (the ten days its feed check allows the whole feed): a payer that pays every week or so is between two files, not
 # stopped, and the claims due since its last file wait for the next one.
@@ -4582,6 +4583,8 @@ class Detector:
         summary = Counter(f["signal"] for f in self.findings.values())
         c.execute("INSERT OR REPLACE INTO detection_runs (run_id, started_at, finished_at, version, lines, findings, summary) VALUES (?,?,?,?,?,?,?)",
                   (self.run_id, self.now, datetime.now(timezone.utc).isoformat(timespec="seconds"), DETECT_VERSION, len(self.lines), len(rows), json.dumps(summary)))
+        if getattr(self, "events_seen", None) is not None:
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (EVENTS_SEEN_META, json.dumps(self.events_seen)))
         c.commit()
         return dict(summary)
 
@@ -4625,6 +4628,13 @@ class Detector:
         self.conn.executemany("INSERT OR REPLACE INTO rate_points VALUES (?,?,?,?,?,?,?,?)", [k + (v,) for k, v in points.items()])
 
     def run(self) -> dict:
+        # the newest person's event this run can see (finding_events ids only grow): one written after this moment, while
+        # the run goes on or later, asks for another run (pipeline.people_changed_since_detection); a timestamp to the
+        # second cannot tell a change made in the run's first second from one it saw
+        try:
+            self.events_seen = int(self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM finding_events").fetchone()[0])
+        except sqlite3.Error:
+            self.events_seen = 0
         try:
             if self.conn.execute("SELECT 1 FROM ema_rows LIMIT 1").fetchone():
                 from .link import build_links

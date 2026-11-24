@@ -1419,3 +1419,19 @@ def test_rule5_the_latest_takeback_dates_an_unpaid_line(store):
     a = only(ar.same_day_answers(store.conn, [item(store, lk, "UNDERPAID_VS_OWN_RATE", "underpayment", expected=5711, shortfall=356)]))
     assert (a["reclass"], a["state_hint"], a["shortfall_cents"], a["taken_back_cents"]) == ("reversed_no_answer", "waiting", 5711, 8047)
     assert max(p["date"] for p in a["proof"]) == "2027-04-02" and "took that back too" in a["hint"]
+
+
+def test_merge_a_downcode_by_line_swap_is_never_closed_by_the_payment_of_the_lower_code(tmp_path):
+    """The payer denied the 99214 line (CO-150) and paid a replacement 99213 line that names 99214 as billed: the item is
+    the level difference ($117.60 usual for 99214, $76.15 paid). The units rule took the replacement's payment as the
+    service paid and closed the item: $41.45 left on the table on every such visit. A downcode is never closed by the
+    payment of the code it was cut to."""
+    from tests.test_features import build_store, claim, clean_visits, svc
+    claims = clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(100, 25, "99213", "156.66", "76.15")
+    claims.append(claim(200, svc("99214", "223.65", "0.00", None, "CAS*CO*150*223.65~")
+                        + svc("99213", "223.65", "76.15", "76.15", "CAS*CO*45*147.50~", orig="99214")))
+    store = build_store(tmp_path, claims)
+    Detector(store, run_id="t").run()
+    got = store.query("SELECT signal, status, shortfall_cents FROM findings WHERE patient_control_number='CB0000200C017'")
+    assert [(r["signal"], r["status"], r["shortfall_cents"]) for r in got] == [("DOWNCODE_LINE_SWAP", "open", 11760 - 7615)], got
+    store.close()

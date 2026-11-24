@@ -363,11 +363,18 @@ def people_changed_since_detection(conn) -> bool:
     if not last:
         return False
     # a person's own status changes (kind 'manual'), and hide rules a person added or removed; never the hide pass that
-    # runs after each analysis (it stamps the items it hides with its own time)
-    # (from the run's start second on: a change made in the second the run started, which its timestamps share at that
-    # precision, may not have been seen either)
-    for sql, args in (("SELECT 1 FROM finding_events WHERE kind='manual' AND at >= ? LIMIT 1", (last,)),
-                      ("SELECT 1 FROM hide_rules WHERE at >= ? OR removed_at >= ? LIMIT 1", (last, last))):
+    # runs after each analysis (it stamps the items it hides with its own time). The events by id where the run recorded
+    # the newest one it could see (exact: a timestamp to the second cannot tell a change made in the run's first second
+    # from one it saw); by time on a store from before that record
+    from .detect import EVENTS_SEEN_META
+    try:
+        raw_seen = conn.execute("SELECT value FROM meta WHERE key=?", (EVENTS_SEEN_META,)).fetchone()
+        seen = int(json.loads(raw_seen[0])) if raw_seen and raw_seen[0] is not None else None
+    except (sqlite3.Error, ValueError, TypeError):
+        seen = None
+    manual = ("SELECT 1 FROM finding_events WHERE kind='manual' AND id > ? LIMIT 1", (seen,)) if seen is not None else \
+        ("SELECT 1 FROM finding_events WHERE kind='manual' AND at > ? LIMIT 1", (last,))
+    for sql, args in (manual, ("SELECT 1 FROM hide_rules WHERE at > ? OR removed_at > ? LIMIT 1", (last, last))):
         try:
             if conn.execute(sql, args).fetchone():
                 return True

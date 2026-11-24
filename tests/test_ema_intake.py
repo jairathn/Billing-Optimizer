@@ -2010,6 +2010,9 @@ def test_two_analyses_that_finished_in_the_same_second_are_told_apart_by_the_one
         fid = conn.execute("SELECT finding_id FROM findings ORDER BY finding_id LIMIT 1").fetchone()[0]
         conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, actor) "
                      "VALUES (?, '2028-02-29T23:59:52+00:00', 'manual', 'open', 'dismissed', 'staff')", (fid,))
+        # and the newest run's record of the newest event it saw, written with its row (Detector.save): that one
+        from remitwatch.detect import EVENTS_SEEN_META
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, (SELECT MAX(id) FROM finding_events))", (EVENTS_SEEN_META,))
         conn.commit()
     if host == "server":
         db = str(tmp_path / "data" / "remitwatch.sqlite")

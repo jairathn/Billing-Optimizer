@@ -763,7 +763,7 @@ async function xpFaxPreview(f, packets, d){
     const answer = {stale: ['Still unpaid in EMA: fax it anyway', 'stale_ok'], check_code: ['It went out as billed: fax it', 'confirmed'],
       check_first: ['Checked: still unpaid, fax it', 'checked']}[res.code];
     if(answer){
-      const again = document.createElement('button'); again.textContent = answer[0];
+      const again = document.createElement('button'); again.textContent = answer[0]; again.id = 'xpAgain';
       again.onclick = () => { said[answer[1]] = true; again.remove(); go(); };
       msg.appendChild(document.createTextNode(' ')); msg.appendChild(again);
     } };

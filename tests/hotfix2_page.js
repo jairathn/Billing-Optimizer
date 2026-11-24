@@ -72,8 +72,12 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
   await sleep(1500);
   out.double_sent = { posts: posts.slice(n0).filter(p => /\/status$/.test(p.url)).length, events: (await (await page.request.get(base + 'api/findings/' + last)).json()).events.filter(e => e.kind === 'manual').length };
 
-  // ---------------------------------------------------------------- H1 (0d-1): a late "Appeal by fax" answer never rebinds another item's panel
-  await open(); ids = await rows();
+  // ---------------------------------------------------------------- H1 (0d-1): a late answer to "Appeal by fax" never acts on another item
+  // (push 2's panel sends from a preview window: a rate request's letter is read there, then "Send the fax")
+  const rateRows = () => page.$$eval('#view table.wl tbody tr.row', trs => trs.filter(t => t.dataset.kind === 'rate').map(t => t.dataset.id));
+  const preview = async id => { await page.click(`tr.row[data-id="${id}"] td.day`); await settle(id); await page.click('#drawer #fxOne');
+    await page.waitForSelector('#modal.open #xpFaxGo'); };
+  await open(); ids = await rateRows();
   const A = ids[0], B = ids[1];
   const sends = [];
   await page.route('**/api/appeals/send', async route => {
@@ -82,22 +86,22 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
     const held = { finding_id: body.finding_id, status: 'held', code: 'stale', reason: 'The newest remittance RemitWatch has is 45 days old, so this claim may have been paid since.' };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body.stale_ok ? { finding_id: body.finding_id, status: 'sent', number: '(800) 555-0142' } : held) });
   });
-  await page.click(`tr.row[data-id="${A}"] td.day`); await settle(A); await page.click('#drawer #fxOne');
-  await sleep(100);
-  await page.click(`tr.row[data-id="${B}"] td.day`); await settle(B); await page.click('#drawer #fxOne');
-  await page.waitForSelector('#drawer #fxStale'); await sleep(2000);         // A's late answer arrives meanwhile
-  out.cross = { panel: await page.$eval('#drawer', d => d.dataset.fid), A, B, stale_buttons: await page.$$eval('#drawer #fxStale', x => x.length) };
-  await page.click('#drawer #fxStale'); await sleep(800);
+  await preview(A); await page.click('#modal #xpFaxGo'); await sleep(100); await page.click('#modal #closeM');
+  await preview(B); await page.click('#modal #xpFaxGo');
+  await page.waitForSelector('#modal #xpFaxMsg #xpAgain'); await sleep(2000);         // A's late answer arrives meanwhile
+  out.cross = { panel: await page.$eval('#drawer', d => d.dataset.fid), A, B, stale_buttons: await page.$$eval('#modal #xpFaxMsg #xpAgain', x => x.length),
+                modal_open: await page.$eval('#modal', m => m.classList.contains('open')) };
+  await page.click('#modal #xpFaxMsg #xpAgain'); await sleep(800);
   out.cross.sends = sends.map(s => ({ id: s.finding_id === A ? 'A' : s.finding_id === B ? 'B' : '?', stale_ok: !!s.stale_ok }));
   out.cross.notice = await page.$$eval('#rwNotice div', ds => ds.map(d => d.innerText));
   await page.unroute('**/api/appeals/send');
 
   // ---------------------------------------------------------------- H1 (0d-5): a fax that goes out does not pull the panel back; typing is kept
-  await open(); ids = await rows();
+  await open(); ids = await rateRows();
   const A2 = ids[2], B2 = ids[3];
   await page.route('**/api/appeals/send', async route => { const body = JSON.parse(route.request().postData()); await sleep(1500);
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ finding_id: body.finding_id, status: 'sent', number: '(800) 555-0142' }) }); });
-  await page.click(`tr.row[data-id="${A2}"] td.day`); await settle(A2); await page.click('#drawer #fxOne');
+  await preview(A2); await page.click('#modal #xpFaxGo'); await sleep(100); await page.click('#modal #closeM');
   await page.click(`tr.row[data-id="${B2}"] td.day`); await settle(B2);
   await page.evaluate(() => { const f = document.querySelector('#drawer details.dfold:has(#noteText)'); if (f) f.open = true; });
   await page.fill('#drawer #noteText', 'Text typed for the second item');
@@ -128,16 +132,16 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
       ? { finding_id: body.finding_id, status: 'sent', number: '(800) 555-0142' }
       : { finding_id: body.finding_id, status: 'held', code: 'note_check', confirm: true, visit_date: '2026-11-01', packet_id: 'pkt.1',
           reason: "Check the visit note before it goes: Its text does not show this patient's name." }) }); });
-  await open(); ids = await rows();
-  await page.click(`tr.row[data-id="${ids[4]}"] td.day`); await settle(ids[4]);
+  await open(); ids = await rateRows();
   sends.length = 0;
-  await page.click('#drawer #fxOne'); await page.waitForSelector('#drawer #fxNoteOk');
-  out.note = { disabled_before: await page.$eval('#drawer #fxNoteGo', b => b.disabled), label: await page.$eval('#drawer #fxNoteOk', c => c.parentElement.innerText),
-               packet_link: await page.$$eval('#drawer a[href*="/api/packets/pkt.1/pdf"]', a => a.length) };
-  await page.check('#drawer #fxNoteOk'); out.note.disabled_after = await page.$eval('#drawer #fxNoteGo', b => b.disabled);
-  await page.click('#drawer #fxNoteGo'); await sleep(800);
+  await preview(ids[4]); await page.click('#modal #xpFaxGo'); await page.waitForSelector('#modal #xpNoteOk');
+  out.note = { disabled_before: await page.$eval('#modal #xpNoteGo', b => b.disabled), label: await page.$eval('#modal #xpNoteOk', c => c.parentElement.innerText),
+               packet_link: await page.$$eval('#modal a[href*="/api/packets/pkt.1/pdf"]', a => a.length) };
+  await page.check('#modal #xpNoteOk'); out.note.disabled_after = await page.$eval('#modal #xpNoteGo', b => b.disabled);
+  await page.click('#modal #xpNoteGo'); await sleep(800);
   out.note.sends = sends.map(s => ({ note_checked: s.note_checked, packet_id: s.packet_id || null }));
   await page.unroute('**/api/appeals/send');
+  if (await page.$('#modal.open #closeM')) await page.click('#modal #closeM');
 
   // ---------------------------------------------------------------- H4: the Paid amount
   await open(); ids = await rows();

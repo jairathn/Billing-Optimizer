@@ -121,7 +121,7 @@ def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path
     assert out["double_sent"] == {"posts": 1, "events": 1}, out["double_sent"]
     # H1 (0d-1): the late answer for A stays A's; the button pressed in B's panel faxes B
     c = out["cross"]
-    assert c["panel"] == c["B"] and c["stale_buttons"] == 1, c
+    assert c["panel"] == c["B"] and c["stale_buttons"] == 1 and c["modal_open"] is True, c
     assert c["sends"] == [{"id": "A", "stale_ok": False}, {"id": "B", "stale_ok": False}, {"id": "B", "stale_ok": True}], c["sends"]
     assert any("Not faxed" in n for n in c["notice"]), c["notice"]
     # H1 (0d-5): A's fax going out leaves the panel on B with what was typed; a notice says A was faxed

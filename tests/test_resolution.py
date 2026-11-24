@@ -111,7 +111,10 @@ def test_emas_figures_for_a_twin_line_neither_close_nor_hint(tmp_path):
                 ("e1", "era_lines", "ERA & Payment Lines.xlsx", 1, "2026-04-01", "CB0000300C017", "88305", 1, 15000, None, None, 7000, "2026-04-17", None)])
     Detector(store, run_id="t").run()
     r = denials(store)["CB0000300C017:88305:DENIED_MISSING_INFO"]
-    assert r["status"] == "open" and r["hint"] is None
+    # EMA's one paid charge row cannot say which line it paid: it neither closes the item nor hints. The 835 itself can
+    # (push 2's units rule): the other line was the one paid, and this one is the unit denied
+    assert r["status"] == "open" and "EMA" not in (r["hint"] or ""), r["hint"]
+    assert r["hint"] is None or "this line is the one denied" in r["hint"], r["hint"]
     store.close()
 
 
