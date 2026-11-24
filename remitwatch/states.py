@@ -1035,11 +1035,31 @@ def _resends_837(fx: dict) -> list[dict]:
         if not same and not elsewhere:
             continue
         who = f.get("payer_group") if same else (grp or "another payer")
-        out.append({"date": s["date"], "kind": "resubmitted", "source": "837", "dated_by": "event", "confirmed": True,
-                    "payer_group": f.get("payer_group") if same else grp,
-                    "text": f"Sent again electronically to {who or 'the payer'} on {day(s['date'])} (837 claim file"
-                            + (", a replacement claim" if s["freq"] == "7" else "") + ")"})
+        row = {"date": s["date"], "kind": "resubmitted", "source": "837", "dated_by": "event", "confirmed": True,
+               "payer_group": f.get("payer_group") if same else grp,
+               "text": f"Sent again electronically to {who or 'the payer'} on {day(s['date'])} (837 claim file"
+                       + (", a replacement claim" if s["freq"] == "7" else "") + ")"}
+        # it waits the payer's usual answer time after a send, as the 837s measure it (95th percentile), where known
+        wait = _answer_wait(fx.get("ctx") or {}, row["payer_group"])
+        if wait:
+            row["wait_days"] = wait
+        out.append(row)
     return out
+
+
+def _answer_wait(ctx: dict, group: Any) -> int | None:
+    """The payer group's answer time after a send, from the 837s (detect.ANSWER_DAYS_META): its own 95th percentile where
+    20 answers are measured, else a group of the same family's, else all payers'; None when nothing is measured."""
+    t = ctx.get("answer_837") or {}
+    groups = t.get("groups") or {}
+    g = groups.get(group or "")
+    if g is None and group:
+        g = next((v for k, v in groups.items() if _same_payer(k, group)), None)
+    g = g or t.get("all")
+    try:
+        return int(g["p95"]) if g and g.get("p95") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _context(conn: sqlite3.Connection, today: str) -> dict:
@@ -1080,6 +1100,8 @@ def _context(conn: sqlite3.Connection, today: str) -> dict:
                 names[g] = newest
         ctx["group_last_835"] = names
     ctx["policy"] = _meta(conn, "ema:writeoff_policy", {}) or {}
+    # each payer group's answer time after a send, from the 837s (detect.ANSWER_DAYS_META): how long a bill sent again waits
+    ctx["answer_837"] = _meta(conn, "detect:answer_days_837", {}) or {}
     return ctx
 
 

@@ -335,10 +335,13 @@ def test_a_denial_whose_bill_went_out_again_waits_for_that_answer(tmp_path, kind
     - D03 (coordination of benefits, CO-22: another payer is primary): the bill went to Humana. Worked: waiting.
     - D04 (CO-16): the only 837 is the first send, before the denial. Work now.
     - D05 (CO-16): no 837 at all. Work now.
-    No resend is chased as a claim of its own. Once the resend's answer is overdue (January 15), D01 is work now again."""
+    No resend is chased as a claim of its own. D01 waits Anthem's usual answer time after a send, as the 837s measure it
+    (its 25 other claims were answered 50 days after they went out): it is followed up on October 30. Once that answer is
+    overdue (January 15), D01 is work now again."""
     s = _store(tmp_path, kind)
     v = [("99214", "223.65", "20260814")]
     send(s, tmp_path, [clm837("CB0000D04C017", v)], "20260816")
+    send(s, tmp_path, [clm837(f"CB{i:07d}C017", [("99214", "223.65", "20260401")]) for i in range(1, 26)], "20260727")
     _remits(s, tmp_path, [_deny("D01", "16"), _deny("D02", "16"), _deny("D03", "22"), _deny("D04", "16"), _deny("D05", "16")], "20260901")
     _remits(s, tmp_path, _visits(), "20260915")
     send(s, tmp_path, [clm837("CB0000D01C024", v, freq="7"), clm837("CB0000D02C024", v, payer=HUMANA),
@@ -351,7 +354,7 @@ def test_a_denial_whose_bill_went_out_again_waits_for_that_answer(tmp_path, kind
         f"items {sorted(rows)}: a resend after a denial is the denial's work, never a claim chased on its own")
     d1 = rows["CB0000D01C017"]
     assert d1["work_state"] == "waiting", f"D01 was resent to Anthem on 2026-09-10: {d1['work_state']} ({d1['state_basis']})"
-    assert d1["follow_up_on"] > "2026-09-20" and "Sent again electronically to Anthem / BCBS on Sep 10, 2026" in d1["state_basis"]
+    assert d1["follow_up_on"] == "2026-10-30" and "Sent again electronically to Anthem / BCBS on Sep 10, 2026" in d1["state_basis"]
     assert rows["CB0000D02C017"]["work_state"] == "work_now", rows["CB0000D02C017"]["state_basis"]
     d3 = rows["CB0000D03C017"]
     assert d3["work_state"] == "waiting" and "to Humana" in d3["state_basis"], d3["state_basis"]

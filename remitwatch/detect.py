@@ -208,6 +208,10 @@ NO_ERA_META = "feed:no_era_837"
 # exports), inside the weeks both reach, with at least SEND_WEEK_MIN claims on the side that has them
 SEND_WEEKS_META = "feed:send_weeks"
 SEND_WEEK_MIN = 5
+# Each payer group's usual answer time after a send, from the 837s: days from a claim's send to the first remittance that
+# answered it, 95th percentile over the two years before the newest remittance (20 answers at least, never under
+# NO_ANSWER_DAYS). A bill sent again waits that long for its answer (states: the resend's follow-up day).
+ANSWER_DAYS_META = "detect:answer_days_837"
 # EMA payer ids of the VA's community care network. EMA names these claims after the network's administrator ("Optum
 # Unitedhealth Care"), whose own commercial rules are not the VA's.
 VA_PAYER_IDS = frozenset({"VACCN", "TWVACCN"})
@@ -3151,6 +3155,49 @@ class Detector:
                           "second_on": min(r[3] for r in later), "paid_cents": paid, "answers": dict(answers)}
         return out
 
+    def _answer_days_837(self, newest: str) -> dict:
+        """Each payer group's answer time after a send (ANSWER_DAYS_META): for each 837 claim sent in the two years before
+        the newest remittance, the days to the first remittance on or after the send that answered its claim id (any
+        processing but a reversal), by that remittance's payer group; the 95th percentile where 20 answers at least are on
+        file (else all payers'), never under NO_ANSWER_DAYS. Written to meta at once: the states of this run's save read
+        it (a bill sent again waits that long for its answer)."""
+        c = self.conn
+        since = _add_days(newest, -730) or ""
+        first: dict[tuple, tuple] = {}
+        for pcn, sent, paid_on, pname, cfi in c.execute(
+                """SELECT c8.patient_control_number, c8.bht_created, t.payment_date, t.payer_name, cl.claim_filing_indicator
+                   FROM claims_837 c8 JOIN claims cl ON cl.patient_control_number = c8.patient_control_number
+                   JOIN transactions t ON t.transaction_key = cl.transaction_key
+                   WHERE COALESCE(t.superseded,0)=0 AND c8.bht_created >= ? AND t.payment_date >= c8.bht_created
+                     AND cl.claim_status_code IN ('1','2','3','4','19','20','21')""", (since,)):
+            k = (pcn, sent)
+            if k not in first or (paid_on or "") < first[k][0]:
+                first[k] = (paid_on or "", pname, cfi)
+        by: dict[str, list] = defaultdict(list)
+        everything: list = []
+        groups: dict = {}
+        for (pcn, sent), (paid_on, pname, cfi) in first.items():
+            d = _days_between(sent, paid_on)
+            if d is None or d < 0 or d > 730:
+                continue
+            gk = (pname, cfi)
+            if gk not in groups:
+                groups[gk] = payer_group_kind(pname, cfi)[0]
+            by[groups[gk]].append(d)
+            everything.append(d)
+
+        def p95(v: list) -> int:
+            v = sorted(v)
+            return max(NO_ANSWER_DAYS, v[min(len(v) - 1, max(0, (len(v) * 95 + 99) // 100 - 1))])
+        out = {"groups": {g: {"p95": p95(v), "n": len(v)} for g, v in by.items() if len(v) >= 20},
+               "all": {"p95": p95(everything), "n": len(everything)} if len(everything) >= 20 else None, "newest": newest}
+        try:
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ANSWER_DAYS_META, json.dumps(out, sort_keys=True)))
+            c.commit()
+        except sqlite3.Error:
+            c.rollback()
+        return out
+
     def _answered_by_name(self, cds: list[dict]) -> dict[str, set]:
         """For the 837s' claims whose EMA claim was found (cd['ema_link']): the services (date, code) a payer answered as its
         primary (claim status 1, 19, 4 or 22) on another bill for the same patient, by EMA's keyed name for the claim's line
@@ -3883,12 +3930,15 @@ class Detector:
         as the exports' items are (_emit_open_claim)."""
         self.no_era = []
         s8 = self._load_837()
-        if not s8["on"] or not s8["sends"]:
+        if not s8["on"]:
             return
         c = self.conn
         newest, oldest = c.execute("SELECT MAX(payment_date), MIN(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
         if not newest:
             return                          # no remittance at all: nothing can say a claim went unanswered
+        self._answer_days_837(newest)
+        if not s8["sends"]:
+            return
         newest = feed_date(c) or newest
         recent = _add_days(newest, -400) or ""
         sends, bills, ema_ids = s8["sends"], s8["bills"], s8["ema_ids"]
