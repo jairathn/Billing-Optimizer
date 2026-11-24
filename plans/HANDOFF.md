@@ -6,11 +6,16 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, about 05:00 UTC.
+Last updated: 2026-11-24, 04:30 UTC.
 
 ## 1. Where things are
 
-- **Live sites**: both the server (AWS) and Vercel run `main` at `949c4db`. The server's `/api/health` shows the commit it
+- **Released 2026-11-24 04:22 UTC**: `main` is `f601b6c` (the live hotfix bundle and both review rounds). The server's
+  `/api/health` showed `f601b6c` at 04:25 UTC. Vercel builds main itself; check its first run (10:17 UTC daily) in the state
+  folder: `status.json` (no `error`, `memory_mb.peak` under 2,278) and `serving.json` `build` "7" (only the new code writes
+  7). The first runs re-analyse once (rules 2.9) and read the six-week catch-up and the 837s; the swing alarm is expected
+  to fire high on the catch-up run (about +900 open items, +$217k): acknowledge it once the files are checked.
+- Before the release: both sites ran `main` at `949c4db`. The server's `/api/health` shows the commit it
   runs. Vercel's last run is in the state folder's `status.json` (Dropbox, `/RemitWatch-state`).
 - **This branch** (`claude/epic-davinci-imb6tj`) is the integration branch. Its code is the live hotfix bundle:
   main + `hotfix/chaos-r0` (hotfix 2, H1-H11) + `hotfix/swing-alarm` (2b) + `hotfix/deadlines` (2c) +
@@ -19,8 +24,7 @@ Last updated: 2026-11-24, about 05:00 UTC.
   refused run keeps the proof), the swing alarm's item-by-item counts (`swing_moves`, guard finding L3-9), and a feed-date
   rule for missing weeks (more than 7 days with no payment from any payer, then newer files: the feed reaches the day before
   the gap). One rules version: `DETECT_RULES = "2.9"`. The merge history keeps the other session's four WIP commits.
-- **Not yet on main.** Still to do before release: the two review rounds below, a fresh run of the four environments, and
-  the catch-up check.
+- **On main since 2026-11-24** (see above).
 - **New data in Dropbox** (`/Trizetto Data`, the folder RemitWatch reads): six weekly folders of remittances (2026-10-12 to
   11-20, with that week's 837s and EMA exports) and six folders of 837s (2024 to September 2026, about 5,400 files). The live
   sites had not read them as of this update. Four `.exe` files and one `.zip` of EMA exports sit in the 10-19 to 10-23
