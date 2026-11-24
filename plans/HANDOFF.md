@@ -177,6 +177,19 @@ Last updated: 2026-11-24, 15:15 UTC.
       denials carry KY Medicaid provider-enrollment reasons (B7, N570, N288): a question for the owner, no money on these
       items. The hook-in unit (E, G, H wired into both cycles, the Data tab panels, the 1 GiB fix) started at 15:10 as a
       background agent on branch `hook` from d27ce98.
+      fix837 is merged (c52a54c): the 837s are a source of sends (a send date where EMA has none; a resend to the denying
+      payer waits for its answer); claims only the 837s know get one item each (837_OPEN_CLAIM, priced at the payer's own
+      rate per line and component, capped at the charge; voids end a claim; CH-8 holds a payer whose remittances stop; the
+      Data tab names payers with no ERAs and holes in either feed); one "answered in EMA" rule serves every never-answered
+      and rejected claim (exports, reports, 837s). A16 against the merged tip: already done on Work now 324 -> 219, paid
+      204 -> 113, undecided 71 -> 41; of the 103 EMA-paid never-answered and rejected items 7 stay (claims dated only by the
+      visit day with look-alikes). Detection 163 s (was 129 s). Open points from it: a claim sent to a payer as its
+      secondary is priced at that payer's full rate (the 837's SBR01 is not read); export claims dated only by the visit day
+      get no send-day twins; a print-batch duplicate made after the visit was paid stays listed; a dependent's 837 carries
+      the subscriber's id; 2024 sends cannot be checked against EMA (its ledger starts later); story.py shows no 837 rows
+      (full visibility); the claim filing indicator is not read; unanswered claims are not grouped by send week (T-N13).
+      **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
+      same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
