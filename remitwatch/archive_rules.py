@@ -864,9 +864,11 @@ def _act(action: str, rule: str, f: Mapping | None, strength: str, proof: list[d
 
 def _close(rule: str, f: Mapping, pay: Ans, paid_cents: int, note: str, how: str, proof: list[dict], *, recovery: bool,
            strength: str = "proven") -> dict:
-    """A closure in the shape Detector._mark_paid takes: the payment's date, amount, a note and the paid_later detail."""
+    """A closure in the shape Detector._mark_paid takes: the payment's date, amount, a note and the paid_later detail. The
+    detail names the paying line and its units: each unit of a payment counts as recovered on one item only (trace finding
+    T-C5: counted by date, trace and claim, a second line paid on the same claim recorded $0)."""
     detail = {"payment_date": pay.paid_on or None, "claim": pay.pcn, "trace": pay.trace, "paid_cents": paid_cents,
-              "claim_status": pay.status, "how": how, "rule": rule}
+              "claim_status": pay.status, "how": how, "rule": rule, "line_key": pay.line_key, "units": pay.unit_count}
     return _act("close_with_proof", rule, f, strength, proof, paid_date=pay.paid_on or None, paid_cents=paid_cents, note=note,
                 detail=detail, counts_as_recovery=recovery)
 
@@ -2815,7 +2817,7 @@ def apply_actions(det, actions: Iterable[Mapping]) -> dict:
                                                     "state_hint": "done", "strength": act.get("strength"), "proof": _kept_proof(act.get("proof"))})
                 n["likely_close_kept_open"] += 1
                 continue
-            det._mark_paid(f, act["paid_date"], act["paid_cents"], act["note"], dict(act["detail"]))
+            det._mark_paid(f, act["paid_date"], act["paid_cents"], act["note"], dict(act["detail"]), counts=bool(act.get("counts_as_recovery")))
             if not act.get("counts_as_recovery"):
                 f["recovered_cents"] = 0
             f["hint"] = None

@@ -330,6 +330,15 @@ FEED_META = "feed:date"         # the feed date the last analysis used, for a co
 # it, and the dashboard's copy carries it.
 PAYERS_BEHIND_META = "feed:payers_behind"
 EVENTS_SEEN_META = "detect:events_seen"     # the newest finding_events id the last detection run could see (Detector.run)
+# Reversals (claim status 22) of a payment that is not on file: no earlier payment of the reversal's own amount from that
+# payer for the bill, code and date (trace finding T-I5). They cancel nothing. {"claims", "lines", "cents"} for those whose
+# service is dated on or after the payer's first remittance on file (that payment's remittance is missing), and the same
+# with "older_" for the rest (paid before the remittances on file begin). Each analysis saves it; the Data tab's checks
+# name it (insights.data_health), and the dashboard's copy carries it.
+REVERSALS_NOT_ON_FILE_META = "ledger:reversals_not_on_file"
+# A claim id written inside a recoupment's reference, among other text (the payer's own claim number before or after it, a
+# letter, a date): the practice's claim ids are a bill id and a submission suffix (bill_of). Trace finding T-I1.
+CLAIM_ID_IN_TEXT = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{5,6}C\d{1,3}")
 # The Data tab names such a payer once its last remittance is more than PAYER_QUIET_DAYS before the day the feed reaches
 # (the ten days its feed check allows the whole feed): a payer that pays every week or so is between two files, not
 # stopped, and the claims due since its last file wait for the next one.
@@ -540,6 +549,13 @@ def is_surgical(code: str | None) -> bool:
 
 SECOND_RATE_MIN_LINES = 5        # a lower amount the payer allowed this often for a code is a rule of the payer's, not a one-off
 STATE_NAMES = {"KY": "Kentucky", "IN": "Indiana"}
+
+
+class LaterPayment(tuple):
+    """A later payment as one event (Detector.later_payment, the claim rules' covering payment), with what the closure's
+    recovery is measured from (Detector._recover): `wants`, [((bill, code, date), the item's units of it, the standing
+    payments of it that came after the item's answer)]."""
+    wants: list = []
 
 
 def _service_keys(item: dict, evidence: dict, code: str | None, dos: str | None) -> list[tuple]:
@@ -864,7 +880,11 @@ class Detector:
                WHERE t.superseded = 0 AND TRIM(cl.claim_frequency_code) = '8'""")}
         self.standing = self._build_ledger()
         self.partly_paid: dict[str, tuple] = {}         # line_key -> (first later payment, units paid, units billed)
-        self.used_payments: set[tuple] = set()          # payments already counted as recovered on a finding
+        self.used_payments: set[tuple] = set()          # payments already counted as recovered on a finding (EMA's, by date)
+        # an 835 payment counted as recovered, by its paying line: [units of it used, cents credited from it]. Each unit pays
+        # one finding (trace finding T-C5: keyed by date, trace, claim and code, a second line paid on the same claim
+        # recorded $0)
+        self.used_units: dict[str, list] = {}
         paid_lines: Counter = Counter()
         for l in self.lines:
             if l["line_key"] in self.standing and l.get("claim_status_code") in ("1", "19") and l.get("service_date"):
@@ -875,14 +895,16 @@ class Detector:
             multi[code] += n > 1
         self.once_codes = {code for code, g in groups.items() if g >= 20 and multi[code] <= 0.015 * g}     # paid at most once a day
         del paid_lines
-        # every payment that still stands, by bill, code and date: (payment date, trace, amount standing, claim status, claim id, units, payer)
+        # every payment that still stands, by bill, code and date: (payment date, trace, amount standing, claim status, claim id, units,
+        # payer, date of service, the paying line, its modifiers)
         self.paid_events: dict[tuple, list[tuple]] = defaultdict(list)
         self.paid_by_code: dict[tuple, list[tuple]] = defaultdict(list)     # (bill, code) -> the same events, undated lines too
         for l in self.lines:
             amt = self.standing.get(l["line_key"])
             if amt:
                 e = (l.get("payment_date") or l.get("txn_payment_date") or "", l.get("trace_number"), amt, l.get("claim_status_code"),
-                     l["patient_control_number"], abs(l.get("paid_units") or 1), l.get("payer_id") or l.get("payer_name"), l.get("service_date"))
+                     l["patient_control_number"], abs(l.get("paid_units") or 1), l.get("payer_id") or l.get("payer_name"), l.get("service_date"),
+                     l["line_key"], l["modifiers"])
                 self.paid_by_code[(bill_of(l["patient_control_number"]), l["procedure_code"])].append(e)
                 if l.get("service_date"):
                     self.paid_events[(bill_of(l["patient_control_number"]), l["procedure_code"], l["service_date"])].append(e)
@@ -1230,16 +1252,22 @@ class Detector:
 
     def _build_ledger(self) -> dict[str, int]:
         """What is left of every payment once the payer's takebacks are applied: {line_key: cents still paid}, with payments
-        taken back in full left out.
+        taken back in full left out. Every take is kept with its date (self.took), for the recovery a closure records.
         A reversal (claim status 22) cancels an earlier payment it reverses: the same bill, code and date, from the same payer
-        (a reversal that names no payer cancels only a payment of exactly its amount), preferring the same amount, then the
-        same claim id, then the same payer claim number, then the most recent. Only a payment dated before the reversal can
-        be cancelled: the archive starts in 2024, and a same-day payment beside a reversal is the repayment of an original
-        paid before it. A payment made again after a reversal is a new payment and stands.
-        Claim-level takebacks follow: a PLB WO whose reference is a claim id or a payer claim number, netted per reference
-        and payer (a balance carried forward with a negative WO and recovered later is taken once), and a reversal sent
-        without service lines. Each takes back that payer's earlier payments on that claim, and a WO is skipped where a
-        reversal already took back as much on that claim."""
+        when it names one, and of the reversal's own amount (as paid, or as it still stands), preferring the same claim id,
+        then the same payer claim number, then the most recent. A reversal restates the payment it takes back: when no
+        payment of its amount is on file, the version it reverses is not on file, and it cancels nothing (another version's
+        payment stays paid; trace finding T-I5). Those reversals are counted for the Data tab (REVERSALS_NOT_ON_FILE_META).
+        Only a payment dated before the reversal can be cancelled: the archive starts in 2024, and a same-day payment beside
+        a reversal is the repayment of an original paid before it. A payment made again after a reversal is a new payment
+        and stands.
+        Claim-level takebacks follow: PLB WO (an overpayment recovered) and FB (a balance carried forward, negative, or
+        recovered, positive), each read for the claim it names (_plb_names: a claim id or a payer claim number, alone or
+        among other text, trace finding T-I1), netted per claim and payer (a balance carried forward and recovered later is
+        taken once), and a reversal sent without service lines. Each takes back that payer's earlier payments on that claim.
+        A PLB entry is skipped where a reversal of the claim the same day already took back as much, and where that payer's
+        reversal of the claim (any date) already took the claim back and carried its balance forward under a reference
+        naming no claim: the entry recovers that balance, not the claim's payment again."""
         when = lambda l: l.get("payment_date") or l.get("txn_payment_date") or ""          # noqa: E731
         payer = lambda l: l.get("payer_id") or l.get("payer_name")                         # noqa: E731
         left: dict[str, int] = {}
@@ -1252,7 +1280,15 @@ class Detector:
                 pos[(bill_of(l["patient_control_number"]), l.get("procedure_code"), l.get("service_date"))].append(l)
             elif st == "22" and amt < 0:
                 revs.append(l)
+        # (bill, code, date) -> [(the payment's line, the day it was taken, cents)]: what each reversal and recoupment took,
+        # when (a closure's recovery is the money its units got after its denial less what stood then and was taken since)
+        self.took: dict[tuple, list] = defaultdict(list)
+
+        def take_from(p, cents: int, day: str) -> None:
+            left[p["line_key"]] -= cents
+            self.took[(bill_of(p["patient_control_number"]), p.get("procedure_code"), p.get("service_date"))].append((p, day or "", cents))
         reversed_on: Counter = Counter()        # (claim id or payer claim number, date) -> cents a line reversal took back
+        lost: list[tuple] = []                  # reversals of a payment not on file: (claim id, cents, date of service, payer)
         if revs:
             keys = sorted({p["claim_key"] for r in revs for p in pos.get((bill_of(r["patient_control_number"]), r.get("procedure_code"),
                                                                           r.get("service_date")), [])} | {r["claim_key"] for r in revs})
@@ -1262,42 +1298,56 @@ class Detector:
                 pccn.update(self.conn.execute(f"SELECT claim_key, payer_claim_control_number FROM claims WHERE claim_key IN ({','.join('?' * len(part))})",
                                               part).fetchall())
             for r in sorted(revs, key=when):
-                need = -r["paid_cents"]
+                need = amount = -r["paid_cents"]
                 cands = [p for p in pos.get((bill_of(r["patient_control_number"]), r.get("procedure_code"), r.get("service_date")), [])
-                         if left[p["line_key"]] > 0 and when(p) < when(r)]
-                cands = [p for p in cands if payer(p) == payer(r)] if payer(r) else [p for p in cands if p["paid_cents"] == need]
+                         if left[p["line_key"]] > 0 and when(p) < when(r) and (not payer(r) or payer(p) == payer(r))]
+                # only a payment of the reversal's own amount: one of another amount is another version's payment (T-I5)
+                cands = [p for p in cands if p["paid_cents"] == amount or left[p["line_key"]] == amount]
+                if not cands:
+                    lost.append((r["patient_control_number"], amount, r.get("service_date"), payer(r)))
+                    continue
                 cands.sort(key=when, reverse=True)          # most recent first, then (a stable sort) the closest match first
-                cands.sort(key=lambda p: (left[p["line_key"]] != need and p["paid_cents"] != need, p["patient_control_number"] != r["patient_control_number"],
+                cands.sort(key=lambda p: (p["patient_control_number"] != r["patient_control_number"],
                                           not pccn.get(r["claim_key"]) or pccn.get(p["claim_key"]) != pccn.get(r["claim_key"])))
                 for p in cands:
                     take = min(left[p["line_key"]], need)
-                    left[p["line_key"]] -= take
+                    take_from(p, take, when(r))
                     need -= take
                     if need <= 0:
                         break
-                taken = -r["paid_cents"] - max(need, 0)
+                taken = amount - max(need, 0)
                 for ref in {r["patient_control_number"], pccn.get(r["claim_key"])} - {None}:
                     reversed_on[(ref, when(r))] += taken
+        self._count_not_on_file(lost)
         takebacks = []              # (references, cents, date, payer, kind)
         net: dict[tuple, list] = defaultdict(lambda: [0, ""])
-        wo_rows = self.conn.execute("""SELECT p.reference, p.amount_cents, t.payment_date, COALESCE(t.payer_id, t.payer_name) FROM plb p
-                                       JOIN transactions t ON t.transaction_key = p.transaction_key
-                                       WHERE t.superseded = 0 AND p.reason_code = 'WO' AND COALESCE(p.reference, '') <> ''""").fetchall()
-        # a balance carried under the payer's claim number and recovered under the claim id (or the reverse) is one balance
-        ids_of_number: dict[tuple, set] = defaultdict(set)
-        wo_refs = sorted({r[0] for r in wo_rows})
-        for i in range(0, len(wo_refs), 500):
-            part = wo_refs[i:i + 500]
-            for pcn, cn, who_ in self.conn.execute(f"""SELECT c.patient_control_number, c.payer_claim_control_number, COALESCE(t.payer_id, t.payer_name)
-                                                       FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
-                                                       WHERE c.payer_claim_control_number IN ({','.join('?' * len(part))})""", part):
-                ids_of_number[(cn, who_)].add(pcn)
-        number_to_id = {k: next(iter(v)) for k, v in ids_of_number.items() if len(v) == 1}     # only a number that names one claim
-        for ref, amount, day, who in wo_rows:
-            n = net[(number_to_id.get((ref, who), ref), who)]
+        plb_rows = self.conn.execute("""SELECT p.reference, p.amount_cents, t.payment_date, COALESCE(t.payer_id, t.payer_name), p.transaction_key
+                                        FROM plb p JOIN transactions t ON t.transaction_key = p.transaction_key
+                                        WHERE t.superseded = 0 AND p.reason_code IN ('WO', 'FB') AND COALESCE(p.reference, '') <> ''""").fetchall()
+        # each entry under the claim it names (a balance carried under the payer's claim number and recovered under the claim
+        # id, or the reverse, is one balance); an entry naming no claim on file nets under its own reference
+        names, named = self._plb_names(plb_rows)
+        carried: set[str] = set()       # remittances that carried a balance forward under a reference naming no claim
+        for (_ref, amount, day, who, tk), name in zip(plb_rows, names):
+            n = net[(name, who)]
             n[0] += amount or 0
             n[1] = max(n[1], day or "")
-        takebacks += [((ref,), amount, day, who, "wo") for (ref, who), (amount, day) in net.items() if amount > 0]
+            if (amount or 0) < 0 and name not in named:
+                carried.add(tk)
+        takebacks += [((name,), amount, day, who, "wo") for (name, who), (amount, day) in net.items() if amount > 0]
+        # (claim id, payer) whose reversal sits in a remittance that carried a balance forward without naming the claim: a
+        # later PLB entry naming the claim recovers that balance (a payer carries it under its own number and recovers it
+        # under the claim's), which the reversal already took from the claim
+        deferred: set[tuple] = set()
+        wanted = sorted({name for (name, _who), (amount, _d) in net.items() if amount > 0 and name in named}) if carried else []
+        for i in range(0, len(wanted), 500):
+            part = wanted[i:i + 500]
+            for pcn, who_, tk in self.conn.execute(f"""SELECT c.patient_control_number, COALESCE(t.payer_id, t.payer_name), c.transaction_key
+                                                       FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
+                                                       WHERE t.superseded = 0 AND c.claim_status_code = '22' AND c.paid_cents < 0
+                                                         AND c.patient_control_number IN ({','.join('?' * len(part))})""", part):
+                if tk in carried:
+                    deferred.add((pcn, who_))
         takebacks += [(tuple(x for x in (pcn, cn) if x), -paid, day, who, "reversal") for pcn, cn, paid, day, who in self.conn.execute(
             """SELECT c.patient_control_number, c.payer_claim_control_number, c.paid_cents, COALESCE(c.payment_date, t.payment_date), COALESCE(t.payer_id, t.payer_name)
                FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
@@ -1319,6 +1369,8 @@ class Detector:
             for refs_, amount, day, who, kind in sorted(takebacks, key=lambda t: (t[2] or "", t[0])):
                 if kind == "wo" and max((reversed_on.get((ref, day), 0) for ref in refs_), default=0) >= amount:
                     continue            # the same remittance reversed that claim: the WO reports the same money again
+                if kind == "wo" and any((ref, who) in deferred for ref in refs_):
+                    continue            # that payer's reversal took the claim back and carried the balance this recovers
                 paid = []
                 # the claim the takeback names by its id first; its payer claim number only when nothing under that id stands
                 for index in (by_id, by_number):
@@ -1328,11 +1380,68 @@ class Detector:
                         break
                 for l in sorted(paid, key=lambda l: (left[l["line_key"]] != amount, -left[l["line_key"]], l["line_key"])):
                     take = min(left[l["line_key"]], amount)
-                    left[l["line_key"]] -= take
+                    take_from(l, take, day)
                     amount -= take
                     if amount <= 0:
                         break
         return {k: v for k, v in left.items() if v > 0}
+
+    def _plb_names(self, rows: list) -> tuple[list[str], set[str]]:
+        """The claim each PLB entry (rows of reference, amount, date, payer, remittance) names, for netting and taking back,
+        and the set of those that are claims on file. A reference names a claim when it is its claim id, or holds one among
+        other text (CLAIM_ID_IN_TEXT: the payer's own claim number before or after it, a letter, a date; the claim id must be
+        on file, and only one); else when it is, or holds as a word of its own, a payer claim number of that payer that
+        names one claim (a number shared by several claims is no name). Any other reference names itself: it nets only with
+        entries that carry the same text, and is looked up whole (trace finding T-I1: references were looked up whole only,
+        so a recoupment written '<the payer's number> <claim id>' was never applied)."""
+        refs = [str(r[0] or "").strip() for r in rows]
+        inside = [sorted(set(CLAIM_ID_IN_TEXT.findall(x.upper()))) for x in refs]
+        words = [[w for w in re.split(r"[^0-9A-Za-z]+", x) if len(w) >= 6 and w != x] for x in refs]
+        on_file: set[str] = set()
+        want = sorted({x for x in refs if x} | {i for f in inside for i in f})
+        for i in range(0, len(want), 500):
+            part = want[i:i + 500]
+            on_file.update(r[0] for r in self.conn.execute(f"SELECT DISTINCT patient_control_number FROM claims WHERE patient_control_number IN "
+                                                           f"({','.join('?' * len(part))})", part))
+        ids_of_number: dict[tuple, set] = defaultdict(set)
+        want = sorted({x for x in refs if x} | {w for ws in words for w in ws})
+        for i in range(0, len(want), 500):
+            part = want[i:i + 500]
+            for pcn, cn, who_ in self.conn.execute(f"""SELECT c.patient_control_number, c.payer_claim_control_number, COALESCE(t.payer_id, t.payer_name)
+                                                       FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
+                                                       WHERE c.payer_claim_control_number IN ({','.join('?' * len(part))})""", part):
+                ids_of_number[(cn, who_)].add(pcn)
+        number_to_id = {k: next(iter(v)) for k, v in ids_of_number.items() if len(v) == 1 and next(iter(v))}
+        names: list[str] = []
+        named: set[str] = set()
+        for (_ref, _amount, _day, who, _tk), x, ids, ws in zip(rows, refs, inside, words):
+            ids = [i for i in ids if i in on_file]
+            nums = {number_to_id[(w, who)] for w in ws if (w, who) in number_to_id}
+            name = (x if x in on_file else number_to_id.get((x, who)) or (ids[0] if len(ids) == 1 else None)
+                    or (next(iter(nums)) if not ids and len(nums) == 1 else None))
+            if name:
+                named.add(name)
+            names.append(name or x)
+        return names, named
+
+    def _count_not_on_file(self, lost: list[tuple]) -> None:
+        """REVERSALS_NOT_ON_FILE_META's counts from the line reversals that found no payment of their amount: (claim id,
+        cents, date of service, payer). A service dated on or after the payer's first remittance on file was paid in a
+        remittance that should be on file too: that one is missing. The rest reverse payments made before the remittances
+        on file begin."""
+        self.not_on_file = {"claims": 0, "lines": 0, "cents": 0, "older_claims": 0, "older_lines": 0, "older_cents": 0}
+        if not lost:
+            return
+        first = {who: day for who, day in self.conn.execute(
+            """SELECT COALESCE(payer_id, payer_name), MIN(payment_date) FROM transactions WHERE superseded = 0 GROUP BY 1""")}
+        claims: dict[str, set] = {"": set(), "older_": set()}
+        for pcn, cents, dos, who in lost:
+            pre = "older_" if (dos or "") < (first.get(who) or "") else ""
+            claims[pre].add(pcn)
+            self.not_on_file[pre + "lines"] += 1
+            self.not_on_file[pre + "cents"] += cents
+        for pre, ids in claims.items():
+            self.not_on_file[pre + "claims"] = len(ids)
 
     def paid_cover(self, bill: str, code: str | None, dos: str | None, expected: int | None = None, after: str | None = None) -> list[tuple]:
         """The payments still standing for this bill, code and date that count as paying it: a primary payment, or a
@@ -1383,14 +1492,15 @@ class Detector:
         A primary payment counts; a secondary payment counts only when it covers at least half the expected amount.
         For a line paid nothing, the later payments must cover the units it billed; short of that the line is recorded in
         self.partly_paid for a hint. `min_paid` is for lines that were paid short under the same code: the later payment
-        must be clearly larger than the short one, so a repeat of the same reduced payment does not close the finding."""
+        must be clearly larger than the short one, so a repeat of the same reduced payment does not close the finding.
+        The event carries (LaterPayment.wants) what the closure's recovery is measured from (_recover): the service, the
+        line's own units, and every later payment of the service that counts as paying it."""
         mine = l.get("payment_date") or l.get("txn_payment_date") or ""
         code = code or l.get("procedure_code")
         standing = self.paid_cover(bill_of(l.get("patient_control_number")), code, l.get("service_date"), expected)
         # later: after this remittance, or in it on another claim of the bill (a corrected claim paid as the original was denied)
-        events = [e for e in standing if e[0] and (e[0] > mine or (e[0] == mine and e[4] != l.get("patient_control_number")))]
-        if min_paid is not None:
-            events = [e for e in events if (e[2] or 0) >= min_paid]
+        later = [e for e in standing if e[0] and (e[0] > mine or (e[0] == mine and e[4] != l.get("patient_control_number")))]
+        events = later if min_paid is None else [e for e in later if (e[2] or 0) >= min_paid]
         if not events:
             return None
         first = min(events)
@@ -1400,7 +1510,81 @@ class Detector:
             if got < need:
                 self.partly_paid[l["line_key"]] = (first, got, need)
                 return None
-        return first if len(events) == 1 else first[:2] + (sum(e[2] for e in events),) + first[3:5] + (self.units_paid(events),) + first[6:]
+        out = LaterPayment(first if len(events) == 1 else first[:2] + (sum(e[2] for e in events),) + first[3:5] + (self.units_paid(events),) + first[6:])
+        out.wants = [((bill_of(l.get("patient_control_number")), code, l.get("service_date")),
+                      abs(l.get("original_units") or l.get("paid_units") or 1), later)]
+        return out
+
+    def _recover(self, own: dict | None, mine: str, own_pcn: str | None, wants: list) -> tuple[int, int, list, bool]:
+        """What a closure recovered (trace findings T-C5, T-C6): the money the item's own units got after its answer (`mine`,
+        on the item's claim id `own_pcn`), from the later standing payments of each service it lists (wants: [((bill,
+        code, date), the item's units of it, those payments)]).
+        Each payer's payments give the item's units in date order (a payment for the same modifiers as the item's own line
+        first), and each unit pays one finding only (self.used_units, by the paying line): a payer that paid the line twice
+        counts once, a second payer's payment of the same units (a supplemental plan after Medicare) counts too. The money is
+        capped by what the service gained after the item's answer: those payments, less what stood then and has been taken
+        back since (a payment that only replaces one the payer reversed is no recovery, and a short payment the payer
+        reversed and paid again recovered the difference), less what other findings already took from them.
+        Returns (cents recovered, cents of the payments that paid the item's units, those payments as [event, units, cents],
+        whether every unit of them was already counted on other findings)."""
+        when = lambda p: p.get("payment_date") or p.get("txn_payment_date") or ""          # noqa: E731
+        before = lambda p: when(p) < mine or (when(p) == mine and p["patient_control_number"] == own_pcn)     # noqa: E731
+        own_key = (bill_of(own.get("patient_control_number")), own.get("procedure_code"), own.get("service_date")) if own else None
+        rec_all, value_all, picks_all, taken_elsewhere = 0.0, 0.0, [], False
+        for key, k, evs in wants:
+            if not evs:
+                continue
+            # money that stood when the item was answered and was taken back since: from this service's payments, and from
+            # the item's own line when it is another service (a downcode paid again under the code billed)
+            lost = sum(c for p, day, c in self.took.get(key, ()) if day > mine and before(p))
+            if own is not None and own_key != key:
+                lost += sum(c for p, day, c in self.took.get(own_key, ()) if p["line_key"] == own["line_key"] and day > mine)
+            budget = sum(e[2] for e in evs) - lost - sum(self.used_units.get(e[8], (0, 0))[1] for e in evs)
+            mods = own.get("modifiers") if own else None
+            by_payer: dict = defaultdict(list)
+            for e in sorted(evs, key=lambda e: (bool(own) and e[9] != mods, e[0], e[1] or "", e[8])):
+                by_payer[e[6]].append(e)
+            value, picks = 0.0, []
+            for es in by_payer.values():
+                need = k
+                for e in es:
+                    if need <= 0:
+                        break
+                    free = e[5] - self.used_units.get(e[8], (0, 0))[0]
+                    if free <= 0:
+                        taken_elsewhere = True
+                        continue
+                    units = min(free, need)
+                    picks.append([e, units, e[2] * units / e[5]])
+                    value += picks[-1][2]
+                    need -= units
+            rec = max(0.0, min(value, budget))
+            for p in picks:             # the units are this finding's now, with their share of what it recovered
+                used = self.used_units.setdefault(p[0][8], [0, 0.0])
+                used[0] += p[1]
+                used[1] += p[2] * rec / value if value else 0
+            rec_all, value_all, picks_all = rec_all + rec, value_all + value, picks_all + picks
+        return int(round(rec_all)), int(round(value_all)), picks_all, taken_elsewhere and not picks_all
+
+    @staticmethod
+    def _paid_words(picks: list, fallback: tuple) -> tuple[str, dict]:
+        """The closure note's words for the payments that paid the item's units (picks from _recover), else for the later
+        payment found (`fallback`: date, trace, cents), and the evidence's paid_later fields: the first of them, the cents
+        they paid for the item's units, and each one when there are several."""
+        if not picks:
+            return (f"Paid on a later remittance ({fallback[0]}, trace {fallback[1]}, ${(fallback[2] or 0)/100:.2f})",
+                    {"payment_date": fallback[0], "trace": fallback[1], "paid_cents": fallback[2]})
+        rows: dict[tuple, list] = {}
+        for e, _u, cents in sorted(picks, key=lambda p: (p[0][0], p[0][1] or "")):
+            r = rows.setdefault((e[0], e[1]), [e, 0.0])
+            r[1] += cents
+        said = "; ".join(f"{e[0]}, trace {e[1]}, ${c/100:.2f}" for e, c in rows.values())
+        first = next(iter(rows.values()))[0]
+        detail = {"payment_date": first[0], "trace": first[1], "paid_cents": int(round(sum(c for _e, c in rows.values()))),
+                  "claim_status": first[3], "claim": first[4]}
+        if len(rows) > 1:
+            detail["payments"] = [{"payment_date": e[0], "trace": e[1], "claim": e[4], "paid_cents": int(round(c))} for e, c in rows.values()]
+        return (f"Paid on a later remittance ({said})" if len(rows) == 1 else f"Paid on later remittances ({said})"), detail
 
     def emit_second_rates(self) -> None:
         """A payer's routine lower amount for a code (the same amount on at least SECOND_RATE_MIN_LINES clean lines of the
@@ -1528,25 +1712,44 @@ class Detector:
                                    if first[0] != last[0] else f"all {n} claims. {last[1]}")
             f["hint"] = f"Filing windows close {first[0]} to {last[0]}" if first[0] != last[0] else None
 
-    def _mark_paid(self, f: dict, paid_date: str | None, paid: int, note: str, detail: dict, used: tuple | None = None) -> None:
-        """Close a finding the way a later payment on the same bill does, after the line rules have run. `used` names the
-        payment (one payment counts as recovered on one finding only); by default its date, trace and claim, and the
-        finding's code and date of service (each line of a claim is paid on its own)."""
+    def _mark_paid(self, f: dict, paid_date: str | None, paid: int, note: str, detail: dict, used: tuple | None = None,
+                   recovery: tuple | None = None, counts: bool = True) -> None:
+        """Close a finding the way a later payment on the same bill does, after the line rules have run. One payment counts
+        as recovered on one finding only. `recovery` is what _recover measured for it (cents, the payments' cents, their
+        picks, counted elsewhere). An 835 payment named by its paying line (detail['line_key'], the archive rules') is
+        counted by that line's units, each unit on one finding, at the amount the rule measured (what came after the
+        item's answer; trace finding T-C5), or at $0 where the rule says it is no recovery (`counts`). Otherwise `used`
+        names the payment (EMA's), by default its date, trace and claim and the finding's code and date of service, and the
+        recovery is at most the finding's shortfall."""
         short = f.get("shortfall_cents")
         ev = json.loads(f["evidence"]) if f.get("evidence") else {}
         if not short or short <= 0:
             f["expected_cents"] = f["shortfall_cents"] = short = paid
             ev["basis"] = "amount paid later (no baseline for this code)"
-        # one payment of one line: a later claim paying two of the claim's lines brings two recoveries, never one; a whole
-        # claim's item names every code and date it lists, so a line item already closed by the same payment is not counted
-        # again on it
-        keys = [used] if used else [(paid_date, detail.get("trace"), detail.get("claim"), c, d)
-                                    for c, d in _service_keys(f, ev, f.get("procedure_code"), f.get("service_date"))]
-        seen = any(k in self.used_payments for k in keys)
-        f["recovered_cents"], f["recovered_date"] = (0 if seen else min(paid, short)), paid_date
+        if recovery is not None:
+            seen = recovery[3]
+            f["recovered_cents"], f["recovered_date"] = recovery[0], paid_date
+        elif detail.get("line_key") and not used:
+            own = next((x for x in self.lines_by_claim.get(f.get("claim_key") or "", []) if x["line_key"] == f.get("line_key")), None)
+            need = abs((own.get("original_units") or own.get("paid_units") or 1) if own is not None else 1)
+            got = self.used_units.setdefault(detail["line_key"], [0, 0.0])
+            free = (detail.get("units") or 1) - got[0]
+            seen = free <= 0
+            f["recovered_cents"], f["recovered_date"] = (0 if seen or not counts else max(paid, 0)), paid_date
+            if not seen:
+                got[0] += min(free, need)
+                got[1] += f["recovered_cents"]
+        else:
+            # one payment of one line: a later claim paying two of the claim's lines brings two recoveries, never one; a
+            # whole claim's item names every code and date it lists, so a line item already closed by the same payment is
+            # not counted again on it
+            keys = [used] if used else [(paid_date, detail.get("trace"), detail.get("claim"), c, d)
+                                        for c, d in _service_keys(f, ev, f.get("procedure_code"), f.get("service_date"))]
+            seen = any(k in self.used_payments for k in keys)
+            f["recovered_cents"], f["recovered_date"] = (0 if seen else min(paid, short)), paid_date
+            self.used_payments.update(keys)
         if seen:
             detail = dict(detail, recovery_counted_elsewhere=True)
-        self.used_payments.update(keys)
         ev["paid_later"] = detail
         f["evidence"] = json.dumps(ev, default=str)
         f["auto_status"], f["auto_notes"] = "resolved", note
@@ -1618,7 +1821,8 @@ class Detector:
         fits = lambda p, want: not p or p in want or "" in want         # a payment for part p can pay toward these parts  # noqa: E731
         bills = {bill_of(f["patient_control_number"]) for f in todo}
         own_paid: dict[tuple, list] = defaultdict(list)     # (bill, code, date) -> the bill's standing payments: (status, amount, units, part)
-        paid: dict[tuple, list] = defaultdict(list)         # standing payments: (date, claim id, trace, amount, status, units, claim key, part)
+        # standing payments: (date, claim id, trace, amount, status, units, claim key, part, line key, payer, modifiers)
+        paid: dict[tuple, list] = defaultdict(list)
         to_patient: dict[tuple, list] = defaultdict(list)   # adjudicated at $0 with the allowed amount owed by the patient
         for l in self.lines:
             if not l.get("service_date"):
@@ -1637,7 +1841,8 @@ class Detector:
                 key = (k, l.get("procedure_code"), l["service_date"])
                 if k and key in need:
                     row = (l.get("payment_date") or l.get("txn_payment_date") or "", l["patient_control_number"], l.get("trace_number"),
-                           amt or pr, l.get("claim_status_code"), abs(l.get("paid_units") or 1), l["claim_key"], part_of(l))
+                           amt or pr, l.get("claim_status_code"), abs(l.get("paid_units") or 1), l["claim_key"], part_of(l),
+                           l["line_key"], l.get("payer_id") or l.get("payer_name"), l["modifiers"])
                     (paid if amt else to_patient)[key].append(row)
         # Codes paid more than once for a patient on a date (Mohs stages, units, fractions): a payment on another claim may
         # be for another stage or lesion. A code counts as paid once when at least 20 patient-dates had it paid and no more
@@ -1734,9 +1939,33 @@ class Detector:
             all_once = all(code in once for code, _d in units)
             if closable and best and units and len(covered) == len(units) and all_once:
                 how = "the service was already paid on another claim" if dup and best[0] <= mine else "another claim for the same patient, date of service and code"
-                self._mark_paid(f, best[0], best[3], f"Paid on a later remittance under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f})"
-                                if best[0] > mine else f"Already paid under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f}): this denial is of a duplicate",
-                                {"payment_date": best[0], "claim": best[1], "trace": best[2], "paid_cents": best[3], "claim_status": best[4], "how": how})
+                # what it recovered: the other claims' payments after the denial for the item's own units (a line's own,
+                # every code's for a whole claim); a payment made before it (a duplicate's denial) recovered nothing (T-C5).
+                # The note names the payments that paid them (T-C6)
+                own = every[0] if f.get("line_key") and every else None
+                k_own = abs((own.get("original_units") or own.get("paid_units") or 1)) if own is not None else None
+                rec = self._recover(own, mine, f["patient_control_number"],
+                                    [((None, code, dos), k_own or n, [(e[0], e[2], e[3], e[4], e[1], e[5], e[9], dos, e[8], e[10])
+                                                                      for e in found.get((code, dos), {}).values() if e[0] > mine])
+                                     for (code, dos), n in units.items()])
+                firsts: dict[tuple, list] = {}
+                for e, _u, cents in sorted(rec[2], key=lambda p: (p[0][0], p[0][1] or "")):
+                    firsts.setdefault((e[4], e[0], e[1]), [e, 0.0])[1] += cents
+                got = list(firsts.values())
+                if best[0] > mine and got:
+                    said = "; ".join(f"claim {e[4]} ({e[0]}, trace {e[1]}, ${c/100:.2f})" for e, c in got)
+                    note = f"Paid on a later remittance under {said}" if len(got) == 1 else f"Paid on later remittances under {said}"
+                    e0 = got[0][0]
+                    detail = {"payment_date": e0[0], "claim": e0[4], "trace": e0[1], "paid_cents": int(round(sum(c for _e, c in got))),
+                              "claim_status": e0[3], "how": how}
+                    if len(got) > 1:
+                        detail["payments"] = [{"payment_date": e[0], "trace": e[1], "claim": e[4], "paid_cents": int(round(c))} for e, c in got]
+                    self._mark_paid(f, e0[0], detail["paid_cents"], note, detail, recovery=rec)
+                else:
+                    self._mark_paid(f, best[0], best[3], f"Paid on a later remittance under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f})"
+                                    if best[0] > mine else f"Already paid under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f}): this denial is of a duplicate",
+                                    {"payment_date": best[0], "claim": best[1], "trace": best[2], "paid_cents": best[3], "claim_status": best[4], "how": how},
+                                    recovery=rec)
                 f["hint"] = None
                 continue
             ev = json.loads(f["evidence"]) if f.get("evidence") else {}
@@ -1939,7 +2168,20 @@ class Detector:
         link = self.links.get(lk) if lk else None
         dos = base.get("service_date") or base.get("statement_from")
         recovered = None
-        if resolved_by:
+        auto_notes = None
+        if resolved_by and getattr(resolved_by, "wants", None):
+            # the money the item's own units got after its answer, less what stood before it, from the payments that paid
+            # them, each unit counted on one finding only; the note names those payments (trace findings T-C5, T-C6)
+            recovered, value, picks, elsewhere = self._recover(l, pay_date or "", base.get("patient_control_number"), resolved_by.wants)
+            if not shortfall or shortfall <= 0:
+                # no baseline for this line: the amount the payer later paid for it is the best measure of what was at stake
+                expected = shortfall = value or resolved_by[2] or 0
+                evidence = dict(evidence, basis="amount paid on the later remittance (no baseline for this code)")
+            auto_notes, paid = self._paid_words(picks, resolved_by)
+            evidence = dict(evidence, paid_later=dict({"claim_status": resolved_by[3]}, **paid))
+            if elsewhere:
+                evidence = dict(evidence, recovery_counted_elsewhere=True)
+        elif resolved_by:
             if not shortfall or shortfall <= 0:
                 # no baseline for this line: the amount the payer later paid is the best measure of what was at stake
                 expected = shortfall = resolved_by[2] or 0
@@ -1962,7 +2204,8 @@ class Detector:
                         or (self.npi_location.get(base.get("rendering_provider_npi") or "", "") + " (provider's usual site)"
                             if self.npi_location.get(base.get("rendering_provider_npi") or "") else None),
             "diagnosis": ((link or {}).get("icd10") or "").split(",")[0].strip() or None,
-            "deadline_basis": deadline_basis, "recovered_cents": recovered, "recovered_date": resolved_by[0] if resolved_by else None,
+            "deadline_basis": deadline_basis, "recovered_cents": recovered,
+            "recovered_date": ((evidence.get("paid_later") or {}).get("payment_date") or resolved_by[0]) if resolved_by else None,
             "finding_id": fid, "signal": signal, "category": category, "severity": severity, "actionable": actionable, "title": title,
             "line_key": base.get("line_key"), "claim_key": base.get("claim_key"), "transaction_key": base.get("transaction_key"),
             "patient_control_number": base.get("patient_control_number"),
@@ -1980,7 +2223,8 @@ class Detector:
             "source": "835" if (base.get("line_key") or base.get("claim_key") or base.get("transaction_key")) else None,
             "ema_handling": ema_handling, "written_off_cents": written_off, "written_off_on": written_on,
             "auto_status": "resolved" if resolved_by else None,
-            "auto_notes": f"Paid on a later remittance ({resolved_by[0]}, trace {resolved_by[1]}, ${(resolved_by[2] or 0)/100:.2f})" if resolved_by else None,
+            "auto_notes": auto_notes or (f"Paid on a later remittance ({resolved_by[0]}, trace {resolved_by[1]}, ${(resolved_by[2] or 0)/100:.2f})"
+                                         if resolved_by else None),
             "run_id": self.run_id,
         }
 
@@ -2602,6 +2846,7 @@ class Detector:
                     k[1] += e or 0
                 unpaid: dict[tuple, list] = {}          # (code, date) -> [units unpaid, expected for them]
                 pays: list[tuple] = []
+                wants: list[tuple] = []                 # every code and date the claim lists, with its later payments (_recover)
                 elsewhere: dict[tuple, tuple] = {}
                 noted: dict[tuple, tuple] = {}
                 payer = cl.get("txn_payer") or cl.get("payer_id") or cl.get("payer_name")
@@ -2613,6 +2858,7 @@ class Detector:
                         evs = [e for e in self.paid_by_code.get((bill, code), []) if e[3] in ("1", "19") and e[0] > when]
                         got = min(units, self.units_paid(evs))
                     pays += [e for e in evs if e[0] > when]
+                    wants.append(((bill, code, dos), units, [e for e in evs if e[0] > when]))
                     if got < units:
                         how = settled(bill, code, dos, payer, when, cl["patient_control_number"],
                                       {ln.get("service_date") for ln in lines if ln.get("procedure_code") == code},
@@ -2625,7 +2871,9 @@ class Detector:
                         unpaid[(code, dos)] = [units - got, int(round(exp_k * (units - got) / units)) if units else exp_k]
                 if lines and not unpaid:
                     if prev and pays:           # listed before and since paid on the bill: closed by that payment, so it counts
-                        covering = min(pays, key=lambda e: (e[0], e[1] or "", e[4] or "", e[2]))
+                        # its recovery is every listed code's payments, not the first one's (trace finding T-C5)
+                        covering = LaterPayment(min(pays, key=lambda e: (e[0], e[1] or "", e[4] or "", e[2])))
+                        covering.wants = wants
                     else:
                         continue
                 if covering is not None:
@@ -4686,6 +4934,9 @@ class Detector:
                               (FEED_META, json.dumps({"date": day, "gap": hole or None, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})))
             # and the payers whose remittances stop before claims sent to them were due (CH-8), for the Data tab's checks
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (PAYERS_BEHIND_META, json.dumps(self.payers_behind)))
+            # and the reversals of a payment that is not on file (T-I5): a remittance that is missing
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                              (REVERSALS_NOT_ON_FILE_META, json.dumps(getattr(self, "not_on_file", None) or {})))
             self.conn.commit()
         except sqlite3.Error:
             self.conn.rollback()        # the analysis is saved; the API works the date out from the store, or the newest payment
