@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 04:30 UTC.
+Last updated: 2026-11-24, 06:30 UTC.
 
 ## 1. Where things are
 
@@ -69,7 +69,12 @@ Last updated: 2026-11-24, 04:30 UTC.
 4. Push this branch's tip to `main` (fast-forward; pushing to main is authorized after review). Check the server's
    `/api/health` shows the commit; watch Vercel's next run (`status.json`: errors, `memory_mb.peak` with the 837s; the limit
    is 2,278 MB, the last peak 1,529 MB).
-5. Started 2026-11-24 04:35 UTC: the audit's foundations (a private EMA-ledger world from the four A/R and Production
+5. Audit pass 1 done (`plans/audit_pass1_2026-11-24.md`, auditor `plans/tools/claim_audit.py`): of the released code's open
+   items, in scope (billed since 2026-01-01) 1,876 correct; 324 already done, 66 already worked, 193 duplicates, 670 wrong
+   amounts; plus 1,664 services ($140k) owed with no item. Running now: a hand calibration of the auditor itself (samples of
+   every verdict traced against raw rows and EMA's books) and an evaluation of push 2's detection with the same auditor,
+   to choose between fixing the released detection and finishing push 2. Vercel's first release run is checked at 10:40 UTC.
+   Started 2026-11-24 04:35 UTC: the audit's foundations (a private EMA-ledger world from the four A/R and Production
    reports with push 2's readers; the independent auditor program, first pass on the post-catch-up store copy). Its
    outputs live in the session's private scratch folder; the auditor's code (no patient data) goes to plans/tools once it
    is validated, and its aggregate results to plans/. If that work is lost, start it again from claim_audit_design.md.
