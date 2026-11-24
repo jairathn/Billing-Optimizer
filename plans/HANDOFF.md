@@ -203,6 +203,18 @@ Last updated: 2026-11-24, 10:45 UTC.
      detection.
    - SQLite also caps a store loaded this way at 1,024 MB (measured): past that, the save fails. The hook-in unit removes
      that cap (`plans/brief_HOOK_2026-11-24.md`).
+   - Measured 2026-11-24 15:00 UTC on Vercel's real image, loaded the way Vercel loads it (load and detection only, no save):
+
+     | code | image | load peak | detection peak | detection time |
+     |---|---|---|---|---|
+     | release (live today) | 720 MB | 1,403 MB | 1,662 MB | 37 s |
+     | merged, A/R only | 720 MB | 1,397 MB | 1,762 MB | 105 s |
+     | merged, A/R and Production | 779 MB | 1,510 MB | 1,813 MB | 129 s |
+
+     The release's 17,281 items equal the live site's. The live site runs about 1.75 times slower and adds about 170 MB
+     before detection and 176 MB at the save. So the merged code there would peak at about 2,110 MB with A/R only and
+     2,230 MB with Production, against 2,278 MB. Detection alone would take about 185 to 225 s of the run's 240 s budget,
+     so it would need its own invocation every day.
    - Options: (a) the server is the one host that analyses; Vercel keeps the dashboard copy and people's actions
      (recommended: no memory ceiling); (b) Vercel analyses too, reading the A/R only, with the archive trimming old
      settled claims (unit E: 24 months at most); (c) a larger Vercel function, if the plan allows it.
