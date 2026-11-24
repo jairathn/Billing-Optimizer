@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 07:30 UTC.
+Last updated: 2026-11-24, 08:10 UTC.
 
 ## 1. Where things are
 
@@ -75,10 +75,33 @@ Last updated: 2026-11-24, 07:30 UTC.
    wrong-amount and already-worked: its biggest blind spot is EMA's Production ledger). Push 2 scored by the same auditor
    (`plans/push2_eval_2026-11-24.md`). **Decision (2026-11-24): finish push 2, not the released detection.**
 6. **Now, in order** (the owner's bar: not one item already worked or paid, no owed money missing, nothing closed wrongly):
-   1. Merge the release (main f601b6c) into push 2 on this branch. A trial merge conflicts in 13 files (api.py 13 hunks,
-      detect.py 9, codes.py 6, index.html 5, faxes.js 3, desk.js 3, test_desk.py 2, today.js 2, features.js 2, cloud.py 2,
-      actions.py 2, upload.html 1, pipeline.py 1). From then on this branch carries push 2 + the release; `main` stays at
-      the release for hotfixes (a hotfix goes on a local branch off `main`, reviewed, then pushed to `main`).
+   1. Merge the release (main f601b6c) into push 2 on this branch: **done (2026-11-24 08:00 UTC)**, commits 9e8f006 (the
+      merge: 13 files, 48 conflict spots, each resolved to keep both sides), 38b2dcb (follow-ups), 2712707 (payer patterns
+      pursued by default) and 38d83d8 (follow-ups 2: the units rule never closes a downcode; detection records the newest
+      person's event it saw, by id; the walk keeps its panel mark; the release's browser test drives push 2's fax preview). Resolutions to know: five-part hide rules (push 2) keep the release's preview, owner password,
+      typed reason, count check and in-flight faxes left out (`/api/hide/preview` takes code, modifier and reason too);
+      `appeal_deadline` uses calendar months and Medicare +5 (release) beside `legal_deadline` (push 2: shown only when
+      later); the never-answered pass holds a claim whose own payer's answers stop before its due day (CH-8) unless EMA's
+      postings for that payer reach past the feed (push 2's `answers_through`); the secondary-only answers (T-C2) feed push
+      2's EMA checks; person status changes keep the release's checks and push 2's let-go reasons; the stale-feed fax hold
+      names the gap and takes push 2's EMA vouch; the swing moves are recorded after push 2's hide hook; serving build 9;
+      rules 2.12; the Detector's day is the practice's. Follow-ups found by the merged suite: the archive-rule hooks are
+      wired (needs_B2 section 1); a save in the middle of a run (push 2's Production slot) records its image in the run's
+      own status (else a run stopped after it made every later run refuse a good store); the one-time EMA clean-up saves
+      the store only when it cleaned something (CH-2); push 2's panel actions send the status they showed (H3) and its fax
+      preview sends once, asks for the note check and never acts on another item when its answer comes late (H1, H6); an
+      item done by posting in EMA takes Paid with $0; a person's change in a run's start second counts as after it. A code
+      a payer almost never pays is pursued until the owner accepts it (decisions 14 and 16; push 2 deleted 580 such items
+      under a default 'accept'). Still failing: push 2's own unfinished docs and fax-command tests (7: README layout,
+      runbook settings, the fax commands), its docs unit's work. The third full run (python 3.13) on 38d83d8 was in
+      progress at the push; the other three environments are not run yet.
+      Measured on a private copy of the real store (world.sqlite: the post-catch-up store with EMA's A/R and Production
+      reports): the merged detection (at 2712707) ran in 129 s, peak 962 MB, server mode; its scoring by the A15 auditor
+      was running (scripts in the session's private audit folder: `m1_run.py`, `p2_analyze.py m1/world_m1.sqlite m1`). Push 2's other unit branches (`wip/archive`, `wip/results`,
+      `wip/today-data`, `wip/unit-h`, `wip/intake-sweep`) are not merged: product features around detection, integrated
+      later per `wip/plans:plans/wire/PLAN.md` (units E, R, C2, H, SWEEP, INT, HOOK).
+      From now on this branch carries push 2 + the release; `main` stays at the release for hotfixes (a hotfix goes on a
+      local branch off `main`, reviewed, then pushed to `main`).
    2. Auditor pass 2 (rules A16): the 13 fixes in `plans/audit_calibration_2026-11-24.md` section 3, EMA's Production
       postings and A/R notes first; re-check by hand; then score the merged code.
    3. Push 2's remaining needs (`plans/push2_eval_2026-11-24.md` section 2): no default "accept" in the payer-policy fold;
