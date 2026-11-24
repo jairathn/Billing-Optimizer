@@ -749,6 +749,11 @@ class Detector:
         self.lines_by_claim: dict[str, list[dict]] = defaultdict(list)
         for l in self.lines:
             self.lines_by_claim[l["claim_key"]].append(l)
+        # the payer's answers to claims the practice voided (CLP09 8): no line or claim item is made from them, as nothing in
+        # them is owed (trace finding T-N5). Their lines still count in the ledger: a void's reversal takes its payment back
+        self.void_claims: set[str] = {r[0] for r in c.execute(
+            """SELECT cl.claim_key FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
+               WHERE t.superseded = 0 AND TRIM(cl.claim_frequency_code) = '8'""")}
         self.standing = self._build_ledger()
         self.partly_paid: dict[str, tuple] = {}         # line_key -> (first later payment, units paid, units billed)
         self.used_payments: set[tuple] = set()          # payments already counted as recovered on a finding
@@ -1832,8 +1837,8 @@ class Detector:
         for l in self.lines:
             status = l.get("claim_status_code")
             code = l.get("procedure_code")
-            if not code or l["line_key"] in swap_paid:
-                continue
+            if not code or l["line_key"] in swap_paid or l["claim_key"] in self.void_claims:
+                continue        # (a payer's answer to a claim the practice voided makes no item: T-N5)
             mods = l["modifiers_list"]
             adj, top, pr, carcs = self._line_carcs(l)
             rarcs = self.rem.get(l["line_key"], [])
@@ -2120,6 +2125,8 @@ class Detector:
                               FROM claims cl JOIN transactions t ON t.transaction_key=cl.transaction_key
                               WHERE t.superseded=0 AND cl.claim_status_code='4'"""):
             cl = dict(r)
+            if cl["claim_key"] in self.void_claims:
+                continue            # the payer denied a claim the practice voided: nothing is owed (T-N5)
             by_bill[(bill_of(cl["patient_control_number"]), cl.get("txn_payer") or cl.get("payer_id") or cl.get("payer_name"))].append(cl)
         bills = {b for b, _p in by_bill}
         bill_lines: dict[str, list] = defaultdict(list)                 # lines of processed (not wholly denied) claims, per bill

@@ -1,7 +1,8 @@
 """
 Round 2 of the fixes, the money that falls off the list (plans/catchup_trace_2026-11-23.md and the misuse check):
 T-C1, a payment for the technical part (TC) of a service closed the denial of its professional part (26); T-C2, a claim
-no primary payer answered left the never-answered list when only a secondary payer answered it.
+no primary payer answered left the never-answered list when only a secondary payer answered it; T-N5, items were made
+from a payer's answer to a claim the practice voided (CLP09 8).
 
 Every claim, member number, name, amount and date here is invented (tests/test_remitwatch.remit, tests/test_features.svc).
 Each test runs on the server's store file and on the compact in-memory store the serverless cycle builds and analyses.
@@ -170,4 +171,40 @@ def test_a_claim_only_a_secondary_payer_answered_is_still_chased_from_its_primar
     _add(s, tmp_path, [_primary("CB0000S01C017")], "20261112")
     found = _chased(s, "t2")
     assert set(found) == {"CB0000S03C024"}
+    s.close()
+
+
+# --------------------------------------------------------------------------- T-N5: a payer's answer to a voided claim
+
+def _answer(i: int, status: str, freq: str, paid: str = "0.00", cas: str = "CAS*CO*16*223.65~") -> str:
+    """A payer's answer to claim i (CLP02 `status`), naming the claim's frequency code in CLP09: 1 an original claim, 7 a
+    corrected one, 8 a claim the practice voided. One 99214 line, paid `paid`."""
+    sign = "-" if status == "22" else ""
+    allowed = "117.60" if float(paid) else None
+    return (f"CLP*CB{i:07d}C017*{status}*{sign}223.65*{sign}{paid}*0.00*12*PC{i}*11*{freq}~NM1*QC*1*VOID*PAT****MI*W{i:08d}~"
+            f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~"
+            + svc("99214", f"{sign}223.65", f"{sign}{paid}", allowed if status != "22" else None, cas).replace("**1~", f"**{sign}1~", 1))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_no_item_is_made_from_a_payers_answer_to_a_voided_claim(tmp_path, kind):
+    """The payer's answers to claims the practice voided (CLP09 8) are not money owed: a line paid nothing with CO-16 on
+    claim 501, and a whole claim denied (CLP02 4) on claim 502, both voids, make no item (trace finding T-N5). The same
+    answers to an original claim (503) and a corrected one (504) still do. A void's reversal still takes its payment back:
+    claim 505 was paid, then voided, and the payer's reversal of it (CLP02 22, CLP09 8) leaves nothing of that payment."""
+    from tests.test_features import clean_visits
+    s = _store(tmp_path, kind)
+    _add(s, tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [_answer(505, "1", "1", "117.60", "CAS*CO*45*106.05~")], "20260415")
+    _add(s, tmp_path, [_answer(501, "1", "8"), _answer(502, "4", "8"), _answer(503, "1", "1"), _answer(504, "4", "7"),
+                       _answer(505, "22", "8", "117.60", "CAS*CO*45*-106.05~")], "20260520")
+    Detector(s, run_id="t").run()
+    made = {(r["patient_control_number"], r["signal"]) for r in s.query(
+        "SELECT patient_control_number, signal FROM findings WHERE category IN ('denial','bundling','downcoding','underpayment')")}
+    print("items:", sorted(made))
+    assert not {pcn for pcn, _sig in made} & {"CB0000501C017", "CB0000502C017"}, f"items made from answers to voided claims: {sorted(made)}"
+    assert ("CB0000503C017", "DENIED_MISSING_INFO") in made and ("CB0000504C017", "CLAIM_DENIED_UNPAID") in made
+    d = Detector(s, run_id="ledger")
+    d.load()
+    paid_505 = [ln["line_key"] for ln in d.lines if ln["patient_control_number"] == "CB0000505C017" and ln["claim_status_code"] == "1"]
+    assert paid_505 and not any(k in d.standing for k in paid_505), "the void's reversal no longer takes the payment back"
     s.close()
