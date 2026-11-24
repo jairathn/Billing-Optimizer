@@ -965,3 +965,64 @@ def test_work_first_seen_on_a_later_production_report_waits_for_the_payers_answe
     assert st["follow_up_on"] > "2026-05-25" and "first seen on the Production report of" in st["state_basis"]
     st = state(store, today=states._add(st["follow_up_on"], 1))
     assert (st["work_state"], st["rule"]) == ("work_now", "follow_up_due")
+
+
+def _paid_then_denied(store, reason=("CO", "29"), paid=30):
+    """Blue Cross paid the visit on March 20 ($30.00 of a $150.00 charge, the rest a contractual cut) and denied a copy of
+    the claim on April 10: the archive's rule 1 proves the line paid before by the same payer. Returns the denial's key."""
+    remit(store, trace="P1", paid_on="2026-03-20", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+          "lines": [ln("99213", 150, paid, [("CO", "45", 150 - paid)], lcn="1")]}])
+    return denied(store, paid_on="2026-04-10", reason=reason, pcn=F.claim_id(1, sub=2), pccn="PCN-B", received="2026-04-01")
+
+
+def _settled_hint(reclass="paid_before"):
+    text = {"paid_before": ("Already paid by this payer, denied again", "Already paid by Blue Cross on 2026-03-20 ($30.00); this is a later "
+                            "denial of the same line. Nothing is owed unless the payer takes that payment back."),
+            "voided": ("Voided by the practice", "The practice voided this claim: Blue Cross answered its void of the claim (frequency 8) on "
+                       "2026-04-20, and nothing was billed or answered for it since.")}[reclass]
+    return {"rule": "same_payer_paid_before" if reclass == "paid_before" else "same_day_answers", "reclass": reclass, "label": text[0],
+            "hint": text[1], "state_hint": "done", "strength": "proven",
+            "proof": [{"date": "2026-03-20", "source": "835", "kind": "payment", "text": "Blue Cross paid 99213 $30.00", "decisive": True}]}
+
+
+@pytest.mark.parametrize("reclass", ["paid_before", "voided"])
+def test_a_denial_the_archive_proves_settled_is_done_whatever_ema_shows_beside_it(store, ledger, tmp_path, reclass):
+    """The archive's rules prove a denial settled: the same payer paid the line before this denial of a copy (rule 1), or
+    the practice voided the claim (rule 5). EMA shows the line settled (insurance paid, nothing open): before, the item
+    stayed on Work now as 'find which payer paid' (the auditor's ALREADY_DONE paid and voided items). Done, with the
+    archive's proof. A person's note on the item keeps it listed, the proof named."""
+    tk = _paid_then_denied(store)
+    item(store, signal="DENIED_TIMELY_FILING", carc="29", payment_date="2026-04-10", patient_control_number=F.claim_id(1, sub=2),
+         expected_cents=9000, shortfall_cents=0, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         evidence={"archive_rule": _settled_hint(reclass)})
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), "P1", 30, posted=D(2026, 3, 31)),
+                                   adj(F.link_no(1), "CO-45", 120, contractual=True, posted=D(2026, 3, 31)), later()])
+    st = state(store)
+    assert (st["work_state"], st["rule"], st["appeal_block"]) == ("done", f"archive_{reclass}", "paid"), (st["rule"], st["state_basis"])
+    assert st["state_basis"].startswith(_settled_hint(reclass)["label"] + ":"), st["state_basis"]
+    assert st["evidence"][0]["text"] == "Blue Cross paid 99213 $30.00"
+    store.conn.execute("UPDATE findings SET notes='called Blue Cross' WHERE finding_id='F1'")
+    store.conn.commit()
+    st = state(store)
+    assert st["work_state"] == "work_now", (st["rule"], st["state_basis"])
+
+
+def test_a_denial_of_a_copy_paid_before_is_done_and_the_credit_ema_shows_on_its_line_is_the_claims(store, ledger, tmp_path):
+    """The same payer paid the line before this denial of a copy (rule 1, proven), and EMA shows a credit on the line (two
+    payments posted against one service). Before, the denial was listed as a refund to decide, beside the claim's own credit
+    item (CREDIT_BALANCE): done, the credit named as the claim's to refund or recoup. An underpayment with a credit on its
+    line stays a refund to decide (C05)."""
+    tk = _paid_then_denied(store)
+    item(store, signal="DENIED_TIMELY_FILING", carc="29", payment_date="2026-04-10", patient_control_number=F.claim_id(1, sub=2),
+         expected_cents=9000, shortfall_cents=0, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         evidence={"archive_rule": _settled_hint()})
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), "P1", 30, posted=D(2026, 3, 31)),
+                                   pay(F.link_no(1), "P2", 30, posted=D(2026, 4, 20)),
+                                   adj(F.link_no(1), "CO-45", 120, contractual=True, posted=D(2026, 3, 31)), later()])
+    st = state(store)
+    assert (st["work_state"], st["rule"]) == ("done", "archive_paid_before"), (st["rule"], st["state_basis"])
+    assert st["state_basis"].endswith("EMA shows a credit of $30.00 on this line: a refund or recoupment of the claim (its credit item), "
+                                      "not work on this denial"), st["state_basis"]
+    item(store, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, paid_cents=3000, line_key=line_key(store, tk),
+         claim_key=f"{tk}-0", transaction_key=tk, evidence={"archive_rule": _settled_hint()})
+    assert state(store)["rule"] == "credit_refund"
