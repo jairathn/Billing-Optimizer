@@ -188,6 +188,15 @@ Last updated: 2026-11-24, 15:15 UTC.
       get no send-day twins; a print-batch duplicate made after the visit was paid stays listed; a dependent's 837 carries
       the subscriber's id; 2024 sends cannot be checked against EMA (its ledger starts later); story.py shows no 837 rows
       (full visibility); the claim filing indicator is not read; unanswered claims are not grouped by send week (T-N13).
+      **Both merged, measured (c52a54c, 15:52 UTC; A16 on a fresh copy of world.sqlite, Work now, in scope; the merged tip
+      in brackets):** correct 1,433 [1,449]; already done 155, $19,591 [324, $77,541] (paid 42, $7,030 [204, $64,163]);
+      already worked 21 [29]; duplicate 5 [8]; wrong amount 343 [346]; undecided 41 [71]; closed wrongly 1 [1]; money
+      left on the table 666 services, $66,686 [656, $66,823]. EMA-paid items still listed: 16 ($4,269) [181, $61,896].
+      Full suite on c52a54c: 2,694 passed, 0 failed (python 3.13). Item by item against the merged tip
+      (`plans/tools/a16/moves_w.py`): resent denials now wait for the resend's answer (correct: they were already worked);
+      25 never-answered claims came onto the list ($8,695, owed); 76 never-answered or rejected claims left it
+      ($16,546: 43 the auditor calls owed, 33 undecided). These 76 are being hand-traced by an independent workflow
+      (16:00 UTC) before the merge is trusted: any wrongly dropped claim becomes a failing test.
       **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
       same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
