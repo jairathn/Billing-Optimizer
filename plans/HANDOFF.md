@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 09:45 UTC.
+Last updated: 2026-11-24, 10:00 UTC.
 
 ## 1. Where things are
 
@@ -129,8 +129,9 @@ Last updated: 2026-11-24, 09:45 UTC.
       floor), not every small recoupment (about 320 a year are legitimate recoveries of double payments); a claim-level
       take-back is split across lines largest first; an empty SVC05 is read as 1 unit (also the auditor's fix 2);
       paid_cover counts a secondary only at half the expected amount, so a 20% coinsurance is not in a recovery; Medicare
-      J1 entries are not read. (c) the 837 pass (plans/design_837_never_answered.md) and (d) the duplicate, already-paid
-      and voided leftovers are running.
+      J1 entries are not read. (c) the 837 pass (plans/design_837_never_answered.md), (d) the duplicate, already-paid
+      and voided leftovers and (e) item amounts (sizes by units and component, the calibration's rate rules) are running.
+      Full suite on acbf60c (python 3.13): 2,640 passed, 0 failed; the other three environments not run yet.
       Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
