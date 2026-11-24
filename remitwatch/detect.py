@@ -796,13 +796,14 @@ def week_of(day: str | None) -> str | None:
 def settled_line_sql(a: str) -> str:
     """SQL that is true for an EMA claim line (ema_lines, alias `a`) EMA shows settled by its payer: nothing open, the
     payer's contractual write-down posted, no write-off of the practice's own, and money paid on it (by insurance, or by
-    the patient: the allowed amount was theirs). A line written down whole as contractual (the payer allowed nothing for
-    it, a G2211 say) is settled too when another line of the same EMA claim was paid so: the claim was processed."""
+    the patient: the allowed amount was theirs). A line with nothing paid on it (a G2211 the payer allowed nothing for,
+    or one whose allowed amount was the patient's and was adjusted off) is settled too when another line of the same EMA
+    claim was paid so: the payer processed the claim."""
     return (f"(COALESCE({a}.balance, 0) <= 0 AND COALESCE({a}.charges, 0) > 0 AND COALESCE({a}.contractual, 0) > 0 "
             f"AND COALESCE({a}.noncontractual, 0) = 0 AND (COALESCE({a}.ins_paid, 0) + COALESCE({a}.pat_paid_joined, 0) > 0 "
-            f"OR (COALESCE({a}.contractual, 0) >= {a}.charges AND EXISTS (SELECT 1 FROM ema_lines sib WHERE sib.link = {a}.link "
+            f"OR EXISTS (SELECT 1 FROM ema_lines sib WHERE sib.link = {a}.link "
             f"AND (sib.svc <> {a}.svc OR sib.cpt <> {a}.cpt) AND COALESCE(sib.balance, 0) <= 0 "
-            f"AND COALESCE(sib.ins_paid, 0) + COALESCE(sib.pat_paid_joined, 0) > 0))))")
+            f"AND COALESCE(sib.ins_paid, 0) + COALESCE(sib.pat_paid_joined, 0) > 0)))")
 
 
 # The open items one run put on the list and took off it, item by item (guard audit L3-9): the swing alarm (alerts.py)
@@ -5434,6 +5435,10 @@ class Detector:
             if not items:
                 continue
             first = str(c.execute("SELECT MIN(first_charge_posted) FROM ema_lines WHERE link = ?", (lk,)).fetchone()[0] or "")[:10]
+            if p["signal"] == "REJECTED_PRE_PAYER":
+                # the send EMA turned back is not dated in its reports: only a posting after the day a report read the
+                # claim Rejected answers it (a payment before then answered an earlier send, not this one)
+                first = max(first, str((p.get("evidence") or {}).get("status_as_of") or "")[:10])
             key = key_of[i] = f"{name}:{lk}"
             cid = claim.get("patient_control_number")
             cds.append({"pcn": key, "b": bill_of(cid) if cid else None, "items": items, "sent": first or "",
@@ -5469,7 +5474,9 @@ class Detector:
             protos = self._ema_step(name, fn, self.conn, today=self.today, rate=self._rate, skip_claim_ids=skip) or []
             if name != "not_sent" and protos:
                 # the one answered rule every never-answered claim meets; should it fail, every claim stays listed
-                protos = self._ema_step(name + "_answered", self._protos_answered, name, protos) or protos
+                kept = self._ema_step(name + "_answered", self._protos_answered, name, protos)
+                if kept is not None:        # None: the step failed (recorded), and every claim stays listed
+                    protos = kept
             for p in protos:
                 links = {p.get("ema_link")} | set((p.get("evidence") or {}).get("ema_links") or [])
                 if links & self._export_links:

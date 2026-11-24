@@ -461,7 +461,9 @@ def test_an_837_claim_is_found_in_ema_under_its_payers_own_name_and_its_send_day
       Which is which cannot be told: both stay listed, and the Production check does not list EMA's open one a third time.
     - claim 74 (the A/R pairs it with EMA claim 74): Blue Cross's contractual write-down of the 99213 and the patient's
       payment of the rest, and the G2211 written down whole as contractual (Blue Cross allowed nothing for it). Nothing is
-      open: answered, not listed (before: the G2211, with nothing paid on it, was listed)."""
+      open: answered, not listed (before: the G2211, with nothing paid on it, was listed).
+    - claim 78 (the A/R pairs it with EMA claim 78): the same, but Blue Cross wrote the G2211 down by $12 only and the
+      patient's $18 share of it was adjusted off. Nothing is open and the claim was processed: answered, not listed."""
     from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import adj, charge, denial_world, pay, remit as raw_remit
@@ -497,8 +499,14 @@ def test_an_837_claim_is_found_in_ema_under_its_payers_own_name_and_its_send_day
     rows += [charge(F.link_no(74), patient=3, posted=SENT), charge(F.link_no(74), cpt="G2211", amount=30, patient=3, posted=SENT),
              adj(F.link_no(74), "CO-45", 85, patient=3, posted=D(2026, 3, 20), contractual=True),
              adj(F.link_no(74), "CO-45", 30, cpt="G2211", patient=3, posted=D(2026, 3, 20), contractual=True),
-             F.production_row(link=F.link_no(74), cpt="99213", pat_paid=65, patient=3, svc=S_, posted=D(2026, 3, 25), payer="Patient")]
-    ar = [F.ar_row(claim=F.claim_id(74), link=F.link_no(74), status="Payment Pending", current=0, svc=S_, patient=3)]
+             F.production_row(link=F.link_no(74), cpt="99213", pat_paid=65, patient=3, svc=S_, posted=D(2026, 3, 25), payer="Patient"),
+             charge(F.link_no(78), patient=2, posted=SENT), charge(F.link_no(78), cpt="G2211", amount=30, patient=2, posted=SENT),
+             adj(F.link_no(78), "CO-45", 85, patient=2, posted=D(2026, 3, 20), contractual=True),
+             adj(F.link_no(78), "CO-45", 12, cpt="G2211", patient=2, posted=D(2026, 3, 20), contractual=True),
+             F.production_row(link=F.link_no(78), cpt="99213", pat_paid=65, patient=2, svc=S_, posted=D(2026, 3, 25), payer="Patient"),
+             F.production_row(link=F.link_no(78), cpt="G2211", pat_adj=18, patient=2, svc=S_, posted=D(2026, 3, 25), payer="Patient")]
+    ar = [F.ar_row(claim=F.claim_id(74), link=F.link_no(74), status="Payment Pending", current=0, svc=S_, patient=3),
+          F.ar_row(claim=F.claim_id(78), link=F.link_no(78), status="Payment Pending", current=0, svc=S_, patient=2)]
     denial_world(s, lg, tmp_path, rows, ar_rows=ar)
     bc = ("BLUE CROSS TEST", "BCT01")
     send(s, tmp_path, [clm837(F.claim_id(n), [("99212", "100.00", "20260302")], payer=("TESTCARE SHARED SERVICES", "TSS01"),
@@ -509,7 +517,8 @@ def test_an_837_claim_is_found_in_ema_under_its_payers_own_name_and_its_send_day
             clm837(F.claim_id(66), [("99203", "180.00", "20260302")], payer=bc, member="MEMBER000066"),
             clm837(F.claim_id(67), [("99204", "250.00", "20260302")], payer=bc, member="MEMBER000067"),
             clm837(F.claim_id(68), [("99204", "250.00", "20260302")], payer=bc, member="MEMBER000068"),
-            clm837(F.claim_id(74), [("99213", "150.00", "20260302"), ("G2211", "30.00", "20260302")], payer=bc, member="MEMBER000074")],
+            clm837(F.claim_id(74), [("99213", "150.00", "20260302"), ("G2211", "30.00", "20260302")], payer=bc, member="MEMBER000074"),
+            clm837(F.claim_id(78), [("99213", "150.00", "20260302"), ("G2211", "30.00", "20260302")], payer=bc, member="MEMBER000078")],
          "20260304")
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
@@ -599,7 +608,10 @@ def test_one_answered_rule_for_the_claims_emas_exports_and_reports_chase(tmp_pat
       listed (before: the patient's $0 answer elsewhere read as this claim's).
     - EMA claim 94 (Production only, nothing posted): the patient's same visit and code are settled on EMA claim 95 (Blue
       Cross's write-down and the patient's payment). Answered, not listed (before: the Production check listed it). EMA
-      claim 86, the other patient's, has nothing posted: listed by the Production check."""
+      claim 86, the other patient's, has nothing posted: listed by the Production check.
+    - EMA claim 77 (Production only): Blue Cross paid it March 20, and on May 1 EMA calls it Rejected (a claim sent again
+      and turned back). The payment came before that send: no answer to it. Listed by the reports' rejected check (before:
+      the payment, after the charge was posted, read as its answer)."""
     from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import adj, charge, denial_world, pay, remit as raw_remit
@@ -645,7 +657,10 @@ def test_one_answered_rule_for_the_claims_emas_exports_and_reports_chase(tmp_pat
             adj(F.link_no(95), "CO-45", 40, cpt="99212", patient=2, posted=D(2026, 3, 20), contractual=True),
             F.production_row(link=F.link_no(95), cpt="99212", pat_paid=60, patient=2, svc=S_, posted=D(2026, 3, 25), payer="Patient"),
             charge(F.link_no(76), cpt="99215", amount=240, patient=0, posted=D(2026, 4, 1), status="Payment Pending"),
-            pay(F.link_no(76), "ZERO-76", 0, cpt="99215", patient=0, posted=D(2026, 4, 20))]
+            pay(F.link_no(76), "ZERO-76", 0, cpt="99215", patient=0, posted=D(2026, 4, 20)),
+            charge(F.link_no(77), cpt="99202", amount=110, patient=3, posted=D(2026, 3, 3)),
+            pay(F.link_no(77), "PAPER-77", 50, cpt="99202", patient=3, posted=D(2026, 3, 20)),
+            charge(F.link_no(77), cpt="99202", amount=0, patient=3, posted=D(2026, 5, 1), status="Rejected")]
     for n, pat, code, amount in ((87, 1, "99212", 100), (97, 3, "99213", 150), (98, 2, "99212", 100), (93, 0, "99212", 100)):
         rows += [charge(F.link_no(n), cpt=code, amount=amount, patient=pat, svc=FEB, posted=D(2026, 2, 3)),
                  pay(F.link_no(n), f"77719{n}", 60, cpt=code, patient=pat, svc=FEB, posted=D(2026, 2, 21))]
@@ -693,6 +708,8 @@ def test_one_answered_rule_for_the_claims_emas_exports_and_reports_chase(tmp_pat
     links = {v["ema_link"] for v in got.values() if not v["patient_control_number"]}
     assert F.link_no(94) not in links, f"EMA claim 94, settled on EMA claim 95, still listed: {sorted(got)}"
     assert F.link_no(86) in links, f"EMA claim 86, the other patient's open claim, not listed: {sorted(got)}"
+    assert any(v["ema_link"] == F.link_no(77) and v["signal"] == "REJECTED_PRE_PAYER" for v in got.values()), (
+        f"EMA claim 77, rejected after its payment, not listed: {sorted(got)}")
     s.close()
 
 
