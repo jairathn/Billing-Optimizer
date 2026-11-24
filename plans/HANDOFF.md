@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 06:30 UTC.
+Last updated: 2026-11-24, 07:30 UTC.
 
 ## 1. Where things are
 
@@ -69,26 +69,34 @@ Last updated: 2026-11-24, 06:30 UTC.
 4. Push this branch's tip to `main` (fast-forward; pushing to main is authorized after review). Check the server's
    `/api/health` shows the commit; watch Vercel's next run (`status.json`: errors, `memory_mb.peak` with the 837s; the limit
    is 2,278 MB, the last peak 1,529 MB).
-5. Audit pass 1 done (`plans/audit_pass1_2026-11-24.md`, auditor `plans/tools/claim_audit.py`): of the released code's open
-   items, in scope (billed since 2026-01-01) 1,876 correct; 324 already done, 66 already worked, 193 duplicates, 670 wrong
-   amounts; plus 1,664 services ($140k) owed with no item. Running now: a hand calibration of the auditor itself (samples of
-   every verdict traced against raw rows and EMA's books) and an evaluation of push 2's detection with the same auditor,
-   to choose between fixing the released detection and finishing push 2. Vercel's first release run is checked at 10:40 UTC.
-   Started 2026-11-24 04:35 UTC: the audit's foundations (a private EMA-ledger world from the four A/R and Production
-   reports with push 2's readers; the independent auditor program, first pass on the post-catch-up store copy). Its
-   outputs live in the session's private scratch folder; the auditor's code (no patient data) goes to plans/tools once it
-   is validated, and its aggregate results to plans/. If that work is lost, start it again from claim_audit_design.md.
+5. Audit pass 1 done (`plans/audit_pass1_2026-11-24.md`, auditor `plans/tools/claim_audit.py`), then checked by hand
+   (`plans/audit_calibration_2026-11-24.md`: 196 verdicts traced, 131 right, 57 wrong, 8 undecidable; the auditor is
+   trustworthy on already-done, duplicate and closed-correct verdicts, not yet on money left on the table, closed-wrongly,
+   wrong-amount and already-worked: its biggest blind spot is EMA's Production ledger). Push 2 scored by the same auditor
+   (`plans/push2_eval_2026-11-24.md`). **Decision (2026-11-24): finish push 2, not the released detection.**
+6. **Now, in order** (the owner's bar: not one item already worked or paid, no owed money missing, nothing closed wrongly):
+   1. Merge the release (main f601b6c) into push 2 on this branch. A trial merge conflicts in 13 files (api.py 13 hunks,
+      detect.py 9, codes.py 6, index.html 5, faxes.js 3, desk.js 3, test_desk.py 2, today.js 2, features.js 2, cloud.py 2,
+      actions.py 2, upload.html 1, pipeline.py 1). From then on this branch carries push 2 + the release; `main` stays at
+      the release for hotfixes (a hotfix goes on a local branch off `main`, reviewed, then pushed to `main`).
+   2. Auditor pass 2 (rules A16): the 13 fixes in `plans/audit_calibration_2026-11-24.md` section 3, EMA's Production
+      postings and A/R notes first; re-check by hand; then score the merged code.
+   3. Push 2's remaining needs (`plans/push2_eval_2026-11-24.md` section 2): no default "accept" in the payer-policy fold;
+      wire the archive-rule hooks; the shared failure kinds, each with a failing test from invented data; serverless memory.
+   4. Iterate (fix, audit, trace every disagreement by hand) until the auditor and the hand traces find no failure; then
+      the release gates (four environments, node checks, catch-up on a fresh live copy, privacy scan) and release.
+   5. Full visibility (837 to 835 to EMA posting to open balance, per charge, reconciled to the cent), built on the merged
+      code with the 837 as a first-class source.
+   Started 2026-11-24 04:35 UTC: the audit's private foundations (a private EMA-ledger world from the four A/R and
+   Production reports with push 2's readers; the auditor's first pass on the post-catch-up store copy). Its outputs live
+   in the session's private scratch folder; the auditor's code (no patient data) is in plans/tools, its aggregate results
+   in plans/. If that work is lost, start it again from claim_audit_design.md.
    The owner's decision (2026-11-23): ship the hotfix, then work every claim before the next release
-   (`plans/claim_audit_design.md`: an independent auditor over every unit of service; not one item may be already worked or
-   paid, no owed money missing, nothing closed wrongly). Detection accuracy, then full visibility. First the findings in `plans/catchup_trace_2026-11-23.md` (one item per unit
-   of service across resubmissions and reversals; void claims; services already paid; secondary processing settles a COB
-   denial; take-backs whose reference embeds the claim id; the 26/TC split; an 837-based never-answered pass), each with a
-   failing test built from the traced pattern (invented data). Then full visibility (the owner's goal, 2026-11-23): with 837s, 835s, EMA's A/R and Production reports and the weekly exports
-   now covering the same dates, every charge can be followed from claim sent (837) to payer's answer (835) to EMA posting to
-   open balance, reconciled to the cent, every gap a named, ranked item. Plan: profile and join the sources over 2024 to now
-   (the full 837 set is easiest to take from Vercel's store image once Vercel has read it: one file); hand-trace every kind
-   of mismatch; then finish push 2 (`claude/ecstatic-fermi-orfcgo`: units E, R, C2, SWEEP fix stages, INT, HOOK, docs,
-   verification, per `wip/plans:plans/wire/`) with the 837 as a first-class source.
+   (`plans/claim_audit_design.md`). The acceptance cases from the catch-up trace (`plans/catchup_trace_2026-11-23.md`)
+   still apply: one item per unit of service across resubmissions and reversals; void claims; services already paid;
+   secondary processing settles a COB denial; take-backs whose reference embeds the claim id; the 26/TC split; an
+   837-based never-answered pass. Push 2's plan for the rest is in `wip/plans:plans/wire/` (units E, R, C2, SWEEP fix
+   stages, INT, HOOK, docs, verification).
 
 ## 4. Open findings
 
