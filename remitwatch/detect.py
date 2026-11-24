@@ -139,9 +139,10 @@ FORWARD_CARCS = {"B11"}
 OTHER_PAYER_CARCS = {"22", "109", "B11", "31", "26", "27", "200", "177", "B9"}
 # remarks with which a payer asks for the primary payer's answer first (N36: the claim must meet the primary payer's
 # requirements; MA04, N4, N479: the primary's payment information or explanation of benefits; MA92, N245: the other
-# insurance's plan): with OTHER_PAYER_CARCS, a payer's answers that another payer covers the claim first. Once that same
-# payer has processed the service as secondary, such an answer is settled (trace findings T-C3, T-N3)
-COB_RARCS = {"N36", "MA04", "N4", "N479", "MA92", "N245"}
+# insurance's plan; N522: a duplicate of a claim processed, or to be processed, as a crossover claim): with
+# OTHER_PAYER_CARCS, a payer's answers that another payer covers the claim first. Once that same payer has processed the
+# service as secondary, such an answer is settled (trace findings T-C3, T-N3)
+COB_RARCS = {"N36", "MA04", "N4", "N479", "MA92", "N245", "N522"}
 # the patient's share as a payer puts it. Its other patient-responsibility reasons are not the patient's balance:
 # coordination of benefits (PR-22), out of network (242), coverage ended (27), information the patient was asked for (227)
 # and not its insured (31) are denials to work (calibration fix 7), and the plan's exclusions wait on the owner
@@ -1659,11 +1660,18 @@ class Detector:
             return None
         at = lambda o: o.get("payment_date") or o.get("txn_payment_date") or ""      # noqa: E731
         mine = [o for o in answers if o.get("procedure_code") == code and o.get("service_date") == dos and self._one_payer(o, denier)]
-        reversed_on = [(o["patient_control_number"], at(o)) for o in mine if o.get("claim_status_code") == "22"]
+        # the payer's reversals of the code and date: under its own id, or under another payer id with its name and plan (a
+        # payer can take an answer back under another id than it gave it under, and the ledger pairs a reversal by its id)
+        revs = [o for o in answers if o.get("claim_status_code") == "22" and o.get("procedure_code") == code and o.get("service_date") == dos
+                and (self._one_payer(o, denier) or (bool(denier[2]) and o.get("payer_name") == denier[2] and o.get("payer_group") == denier[1]))]
+        reversed_on = [(o["patient_control_number"], at(o)) for o in revs]
 
         def stands(o: dict) -> bool:
             if (o.get("paid_cents") or 0) > 0:
-                return self.standing.get(o["line_key"], 0) > 0
+                # a payment the ledger still counts, unless a reversal of its claim id since takes that very amount back
+                return self.standing.get(o["line_key"], 0) > 0 and not any(
+                    r["patient_control_number"] == o["patient_control_number"] and at(r) > at(o)
+                    and (r.get("paid_cents") or 0) == -(o.get("paid_cents") or 0) for r in revs)
             return not any(p == o["patient_control_number"] and d > at(o) for p, d in reversed_on)
         by_claim: dict[str, list] = defaultdict(list)
         for o in mine:
@@ -2505,8 +2513,12 @@ class Detector:
                     exp, basis = self.expected_allowed(l, orig)
                     short = (exp - allowed) if exp else None
                     if short and short > 100:
+                        # a line answered under another code and paid nothing is settled, as a downcode is, by the billed
+                        # code paid since on the bill for every unit billed (a corrected claim, or the second payer paying
+                        # its share after the first payer's answer)
                         self._emit("CODE_CHANGED", "downcoding", "medium", "review",
-                                   f"Payer changed {orig} to {code} ({l['payer_group']})", l, exp, short, top, rarc, {"basis": basis, "claim_status": status})
+                                   f"Payer changed {orig} to {code} ({l['payer_group']})", l, exp, short, top, rarc, {"basis": basis, "claim_status": status},
+                                   resolved_by=None if paid else self.later_payment(l, orig, expected=exp))
                 continue
             if primary and not orig:
                 # the claim file or EMA shows a higher level was billed and the remit does not admit to a change
@@ -2797,7 +2809,10 @@ class Detector:
         """Lines whose whole charge the payer took as CO-45 with nothing allowed: a denial (the answer key's R9), unless the
         same payer allowed or paid the same service (patient, date, code) on another of its answers, a corrected or
         repeated claim it processed (the key's 'recognized' stance: 196 of 222 work-now items of one Medicare Advantage
-        plan on real data)."""
+        plan on real data); or unless the claim came to this payer from another payer that answered it first as primary,
+        forwarded it (claim status 19, or a crossover carrier named) and itself allowed nothing for the line, while no
+        primary payment of the service stands: the second payer's CO-45 only follows the first payer's denial, which is
+        the item to work (a Medigap's answer to Medicare's crossover)."""
         cands = self.__dict__.pop("_co45_cands", None) or []
         if not cands:
             return
@@ -2808,11 +2823,41 @@ class Detector:
             if k in want and ((x.get("allowed_cents") or 0) > 0 or (x.get("paid_cents") or 0) > 0):
                 answered[k].append(x)
         who = self._patient_of_claims({x["claim_key"] for v in answered.values() for x in v} | {l["claim_key"] for l, _r in cands})
+        # the first payer's answers that allowed nothing for the line, on claims it forwarded: (bill, date, code) -> lines. A
+        # payer may write the modifier into the code ('99213 57'): the code is its first word
+        base = lambda code: (code or "").split(" ")[0]          # noqa: E731
+        svc_of = lambda x: (bill_of(x.get("patient_control_number")), x.get("service_date"), base(x.get("procedure_code")))     # noqa: E731
+        wanted = {svc_of(l) for l, _r in cands}
+        forwarded: dict[tuple, list] = defaultdict(list)
+        for x in self.lines:
+            k = svc_of(x)
+            if k in wanted and not (x.get("paid_cents") or 0) and not (x.get("allowed_cents") or 0) and (
+                    x.get("claim_status_code") == "19" or (x.get("claim_status_code") == "1" and self.crossover_carrier(x["claim_key"]))):
+                forwarded[k].append(x)
+        at = lambda x: x.get("payment_date") or x.get("txn_payment_date") or ""      # noqa: E731
+        payer = lambda x: x.get("payer_id") or x.get("payer_name")                   # noqa: E731
+
+        def first_denial(l: dict) -> dict | None:
+            """The first payer's own answer of the line that this payer's CO-45 follows, if any."""
+            k = svc_of(l)
+            if any(e[3] in ("1", "19") for code in {l["procedure_code"], k[2]} for e in self.paid_events.get((k[0], code, k[1]), [])):
+                return None             # a primary payment of the service stands: the second payer may owe its share (rule 2)
+            return next((x for x in forwarded.get(k, []) if x["claim_key"] != l["claim_key"] and payer(x) != payer(l)
+                         and x.get("payer_group") != l.get("payer_group") and at(x) <= at(l)), None)
+        follows = {l["line_key"]: x for l, _r in cands for x in [first_denial(l)] if x is not None}
+        if follows:
+            # a person's work is never dropped: an item someone worked stays listed, the first payer's denial named on it
+            from .archive_rules import worked_ids
+            kept = worked_ids(self.conn, [_fid("DENIED_OTHER", lk) for lk in follows])
         for l, rarc in cands:
             me = who.get(l["claim_key"])
             if me and any(x["line_key"] != l["line_key"] and who.get(x["claim_key"]) == me and x.get("payer_group") == l.get("payer_group")
                           for x in answered.get((l.get("service_date"), l.get("procedure_code")), [])):
                 self.ema_counts["co45_answered_elsewhere"] += 1
+                continue
+            first = follows.get(l["line_key"])
+            if first is not None and _fid("DENIED_OTHER", l["line_key"]) not in kept:
+                self.ema_counts["co45_follows_first_payers_denial"] += 1
                 continue
             code = l["procedure_code"]
             exp, basis = self.expected_allowed(l, code)
@@ -2820,6 +2865,11 @@ class Detector:
                        f"{code} paid $0: the whole charge was taken as a contractual reduction (CO-45), nothing allowed",
                        l, exp, exp, "45", rarc, {"basis": basis, "whole_charge_co45": True},
                        resolved_by=self.later_payment(l, expected=exp))
+            f = self.findings.get(_fid("DENIED_OTHER", l["line_key"]))
+            if first is not None and f is not None and not f.get("auto_status"):
+                f["hint"] = (f"{first.get('payer_group') or 'The first payer'} answered this service first and paid nothing on it, then sent "
+                             f"the claim on to this payer: this CO-45 follows that answer, which is the one to work. Kept listed because a "
+                             "person worked it.")
 
     def _outranked(self, l: dict, rate: int) -> bool:
         """Whether a reducible procedure the payer cut as a second one (ranked below another on its claim by what was
