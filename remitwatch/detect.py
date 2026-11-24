@@ -3033,6 +3033,7 @@ class Detector:
                                     WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IS NOT NULL
                                       AND cl.claim_status_code IN ({','.join("'" + s + "'" for s in PRIMARY_STATUSES)})"""):
             prim.add(bill_of(pcn))
+        prim -= set(self._cob_only())      # a coordination denial its payer then answered as secondary is not a primary answer
         ema_ids: set[str] = set()
         if "ema_rows" in tables:
             ema_ids = {r[0] for r in c.execute("SELECT DISTINCT claim_id FROM ema_rows WHERE claim_id IS NOT NULL")}
@@ -3078,6 +3079,101 @@ class Detector:
                 r[2:9] = [freq, False, pid, pname, chg, key, member]
         out.update(sends=sends, bills=bills, ema_ids=ema_ids, prim_bills=prim)
         return out
+
+    def _cob_only(self) -> dict[str, dict]:
+        """Bills whose every remittance is one payer's: it denied the claim as the primary payer saying another payer covers
+        it first (a reason of OTHER_PAYER_CARCS or a remark of COB_RARCS, nothing paid), then processed it as secondary
+        (claim status 2 or 3, on or after that denial), and never paid it as primary. Its denial closes on that answer
+        (_settled_by_answer), but no remittance from the payer that covers the claim first is on file: the primary's
+        money is unanswered as for a claim only a secondary answered (T-C2), though the payer that answered as secondary is
+        the one the claim was sent to. Worked out once a run, after load():
+        {bill: {'payer': group, 'payer_id', 'denied_on', 'reason', 'second_on', 'paid_cents', 'answers': {claim id:
+        [(date, group, paid, status)]}}}, the answers being its processings as secondary."""
+        got = self.__dict__.get("_cob")
+        if got is not None:
+            return got
+        c = self.conn
+        out: dict[str, dict] = {}
+        self._cob = out
+        c.create_function("rw_837_bill", 1, bill_of, deterministic=True)
+        prim = ",".join("'" + s + "'" for s in PRIMARY_STATUSES)
+        bills = [r[0] for r in c.execute(
+            f"""SELECT rw_837_bill(cl.patient_control_number) AS b FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
+                WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IS NOT NULL
+                GROUP BY b HAVING COUNT(DISTINCT COALESCE(t.payer_id, t.payer_name)) = 1 AND SUM(cl.claim_status_code IN ('2','3')) > 0
+                   AND SUM(cl.claim_status_code IN ({prim}) AND COALESCE(cl.paid_cents,0) = 0) > 0
+                   AND SUM(cl.claim_status_code IN ({prim}) AND COALESCE(cl.paid_cents,0) <> 0) = 0""")]
+        if not bills:
+            return out
+        rows: dict[str, list] = defaultdict(list)
+        for i in range(0, len(bills), 500):
+            c.execute("DROP TABLE IF EXISTS temp.d837_cb")
+            c.execute("CREATE TEMP TABLE d837_cb (bill TEXT PRIMARY KEY, hi TEXT)")
+            c.executemany("INSERT OR IGNORE INTO temp.d837_cb VALUES (?, ?)", [(b, b + "~") for b in bills[i:i + 500]])
+            for b, ck, pcn, st, paid_on, pname, pid, cfi in c.execute(
+                    """SELECT x.bill, cl.claim_key, cl.patient_control_number, cl.claim_status_code, t.payment_date, t.payer_name, t.payer_id,
+                              cl.claim_filing_indicator
+                       FROM temp.d837_cb x JOIN claims cl ON cl.patient_control_number >= x.bill AND cl.patient_control_number < x.hi
+                       JOIN transactions t ON t.transaction_key = cl.transaction_key WHERE COALESCE(t.superseded,0)=0"""):
+                if bill_of(pcn) == b:
+                    rows[b].append((ck, pcn, st or "", paid_on or "", payer_group_kind(pname, cfi)[0], pid or pname))
+        c.execute("DROP TABLE IF EXISTS temp.d837_cb")
+        for b, rs in rows.items():
+            denials = [r for r in rs if r[2] in PRIMARY_STATUSES]
+            seconds = [r for r in rs if r[2] in ("2", "3")]
+            if not denials or not seconds or len({payer_company(r[4]) for r in rs}) != 1:
+                continue
+            why = []
+            for ck, *_rest in denials:
+                lines = self.lines_by_claim.get(ck, [])
+                reasons = {(g, rc) for g, rc, _a in self.claim_adj.get(ck, [])} | {(g, rc) for ln in lines for g, rc, _a in self.adj.get(ln["line_key"], [])}
+                remarks = set(self.claim_rem.get(ck, [])) | {x for ln in lines for x in self.rem.get(ln["line_key"], [])}
+                if any((ln.get("paid_cents") or 0) for ln in lines):
+                    break
+                hit = sorted(f"{g}-{rc}" for g, rc in reasons if rc in OTHER_PAYER_CARCS) or sorted(remarks & COB_RARCS)
+                if not hit:
+                    break               # a denial as primary for another reason: the claim was answered as primary
+                why.append(hit[0])
+            else:
+                first = min(r[3] for r in denials)
+                later = [r for r in seconds if r[3] >= first]
+                if not later:
+                    continue
+                answers: dict[str, list] = defaultdict(list)
+                paid = 0
+                for ck, pcn, st, day, grp, _pid in later:
+                    p = sum(self.standing.get(ln["line_key"], 0) for ln in self.lines_by_claim.get(ck, []))
+                    paid += p
+                    answers[pcn].append((day, grp, p, st))
+                out[b] = {"payer": denials[0][4], "payer_id": denials[0][5], "denied_on": first, "reason": why[0],
+                          "second_on": min(r[3] for r in later), "paid_cents": paid, "answers": dict(answers)}
+        return out
+
+    def _primary_posted(self, claims: list[tuple]) -> set[str]:
+        """The claims among these that EMA's postings show answered by a payer other than the ones that answered them as
+        secondary: [(claim id, EMA claim number, sent, the secondary payers' groups)]. A payment or a $0 check posted after
+        the send (never one under the surgery center's separate-payee checks) by another payer is the primary's answer:
+        then nothing is left to chase (the coordinator's addition to T-I2; T-C2)."""
+        from . import ema_checks as ec
+        rows = [(cid, lk, sent) for cid, lk, sent, _g in claims if lk is not None and sent]
+        if not rows:
+            return set()
+        groups = {cid: [g for g in gs if g] for cid, _lk, _s, gs in claims}
+        c = self.conn
+        got: set[str] = set()
+        c.execute("DROP TABLE IF EXISTS temp.d837_pp")
+        c.execute("CREATE TEMP TABLE d837_pp (cid TEXT, link INTEGER, sent TEXT)")
+        c.executemany("INSERT INTO temp.d837_pp VALUES (?, ?, ?)", rows)
+        sep = ("AND NOT EXISTS (SELECT 1 FROM ema_checks s WHERE s.check_no = y.check_no AND s.payer = y.payer AND s.cause = 'separate_payee')"
+               if c.execute("SELECT 1 FROM sqlite_master WHERE name='ema_checks'").fetchone() else "")
+        for cid, grp, payer in c.execute(
+                f"""SELECT x.cid, y.payer_group, y.payer FROM temp.d837_pp x JOIN ema_line_payments y ON y.link = x.link
+                    WHERE y.posted > x.sent AND (COALESCE(y.ins_paid, 0) <> 0 OR COALESCE(y.check_no, '') <> '') {sep}"""):
+            g = grp or (normalize_payer(payer)[0] if payer else None)
+            if g and not any(ec._same_payer(g, s) or payer_company(g) == payer_company(s) for s in groups.get(cid, [])):
+                got.add(cid)
+        c.execute("DROP TABLE IF EXISTS temp.d837_pp")
+        return got
 
     def _lines_837(self, claims: dict[str, str]) -> dict[str, list[tuple]]:
         """The service lines of these 837 claims ({claim_837_key: claim id}): {claim_837_key: [(code, date, charge, units,
@@ -3171,12 +3267,16 @@ class Detector:
         answered: set[str] = set()
         bill_last: dict[str, str] = {}          # each bill's newest answer of any kind (a submission sent again went out after it)
         bill_answered: dict[str, str] = {}      # each bill's newest answer that counts
+        # a bill whose only answers are one payer's denial as primary because another payer covers it first and then its
+        # processing as secondary: the primary's remittance is missing (the coordinator's addition to T-I2), so neither of
+        # those answers is the claim's own, whoever EMA billed
+        cob = self._cob_only()
         for pcn, paid_on, primary in c.execute("""SELECT cl.patient_control_number, MAX(t.payment_date), MAX(cl.claim_status_code IN ('1','19','4','22'))
                                                   FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
                                                   WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IS NOT NULL GROUP BY 1"""):
             b = bill_of(pcn)
             bill_last[b] = max(bill_last.get(b, ""), paid_on or "")
-            if primary:
+            if primary and b not in cob:
                 answered.add(pcn)
                 bill_answered[b] = max(bill_answered.get(b, ""), paid_on or "")
         second: dict[str, list[tuple]] = defaultdict(list)     # claim id -> the other payers' answers: (date, payer group, paid, CLP02)
@@ -3187,8 +3287,11 @@ class Detector:
                      AND COALESCE(cl.claim_status_code, '') NOT IN ('1','19','4','22')"""):
             if pcn not in answered:
                 second[pcn].append((paid_on or "", payer_group_kind(name, cfi)[0], paid or 0, st or ""))
-        for cid, when in c.execute("""SELECT claim_id, MAX(COALESCE(transaction_date, posted_date, '')) FROM ema_rows
-                                      WHERE family='era_lines' AND claim_id IS NOT NULL GROUP BY 1"""):
+        for cid, payer, when in c.execute("""SELECT claim_id, payer, MAX(COALESCE(transaction_date, posted_date, '')) FROM ema_rows
+                                             WHERE family='era_lines' AND claim_id IS NOT NULL GROUP BY 1, 2"""):
+            cb = cob.get(bill_of(cid))
+            if cb and payer and payer_company(normalize_payer(payer)[0]) == payer_company(cb["payer"]):
+                continue                    # EMA's posting of that payer's own answers, as secondary: not the primary's
             answered.add(cid)
             b = bill_of(cid)
             bill_last[b] = max(bill_last.get(b, ""), when or "")
@@ -3331,8 +3434,8 @@ class Detector:
         # to it); otherwise the primary's remittance is missing, and the claim is chased like any claim no payer answered
         for cid in [x for x in claims if x in second and claims[x]["payers"]]:
             k = claims[cid]
-            if group_of(k)[0] not in {g for _d, g, _p, _s in second[cid]}:
-                continue
+            if group_of(k)[0] not in {g for _d, g, _p, _s in second[cid]} or bill_of(cid) in cob:
+                continue                    # (a payer that denied it as primary for coordination answered as secondary only)
             answered.add(cid)
             b = bill_of(cid)
             bill_answered[b] = max([bill_answered.get(b, "")] + [d for d, _g, _p, _s in second[cid]])
@@ -3489,15 +3592,16 @@ class Detector:
                 # showed it in the print batch, not the remittance feed (trace finding T-N11)
                 if not due or due > (seen_on or self.today):
                     continue
-            elif not rejected and (not due or due > (through or newest)):
-                continue                    # not due yet, or the answers on file do not reach the day it was due
+            elif not rejected and not cob.get(b) and (not due or due > (through or newest)):
+                continue                    # not due yet, or the answers on file do not reach the day it was due (a payer
+                                            # that answered as secondary after a coordination denial applied the primary's)
             # Its own payer's answers must reach that day too (misuse check CH-8): its remittances, or EMA's postings for it when
             # they reach past the feed (through). When they stop before it while the feed goes on, nothing on file says whether
             # that payer answered. The claim is counted under its payer for the Data tab, not listed. A payer with no remittance
             # on file at all is judged by the feed date, with its own hint.
             last = payer_last.get(grp) or name_last.get(normalize_payer(grp)[0]) or name_last.get(normalize_payer(ema_payer)[0])
             known = max(last, through) if (last and through and through > newest) else last
-            if not rejected and not unsent and last and due > known:
+            if not rejected and not unsent and last and due > known and not cob.get(b):
                 held = behind.setdefault(grp, {"payer": grp, "since": last, "claims": 0, "billed_cents": 0})
                 held["claims"] += 1
                 held["billed_cents"] += sum(x[2] for x in items)
@@ -3505,7 +3609,8 @@ class Detector:
             cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
                           "again_after": again_after, "rejected": rejected, "unsent": unsent, "gave_up": gave_up, "status": status,
                           "ema_payer": ema_payer, "group": (grp, kind), "grp": grp, "kind": kind, "through": through,
-                          "payer_last": last, "secondary": second.get(pcn) or [], "s837": r8, "batched": batched,
+                          "payer_last": last, "s837": r8, "batched": batched, "cob": cob.get(b),
+                          "secondary": second.get(pcn) or [x for xs in (cob.get(b) or {}).get("answers", {}).values() for x in xs],
                           "resent_837": bool(r8 is not None and k["sent"] and basis == SENT_837),
                           "bill_answered": bill_answered.get(b) if (bill_answered.get(b) or "") >= sent else None})
         # one visit chased under two bills (a bill made again): only the newest carries it
@@ -3601,6 +3706,11 @@ class Detector:
             other = f"; only {sec_payer} answered, " + ("as secondary" if as_second else "not as the primary payer")
             if expected and 0 < sec_paid < expected:
                 short = expected - sec_paid
+        cob = cd.get("cob")
+        if cob and sec:
+            # the payer it was sent to denied it as primary because another payer covers it first, then answered as secondary:
+            # the money the primary payer owes is what is chased (the coordinator's addition to T-I2)
+            ev["secondary_answer"].update(after_coordination_denial=True, denied_as_primary_on=cob["denied_on"], reason=cob["reason"])
         if cd.get("ema_bridge"):
             ev["ema_bridge"] = cd["ema_bridge"]         # how EMA's claim for it was found: its claim id, its bill or its content
         if cd.get("through") and cd["through"] != newest:
@@ -3642,7 +3752,9 @@ class Detector:
                        short, None, None, ev, key_parts=(pcn,), claim=claim, id_signal=cd.get("id_signal") or "EMA_OPEN_CLAIM")
         else:
             said = f" (EMA: {status})" if gave_up else ""
-            waited = f"no answer from {grp} in {ev['days_waiting']} days{other}{said}: {label}"
+            waited = (f"the primary payer's remittance is missing ({sec_payer} denied it as primary, another payer covers it first, "
+                      f"then answered as secondary){said}: {label}" if cob and sec else
+                      f"no answer from {grp} in {ev['days_waiting']} days{other}{said}: {label}")
             if cd["basis"] == SENT_837:
                 # the 837 shows the day it went out: sent again since the exports' date, or (still in EMA's print batch)
                 # electronically before EMA batched it for printing (trace finding T-I4)
@@ -3667,7 +3779,13 @@ class Detector:
             f["written_off_cents"] = min(expected, owed) if expected else owed
             f["written_off_on"] = (k["status_at"][0] or "")[:10] or None
         hints = []
-        if sec:
+        if sec and cob:
+            hints.append(f"{sec_payer} denied this claim as the primary payer on {cob['denied_on']} (another payer covers it first: "
+                         f"{cob['reason']}) and processed it as secondary on {sec_on}, "
+                         + (f"paying ${sec_paid/100:,.2f}" if sec_paid > 0 else "paying nothing") + ". The primary payer's remittance is "
+                         f"not on file: find which payer covers the patient first (EMA's coverage, or ask {sec_payer}), then get its "
+                         "remittance from its portal or ask it to send it again")
+        elif sec:
             hints.append((f"{sec_payer} processed this claim as secondary on {sec_on}" + (f" and paid ${sec_paid/100:,.2f}, its share" if sec_paid > 0 else ", paying nothing")
                           if as_second else f"{sec_payer} answered this claim on {sec_on}, but not as its primary payer"
                           + (f", and paid ${sec_paid/100:,.2f}" if sec_paid > 0 else ""))
@@ -3825,11 +3943,13 @@ class Detector:
         behind: dict[str, dict] = {p["payer"]: p for p in self.payers_behind}
         no_era: dict[str, dict] = {}
         cds: list[dict] = []
+        cob = self._cob_only()
         for pcn, r in sorted(cand.items()):
             b = bill_of(pcn)
             ans = rows835.get(b) or []
+            cb = cob.get(b)                 # its payer denied it as primary for coordination, then answered as secondary
             mine = named(r)
-            if any(a[4] and r[4] and a[4] == r[4] for a in ans) or any(payer_company(a[1]) in mine for a in ans):
+            if not cb and (any(a[4] and r[4] and a[4] == r[4] for a in ans) or any(payer_company(a[1]) in mine for a in ans)):
                 self.ema_counts["837_answered_by_its_payer"] += 1
                 continue                    # the payer the 837 named answered it (as its secondary, say)
             items = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in lines.get(r[7], [])]
@@ -3848,8 +3968,9 @@ class Detector:
                 if usual and usual > due:
                     due = usual
             through = self._answers_through(grp, newest) if self.ema_on else newest
-            if not due or due > (through or newest):
-                continue                    # not due yet, or the answers on file do not reach the day it was due
+            if not cb and (not due or due > (through or newest)):
+                continue                    # not due yet, or the answers on file do not reach the day it was due (a payer
+                                            # that answered as secondary after a coordination denial applied the primary's)
             billed = sum(x[2] or 0 for x in items)
             pid = (r[4] or "").strip()
             last = None
@@ -3864,19 +3985,20 @@ class Detector:
             else:
                 last = payer_last.get(grp) or name_last.get(normalize_payer(grp)[0]) or (name_last.get(normalize_payer(r[5])[0]) if r[5] else None)
                 known = max(last, through) if (last and through and through > newest) else last
-                if last and due > known:
+                if last and due > known and not cb:
                     held = behind.setdefault(grp, {"payer": grp, "since": last, "claims": 0, "billed_cents": 0})
                     held["claims"] += 1
                     held["billed_cents"] += billed
                     continue                # its payer's remittances stop before its due day (CH-8): counted, not listed
-            sec = [(a[0], a[1], a[2], a[3]) for a in ans if a[5] == pcn] or [(a[0], a[1], a[2], a[3]) for a in ans]
+            sec = ([x for xs in cb["answers"].values() for x in xs] if cb else
+                   [(a[0], a[1], a[2], a[3]) for a in ans if a[5] == pcn] or [(a[0], a[1], a[2], a[3]) for a in ans])
             k = {"payer_ids": Counter({r[4]: 1}) if r[4] else Counter(), "pat_paid": 0, "ins": {}, "providers": Counter(),
                  "status_at": ("", "", -1), "amb_paid": 0, "days": set(days), "member": r[8]}
             cds.append({"pcn": pcn, "k": k, "b": b, "items": items, "sent": sent, "basis": SENT_837, "due": due, "again_after": False,
                         "rejected": False, "unsent": False, "gave_up": False, "status": None, "ema_payer": r[5] or grp,
                         "group": (grp, kind), "grp": grp, "kind": kind, "through": through, "payer_last": last, "secondary": sec,
                         "s837": r, "batched": False, "resent_837": False, "bill_answered": None, "id_signal": OPEN_837_ID,
-                        "source": "837", "no_era": pid if pid in no_era_ids else None})
+                        "source": "837", "no_era": pid if pid in no_era_ids else None, "cob": cb})
         # a service a primary payer paid under another bill of the same member (a bill made again) is paid (T-N10)
         cds = self._837_paid_elsewhere(cds)
         if self.ema_on and cds:
@@ -3944,11 +4066,15 @@ class Detector:
                    "lines": [(x[1], x[0], x[2]) for x in cd["items"] if x[1]]} for cd in cds]
         answers = self._ema_step("claim_answers_837", ec.claim_answers, self.conn, claims) or {}
         statuses = self._ema_step("claim_statuses_837", ec.claim_statuses, self.conn, claim_ids=[cd["pcn"] for cd in cds]) or {}
+        # a claim only a secondary answered: only another payer's posting in EMA is the primary's answer (as on the exports')
+        primary = self._ema_step("primary_posted_837", self._primary_posted, [
+            (cd["pcn"], (answers.get(cd["pcn"]) or {}).get("link"), cd["sent"], sorted({x[1] for x in cd["secondary"]}))
+            for cd in cds if cd.get("secondary")]) or set()
         out = []
         for cd in cds:
             a = answers.get(cd["pcn"]) or {}
             ne = no_era.get(cd.get("no_era") or "")
-            if a.get("answered"):
+            if (cd["pcn"] in primary) if cd.get("secondary") else a.get("answered"):
                 self.ema_counts["837_answered_in_ema"] += 1
                 if ne is not None:
                     ne["answered_in_ema"] += 1
@@ -4240,11 +4366,16 @@ class Detector:
         claims = [{"claim_id": cd["pcn"], "sent": cd["sent"], "payer_group": cd.get("grp"),
                    "lines": [(x[1], x[0], x[2]) for x in items if x[1]]} for cd, items in final]
         answers = self._ema_step("claim_answers", ec.claim_answers, self.conn, claims) or {}
+        # a claim only a secondary answered (T-C2, or its own payer as secondary after a coordination denial): EMA's posting
+        # of that payer's answer is not the primary's. Only another payer's posting answers it
+        primary = self._ema_step("primary_posted", self._primary_posted, [
+            (cd["pcn"], (answers.get(cd["pcn"]) or {}).get("link"), cd["sent"], sorted({x[1] for x in cd["secondary"]}))
+            for cd, _items in final if cd.get("secondary")]) or set()
         newest = self.conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0] or ""
         out = []
         for cd, items in final:
             a = answers.get(cd["pcn"]) or {}
-            if a.get("answered"):
+            if (cd["pcn"] in primary) if cd.get("secondary") else a.get("answered"):
                 self.ema_counts["export_answered_in_ema"] += 1
                 continue
             if not cd["rejected"] and (cd.get("due") or "") > newest and a.get("link") is None:

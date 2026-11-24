@@ -238,6 +238,50 @@ def test_a_claim_the_weekly_exports_chase_keeps_one_item_dated_by_its_837(tmp_pa
     s.close()
 
 
+# --------------------------------------------------------------------------- a coordination denial, then the same payer as secondary
+
+def _cob(claim_id: str, paid: str = "23.52", dos: str = "20260914") -> list[str]:
+    """Humana's two answers to a claim: a denial as primary because another payer covers it first (CLP02 4, CO-22), then
+    its processing as secondary (CLP02 2, OA-23 for the primary's answer), paying `paid`, its share."""
+    return [answer(claim_id, status="4", paid="0.00", dos=dos, cas="CAS*CO*22*223.65~"), answer(claim_id, status="2", paid=paid, dos=dos)]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_its_payer_denied_for_coordination_then_paid_as_secondary_chases_the_primarys_remittance(tmp_path, kind):
+    """Humana denied these claims as primary saying another payer covers them first (CO-22) and then processed them as
+    secondary, paying $23.52, its share. The denial items close on that answer (the settled-elsewhere fix), but the money
+    the primary payer owes was chased by nothing: the coordination denial counted as the claim's primary answer.
+    - K01, sent to Humana (only the 837s know it): no other payer's remittance is on file. The primary's remittance is
+      missing: listed, saying so, sized at the usual rate less what Humana paid as secondary.
+    - K02, in EMA's exports billed to Humana: the same, from the exports' path.
+    - K03, as K01, and Anthem's remittance as primary is on file (it paid): answered, not listed.
+    - K04, as K01, but Humana also paid it as primary once: answered by its primary, not listed."""
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837(f"CB0000K0{i}C017", V, payer=HUMANA) for i in (1, 3, 4)], "20260915")
+    _remits(s, tmp_path, _cob("CB0000K01C017") + _cob("CB0000K02C017") + _cob("CB0000K03C017") + _cob("CB0000K04C017")
+            + [answer("CB0000K04C017", paid="80.00")], "20261001", payer="HUMANA", payer_id="HUMNA")
+    _remits(s, tmp_path, [answer("CB0000K03C017")], "20261005")
+    _remits(s, tmp_path, _visits(), "20261110")
+    ema(s.conn, "CB0000K02C017", payer="Humana", payer_id="61101")
+    s.conn.commit()
+    found = _chased(s, "t1")
+    print({k: (v["finding_id"], v["title"], v["hint"], v["expected_cents"], v["shortfall_cents"]) for k, v in found.items()})
+    assert set(found) == {"CB0000K01C017", "CB0000K02C017"}, (
+        f"listed {sorted(found)}: K01 and K02 were answered only by Humana as secondary after its coordination denial")
+    k1, k2 = found["CB0000K01C017"], found["CB0000K02C017"]
+    assert k1["finding_id"] == _fid("837_OPEN_CLAIM", "CB0000K01C017") and k2["finding_id"] == _fid("EMA_OPEN_CLAIM", "CB0000K02C017")
+    for f in (k1, k2):
+        assert f["signal"] == "NO_ANSWER" and "the primary payer's remittance is missing" in f["title"], f["title"]
+        assert f["hint"].startswith("Humana denied this claim as the primary payer on 2026-10-01 (another payer covers it first: CO-22) "
+                                    "and processed it as secondary on 2026-10-01, paying $23.52. The primary payer's remittance is "
+                                    "not on file"), f["hint"]
+        assert (f["expected_cents"], f["shortfall_cents"]) == (11760, 11760 - 2352)
+        ev = json.loads(f["evidence"])
+        assert ev["secondary_answer"]["after_coordination_denial"] is True and ev["secondary_answer"]["paid_cents"] == 2352
+    s.close()
+
+
 # --------------------------------------------------------------------------- the size of a never-answered claim (T-N9)
 
 def _parts(i: int, mods: str, paid: str) -> str:
@@ -367,6 +411,82 @@ def test_an_837_claim_emas_postings_answered_is_not_chased(tmp_path, kind, monke
     unseen = json.loads(s.conn.execute("SELECT value FROM meta WHERE key='ema:unanswered_unseen'").fetchone()[0])
     print(unseen)
     assert unseen["n"] == 1 and unseen["billed_cents"] == 12000
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_coordination_denials_primary_answer_posted_in_ema_leaves_nothing_to_chase(tmp_path, kind, monkeypatch):
+    """Blue Cross denied claims 54 and 55 as primary because another payer covers them first (CO-22) and then processed
+    them as secondary, paying $20; the 837s show both sent March 4, and no other payer's remittance is on file. EMA's
+    Production report (as of May 1):
+    - claim 54: Medicare's payment of $80 posted March 20, after the send: the primary answered, nothing to chase.
+    - claim 55: only Blue Cross's own $20 (its answer as secondary) is posted. The primary's remittance is missing: listed,
+      saying so (EMA's posting of the secondary's answer is not the primary's).
+    - claim 56, in EMA's weekly exports billed to Blue Cross: only another payer answered, as secondary (T-C2), and EMA
+      shows only that payer's posting. Listed from the exports' path (before: EMA's posting of the secondary's own answer
+      read as the claim's answer, and the primary's missing remittance was dropped)."""
+    from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setenv("REMITWATCH_EMA_STRICT", "1")
+    for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES", "REMITWATCH_EMA_LEDGER",
+              "REMITWATCH_EMA_REPORT_KEEP", "REMITWATCH_EMA_CLOSES"):
+        monkeypatch.delenv(k, raising=False)
+    ec._LAST_POST.clear()
+    s = _store(tmp_path, kind)
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", ("ab" * 32,))
+    s.conn.commit()
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    D = dt.date
+    S_ = "2026-03-02"
+    for n in (54, 55):
+        raw_remit(s, trace=f"77700{n}1", paid_on="2026-03-12", claims=[{"pcn": F.claim_id(n), "status": "4", "member": f"MEMBER0000{n}",
+                                                                     "lines": [(S_, "99213", 150, 0, [("CO", "22", 150)])]}])
+        raw_remit(s, trace=f"77700{n}2", paid_on="2026-03-26", claims=[{"pcn": F.claim_id(n), "status": "2", "member": f"MEMBER0000{n}",
+                                                                     "lines": [(S_, "99213", 150, 20, [("OA", "23", 130)])]}])
+    raw_remit(s, trace="777000562", paid_on="2026-03-26", payer="TESTCARE HEALTH",
+              claims=[{"pcn": F.claim_id(56), "status": "2", "member": "MEMBER000056", "lines": [(S_, "99214", 200, 30, [("OA", "23", 170)])]}])
+    rows = [charge(F.link_no(54), patient=1, posted=D(2026, 3, 3)),
+            pay(F.link_no(54), "PAPER-54", 80, patient=1, posted=D(2026, 3, 20), payer=F.PAYERS["medicare"]),
+            pay(F.link_no(54), "777000542", 20, patient=1, posted=D(2026, 3, 27)),
+            charge(F.link_no(55), patient=2, posted=D(2026, 3, 3)),
+            pay(F.link_no(55), "777000552", 20, patient=2, posted=D(2026, 3, 27)),
+            charge(F.link_no(56), cpt="99214", amount=200, patient=3, posted=D(2026, 3, 3)),
+            pay(F.link_no(56), "777000562", 30, cpt="99214", patient=3, posted=D(2026, 3, 27), payer=F.PAYERS["commercial"]),
+            # Blue Cross's answers in EMA reach past April 1 (another claim's payment): its claims due by then are judged
+            charge(F.link_no(58), cpt="11102", amount=120, patient=0, posted=D(2026, 3, 3)),
+            pay(F.link_no(58), "PAPER-58", 60, cpt="11102", patient=0, posted=D(2026, 4, 10))]
+    ar = [F.ar_row(claim=F.claim_id(54), link=F.link_no(54), status="Payment Pending", current=50, svc=D(2026, 3, 2), patient=1),
+          F.ar_row(claim=F.claim_id(55), link=F.link_no(55), status="Payment Pending", current=130, svc=D(2026, 3, 2), patient=2),
+          F.ar_row(claim=F.claim_id(56), link=F.link_no(56), status="Payment Pending", current=170, svc=D(2026, 3, 2), patient=3,
+                   cpt="99214")]
+    denial_world(s, lg, tmp_path, rows, ar_rows=ar)
+    from tests.test_workable import ema
+    ema(s.conn, F.claim_id(56), payer="Blue Cross Test Plan", payer_id="BCT01", service_date=S_, bill_created="2026-03-03",
+        charges_cents=20000, patient_id="EMA56")
+    s.conn.commit()
+    bc = ("BLUE CROSS TEST", "BCT01")
+    send(s, tmp_path, [clm837(F.claim_id(n), [("99213", "150.00", "20260302")], payer=bc, member=f"MEMBER0000{n}") for n in (54, 55)],
+         "20260304")
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = {r["patient_control_number"]: dict(r) for r in s.query(
+        "SELECT finding_id, patient_control_number, ema_link, hint, title FROM findings WHERE signal='NO_ANSWER'")}
+    print(got)
+    assert set(got) == {F.claim_id(55), F.claim_id(56)}, (
+        f"listed {sorted(got)}: claim 54's primary answer is posted in EMA, the others' are not")
+    f = got[F.claim_id(55)]
+    assert f["finding_id"] == _fid("837_OPEN_CLAIM", F.claim_id(55)) and f["ema_link"] == F.link_no(55)
+    assert f["hint"].startswith("Anthem / BCBS denied this claim as the primary payer on 2026-03-12 (another payer covers it first: CO-22)")
+    g = got[F.claim_id(56)]
+    assert g["finding_id"] == _fid("EMA_OPEN_CLAIM", F.claim_id(56))
+    assert g["hint"].startswith("Testcare Health processed this claim as secondary on 2026-03-26 and paid $30.00, its share. The "
+                                "primary's remittance, from Anthem / BCBS, is not on file"), g["hint"]
     s.close()
 
 
