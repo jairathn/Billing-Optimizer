@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 10:15 UTC.
+Last updated: 2026-11-24, 10:45 UTC.
 
 ## 1. Where things are
 
@@ -15,6 +15,11 @@ Last updated: 2026-11-24, 10:15 UTC.
   folder: `status.json` (no `error`, `memory_mb.peak` under 2,278) and `serving.json` `build` "7" (only the new code writes
   7). The first runs re-analyse once (rules 2.9) and read the six-week catch-up and the 837s; the swing alarm is expected
   to fire high on the catch-up run (about +900 open items, +$217k): acknowledge it once the files are checked.
+  **Checked 10:29 UTC**: the run chain read every file (7,736 wanted, 0 remaining, 0 errors), memory peak 2,008 of 2,278 MB
+  on the release code, `serving.json` build "7" (data_rev 8), 17,281 findings, image 144 MB gz (the full 837 history,
+  158,573 claims 2024-01 to 2026-11). The 835 side of that image equals the private world copy's row for row; a second
+  world copy with the full 837 history is in the session's private folder (`world2/world2.sqlite`, built by
+  `world2/build_world2.py`) for the final measurements.
 - Before the release: both sites ran `main` at `949c4db`. The server's `/api/health` shows the commit it
   runs. Vercel's last run is in the state folder's `status.json` (Dropbox, `/RemitWatch-state`).
 - **This branch** (`claude/epic-davinci-imb6tj`) is the integration branch. Its code is the live hotfix bundle:
@@ -142,6 +147,24 @@ Last updated: 2026-11-24, 10:15 UTC.
       payers with no rate; a payer's re-processing that lists a line twice is read as two units; two same-day deliveries
       of one underpayment (T-I3); a claim-level second-payer denial should name the primary's payment (as rule 2 does
       for lines); an archive Done shows only its rule's label as its state basis.
+      **A16 view of the merged tip** (0e6ef4a, scored 10:25 UTC by `plans/tools/claim_audit_a16.py` through
+      `plans/tools/a16/`; Work now, services since 2026-01-01; push 2 alone in brackets): correct 1,449 [1,419]; already
+      done 324, $77,541 [374]; already worked 29 [41]; duplicate 8 [112]; wrong amount 346 [330]; undecided 71 [75];
+      closed wrongly 1 [9]; money left on the table 656 services, $66,823 [650, $63,277]. Already done is mostly paid
+      off-feed by EMA's books (181 items, $61,896), in three kinds: (1) 77 denials whose line EMA shows paid, almost all a
+      Kentucky Medicaid fee-for-service denial (CO-96, CO-24, CO-109) of a service UHC Community Plan had paid before
+      (routes settled_in_ema, note, check_first; C6 never closes on a payment before the denial): **fixer fix6 running
+      (10:40 UTC)**; (2) 54 never-answered and (3) 49 rejected-before-the-payer claims (the item carries no EMA link; the
+      auditor ties them by the patient or the only matching claim) with insurance payments posted since: **handed to the
+      837 fixer** (one "answered in EMA" rule for every never-answered item). The rest of already done: moved to the
+      patient 66 ($4,157, mostly rule 8's patient-group items: the owner's ruling), not payable 21 ($7,237, owner rule
+      4.2), paid on an 835 13, the 26/TC global 12, small kinds. Money left on the table: denials 233 services ($26,619,
+      102 of them on items waiting for a follow-up date, which this view counts as off the list), never answered 213
+      ($30,174: the 837 fixer's), short 198 ($9,319: the amounts fixer's).
+      Fixers running at 10:45 UTC, each in its own worktree, committing on a local branch for the integrator: fix837 (the
+      837 pass, `plans/design_837_never_answered.md`, base 2b72f47 + 6c34e08), fix4 (item amounts, base 383d99e), fix5
+      (ledger and leftovers, base 0e6ef4a), fix6 (EMA paid before the denial, base 0e6ef4a). Integrate each (merge, the
+      suite, push), bump DETECT_RULES once, then measure the whole on world2 with A16 and hand-trace.
       Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.
