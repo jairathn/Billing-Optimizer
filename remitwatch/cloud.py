@@ -276,17 +276,19 @@ def _saved_before(state) -> bool:
 def save_raw(state, store, log=print, status: dict | None = None) -> dict:
     """Save the store image, and record it at once (record_image). The result carries IMAGE_KEY: the saved file's size and
     sha256. Before the upload is committed, status.json names the image as pending (and so does status, the run's own,
-    when given): an upload Dropbox commits but whose answer is lost is then the image the next run loads (load_raw)."""
-    data = store.to_bytes()
+    when given): an upload Dropbox commits but whose answer is lost is then the image the next run loads (load_raw). The
+    image is the store's one block (Store.image: no third copy of a store held in memory at the save's peak)."""
     h, size = hashlib.sha256(), [0]
 
     def pending() -> None:
         record_pending(state, {"size": size[0], "sha256": h.hexdigest(), "saved": _now()}, status)
     try:
-        meta = dict(state.put_chunks(RAW, _counted(gzip_chunks(data), h, size, then=pending)) or {})
+        with store.image() as data:
+            image_mb = round(len(data) / 1048576, 1)
+            meta = dict(state.put_chunks(RAW, _counted(gzip_chunks(data), h, size, then=pending)) or {})
     finally:
-        del data
         gc.collect()
+    meta["image_mb"] = image_mb             # the store's size in memory: its share of the one-block ceiling (Store.image)
     meta[IMAGE_KEY] = {"size": size[0], "sha256": h.hexdigest(), "saved": _now()}
     record_image(state, meta[IMAGE_KEY], log)
     if status is not None:

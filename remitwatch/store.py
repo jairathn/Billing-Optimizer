@@ -8,6 +8,7 @@ name) are skipped by content fingerprint.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -447,11 +448,41 @@ def _lost_entry(kept: list[dict], dropped: list[dict], held: dict) -> dict | Non
             "cents_not_counted": sum(lost.values())}
 
 
+# SQLite holds a deserialized database in one block of memory that it never lets grow past this (SQLITE_MEMDB_DEFAULT_MAXSIZE;
+# Python cannot raise it): a write past it fails with "database or disk is full". A store held in memory is therefore a plain
+# in-memory database (from_bytes), and only its image at the save goes through such a block (image()).
+MEMDB_CEILING_MB = 1024
+
+
+def _copy_pages(src: sqlite3.Connection, dst: sqlite3.Connection) -> None:
+    """Every page of `src` into `dst` (SQLite's backup), in one step."""
+    src.backup(dst)
+
+
+_TRIM: list = []
+
+
+def _give_back_memory() -> None:
+    """Hand the heap's free pages back to the system (glibc's malloc_trim). The store's pages are many small allocations: let
+    go while the image is out, they would otherwise still count against the host's memory beside the image. Elsewhere (no
+    glibc) it does nothing, and the save then holds one copy more at its peak."""
+    if not _TRIM:
+        try:
+            import ctypes
+            _TRIM.append(ctypes.CDLL(None).malloc_trim)
+        except (OSError, AttributeError, ImportError) as exc:
+            from . import runlog
+            runlog.caught(exc, "store:malloc_trim", level="warning")
+            _TRIM.append(None)
+    if _TRIM[0] is not None:
+        _TRIM[0](0)
+
+
 class Store:
-    def __init__(self, db_path: str, compact: bool = False):
+    def __init__(self, db_path: str, compact: bool = False, *, conn: sqlite3.Connection | None = None):
         self.db_path = db_path
         self.compact = compact
-        self.conn = connect(db_path, compact)
+        self.conn = conn if conn is not None else connect(db_path, compact)
         _ema_schema(self.conn)
         self.ema_changed = False            # set by remitwatch.ema_reports when the report catalog changed
         self._cols = {t: table_columns(self.conn, t) for t in
@@ -460,22 +491,94 @@ class Store:
 
     # ------------------------------------------------------------------ in-memory stores (serverless hosts have no disk)
     @classmethod
-    def from_bytes(cls, data) -> "Store":
-        """Open a compact in-memory store from a serialized database image."""
-        store = cls(":memory:", compact=True)
-        if data:
-            store.conn.deserialize(data)
-            store.conn.row_factory = sqlite3.Row
-            store.conn.executescript(ddl(True))         # tables added since the image was written
-            _ema_schema(store.conn)                     # the EMA report tables keep their indexes (they are small)
-            store.conn.execute("UPDATE transactions SET superseded=0 WHERE superseded IS NULL")
-            store.conn.commit()
-            store._cols = {t: table_columns(store.conn, t) for t in store._cols}
-        return store
+    def from_bytes(cls, data, *, copy=None) -> "Store":
+        """Open a compact in-memory store from a serialized database image. The image is deserialized into a source
+        connection, its buffer let go (a bytearray is emptied: the caller hands it over), and its pages copied (`copy`,
+        SQLite's backup) into a plain in-memory database, which has no ceiling (MEMDB_CEILING_MB); then the source is
+        closed. The peak stays about twice the image; the store holds about 8% more than the block it came from."""
+        if not data:
+            return cls(":memory:", compact=True)
+        src = sqlite3.connect(":memory:")
+        try:
+            src.deserialize(data)
+            if isinstance(data, bytearray):
+                del data[:]                             # SQLite holds its own copy now: one image less at the peak
+            # a database with no page yet takes the image's page size (a plain in-memory one of another size refuses it)
+            conn = sqlite3.connect(":memory:", timeout=60, check_same_thread=False)
+            try:
+                (copy or _copy_pages)(src, conn)
+            except BaseException:
+                conn.close()
+                raise
+        finally:
+            src.close()
+        conn.row_factory = sqlite3.Row
+        conn.executescript(ddl(True))                   # tables added since the image was written
+        conn.execute("UPDATE transactions SET superseded=0 WHERE superseded IS NULL")
+        conn.commit()
+        return cls(":memory:", compact=True, conn=conn)  # the EMA report tables keep their indexes (they are small)
 
     def to_bytes(self) -> bytes:
         self.conn.commit()
         return self.conn.serialize()
+
+    @contextlib.contextmanager
+    def image(self, *, copy=None) -> Iterator[memoryview]:
+        """The store's serialized image, for its save, as a view that lasts until the block ends. Python's serialize copies
+        a plain in-memory database twice (three times the image at the peak). Here its pages go into one deserialized
+        block first (`copy`, SQLite's backup), the store's own pages are let go while the block's single copy is out, and
+        the store is filled again from the block when the block ends: the peak stays about twice the image, and the
+        store's connection is the same object throughout. A store past the block's ceiling (MEMDB_CEILING_MB: SQLite says
+        the disk is full), and a store on disk, are serialized the plain way and never emptied."""
+        self.conn.commit()
+        block = None
+        if self.db_path == ":memory:":
+            page_size = int(self.conn.execute("PRAGMA page_size").fetchone()[0])
+            block = sqlite3.connect(":memory:")
+            try:
+                empty = sqlite3.connect(":memory:")
+                try:                                    # an empty database of the store's page size (a block of another
+                    empty.execute(f"PRAGMA page_size={page_size}")      # page size refuses the copy)
+                    seed = empty.serialize()
+                finally:
+                    empty.close()
+                block.deserialize(seed)                 # a deserialized block, which serialize hands out without a copy
+                (copy or _copy_pages)(self.conn, block)
+            except sqlite3.Error as exc:                # past the ceiling: the plain way (three copies at the peak)
+                from . import runlog
+                runlog.caught(exc, "store:image", level="warning")
+                block.close()
+                block = None
+        if block is None:
+            data = self.conn.serialize()
+            view = memoryview(data)
+            try:
+                yield view
+            finally:
+                view.release()
+                del data
+            return
+        pages = block.execute("PRAGMA page_count").fetchone()[0]
+        try:
+            empty = sqlite3.connect(":memory:")
+            try:
+                empty.execute(f"PRAGMA page_size={page_size}")
+                empty.backup(self.conn)                 # the store's own pages go; its connection stays as it is
+            finally:
+                empty.close()
+            _give_back_memory()
+            data = block.serialize()
+            view = memoryview(data)
+            try:
+                yield view
+            finally:
+                view.release()
+                del data
+        finally:
+            block.backup(self.conn)                     # the store, whole again
+            block.close()
+            if self.conn.execute("PRAGMA page_count").fetchone()[0] != pages:
+                raise sqlite3.DatabaseError("the store could not be filled again after its image was saved")
 
     # ------------------------------------------------------------------ files
     def file_seen(self, sha256: str) -> bool:
