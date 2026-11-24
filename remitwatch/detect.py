@@ -30,7 +30,8 @@ denial       DENIED_MISSING_MODIFIER   CO-16 with RARC N822/N823/N519: correct a
              DENIED_AUTH               CO-197/198/15/39/210/243: authorization failure
              DENIED_LEVEL_OF_SERVICE   CO-150/186 on a procedure: payer says the records do not support the service as billed
              DENIED_MEDICAL_NECESSITY  CO-50/B12/B22/167/A1/272: appeal with records
-             DENIED_FREQUENCY          CO-151/119/222/273/B14: appeal with records
+             DENIED_FREQUENCY          CO-151/119/222/273/B14: appeal with records (CO-151 with M86 on a service the bill
+                                       already had paid is the payer's duplicate denial: no item)
              DENIED_NONCOVERED         CO-96/204/49/55/200...: verify benefits, bill patient where allowed
              DENIED_TIMELY_FILING      CO-29
              DENIED_PROVIDER           CO-B7/170/171/185/208: enrollment or credentialing failure
@@ -38,7 +39,9 @@ denial       DENIED_MISSING_MODIFIER   CO-16 with RARC N822/N823/N519: correct a
              DENIED_OTHER              paid $0 with another payer-responsibility CARC
              CLAIM_DENIED_UNPAID       whole claim denied (CLP02 = 4) and never paid later
              (a denial is closed when the service is paid later: on the same bill, on a corrected claim under a new bill
-             number or to another payer for the same patient, date and code, or when EMA shows the payment first)
+             number or to another payer for the same patient, date and code, or when EMA shows the payment first; and when
+             the payer that denied it answers it again itself, as secondary after saying another payer covers it first, or
+             onto the patient's deductible, coinsurance or copay)
 underpayment UNDERPAID_VS_OWN_RATE     allowed below the payer's own usual rate (rank-aware) for this code and tier, at an
                                        amount the payer does not use routinely (a one-off)
              MPPR_EXCESS               multiple-procedure reduction on an add-on code or deeper than policy
@@ -134,6 +137,15 @@ FORWARD_CARCS = {"B11"}
 # reasons a payer gives when the claim is another payer's to pay (coordination of benefits, coverage dates, not its member,
 # not its jurisdiction, sent on): another payer that then pays the line in full has paid the right claim
 OTHER_PAYER_CARCS = {"22", "109", "B11", "31", "26", "27", "200", "177", "B9"}
+# remarks with which a payer asks for the primary payer's answer first (N36: the claim must meet the primary payer's
+# requirements; MA04, N4, N479: the primary's payment information or explanation of benefits; MA92, N245: the other
+# insurance's plan): with OTHER_PAYER_CARCS, a payer's answers that another payer covers the claim first. Once that same
+# payer has processed the service as secondary, such an answer is settled (trace findings T-C3, T-N3)
+COB_RARCS = {"N36", "MA04", "N4", "N479", "MA92", "N245"}
+# the patient's share as a payer puts it. Its other patient-responsibility reasons are not the patient's balance:
+# coordination of benefits (PR-22), out of network (242), coverage ended (27), information the patient was asked for (227)
+# and not its insured (31) are denials to work (calibration fix 7), and the plan's exclusions wait on the owner
+COST_SHARE = {"1": "deductible", "2": "coinsurance", "3": "copay"}
 TIMELY_CARCS = {"29"}
 PROVIDER_CARCS = {"B7", "170", "171", "185", "208", "242", "54", "147"}
 DUP_CARCS = {"18", "B13"}
@@ -1402,6 +1414,160 @@ class Detector:
                 return None
         return first if len(events) == 1 else first[:2] + (sum(e[2] for e in events),) + first[3:5] + (self.units_paid(events),) + first[6:]
 
+    def _settled_by_answer(self, answers: list, code: str | None, dos: str | None, denier: tuple, when: str, pcn: str | None,
+                           cob: bool, mods: list | None = None) -> tuple[str, list] | None:
+        """How the payer that denied this code and date has settled it since with an answer the payment rules do not count
+        (a payment that small, or none), with the answers that prove it. `answers` are the bill's lines, any claim status;
+        `denier` is the payer that denied it (_one_payer).
+        - ('as_secondary', lines): its denial said another payer covers the claim first (`cob`), and it then processed the
+          code and date as secondary (claim status 2 or 3), applying the primary payer's answer (OA-23) or paying, whatever
+          the amount: the denial was of the claim sent to it as if it were primary (trace findings T-C3, T-N3);
+        - ('to_patient', lines): it answered the code and date again as primary, allowed it, paid nothing and put the
+          allowed amount on the patient's deductible, coinsurance or copay with no reason of its own beside its pricing
+          (trace finding T-N6). Another payer's answer, its other plan's included, settles nothing here: a second payer may
+          owe the first's deductible.
+        One later answer (one claim) settles it only when every line of it that can be the denied one settles it alike:
+        every line of the code and date, or, where the denied claim billed the code and date on several lines (`mods`, the
+        denied line's modifiers), the lines with the same modifiers. A line paid there and its twin put on the patient say
+        nothing of which one was denied. Later: after the denial's remittance, or in it on another claim id of the bill. An
+        answer its payer reversed since (claim status 22), or a payment taken back, counts for nothing."""
+        if not code or not dos:
+            return None
+        at = lambda o: o.get("payment_date") or o.get("txn_payment_date") or ""      # noqa: E731
+        mine = [o for o in answers if o.get("procedure_code") == code and o.get("service_date") == dos and self._one_payer(o, denier)]
+        reversed_on = [(o["patient_control_number"], at(o)) for o in mine if o.get("claim_status_code") == "22"]
+
+        def stands(o: dict) -> bool:
+            if (o.get("paid_cents") or 0) > 0:
+                return self.standing.get(o["line_key"], 0) > 0
+            return not any(p == o["patient_control_number"] and d > at(o) for p, d in reversed_on)
+        by_claim: dict[str, list] = defaultdict(list)
+        for o in mine:
+            if o.get("claim_status_code") != "22" and (at(o) > when or (at(o) == when and o["patient_control_number"] != pcn)) and stands(o) \
+                    and (mods is None or sorted(o.get("modifiers_list") or []) == sorted(mods)):
+                by_claim[o["claim_key"]].append(o)
+        ok = {"as_secondary": lambda o: o.get("claim_status_code") in ("2", "3")
+              and (self.standing.get(o["line_key"], 0) > 0 or self._applied_primary(o)),
+              "to_patient": lambda o: o.get("claim_status_code") in ("1", "19") and self._to_patient(o)}
+        for how in (("as_secondary", "to_patient") if cob else ("to_patient",)):
+            rows = [o for ls in by_claim.values() if all(ok[how](o) for o in ls) for o in ls]
+            if rows:
+                return how, rows
+        return None
+
+    @staticmethod
+    def _one_payer(o: dict, denier: tuple) -> bool:
+        """This line is the denying payer's own answer: the same payer id (or name), the same plan (its payer group, as the
+        claim filing indicator refines it: a company's Medicaid plan and its Medicare Advantage plan are two payers under one
+        id, as archive_rules._two_plans has it) and, in a group that holds many payers, the same payer name."""
+        key, grp, name = denier
+        return ((o.get("payer_id") or o.get("payer_name")) == key and o.get("payer_group") == grp
+                and (grp not in MANY_PAYER_GROUPS or o.get("payer_name") == name))
+
+    def _applied_primary(self, o: dict) -> bool:
+        """A line answered as secondary applied the primary payer's answer: OA-23 on the line, or on its claim when the line
+        carries no reason of its own for not paying."""
+        adj = self.adj.get(o["line_key"], [])
+        if any(g == "OA" and rc == "23" for g, rc, _a in adj):
+            return True
+        own = [rc for g, rc, a in adj if g in ("CO", "OA", "PI") and rc not in IGNORE_CARCS and a]
+        return not own and any(g == "OA" and rc == "23" for g, rc, _a in self.claim_adj.get(o["claim_key"], []))
+
+    def _to_patient(self, o: dict) -> bool:
+        """A line allowed and paid nothing, the allowed amount on the patient's deductible, coinsurance or copay, and no other
+        reason beside the payer's pricing: a patient-responsibility reason that is not the patient's share (COST_SHARE) is a
+        denial, not the patient's balance."""
+        if (o.get("paid_cents") or 0) or not (o.get("allowed_cents") or 0) > 0:
+            return False
+        adj = self.adj.get(o["line_key"], [])
+        other = [rc for g, rc, a in adj if a and ((g == "PR" and rc not in COST_SHARE) or (g != "PR" and rc not in IGNORE_CARCS))]
+        return not other and sum(a for g, rc, a in adj if g == "PR" and rc in COST_SHARE) > 0
+
+    def _close_by_answer(self, f: dict, how: str, rows: list, codes: list, answers: list, paid_rows: list | None = None) -> None:
+        """Close an item by the payer's own later answer that settled it (_settled_by_answer), that answer as its proof
+        (evidence settled_by and paid_later). What that payer paid after its denial is recovered: as secondary, its own
+        payment (never the primary's), on `paid_rows` where given (a whole claim: every line of its codes the payer paid
+        since, the ones its payment rules already counted included), else on the settling lines; to the patient, only what
+        it paid on a claim's other codes. Where no other payer's answer as primary to the service is on file, the item says
+        the primary's remittance is missing, as a claim only a secondary answered does (T-C2)."""
+        at = lambda o: o.get("payment_date") or o.get("txn_payment_date") or ""      # noqa: E731
+        first = min(rows, key=lambda o: (at(o), o["patient_control_number"], o["line_key"]))
+        day, other_id = at(first), first["patient_control_number"]
+        grp = first.get("payer_group") or first.get("payer_name") or "The payer"
+        what = "service" if f.get("line_key") else "claim"
+        detail: dict = {"payer": grp, "date": day, "claim": other_id}
+        paid = sum(self.standing.get(o["line_key"], 0) for o in (rows if paid_rows is None else paid_rows))
+        if how == "as_secondary":
+            itself = (first.get("payer_id") or first.get("payer_name"), first.get("payer_group"), first.get("payer_name"))
+            served = {(o.get("procedure_code"), o.get("service_date")) for o in rows}
+            primary = any(not self._one_payer(o, itself) and o.get("claim_status_code") in ("1", "19", "4")
+                          and (o.get("procedure_code"), o.get("service_date")) in served for o in answers)
+            note = (f"{grp} processed this {what} as secondary on {day} (claim {other_id})"
+                    + (f" and paid {_usd(paid)}, its share" if paid > 0 else ", applying the primary payer's answer (OA-23) and paying nothing more")
+                    + ": its denial as the primary payer is settled"
+                    + ("" if primary else ". The primary's remittance is not on file: look it up on the payer's portal, or ask the payer "
+                                          "to send it again"))
+            detail.update(how="processed as secondary", paid_cents=paid, codes=codes, primary_remittance="on file" if primary else "not on file")
+        else:
+            share: Counter = Counter()
+            for o in rows:
+                for g, rc, a in self.adj.get(o["line_key"], []):
+                    if g == "PR" and rc in COST_SHARE:
+                        share[rc] += a
+            allowed = sum(o.get("allowed_cents") or 0 for o in rows)
+            words = " and ".join(COST_SHARE[rc] for rc in sorted(share) if share[rc] > 0)
+            note = (f"Processed to the patient's responsibility: {grp} answered this {what} again on {day} (claim {other_id}), allowed "
+                    f"{_usd(allowed)} and put {_usd(sum(share.values()))} on the patient's {words}; nothing is owed by the payer"
+                    + (f" (it paid {_usd(paid)} on the claim's other codes)" if paid > 0 else ""))
+            detail.update(how="processed to the patient's responsibility", allowed_cents=allowed, patient_cents=sum(share.values()), codes=codes)
+        later = {"payment_date": day, "claim": other_id, "trace": first.get("trace_number"), "paid_cents": paid,
+                 "claim_status": first.get("claim_status_code"), "how": detail["how"]}
+        if paid > 0:
+            self._mark_paid(f, day, paid, note, later)        # recovered once: a payment counted on another item is not again
+        ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+        ev["settled_by"] = detail
+        if paid <= 0:
+            ev["paid_later"] = later
+            f["recovered_cents"], f["recovered_date"] = 0, day
+            f["auto_status"], f["auto_notes"] = "resolved", note
+        f["evidence"] = json.dumps(ev, default=str)
+        f["hint"] = None
+        self.ema_counts["settled_" + how] += 1
+
+    def _settle_unpaid_lines(self) -> None:
+        """After the line rules: a line denial (or a bundled line) left unpaid that the payer which denied it has settled since
+        with an answer the payment rules do not count (_settled_by_answer) is closed, that answer as its proof. Before the
+        archive rules, which leave a closed item alone."""
+        todo = [f for f in self.findings.values() if f.get("line_key") and f.get("category") in ("denial", "bundling")
+                and not f.get("auto_status") and not (f.get("paid_cents") or 0) and f.get("service_date")]
+        if not todo:
+            return
+        bill_at: dict[str, str] = {}
+
+        def bill(pcn: str | None) -> str:
+            if pcn not in bill_at:
+                bill_at[pcn] = bill_of(pcn)
+            return bill_at[pcn]
+        bills = {bill(f["patient_control_number"]) for f in todo}
+        answers: dict[str, list] = defaultdict(list)
+        for l in self.lines:
+            if l.get("service_date") and bill(l["patient_control_number"]) in bills:
+                answers[bill(l["patient_control_number"])].append(l)
+        for f in todo:
+            remarks = set(self.rem.get(f["line_key"], [])) | set(self.claim_rem.get(f["claim_key"], []))
+            cob = bool({rc for _g, rc, _a in self.adj.get(f["line_key"], [])} & OTHER_PAYER_CARCS or remarks & COB_RARCS)
+            ans = answers.get(bill(f["patient_control_number"]), [])
+            # the denied claim's lines of the code and date: on several, the denied one is told apart by its modifiers
+            own = [x for x in self.lines_by_claim.get(f["claim_key"], [])
+                   if x.get("procedure_code") == f.get("procedure_code") and x.get("service_date") == f["service_date"]]
+            line = next((x for x in own if x["line_key"] == f["line_key"]), None)
+            mods = (line.get("modifiers_list") or []) if line is not None and len(own) > 1 else None
+            denier = (f.get("payer_id") or f.get("payer_name"), f.get("payer_group"), f.get("payer_name"))
+            got = self._settled_by_answer(ans, f.get("procedure_code"), f["service_date"], denier, f.get("payment_date") or "",
+                                          f["patient_control_number"], cob, mods)
+            if got:
+                self._close_by_answer(f, got[0], got[1], [f["procedure_code"]], ans)
+
     def emit_second_rates(self) -> None:
         """A payer's routine lower amount for a code (the same amount on at least SECOND_RATE_MIN_LINES clean lines of the
         line's own payer, year, code, provider type and place of service) becomes one finding with its claims, when the
@@ -1986,6 +2152,15 @@ class Detector:
 
     # ------------------------------------------------------------------ line rules
     def run_line_rules(self) -> None:
+        def dup_units(l: dict, code: str) -> float:
+            """Units a duplicate's denial is about: this line's, plus lines of the code and date paid on this same claim (a
+            second specimen denied as a duplicate of the first). Other lines denied as duplicates are not counted: a
+            resubmission that repeats a paid service three times is three copies of one service, not three services. (For a
+            code paid at most once a day, a second line is a charge posted twice: nothing more is owed.)"""
+            return abs(l.get("original_units") or l.get("paid_units") or 1) + (0 if code in self.once_codes else sum(
+                abs(o.get("original_units") or o.get("paid_units") or 1) for o in self.lines_by_claim.get(l["claim_key"], [])
+                if o["line_key"] != l["line_key"] and o.get("procedure_code") == code and o.get("service_date") == l.get("service_date")
+                and (o.get("paid_cents") or 0) > 0))
         # a denied visit with a lower level paid in its place is one event: the paid line must not also count as a downcode
         swap_paid: set[str] = set()
         primary_changes: set[tuple] = set()
@@ -2217,6 +2392,16 @@ class Detector:
                                f"{code} denied: payer says the records do not support the service as billed ({top})", l, exp, exp, top, rarc, {"basis": basis})
                     self._emit = emit
                     continue
+                if top == "151" and "M86" in set(rarcs) | set(self.claim_rem.get(l["claim_key"], [])):
+                    # CO-151 with M86 (payment already made for the same service) is the payer's duplicate denial: on a
+                    # resubmission of a service the bill already had paid, by a payment still standing made on or before
+                    # this answer, nothing is owed (trace finding T-N8). Paid only later, the denial is closed by that
+                    # payment as any denial is; nothing paid, it is the frequency denial below
+                    mine = l.get("payment_date") or l.get("txn_payment_date") or ""
+                    have = [e for e in self.paid_cover(bill_of(l["patient_control_number"]), code, l.get("service_date"), exp) if e[0] <= mine]
+                    if self.units_paid(have) >= dup_units(l, code):
+                        self._emit = emit
+                        continue
                 if top in MEDNEC_CARCS:
                     self._emit("DENIED_MEDICAL_NECESSITY", "denial", "high", "appeal", f"{code} denied: medical necessity / documentation ({top})", l, exp, exp, top, rarc, {"basis": basis})
                     self._emit = emit
@@ -2235,15 +2420,7 @@ class Detector:
                     continue
                 if top in DUP_CARCS:
                     have = self.paid_cover(bill_of(l["patient_control_number"]), code, l.get("service_date"), exp)
-                    # Units at stake: this line's, plus lines of the code and date paid on this same claim (a second specimen
-                    # denied as a duplicate of the first). Other lines denied as duplicates are not counted: a resubmission
-                    # that repeats a paid service three times is three copies of one service, not three services.
-                    # (for a code paid at most once a day, a second line is a charge posted twice: nothing more is owed)
-                    need = abs(l.get("original_units") or l.get("paid_units") or 1) + (0 if code in self.once_codes else sum(
-                        abs(o.get("original_units") or o.get("paid_units") or 1) for o in self.lines_by_claim.get(l["claim_key"], [])
-                        if o["line_key"] != l["line_key"] and o.get("procedure_code") == code and o.get("service_date") == l.get("service_date")
-                        and (o.get("paid_cents") or 0) > 0))
-                    if self.units_paid(have) < need:
+                    if self.units_paid(have) < dup_units(l, code):
                         self._emit("DENIED_DUPLICATE_UNPAID", "denial", "medium", "review", f"{code} denied as duplicate but never paid", l, exp, exp, top, rarc, {"basis": basis})
                     self._emit = emit
                     continue
@@ -2318,6 +2495,7 @@ class Detector:
                     self._emit_underpaid(l, allowed, r, one_off)
         self._settle_mppr_candidates()
         self._settle_co45_candidates()
+        self._settle_unpaid_lines()
 
     def _patient_of_claims(self, claim_keys) -> dict[str, str | None]:
         """The patient key (member number, else name) of each 835 claim."""
@@ -2471,7 +2649,10 @@ class Detector:
         lists the others, which add only lines it does not have. A submission someone worked always keeps its own finding;
         the carrier is otherwise the submission that already has a finding, else the newest; a submission denied after the
         last change someone made on a worked carrier is listed on its own, so a repeat denial is seen. A finding someone
-        worked whose lines the bill has since paid is closed by that payment, so the recovery is counted."""
+        worked whose lines the bill has since paid is closed by that payment, so the recovery is counted. A code and date
+        the denying payer has since answered itself, as secondary after saying another payer covers the claim first or
+        onto the patient's share (_settled_by_answer), is settled by that answer: a finding whose every line is settled
+        or paid so is closed with that answer as its proof, worked or not; a claim never listed makes no finding."""
         c = self.conn
         c.row_factory = sqlite3.Row
         by_bill: dict[tuple, list[dict]] = defaultdict(list)
@@ -2484,9 +2665,13 @@ class Detector:
             by_bill[(bill_of(cl["patient_control_number"]), cl.get("txn_payer") or cl.get("payer_id") or cl.get("payer_name"))].append(cl)
         bills = {b for b, _p in by_bill}
         bill_lines: dict[str, list] = defaultdict(list)                 # lines of processed (not wholly denied) claims, per bill
+        answers: dict[str, list] = defaultdict(list)                    # every line of the bill, any claim status (_settled_by_answer)
         for l in self.lines:
-            if l.get("claim_status_code") in ("1", "19", "2", "3") and bill_of(l["patient_control_number"]) in bills:
-                bill_lines[bill_of(l["patient_control_number"])].append(l)
+            b = bill_of(l["patient_control_number"])
+            if b in bills:
+                answers[b].append(l)
+                if l.get("claim_status_code") in ("1", "19", "2", "3"):
+                    bill_lines[b].append(l)
 
         at = lambda o: o.get("payment_date") or o.get("txn_payment_date") or ""          # noqa: E731
         who = lambda o: o.get("payer_id") or o.get("payer_name")                          # noqa: E731
@@ -2604,7 +2789,10 @@ class Detector:
                 pays: list[tuple] = []
                 elsewhere: dict[tuple, tuple] = {}
                 noted: dict[tuple, tuple] = {}
+                by_answer: dict[tuple, tuple] = {}      # (code, date) -> how the denying payer's own later answer settled it
                 payer = cl.get("txn_payer") or cl.get("payer_id") or cl.get("payer_name")
+                remarks = set(self.claim_rem.get(cl["claim_key"], [])) | {x for ln in lines for x in self.rem.get(ln["line_key"], [])}
+                cob = bool({rc for _g, rc, _a in adj} & OTHER_PAYER_CARCS or remarks & COB_RARCS)
                 for (code, dos), (units, exp_k) in need.items():
                     if dos:
                         evs = self.paid_cover(bill, code, dos, exp_k // max(units, 1) if exp_k else None)
@@ -2614,6 +2802,16 @@ class Detector:
                         got = min(units, self.units_paid(evs))
                     pays += [e for e in evs if e[0] > when]
                     if got < units:
+                        # the payer that denied the claim answered the code and date again since: processed it as secondary
+                        # after saying another payer covers the claim first (T-C3, T-N3), or put it on the patient's share
+                        # (T-N6). Settled, with that answer as the proof, whether or not someone is working the denial
+                        ans = self._settled_by_answer(answers.get(bill, []), code, dos, (payer, grp, cl.get("payer_name")), when,
+                                                      cl["patient_control_number"], cob)
+                        if ans:
+                            by_answer[(code, dos)] = ans
+                            elsewhere[(code, dos)] = ("processed as secondary by the same payer" if ans[0] == "as_secondary"
+                                                      else "processed to the patient's share", ans[1][0]["patient_control_number"])
+                            continue
                         how = settled(bill, code, dos, payer, when, cl["patient_control_number"],
                                       {ln.get("service_date") for ln in lines if ln.get("procedure_code") == code},
                                       dup=top in DUP_CARCS)
@@ -2623,6 +2821,31 @@ class Detector:
                         if how:         # someone is working this denial: it stays listed until a payment covers it
                             noted[(code, dos)] = how
                         unpaid[(code, dos)] = [units - got, int(round(exp_k * (units - got) / units)) if units else exp_k]
+                # as on a line: a post-op visit, G2211 or a token charge is nothing to appeal
+                trivial = lambda code: code in ("99024", "G2211") or sum(                                 # noqa: E731
+                    ln.get("charge_cents") or 0 for ln in lines if ln.get("procedure_code") == code) <= 100
+                if lines and prev and by_answer and all(trivial(code) for code, _d in unpaid):
+                    # listed before and since settled by the denying payer's own answer (what it left is nothing to appeal):
+                    # closed with that answer as its proof (as secondary first, then to the patient; a claim never listed
+                    # makes no item, as when paid)
+                    how = "as_secondary" if any(v[0] == "as_secondary" for v in by_answer.values()) else "to_patient"
+                    exp_all = sum(v[1] for v in need.values()) or None
+                    self._emit("CLAIM_DENIED_UNPAID", "denial", "medium", "review",
+                               f"Claim denied ({top or 'no CARC'}) and since "
+                               + ("processed as secondary by the same payer" if how == "as_secondary" else "processed to the patient's share"),
+                               None, exp_all, exp_all, top, None, {"codes": sorted({code for code, _d in need})},
+                               key_parts=(cl["claim_key"],), claim=cl)
+                    f = self.findings.get(_fid("CLAIM_DENIED_UNPAID", cl["claim_key"]))
+                    if f is not None:
+                        # what the payer paid since on every code of the claim counts as recovered: a code its payment rules
+                        # already counted as paid (a secondary's payment of half the expected amount) was paid by it too
+                        paid_rows = [o for o in answers.get(bill, []) if (o.get("procedure_code"), o.get("service_date")) in need
+                                     and self._one_payer(o, (payer, grp, cl.get("payer_name"))) and self.standing.get(o["line_key"], 0) > 0
+                                     and (at(o) > when or (at(o) == when and o["patient_control_number"] != cl["patient_control_number"]))]
+                        self._close_by_answer(f, how, [o for v in by_answer.values() if v[0] == how for o in v[1]],
+                                              sorted({code for (code, _d), v in by_answer.items() if v[0] == how}), answers.get(bill, []),
+                                              paid_rows)
+                    continue
                 if lines and not unpaid:
                     if prev and pays:           # listed before and since paid on the bill: closed by that payment, so it counts
                         covering = min(pays, key=lambda e: (e[0], e[1] or "", e[4] or "", e[2]))
@@ -2654,9 +2877,7 @@ class Detector:
                         home.setdefault("_also", []).append(cl["patient_control_number"])
                     continue
                 unpaid_codes = {code for code, _d in novel if code != "*"}
-                if unpaid_codes and all(code in ("99024", "G2211")
-                                        or sum(ln.get("charge_cents") or 0 for ln in lines if ln.get("procedure_code") == code) <= 100
-                                        for code in unpaid_codes):
+                if unpaid_codes and all(trivial(code) for code in unpaid_codes):
                     continue        # as on a line: a post-op visit, G2211 or a token charge is nothing to appeal
                 if not closed:
                     (repeats if again else reported).update(novel)
