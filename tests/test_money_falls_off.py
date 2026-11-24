@@ -2,7 +2,8 @@
 Round 2 of the fixes, the money that falls off the list (plans/catchup_trace_2026-11-23.md and the misuse check):
 T-C1, a payment for the technical part (TC) of a service closed the denial of its professional part (26); T-C2, a claim
 no primary payer answered left the never-answered list when only a secondary payer answered it; T-N5, items were made
-from a payer's answer to a claim the practice voided (CLP09 8).
+from a payer's answer to a claim the practice voided (CLP09 8); CH-8, one payer's remittances stopped while the others'
+went on, and its claims became never-answered items with nothing saying the payer had stopped.
 
 Every claim, member number, name, amount and date here is invented (tests/test_remitwatch.remit, tests/test_features.svc).
 Each test runs on the server's store file and on the compact in-memory store the serverless cycle builds and analyses.
@@ -207,4 +208,70 @@ def test_no_item_is_made_from_a_payers_answer_to_a_voided_claim(tmp_path, kind):
     d.load()
     paid_505 = [ln["line_key"] for ln in d.lines if ln["patient_control_number"] == "CB0000505C017" and ln["claim_status_code"] == "1"]
     assert paid_505 and not any(k in d.standing for k in paid_505), "the void's reversal no longer takes the payment back"
+    s.close()
+
+
+# --------------------------------------------------------------------------- CH-8: one payer's remittances stop
+
+def _stopped(checks: list[dict]) -> dict | None:
+    return next((h for h in checks if h.get("key") == "payer_stopped"), None)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_payer_whose_remittances_stopped_has_its_claims_counted_not_listed_as_never_answered(tmp_path, kind):
+    """Anthem's remittances reach November 10; Humana's stop on September 25 (its files no longer come, or it stopped
+    sending them), and the feed reaches November 10. EMA shows claims sent that no remittance answers:
+    - H01, sent to Humana October 1 (due October 31): Humana's remittances do not reach that day, so nothing on file says
+      whether it answered. It is not listed as never answered (before, it was: misuse check CH-8), and the Data tab's
+      checks say "No remittance from Humana since 2026-09-25" with the claim and its dollars, from the store on a server
+      and from the dashboard's copy on the serverless site.
+    - H02, sent to Humana August 1 (due August 31): Humana's remittances run past that day and do not answer it. Listed.
+    - A01, sent to Anthem October 1: Anthem's remittances reach past its due date. Listed.
+    - Z01, sent to Aetna October 1: no remittance from Aetna is on file at all, so nothing says a feed of its stopped. It
+      is judged by the feed date as before: listed, with the hint that no remittance from Aetna is on file.
+    - U01, sent to UnitedHealthcare October 9 (due November 8), whose last remittance is November 5: between two files,
+      not stopped. It waits for UnitedHealthcare's next file and is counted, but the Data tab does not name a payer only
+      5 days behind the feed (the feed check allows the whole feed 10)."""
+    from remitwatch import cloud, insights
+    from tests.test_features import claim
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    humana = [claim(800 + i, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20260814"), dos="20260814") for i in range(5)]
+    _add(s, tmp_path, humana, "20260925", payer="HUMANA", payer_id="HUMNA")
+    uhc = [claim(820 + i, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20261001"), dos="20261001") for i in range(3)]
+    _add(s, tmp_path, uhc, "20261105", payer="UNITEDHEALTHCARE", payer_id="87726")
+    _add(s, tmp_path, _visits(), "20261110")
+    c = s.conn
+    ema(c, "CB0000H01C017", payer="Humana", payer_id="61101", service_date="2026-09-30", bill_created="2026-10-01")
+    ema(c, "CB0000H02C017", payer="Humana", payer_id="61101", service_date="2026-07-31", bill_created="2026-08-01")
+    ema(c, "CB0000A01C017", service_date="2026-09-30", bill_created="2026-10-01")
+    ema(c, "CB0000Z01C017", payer="Aetna", payer_id="60054", service_date="2026-09-30", bill_created="2026-10-01")
+    ema(c, "CB0000U01C017", payer="UnitedHealthcare", payer_id="87726", service_date="2026-10-08", bill_created="2026-10-09")
+    c.commit()
+    found = _chased(s, "t1")
+    print("listed:", sorted(found))
+    assert set(found) == {"CB0000H02C017", "CB0000A01C017", "CB0000Z01C017"}, (
+        f"listed {sorted(found)}: H01 and U01 are due after their payer's last remittance, so nothing can say they went unanswered")
+    assert "No remittance from Aetna is on file at all" in found["CB0000Z01C017"]["hint"]
+    saved = json.loads(s.conn.execute("SELECT value FROM meta WHERE key='feed:payers_behind'").fetchone()[0])
+    assert [(p["payer"], p["since"], p["claims"], p["billed_cents"]) for p in saved] == [
+        ("Humana", "2026-09-25", 1, 22365), ("UnitedHealthcare", "2026-11-05", 1, 22365)], f"the held claims are not all counted: {saved}"
+    copy = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(s.conn, copy)
+    served = Store(copy)
+    for where, conn in (("store", s.conn), ("dashboard's copy", served.conn)):
+        check = _stopped(insights.data_health(conn, "2026-11-10", "2026-11-12"))
+        print(where, check)
+        assert check is not None and not check["ok"], f"nothing on the Data tab ({where}) says Humana's remittances stopped"
+        assert check["title"] == "No remittance from Humana since 2026-09-25"
+        assert check["n"] == 1 and check["cents"] == 22365
+        assert "1 claim sent to Humana and due since then ($223.65 billed) is not listed as never answered" in check["detail"]
+    served.close()
+    # Humana's remittances come in again, through November 10, and still do not answer H01: it is listed, and the check clears
+    # (U01 still waits for UnitedHealthcare's next file, which is not named)
+    _add(s, tmp_path, [claim(810, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20261020"), dos="20261020")],
+         "20261110", payer="HUMANA", payer_id="HUMNA")
+    found = _chased(s, "t2")
+    assert set(found) == {"CB0000H01C017", "CB0000H02C017", "CB0000A01C017", "CB0000Z01C017"}
+    assert _stopped(insights.data_health(s.conn, "2026-11-10", "2026-11-12")) is None, "a payer between two files is named as stopped"
     s.close()

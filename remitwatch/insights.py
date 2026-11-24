@@ -613,6 +613,35 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
                               "them, ask TriZetto for them)." if gap else
                               "Billing lead, with TriZetto: ask whether newer remittances exist and why they are not in the downloads." if recent
                               else "Billing lead: put the latest TriZetto downloads in the Dropbox folder.")})
+    # One payer's remittances stopped while the feed goes on (misuse check CH-8): the claims sent to it and due since its last
+    # remittance are not listed as never answered, since nothing on file says whether it answered them. The analysis saves
+    # them (detect.PAYERS_BEHIND_META), most dollars first; a payer is named once its last remittance is more than
+    # PAYER_QUIET_DAYS behind the day the feed reaches (before that it is between two files).
+    from .detect import PAYER_QUIET_DAYS, PAYERS_BEHIND_META
+
+    def quiet(p: dict) -> bool:
+        try:
+            return (date.fromisoformat(reach) - date.fromisoformat(str(p["since"])[:10])).days > PAYER_QUIET_DAYS
+        except ValueError:
+            return True             # a date no calendar has: named, so that a person looks
+    behind = [p for p in _meta(conn, PAYERS_BEHIND_META) or [] if isinstance(p, dict) and p.get("payer") and p.get("since") and quiet(p)]
+    if behind:
+        def held(p: dict) -> str:
+            k, c = int(p.get("claims") or 0), int(p.get("billed_cents") or 0)
+            return (f"{k} {'claim' if k == 1 else 'claims'} sent to {p['payer']} and due since then (${c / 100:,.2f} billed) "
+                    f"{'is' if k == 1 else 'are'} not listed as never answered")
+        n, cents = sum(int(p.get("claims") or 0) for p in behind), sum(int(p.get("billed_cents") or 0) for p in behind)
+        one = behind[0]
+        items.append({"key": "payer_stopped", "ok": False, "n": n, "cents": cents, "payers": behind[:20],
+                      "title": (f"No remittance from {one['payer']} since {one['since']}" if len(behind) == 1 else
+                                f"No recent remittance from {len(behind)} payers: "
+                                + ", ".join(f"{p['payer']} (since {p['since']})" for p in behind[:3]) + (", and more" if len(behind) > 3 else "")),
+                      "detail": (f"{held(one)}: nothing on file says whether {one['payer']} answered {'it' if n == 1 else 'them'}."
+                                 if len(behind) == 1 else
+                                 "; ".join(f"{p['payer']}, no remittance since {p['since']}: {held(p)}" for p in behind[:5])
+                                 + ("; and more" if len(behind) > 5 else "") + ". Nothing on file says whether those payers answered them."),
+                      "who": "Billing lead, with TriZetto: ask why the payer's remittances stopped (its ERA enrollment, or files missing from the "
+                             "downloads) and put any missing files in the Dropbox folder. Until they are in, check those claims on the payer's portal."})
     items += trizetto_health(conn, today)
     # versions of one remittance that differ (remitwatch.store.mark_superseded): no rule can say which stands, so both are
     # counted until a person checks

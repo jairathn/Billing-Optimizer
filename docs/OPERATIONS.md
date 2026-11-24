@@ -138,10 +138,15 @@ the item says how much and since when. Work it as any other item, and reverse th
 
 EMA's exports say which claims went out; the remittances say which ones a payer answered. A claim EMA shows sent to a
 payer is listed once 30 days have passed since it was sent (`REMITWATCH_NO_ANSWER_DAYS`) and the remittances on file
-reach that day (a feed that stopped never makes newer claims look unanswered), when nothing answers it:
+reach that day, its own payer's too (a feed that stopped never makes newer claims look unanswered; when one payer's
+remittances stop while the others' go on, the claims sent to it and due since its last remittance are not listed, and once
+that remittance is more than ten days behind the feed the Data tab says so: "No remittance from Humana since 2026-09-25",
+with how many claims and how many dollars), when nothing answers it:
 
-- no remittance for it (another submission's answer, from this payer or another, is not this claim's: the item says when
-  one came; a later submission of the bill that was answered supersedes it);
+- no remittance in which a payer processed it as primary, and none from the payer EMA billed it to (another submission's
+  answer, from this payer or another, is not this claim's: the item says when one came; a later submission of the bill
+  that was answered supersedes it). A claim only another payer processed as secondary is still waiting for its primary's
+  remittance: it stays listed, the item says what that payer paid as its share, and it is sized at what is left;
 - no ERA line posted in EMA for it (the payer's answer reached EMA even if its 835 never reached the site);
 - nothing paid by insurance in EMA, by the newest export, net of anything taken back: the Insurance Payments column, or a
   Payment row whose activity or payment method says insurance (ERA, EFT). A Payment row that only names the payer could be

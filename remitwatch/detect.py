@@ -252,6 +252,15 @@ def real_day(d) -> str | None:
 
 FEED_WINDOW_DAYS = 120          # the remittance lines that weigh each payer group's say in feed_date
 FEED_META = "feed:date"         # the feed date the last analysis used, for a copy that does not hold every line (Vercel's)
+# The payers whose remittances stop before the day a claim sent to them was due, while the feed goes on (misuse check CH-8):
+# [{"payer", "since" (its last remittance), "claims", "billed_cents"}], most dollars first. Those claims are not judged
+# unanswered (run_ema_open_claims), and the Data tab's checks name each payer (insights.data_health). Each analysis saves
+# it, and the dashboard's copy carries it.
+PAYERS_BEHIND_META = "feed:payers_behind"
+# The Data tab names such a payer once its last remittance is more than PAYER_QUIET_DAYS before the day the feed reaches
+# (the ten days its feed check allows the whole feed): a payer that pays every week or so is between two files, not
+# stopped, and the claims due since its last file wait for the next one.
+PAYER_QUIET_DAYS = 10
 # A hole in the feed: more than FEED_GAP_DAYS in a row with no remittance from any payer, followed by newer ones (weeks a
 # person forgot to put in the folder, then the newest week). Nobody can see what the payers paid in the hole, so the feed
 # reaches only the last day before it. The live archive's longest stretch without a payment from mid-2024 to its end was
@@ -633,6 +642,7 @@ class Detector:
         self.second_rates: dict[tuple, list] = defaultdict(list)     # (baseline key, amount) -> lines the payer routinely allowed less
         self.ema_paid: dict[tuple, tuple] = {}                        # (claim id, code, date) -> (insurance payments in EMA, export)
         self.ema_patient: dict[str, str] = {}                         # claim id -> EMA patient id (full charge layout only)
+        self.payers_behind: list[dict] = []                           # PAYERS_BEHIND_META, from run_ema_open_claims
         self.worked_underpaid: set[str] = {r[0] for r in store.conn.execute(
             """SELECT line_key FROM findings WHERE signal='UNDERPAID_VS_OWN_RATE' AND line_key IS NOT NULL
                AND (status != 'open' OR notes IS NOT NULL OR appealed_at IS NOT NULL)""")}       # their own finding is kept, never folded
@@ -2372,6 +2382,7 @@ class Detector:
         that limit (except Medicare, whose year is firm). Both signals of one claim share its id, so the work people record
         follows the claim from one to the other; save() hands it to the claim's own answer or its later submission."""
         c = self.conn
+        self.payers_behind = []
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "ema_rows" not in tables:
             return
@@ -2633,6 +2644,7 @@ class Detector:
                     paid_visits.setdefault(hash((pat, v[1], v[0])), set()).add(bill_of(pcn))
 
         cands: list[dict] = []
+        behind: dict[str, dict] = {}        # payer group -> the claims due after its last remittance (PAYERS_BEHIND_META)
         for pcn, k in claims.items():
             b = bill_of(pcn)
             if latest.get(b) != pcn or not k["payers"]:
@@ -2673,9 +2685,19 @@ class Detector:
             due = _add_days(sent, NO_ANSWER_DAYS)
             if not rejected and (not due or due > newest):
                 continue                    # not due yet, or the remittances on file do not reach the day it was due
+            # Its own payer's remittances must reach that day too (misuse check CH-8): when they stop before it while the feed
+            # goes on, nothing on file says whether that payer answered. The claim is counted under its payer for the Data
+            # tab, not listed. A payer with no remittance on file at all is judged by the feed date, with its own hint.
+            group = group_of(k)
+            last = payer_last.get(group[0]) or name_last.get(normalize_payer(group[0])[0]) or name_last.get(normalize_payer(ema_payer)[0])
+            if not rejected and not unsent and last and due > last:
+                held = behind.setdefault(group[0], {"payer": group[0], "since": last, "claims": 0, "billed_cents": 0})
+                held["claims"] += 1
+                held["billed_cents"] += sum(x[2] for x in items)
+                continue
             cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
                           "again_after": again_after, "rejected": rejected, "unsent": unsent, "gave_up": gave_up, "status": status,
-                          "ema_payer": ema_payer, "group": group_of(k), "secondary": second.get(pcn) or [],
+                          "ema_payer": ema_payer, "group": group, "payer_last": last, "secondary": second.get(pcn) or [],
                           "bill_answered": bill_answered.get(b) if (bill_answered.get(b) or "") >= sent else None})
         # one visit chased under two bills (a bill made again): only the newest carries it
         newest_for: dict[int, tuple] = {}
@@ -2691,9 +2713,10 @@ class Detector:
             items = [x for x in cd["items"] if not (patient and x[1] and newest_for.get(hash((patient, x[1], x[0])), (None, b))[1] != b)]
             if not items:
                 continue                    # chased under the newer bill made for the same visit
-            self._emit_open_claim(cd, items, newest, payer_last, name_last)
+            self._emit_open_claim(cd, items, newest)
+        self.payers_behind = sorted(behind.values(), key=lambda h: (-h["billed_cents"], h["payer"]))
 
-    def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str, payer_last: dict, name_last: dict) -> None:
+    def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str) -> None:
         """One claim no payer answered (run_ema_open_claims): its payer group, size, filing date and item. A claim still in
         EMA's print batch (cd["unsent"]) was never sent: it is listed under Fix and resubmit, dated by the first-filing limit.
         A claim only another payer answered (cd["secondary"]: its answers, processed as secondary or otherwise) says so, and
@@ -2730,7 +2753,7 @@ class Detector:
                  "payer_id": payer_id, "service_date": days[0],
                  "year": year, "procedure_code": top, "charge_cents": billed or None,
                  "rendering_provider_name": k["providers"].most_common(1)[0][0] if k["providers"] else None}
-        last = payer_last.get(grp) or name_last.get(normalize_payer(grp)[0]) or name_last.get(normalize_payer(ema_payer)[0])
+        last = cd.get("payer_last")         # its payer's last remittance, or none (a claim sent is due on or before it: CH-8)
         ev = {"codes": codes, "billed_cents": billed or None, "sent": sent, "sent_basis": cd["basis"], "answer_due": due,
               "newest_remittance": newest, "ema_status": status or None, "payer_in_ema": ema_payer, "lines": lines,
               "days_waiting": _days_between(sent, newest), "payer_last_remittance": last}
@@ -2812,13 +2835,10 @@ class Detector:
         if k["amb_paid"]:
             hints.append(f"EMA shows ${k['amb_paid']/100:,.2f} paid on this claim by a payment row that names {ema_payer} but is "
                          "not marked insurance or patient: if it is the insurer's, the claim was answered")
-        if not rejected and not unsent:
-            if last and due and last < due:
-                hints.append(f"No remittance from {grp} since {last}: its remittances may be missing (Data tab), so check its "
-                             "portal before sending the claim again")
-            elif not last:
-                hints.append(f"No remittance from {grp} is on file at all: check its portal, and whether its ERAs are enrolled, "
-                             "before sending the claim again")
+        # (a claim due after its payer's last remittance is not listed at all: run_ema_open_claims counts it for the Data tab)
+        if not rejected and not unsent and not last:
+            hints.append(f"No remittance from {grp} is on file at all: check its portal, and whether its ERAs are enrolled, "
+                         "before sending the claim again")
         if hints:
             f["hint"] = ". ".join(hints)
 
@@ -3318,6 +3338,8 @@ class Detector:
             day = feed_date(self.conn, hole=hole)
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                               (FEED_META, json.dumps({"date": day, "gap": hole or None, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})))
+            # and the payers whose remittances stop before claims sent to them were due (CH-8), for the Data tab's checks
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (PAYERS_BEHIND_META, json.dumps(self.payers_behind)))
             self.conn.commit()
         except sqlite3.Error:
             self.conn.rollback()        # the analysis is saved; the API works the date out from the store, or the newest payment
