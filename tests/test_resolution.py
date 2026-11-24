@@ -380,7 +380,11 @@ def test_physician_lines_at_85_percent_stay_appeals_with_deadlines(tmp_path):
     store = build_store(tmp_path, [cl(100 + i, "99214", "223.65", "117.60") for i in range(25)] + [cl(200 + i, "99214", "223.65", "100.00") for i in range(6)])
     Detector(store, run_id="t").run()
     rows = underpaid(store)
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6 and all(r["appeal_deadline"] and r["actionable"] == "appeal" for r in rows)
+    # six lines at one amount with no reason that holds for a physician: listed with their deadlines, as one routine-rate item to
+    # review (trace finding T-N4: not one appeal per line), and not explained away as the PA/NP rate
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["appeal_deadline"] and rows[0]["actionable"] == "review"
+    ev = json.loads(rows[0]["evidence"])
+    assert ev["lines"] == 6 and rows[0]["shortfall_cents"] == 6 * 1760 and "physician assistant" not in ev["note"]
     store.close()
 
 
@@ -391,7 +395,10 @@ def test_a_cut_on_the_pa_rate_is_not_explained_as_the_pa_rate(tmp_path):
     store = build_store(tmp_path, [cl(100 + i, "99214", "223.65", "100.00", npi=PA_NPI) for i in range(25)]
                         + [cl(200 + i, "99214", "223.65", "85.00", npi=PA_NPI) for i in range(6)])
     Detector(store, run_id="t").run()
-    assert [r["signal"] for r in underpaid(store)] == ["UNDERPAID_VS_OWN_RATE"] * 6
+    # one routine-rate item to review (trace finding T-N4), short of the PA's own rate, never explained as the PA rate
+    rows = underpaid(store)
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["shortfall_cents"] == 6 * 1500
+    assert "physician assistant" not in json.loads(rows[0]["evidence"])["note"]
     store.close()
 
 
@@ -440,7 +447,9 @@ def test_a_visit_at_half_rate_is_not_called_the_multiple_procedure_rule(tmp_path
     store = build_store(tmp_path, [cl(100 + i, "99214", "223.65", "117.60") for i in range(25)] + [cl(200 + i, "99214", "223.65", "58.80") for i in range(6)])
     Detector(store, run_id="t").run()
     rows = underpaid(store)
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6
+    # one routine-rate item to review (trace finding T-N4), and a visit is never "the multiple-procedure rule"
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and json.loads(rows[0]["evidence"])["lines"] == 6
+    assert "multiple-procedure" not in json.loads(rows[0]["evidence"])["note"]
     store.close()
 
 

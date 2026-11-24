@@ -134,6 +134,26 @@ RADIATION_CODES = {"77401", "77402", "77407", "77412", "77427", "77431", "77432"
 SKIN_SUBSTITUTE_RE = re.compile(r"^Q4[0-9]{3}$|^A2[0-9]{3}$|^C9[0-9]{3}$")
 DRUG_RE = re.compile(r"^J[0-9]{4}$")
 
+# Unlisted procedure codes (CPT) and not-otherwise-classified codes (HCPCS): each claim is priced on its own (an
+# unclassified drug, J3490, can be any drug), so the amounts a payer allowed for the code are no rate for another claim
+# of it (the owner's rule on rate evidence, plans/audit_calibration_2026-11-24.md section 3 fix 5).
+UNLISTED_CODES = frozenset({
+    "15999", "17999", "19499", "20999", "21299", "21499", "22899", "22999", "23929", "24999", "25999", "26989", "27299",
+    "27599", "27899", "28899", "29799", "29999", "30999", "31299", "31599", "36299", "37799", "38999", "40799", "40899",
+    "41599", "41899", "42299", "42699", "42999", "46999", "54699", "55899", "58999", "60699", "64999", "66999", "67299",
+    "67399", "67599", "67999", "68399", "68899", "69399", "69799", "69949", "69979", "76499", "76999", "77299", "77399",
+    "77499", "77799", "79999", "84999", "85999", "86849", "87999", "88099", "88199", "88299", "88399", "89240", "90749",
+    "90899", "92499", "93799", "94799", "95199", "95999", "96379", "96549", "96999", "97039", "97139", "97799", "99199",
+    "99429", "99499", "99600",
+    "J3490", "J3590", "J3591", "J7599", "J7699", "J7799", "J7999", "J8499", "J8597", "J8999", "J9999", "C9399", "A4649",
+    "A9698", "A9699", "A9999", "E1399", "L8699", "Q4100", "T1999", "T5999",
+})
+
+
+def is_unlisted(code: str | None) -> bool:
+    """An unlisted or not-otherwise-classified code: priced claim by claim, so it has no rate of its own."""
+    return (code or "").strip().upper() in UNLISTED_CODES
+
 
 # What may be shown, exported, searched and printed in a letter as a member number. A payer can also send a Social
 # Security number (34), the old Medicare claim number built on one (HN) or a tax ID (FI) in the same place, and a

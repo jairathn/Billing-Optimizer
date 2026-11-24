@@ -157,8 +157,10 @@ def test_the_commonest_plan_explains_lines_it_is_paid_the_usual_rate_on(tmp_path
     for r in rows:
         if r["signal"] == "SECOND_RATE":
             print("NOTE:", r["evidence"]["note"])
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6, \
+    assert not any("PPO" in r["evidence"]["note"] for r in rows if r["signal"] == "SECOND_RATE"), \
         "a plan paid the usual rate on 72 percent of the usual-rate visits is given as the reason six of its visits were paid less"
+    # no reason holds: the six are one routine-rate item to review (trace finding T-N4), not six appeals
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["evidence"]["lines"] == 6
     store.close()
 
 
@@ -183,6 +185,8 @@ def test_the_office_most_visits_are_in_explains_lines_it_is_paid_the_usual_rate_
     for r in rows:
         if r["signal"] == "SECOND_RATE":
             print("NOTE:", r["evidence"]["note"], "| by office:", r["evidence"]["by_office_state"])
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6, \
+    assert not any("Kentucky" in r["evidence"]["note"] for r in rows if r["signal"] == "SECOND_RATE"), \
         "the office where most usual-rate visits happen is given as the reason six of its visits were paid less"
+    # no reason holds: the six are one routine-rate item to review (trace finding T-N4), not six appeals
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["evidence"]["lines"] == 6
     store.close()

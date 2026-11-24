@@ -91,7 +91,9 @@ def test_level_of_care_reduction_keeps_the_code_and_facility_rate_is_not_underpa
     # an office visit quietly allowed below the usual rate: still an underpayment
     claims.append(claim(202, svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~"), cfi="16"))
     store = build_store(tmp_path, claims)
-    summary = Detector(store, run_id="t").run()
+    # run while the plan's 120 days from the April remittance still run: a short payment found after its window closed is
+    # no new item (trace finding T-N4)
+    summary = Detector(store, run_id="t", today="2026-05-01").run()
     assert summary.get("DOWNCODE_LEVEL_REDUCED") == 1
     f = store.query("SELECT * FROM findings WHERE signal='DOWNCODE_LEVEL_REDUCED'")[0]
     assert f["procedure_code"] == "99214" and f["shortfall_cents"] == 5171 and f["expected_cents"] == 12780
