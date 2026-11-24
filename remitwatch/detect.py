@@ -756,6 +756,10 @@ def payer_company(group: str | None) -> str:
     if g in MANY_PAYER_GROUPS:
         return "=" + g.lower()
     first = re.split(r"[^a-z0-9]+", g.lower())[0]
+    if first in ("medicaid", "medicare"):
+        # a state's Medicaid, the Medicaid plans no group names (United Healthcare's community plan...), a Medicare
+        # contractor: each is only itself
+        return "=" + g.lower()
     return _COMPANY_ALIASES.get(first, first)
 
 
@@ -3296,63 +3300,87 @@ class Detector:
         seconds = {cd["pcn"]: [x[1] for x in cd.get("secondary") or [] if x[1]] for cd in cds}
         sep = ("AND NOT EXISTS (SELECT 1 FROM ema_checks s WHERE s.check_no = y.check_no AND s.payer = y.payer AND s.cause = 'separate_payee')"
                if c.execute("SELECT 1 FROM sqlite_master WHERE name='ema_checks'").fetchone() else "")
-
-        def counts(cid: str, grp: str | None, payer: str | None) -> bool:
-            # the posting's own payer, by its name: the summary's payer group is its line's, the same for every posting
-            g = (normalize_payer(payer)[0] if payer else None) or grp
-            if not seconds.get(cid):
-                return True
-            return bool(g) and not any(ec._same_payer(g, s) or payer_company(g) == payer_company(s) for s in seconds[cid])
-        hits: list[tuple] = []          # (key, payer group, payer name)
+        hits: list[tuple] = []          # (key, EMA claim number, payer group, payer name, settled)
         for kind, keys, col in (("l", sorted(by_link), "link"), ("n", sorted(by_name), "name_key")):
             for i in range(0, len(keys), 500):
                 c.execute("DROP TABLE IF EXISTS temp.d837_ek")
                 c.execute("CREATE TEMP TABLE d837_ek (k INTEGER, svc TEXT, cpt TEXT)")
                 c.executemany("INSERT INTO temp.d837_ek VALUES (?, ?, ?)", keys[i:i + 500])
-                for k, svc, cpt, grp, payer in c.execute(
-                        f"""SELECT y.{col}, y.svc, y.cpt, y.payer_group, y.payer FROM temp.d837_ek x
+                for k, svc, cpt, lk, grp, payer in c.execute(
+                        f"""SELECT y.{col}, y.svc, y.cpt, y.link, y.payer_group, y.payer FROM temp.d837_ek x
                             JOIN ema_line_payments y ON y.{col} = x.k AND y.svc = x.svc AND y.cpt = x.cpt
                             WHERE (COALESCE(y.ins_paid, 0) <> 0 OR COALESCE(y.check_no, '') <> '') {sep}"""):
-                    hits.append(((kind, k, svc, cpt), grp, payer))
+                    hits.append(((kind, k, svc, cpt), lk, grp, payer, False))
                 # a line EMA shows settled: nothing open, the payer's contractual write-down posted, no write-off of the
                 # practice's own, and money paid on it (by insurance, or by the patient: the allowed amount was theirs)
-                for k, svc, cpt, payer in c.execute(
-                        f"""SELECT l.{col}, l.svc, l.cpt, COALESCE(l.primary_payer, l.payer_group) FROM temp.d837_ek x
+                for k, svc, cpt, lk in c.execute(
+                        f"""SELECT l.{col}, l.svc, l.cpt, l.link FROM temp.d837_ek x
                             JOIN ema_lines l ON l.{col} = x.k AND l.svc = x.svc AND l.cpt = x.cpt
                             WHERE COALESCE(l.balance, 0) <= 0 AND COALESCE(l.charges, 0) > 0 AND COALESCE(l.contractual, 0) > 0
                               AND COALESCE(l.noncontractual, 0) = 0 AND COALESCE(l.ins_paid, 0) + COALESCE(l.pat_paid_joined, 0) > 0"""):
-                    hits.append(((kind, k, svc, cpt), None, payer))
+                    hits.append(((kind, k, svc, cpt), lk, None, None, True))
         c.execute("DROP TABLE IF EXISTS temp.d837_ek")
-        for key, grp, payer in hits:
+        names = self._secondary_names({h[1] for h in hits if h[1] is not None})
+        for key, lk, grp, payer, settled in hits:
             for cid in want.get(key, ()):
-                if counts(cid, grp, payer):
+                if settled or not seconds.get(cid) or not self._is_secondary_posting(lk, payer, grp, seconds[cid], names):
                     out[cid].add((key[2], key[3]))
         return out
+
+    def _secondary_names(self, links) -> dict[int, set]:
+        """Each EMA claim's payer names on the postings EMA matched to a remittance on file (in_835): on a claim only a
+        secondary answered (T-C2, or its own payer as secondary after a coordination denial), the secondary's own names."""
+        out: dict[int, set] = defaultdict(set)
+        lks = sorted({int(x) for x in links if x is not None})
+        c = self.conn
+        for i in range(0, len(lks), 500):
+            c.execute("DROP TABLE IF EXISTS temp.d837_sn")
+            c.execute("CREATE TEMP TABLE d837_sn (link INTEGER PRIMARY KEY)")
+            c.executemany("INSERT OR IGNORE INTO temp.d837_sn VALUES (?)", [(x,) for x in lks[i:i + 500]])
+            for lk, payer in c.execute("""SELECT DISTINCT y.link, y.payer FROM ema_line_payments y
+                                          WHERE y.link IN (SELECT link FROM temp.d837_sn) AND COALESCE(y.in_835, 0) = 1
+                                            AND COALESCE(y.payer, '') <> ''"""):
+                out[lk].add(payer)
+        c.execute("DROP TABLE IF EXISTS temp.d837_sn")
+        return out
+
+    @staticmethod
+    def _is_secondary_posting(link, payer: str | None, grp: str | None, seconds: list, names: dict) -> bool:
+        """An EMA posting on a claim only a secondary answered is that secondary's own when its payer is a name the claim's
+        postings matched to the remittances carry (only the secondary's remittance is on file); under any other name it is
+        another payer's, the primary's (EMA's groups cannot tell a state's Medicaid from a Medicaid plan: both are
+        'Medicaid (other)'). With no posting matched to a remittance, the payer's group decides, by its family."""
+        from . import ema_checks as ec
+        own = names.get(link) or set()
+        if payer and payer in own:
+            return True
+        if own:
+            return False
+        g = (normalize_payer(payer)[0] if payer else None) or grp
+        return not g or any(g == s or ec._same_payer(g, s) or payer_company(g) == payer_company(s) for s in seconds)
 
     def _primary_posted(self, claims: list[tuple]) -> set[str]:
         """The claims among these that EMA's postings show answered by a payer other than the ones that answered them as
         secondary: [(claim id, EMA claim number, sent, the secondary payers' groups)]. A payment or a $0 check on the claim's
         EMA claim (never one under the surgery center's separate-payee checks) by another payer is the primary's answer,
         whatever its day (the primary answers before the claim goes to the secondary): then nothing is left to chase (the
-        coordinator's addition to T-I2; T-C2)."""
-        from . import ema_checks as ec
+        coordinator's addition to T-I2; T-C2). Whose a posting is: _is_secondary_posting."""
         rows = [(cid, lk, sent) for cid, lk, sent, _g in claims if lk is not None and sent]
         if not rows:
             return set()
         groups = {cid: [g for g in gs if g] for cid, _lk, _s, gs in claims}
         c = self.conn
         got: set[str] = set()
+        names = self._secondary_names([lk for _cid, lk, _s in rows])
         c.execute("DROP TABLE IF EXISTS temp.d837_pp")
         c.execute("CREATE TEMP TABLE d837_pp (cid TEXT, link INTEGER, sent TEXT)")
         c.executemany("INSERT INTO temp.d837_pp VALUES (?, ?, ?)", rows)
         sep = ("AND NOT EXISTS (SELECT 1 FROM ema_checks s WHERE s.check_no = y.check_no AND s.payer = y.payer AND s.cause = 'separate_payee')"
                if c.execute("SELECT 1 FROM sqlite_master WHERE name='ema_checks'").fetchone() else "")
-        for cid, grp, payer in c.execute(
-                f"""SELECT x.cid, y.payer_group, y.payer FROM temp.d837_pp x JOIN ema_line_payments y ON y.link = x.link
+        for cid, lk, grp, payer in c.execute(
+                f"""SELECT x.cid, y.link, y.payer_group, y.payer FROM temp.d837_pp x JOIN ema_line_payments y ON y.link = x.link
                     WHERE (COALESCE(y.ins_paid, 0) <> 0 OR COALESCE(y.check_no, '') <> '') {sep}"""):
-            # the posting's own payer, by its name: the summary's payer group is its line's, the same for every posting
-            g = (normalize_payer(payer)[0] if payer else None) or grp
-            if g and not any(ec._same_payer(g, s) or payer_company(g) == payer_company(s) for s in groups.get(cid, [])):
+            if not self._is_secondary_posting(lk, payer, grp, groups.get(cid, []), names):
                 got.add(cid)
         c.execute("DROP TABLE IF EXISTS temp.d837_pp")
         return got

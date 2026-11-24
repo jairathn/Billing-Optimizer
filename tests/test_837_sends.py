@@ -532,7 +532,8 @@ def test_the_primarys_posting_is_told_by_its_payers_name_not_the_summarys_group(
     """EMA's payment summary can carry another payer's group on a posting (a learned alias put United Healthcare's postings
     under 'Medicaid (other)' on the real data). A claim Medicaid KY answered as secondary, with United Healthcare's
     payment posted on its EMA claim, was answered by its primary (nothing to chase); one with only Medicaid's own
-    postings was not."""
+    postings was not. Nor are two Medicaid payers one payer: a Medicaid plan's payment (United Healthcare's community plan)
+    on a claim the state's Medicaid answered as secondary is the primary's answer."""
     from remitwatch import ema_reports as er
     s = _store(tmp_path, kind)
     er.ensure_schema(s.conn)
@@ -540,11 +541,15 @@ def test_the_primarys_posting_is_told_by_its_payers_name_not_the_summarys_group(
                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                        [(7001, "2026-03-02", "99213", "CHK1", "2026-03-20", "United Healthcare", "Medicaid (other)", "other", 6457, 1, 0),
                         (7001, "2026-03-02", "99213", "CHK2", "2026-04-20", "Medicaid of Kentucky", "Medicaid (other)", "secondary", 0, 1, 1),
-                        (7002, "2026-03-02", "99213", "CHK3", "2026-04-20", "Medicaid of Kentucky", "Medicaid (other)", "secondary", 0, 1, 1)])
+                        (7002, "2026-03-02", "99213", "CHK3", "2026-04-20", "Medicaid of Kentucky", "Medicaid (other)", "secondary", 0, 1, 1),
+                        (7003, "2026-03-02", "99213", "CHK4", "2026-03-20", "United Healthcare Medicaid Community Plan", "Medicaid (other)",
+                         "other", 6457, 1, 0),
+                        (7003, "2026-03-02", "99213", "CHK5", "2026-04-20", "Medicaid of Kentucky", "Medicaid (other)", "secondary", 0, 1, 1)])
     s.conn.commit()
     det = Detector(s, run_id="t", today="2026-05-03")
-    got = det._primary_posted([("CLAIM1", 7001, "2026-04-01", ["Medicaid KY"]), ("CLAIM2", 7002, "2026-04-01", ["Medicaid KY"])])
-    assert got == {"CLAIM1"}, f"answered by the primary: {sorted(got)}"
+    got = det._primary_posted([("CLAIM1", 7001, "2026-04-01", ["Medicaid KY"]), ("CLAIM2", 7002, "2026-04-01", ["Medicaid KY"]),
+                               ("CLAIM3", 7003, "2026-04-01", ["Medicaid KY"])])
+    assert got == {"CLAIM1", "CLAIM3"}, f"answered by the primary: {sorted(got)}"
     s.close()
 
 
