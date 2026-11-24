@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-23, about 20:00 UTC.
+Last updated: 2026-11-24, about 04:00 UTC.
 
 ## 1. Where things are
 
@@ -50,10 +50,10 @@ Last updated: 2026-11-23, about 20:00 UTC.
 
 1. Round-1 review fixes: all merged here (mr-1, mr-2, mr-3, mr-4 in-flight case, mr-5, mr-7, mr-8, mr-9, mr-10, mr-11,
    mr-12), each with failing-first tests (tests/test_feed_and_day.py, tests/test_notes_bodies_cli.py and others).
-2. Round 2 (started 2026-11-23 about 20:00 UTC from 58d836b, three fixers on local branches fix2/status-and-sends,
-   fix2/alarms-and-gaps, fix2/money-falls-off): the misuse check's CH-1, CH-2, CH-4, CH-10, CH-14; CH-3, CH-6; CH-8; and the
-   trace's T-C1 (a TC payment closing a 26 denial), T-C2 (a claim answered only by a secondary vanishes), T-N5 (items from
-   answers to voided claims). If those branches are gone, redo them from the descriptions in section 4 and the trace file.
+2. Round 2: merged here: CH-1, CH-2, CH-3, CH-4, CH-6, CH-10, CH-14. Still running (local branch fix3/money-falls-off from
+   1515ae5, one fixer): T-C1 (a TC payment closing a 26 denial), T-C2 (a claim answered only by a secondary vanishes), T-N5
+   (items from answers to voided claims), CH-8 (one payer stopping turns its paid claims into never-answered items). If
+   that branch is gone, redo them from section 4 and the trace file, or ship without them (they also belong to step 5).
    Every fix: a failing test with invented data first, both store kinds, break and restore.
 3. Run the four environments and the node checks (`plans/tools/four_envs.sh`), and the catch-up harness on a fresh copy of
    the live store (`plans/tools/catchup.py`). Every item that closes or leaves must be explained by a payment, a newer copy
@@ -61,7 +61,9 @@ Last updated: 2026-11-23, about 20:00 UTC.
 4. Push this branch's tip to `main` (fast-forward; pushing to main is authorized after review). Check the server's
    `/api/health` shows the commit; watch Vercel's next run (`status.json`: errors, `memory_mb.peak` with the 837s; the limit
    is 2,278 MB, the last peak 1,529 MB).
-5. Detection accuracy, then full visibility. First the findings in `plans/catchup_trace_2026-11-23.md` (one item per unit
+5. The owner's decision (2026-11-23): ship the hotfix, then work every claim before the next release
+   (`plans/claim_audit_design.md`: an independent auditor over every unit of service; not one item may be already worked or
+   paid, no owed money missing, nothing closed wrongly). Detection accuracy, then full visibility. First the findings in `plans/catchup_trace_2026-11-23.md` (one item per unit
    of service across resubmissions and reversals; void claims; services already paid; secondary processing settles a COB
    denial; take-backs whose reference embeds the claim id; the 26/TC split; an 837-based never-answered pass), each with a
    failing test built from the traced pattern (invented data). Then full visibility (the owner's goal, 2026-11-23): with 837s, 835s, EMA's A/R and Production reports and the weekly exports
