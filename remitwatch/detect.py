@@ -1264,12 +1264,15 @@ class Detector:
         Claim-level takebacks follow: PLB WO (an overpayment recovered) and FB (a balance carried forward, negative, or
         recovered, positive), each read for the claim it names (_plb_names: a claim id or a payer claim number, alone or
         among other text, trace finding T-I1), netted per claim and payer (a balance carried forward and recovered later is
-        taken once), and a reversal sent without service lines. Each takes back that payer's earlier payments on that claim.
+        taken once; an adjustment, CS or 72, naming the claim nets with them), and a reversal sent without service lines.
+        Each takes back that payer's earlier payments on that claim (for an entry naming a claim, the payer by its name: a
+        payer recoups under another of its payer ids).
         A PLB entry is skipped where a reversal of the claim the same day already took back as much, and where that payer's
         reversal of the claim (any date) already took the claim back and carried its balance forward under a reference
         naming no claim: the entry recovers that balance, not the claim's payment again."""
         when = lambda l: l.get("payment_date") or l.get("txn_payment_date") or ""          # noqa: E731
         payer = lambda l: l.get("payer_id") or l.get("payer_name")                         # noqa: E731
+        payer_word = lambda name: re.sub(r"[^A-Z0-9]", "", (name or "").upper())         # noqa: E731
         left: dict[str, int] = {}
         pos: dict[tuple, list] = defaultdict(list)
         revs = []
@@ -1321,34 +1324,47 @@ class Detector:
         self._count_not_on_file(lost)
         takebacks = []              # (references, cents, date, payer, kind)
         net: dict[tuple, list] = defaultdict(lambda: [0, ""])
-        plb_rows = self.conn.execute("""SELECT p.reference, p.amount_cents, t.payment_date, COALESCE(t.payer_id, t.payer_name), p.transaction_key
+        plb_rows = self.conn.execute("""SELECT p.reference, p.amount_cents, t.payment_date, COALESCE(t.payer_id, t.payer_name), p.transaction_key,
+                                               p.reason_code, t.payer_name
                                         FROM plb p JOIN transactions t ON t.transaction_key = p.transaction_key
-                                        WHERE t.superseded = 0 AND p.reason_code IN ('WO', 'FB') AND COALESCE(p.reference, '') <> ''""").fetchall()
+                                        WHERE t.superseded = 0 AND p.reason_code IN ('WO', 'FB', 'CS', '72') AND COALESCE(p.reference, '') <> ''""").fetchall()
         # each entry under the claim it names (a balance carried under the payer's claim number and recovered under the claim
-        # id, or the reverse, is one balance); an entry naming no claim on file nets under its own reference
+        # id, or the reverse, is one balance); an entry naming no claim on file nets under its own reference. An adjustment
+        # (CS) or authorized return (72) naming a claim nets with that claim's recoupments: a payer lists a recoupment and,
+        # in the same remittance, an adjustment of the same amount naming the claim that cancels it. Only a claim with a WO
+        # or FB entry is taken back; CS and 72 entries naming no claim are fees and other money, not the claim's.
+        # The payer of an entry naming a claim is known by its name: a payer sends remittances under more than one payer id,
+        # and a recoupment can come under another id than the payment it takes back (the claim id names one claim of the
+        # practice's). An entry naming no claim keeps its payer id. `by` is ("name", the payer's name) or ("key", its id)
         names, named = self._plb_names(plb_rows)
         carried: set[str] = set()       # remittances that carried a balance forward under a reference naming no claim
-        for (_ref, amount, day, who, tk), name in zip(plb_rows, names):
-            n = net[(name, who)]
+        recouped: set[tuple] = set()    # (name, by) with a WO or FB entry
+        for (_ref, amount, day, who, tk, code, pname), name in zip(plb_rows, names):
+            if code not in ("WO", "FB") and name not in named:
+                continue
+            by = ("name", payer_word(pname)) if name in named and payer_word(pname) else ("key", who)
+            n = net[(name, by)]
             n[0] += amount or 0
             n[1] = max(n[1], day or "")
-            if (amount or 0) < 0 and name not in named:
-                carried.add(tk)
-        takebacks += [((name,), amount, day, who, "wo") for (name, who), (amount, day) in net.items() if amount > 0]
+            if code in ("WO", "FB"):
+                recouped.add((name, by))
+                if (amount or 0) < 0 and name not in named:
+                    carried.add(tk)
+        takebacks += [((name,), amount, day, by, "wo") for (name, by), (amount, day) in net.items() if amount > 0 and (name, by) in recouped]
         # (claim id, payer) whose reversal sits in a remittance that carried a balance forward without naming the claim: a
         # later PLB entry naming the claim recovers that balance (a payer carries it under its own number and recovers it
         # under the claim's), which the reversal already took from the claim
         deferred: set[tuple] = set()
-        wanted = sorted({name for (name, _who), (amount, _d) in net.items() if amount > 0 and name in named}) if carried else []
+        wanted = sorted({name for (name, _by), (amount, _d) in net.items() if amount > 0 and name in named}) if carried else []
         for i in range(0, len(wanted), 500):
             part = wanted[i:i + 500]
-            for pcn, who_, tk in self.conn.execute(f"""SELECT c.patient_control_number, COALESCE(t.payer_id, t.payer_name), c.transaction_key
+            for pcn, pname, tk in self.conn.execute(f"""SELECT c.patient_control_number, t.payer_name, c.transaction_key
                                                        FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
                                                        WHERE t.superseded = 0 AND c.claim_status_code = '22' AND c.paid_cents < 0
                                                          AND c.patient_control_number IN ({','.join('?' * len(part))})""", part):
                 if tk in carried:
-                    deferred.add((pcn, who_))
-        takebacks += [(tuple(x for x in (pcn, cn) if x), -paid, day, who, "reversal") for pcn, cn, paid, day, who in self.conn.execute(
+                    deferred.add((pcn, ("name", payer_word(pname))))
+        takebacks += [(tuple(x for x in (pcn, cn) if x), -paid, day, ("key", who), "reversal") for pcn, cn, paid, day, who in self.conn.execute(
             """SELECT c.patient_control_number, c.payer_claim_control_number, c.paid_cents, COALESCE(c.payment_date, t.payment_date), COALESCE(t.payer_id, t.payer_name)
                FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
                WHERE t.superseded = 0 AND c.claim_status_code = '22' AND c.paid_cents < 0
@@ -1366,16 +1382,18 @@ class Detector:
                         by_id[pcn].add(ck)
                     if cn in part:
                         by_number[cn].add(ck)
-            for refs_, amount, day, who, kind in sorted(takebacks, key=lambda t: (t[2] or "", t[0])):
+            for refs_, amount, day, by, kind in sorted(takebacks, key=lambda t: (t[2] or "", t[0])):
                 if kind == "wo" and max((reversed_on.get((ref, day), 0) for ref in refs_), default=0) >= amount:
                     continue            # the same remittance reversed that claim: the WO reports the same money again
-                if kind == "wo" and any((ref, who) in deferred for ref in refs_):
+                if kind == "wo" and any((ref, by) in deferred for ref in refs_):
                     continue            # that payer's reversal took the claim back and carried the balance this recovers
+                ours = ((lambda l: payer_word(l.get("payer_name")) == by[1]) if by[0] == "name" else    # noqa: E731
+                        (lambda l: by[1] is None or payer(l) == by[1]))
                 paid = []
                 # the claim the takeback names by its id first; its payer claim number only when nothing under that id stands
                 for index in (by_id, by_number):
                     paid = [l for ck in sorted(set().union(*(index.get(ref, set()) for ref in refs_))) for l in self.lines_by_claim.get(ck, [])
-                            if left.get(l["line_key"], 0) > 0 and when(l) < (day or "~") and (who is None or payer(l) == who)]
+                            if left.get(l["line_key"], 0) > 0 and when(l) < (day or "~") and ours(l)]
                     if paid:
                         break
                 for l in sorted(paid, key=lambda l: (left[l["line_key"]] != amount, -left[l["line_key"]], l["line_key"])):
@@ -1387,7 +1405,7 @@ class Detector:
         return {k: v for k, v in left.items() if v > 0}
 
     def _plb_names(self, rows: list) -> tuple[list[str], set[str]]:
-        """The claim each PLB entry (rows of reference, amount, date, payer, remittance) names, for netting and taking back,
+        """The claim each PLB entry (rows of reference, amount, date, payer, ...) names, for netting and taking back,
         and the set of those that are claims on file. A reference names a claim when it is its claim id, or holds one among
         other text (CLAIM_ID_IN_TEXT: the payer's own claim number before or after it, a letter, a date; the claim id must be
         on file, and only one); else when it is, or holds as a word of its own, a payer claim number of that payer that
@@ -1414,7 +1432,7 @@ class Detector:
         number_to_id = {k: next(iter(v)) for k, v in ids_of_number.items() if len(v) == 1 and next(iter(v))}
         names: list[str] = []
         named: set[str] = set()
-        for (_ref, _amount, _day, who, _tk), x, ids, ws in zip(rows, refs, inside, words):
+        for (_ref, _amount, _day, who, *_rest), x, ids, ws in zip(rows, refs, inside, words):
             ids = [i for i in ids if i in on_file]
             nums = {number_to_id[(w, who)] for w in ws if (w, who) in number_to_id}
             name = (x if x in on_file else number_to_id.get((x, who)) or (ids[0] if len(ids) == 1 else None)

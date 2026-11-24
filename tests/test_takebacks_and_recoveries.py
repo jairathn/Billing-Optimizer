@@ -101,6 +101,47 @@ def test_a_recoupment_whose_reference_holds_the_claim_id_takes_the_payment_back_
     w.store.close()
 
 
+def test_a_recoupment_from_the_same_payer_under_another_payer_id_takes_the_payment_back(tmp_path, kind):
+    """C024 was paid by ANTHEM under one payer id; the recoupment naming C024 comes on a remittance from ANTHEM under
+    another of its payer ids. It is the same payer: the payment is taken back. Another payer's recoupment naming the claim
+    takes nothing."""
+    w = World(tmp_path, kind)
+    denied_then_paid(w)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803", payer="BRIGHTPATH HEALTH", payer_id="BRGHT",
+            plb="PLB*1777777772*20261231*WO:QCB0000300C024/77700000000012*117.60~")
+    det = w.run("r1")
+    assert standing(det, "CB0000300C024") == 11760, "another payer's recoupment took the claim's payment"
+    w.remit([visit_paid("CB0000901C017", who=OTHER, payer_ctl="PC901")], "20260810", payer_id="00660",
+            plb="PLB*1777777772*20261231*WO:QCB0000300C024/77700000000012*117.60~")
+    det = w.run("r2")
+    assert standing(det, "CB0000300C024") == 0, "the payer's recoupment under its other payer id was not applied"
+    assert w.items()["CB0000300C017:99214:DENIED_MISSING_INFO"]["status"] == "open"
+    w.store.close()
+
+
+@pytest.mark.parametrize("offset", ["CS", "72"])
+def test_a_recoupment_the_same_remittance_offsets_under_the_claims_name_takes_nothing(tmp_path, kind, offset):
+    """2026-08-03: the payer lists a recoupment of C024's $117.60 (WO) and, in the same remittance, an adjustment of
+    -$117.60 naming the same claim (CS, or 72, an authorized return): the two cancel, no money was taken, the denial stays
+    closed. A CS or 72 entry alone never starts a takeback."""
+    w = World(tmp_path, kind)
+    denied_then_paid(w)
+    ref = "PC300B-CB0000300C024-0001-01-01"
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:{ref}*117.60*{offset}:{ref}*-117.60~")
+    det = w.run("r1")
+    assert standing(det, "CB0000300C024") == 11760, "a recoupment its own remittance offset was taken back"
+    assert w.items()["CB0000300C017:99214:DENIED_MISSING_INFO"]["status"] == "resolved"
+    w.store.close()
+    (tmp_path / "alone").mkdir()
+    w = World(tmp_path / "alone", kind)
+    denied_then_paid(w)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260817", plb=f"PLB*1777777772*20261231*{offset}:{ref}*50.00~")
+    det = w.run("r2")
+    assert standing(det, "CB0000300C024") == 11760, f"a {offset} entry alone started a takeback"
+    w.store.close()
+
+
 def test_a_balance_carried_forward_under_the_claims_name_and_recovered_later_is_taken_once(tmp_path, kind):
     """2026-06-10: the payer reverses C024's $117.60 and pays it again at $90.00 in the same remittance; the $27.60 it is
     owed is carried forward (FB, negative) naming the claim, and recovered on 2026-06-24 (WO, positive) naming it the same
