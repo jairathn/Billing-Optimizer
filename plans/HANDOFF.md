@@ -69,7 +69,11 @@ Last updated: 2026-11-24, 04:30 UTC.
 4. Push this branch's tip to `main` (fast-forward; pushing to main is authorized after review). Check the server's
    `/api/health` shows the commit; watch Vercel's next run (`status.json`: errors, `memory_mb.peak` with the 837s; the limit
    is 2,278 MB, the last peak 1,529 MB).
-5. The owner's decision (2026-11-23): ship the hotfix, then work every claim before the next release
+5. Started 2026-11-24 04:35 UTC: the audit's foundations (a private EMA-ledger world from the four A/R and Production
+   reports with push 2's readers; the independent auditor program, first pass on the post-catch-up store copy). Its
+   outputs live in the session's private scratch folder; the auditor's code (no patient data) goes to plans/tools once it
+   is validated, and its aggregate results to plans/. If that work is lost, start it again from claim_audit_design.md.
+   The owner's decision (2026-11-23): ship the hotfix, then work every claim before the next release
    (`plans/claim_audit_design.md`: an independent auditor over every unit of service; not one item may be already worked or
    paid, no owed money missing, nothing closed wrongly). Detection accuracy, then full visibility. First the findings in `plans/catchup_trace_2026-11-23.md` (one item per unit
    of service across resubmissions and reversals; void claims; services already paid; secondary processing settles a COB
