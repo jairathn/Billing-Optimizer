@@ -28,6 +28,12 @@ The probes are `plans/tools/a16/residual_probe.py` and `offfeed_probe.py`. Run t
 - "Already worked, waiting" (about 20): an appeal noted on the first A/R, routed to "call". Decide by hand whether calling
   is real work or a repeat, and set the rule.
 
+- **The answered rule ignores the component (found by the independent hand-trace of the dropped claims, 16:30 UTC).** A
+  payment for a service's TC on another bill was taken as the answer to the same patient's -26 claim. Railroad Medicare
+  paid the 88305-TC, while the 88305-26 claim was rejected, with nothing posted. Here the money happens to be covered: a
+  REJECTED_PRE_PAYER item on the same EMA claim still lists it. But a claim must be answered only by an answer for its
+  own component: 26, TC, or the global covering both (T-C1).
+
 ## 3. Amounts (after fix4 is merged; its leftovers join this list)
 - A claim item is sized without its units (example: $98 where the units say $196).
 - A claim sent to a payer as its secondary is priced at that payer's full rate: the 837's SBR01 and the claim filing
