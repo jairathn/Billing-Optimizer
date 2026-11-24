@@ -194,6 +194,30 @@ Last updated: 2026-11-24, 10:45 UTC.
    837-based never-answered pass. Push 2's plan for the rest is in `wip/plans:plans/wire/` (units E, R, C2, SWEEP fix
    stages, INT, HOOK, docs, verification).
 
+## 3b. Decisions waiting on the owner (with the recommendation)
+
+1. **Which host runs the daily analysis.** Vercel keeps the store in memory, and the merged code is near the limit.
+   - The release's own run on the live image (2026-11-24 10:28 UTC: full 837 history, 712 MB in memory) peaked at 2,008 of
+     2,278 MB.
+   - The merged code adds EMA's report tables (779 MB with A/R and Production, 720 MB with A/R only) and heavier
+     detection.
+   - SQLite also caps a store loaded this way at 1,024 MB (measured): past that, the save fails. The hook-in unit removes
+     that cap (`plans/brief_HOOK_2026-11-24.md`).
+   - Options: (a) the server is the one host that analyses; Vercel keeps the dashboard copy and people's actions
+     (recommended: no memory ceiling); (b) Vercel analyses too, reading the A/R only, with the archive trimming old
+     settled claims (unit E: 24 months at most); (c) a larger Vercel function, if the plan allows it.
+2. **Rule 8, patient-group denials** that are not deductible, coinsurance or copay (PR-204 plan exclusion, PR-288
+   referral, PR-27 coverage ended). The choices are to work them (bill the patient, or find the right plan) or to count
+   them done. About 66 items on Work now ($4,157) wait on this.
+3. **The recovered amount when a payer denies as primary and pays later as secondary.** Today two rules record it two
+   ways. Recommended: the amount that arrived.
+4. **Owner rules 4.1 and 4.2 in the product** (the auditor already applies the recommended versions):
+   - 4.1: a provider's own rate counts only as a recognised tier (100% or 85% of the payer's full rate). An unexplained
+     discount is listed once per payer and provider.
+   - 4.2: codes a payer never pays, for example G2211 beside an E/M with -25 at Medicare, and 99024. Twenty code-change
+     items ($7,150) on Work now are for codes the payer almost never pays. Today the product pursues them until the owner
+     accepts them (decisions 14 and 16).
+
 ## 4. Open findings
 
 Round 1 (merge review, being fixed): mr-1 a payment date that is not a real day crashes the gap rule (high); mr-2 the Data
