@@ -5165,10 +5165,10 @@ class Detector:
         year = days[0][:4]
         # one pricing for every never-answered pass (the weekly exports' and the 837s'): each line at the payer's own rate for
         # the part it bills (26, TC or the whole: T-N9), times its units, the multiple-procedure share, capped at its charge
-        billed = sorted(((cpt, dos, charge, units, more[0] if more else None) for cpt, dos, charge, units, _item, *more in items),
-                        key=lambda x: (x[1] or "", x[0] or ""))
-        lines = self.price_unanswered_lines(grp, kind, year, billed)
-        for ln, src in zip(lines, billed):
+        billed_lines = sorted(((cpt, dos, charge, units, more[0] if more else None) for cpt, dos, charge, units, _item, *more in items),
+                              key=lambda x: (x[1] or "", x[0] or ""))
+        lines = self.price_unanswered_lines(grp, kind, year, billed_lines)
+        for ln, src in zip(lines, billed_lines):
             comp = component_of(src[4])
             if comp:
                 ln.append(comp)             # the part the line bills, for its story and the checks
