@@ -1429,6 +1429,10 @@ def _archive_hint(f: dict) -> dict | None:
     a = _ev(f).get("archive_rule")
     if not isinstance(a, dict) or a.get("state_hint") not in ("done", "work_now", "waiting"):
         return None
+    if not a.get("hint") and f.get("hint"):
+        # the rule's sentence (archive_rules.apply_actions keeps it on the item's hint; an item saved before it was kept
+        # with the label too): a state it decides shows the sentence, not the label alone
+        a = dict(a, hint=f["hint"])
     return a
 
 
@@ -1512,6 +1516,10 @@ def paid_proof(fx: dict) -> dict | None:
                         + (f"(check ending {fp['check_tail']}, no 835)" if fp.get("check_tail") else "(no 835)") + "; EMA shows the line settled"}
     rows = fx["r835"]["rows"]
     stand = standing_rows(rows)
+    # the payments a recoupment (PLB) took back since, which the detection run's ledger names on the item: they pay nothing
+    gone = set(_ev(f).get("taken_back_lines") or [])
+    if gone:
+        stand = [x for x in stand if x.get("line_key") not in gone]
     own = own_rows(fx)
     once = code_once(fx)
     lcns = {x.get("lcn") for x in own if x.get("lcn")}
@@ -2255,9 +2263,25 @@ def _decide(fx: dict, today: str) -> dict:
         res["appeal_block"] = "owner"
         return put("work_now", "owner_decision", "A contract or billing-policy question for the owner, not a claim to appeal")
     if sig in FEES:
+        tb = _ev(f).get("taken_back") if sig == "TAKEBACK" else None
+        if isinstance(tb, dict) and tb.get("date"):
+            # a service the recoupment left unpaid (detect._taken_back_items): its own payment came back to the payer. Paid
+            # again since on a check no 835 on file carries (EMA posted it after the takeback, and its postings of the line
+            # still hold the money): done
+            pays = fx["ema"]["pays"]
+            again = [p for p in pays if (p["cents"] or 0) > 0 and (p["posted"] or "") > str(tb["date"]) and not p.get("in_835")]
+            if again and sum(p["cents"] or 0 for p in pays) >= 0.95 * int(tb.get("cents") or 0):
+                p0 = again[0]
+                res["appeal_block"] = "paid"
+                text = (f"Paid again after the takeback: EMA shows {usd(sum(p['cents'] for p in again))} from {p0['payer'] or 'insurance'} "
+                        f"posted {day(p0['posted'])} (check ending {p0['check_tail'] or '?'}, no 835)")
+                return put("done", "repaid_after_takeback", text, [{"source": "production", "kind": "proof", "date": p0["posted"], "text": text}])
         if past_all:
             return expired()
         res["appeal_block"] = "fees"
+        if isinstance(tb, dict) and tb.get("date"):
+            return put("work_now", "fees", f"Paid, then taken back by {grp or 'the payer'} on {day(tb['date'])}: find out why, then dispute "
+                       "or bill the right payer")
         return put("work_now", "fees", "A takeback to match to the payer's overpayment letter, and to dispute if it was not owed"
                    if sig == "TAKEBACK" else "A payment fee the payer's vendor took: ask for standard EFT with no fee")
     if sig == "REMIT_NOT_POSTED":

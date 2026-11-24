@@ -1194,6 +1194,98 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
             hint += f": this denial by {who} is another payer's answer, not a denial to appeal. Nothing is left to collect from a payer."
         out.append(_reclass(R_OTHER_PAYER, f, "other_payer_paid", "Paid by another payer first", hint, size, state, proof, "proven",
                             paid_by=p.payer_name, patient_share_left_cents=left))
+    return out + _claim_after_primary(items, arch)
+
+
+def _claim_reasons(cl: Claim) -> list[tuple[str, str, int]]:
+    """A whole claim's reasons for not paying: its claim-level ones and its lines' (not the payer's pricing, not the cost
+    share), largest first."""
+    got: Counter = Counter()
+    for g, r, c in list(cl.adj or []) + [x for a in cl.lines for x in (a.adj or [])]:
+        if c > 0 and r not in PRICING_CARCS and not (g == "PR" and r in COST_SHARE_CARCS):
+            got[(g, r)] += c
+    return sorted(((g, r, c) for (g, r), c in got.items()), key=lambda x: (-x[2], x[0], x[1]))
+
+
+def _claim_after_primary(items: list, arch: Archive) -> list[dict]:
+    """Rule 2 for a whole claim (CLAIM_DENIED_UNPAID): a payer denied the claim (claim status 4) after another payer
+    answered its services as primary and paid (a payment that still stands, before the denial or the same day on another
+    remittance): a second payer's answer to the claim sent to it as if it were primary (a Medicaid plan behind a Medicare
+    Advantage plan denying for the clinician's enrollment or NPI). As for a line, the item names the primary's payment and
+    is sized at the patient's share the primary left on the claim's services (what it put on the patient's deductible,
+    coinsurance or copay, on the lines it paid and on those it put wholly on the patient) that no other payer has paid or
+    put on the patient since; nothing left: 'done'. A claim sent back with no service lines is about the bill's services.
+    The same branches as a line's decide what is left to do: another payer covers the claim first (CO-22), it is not the
+    payer's (not its member, B11, 109...), the payer paid part of the share and declined the rest, or the share to collect."""
+    out = []
+    services: dict[str, set] = defaultdict(set)
+    for bill, code, dos in arch.by_service:
+        services[bill].add((code, dos))
+    gone = arch.cancelled()
+    for f in items:
+        if not _is_open(f) or f.get("line_key") or f.get("signal") != "CLAIM_DENIED_UNPAID" or not f.get("claim_key"):
+            continue
+        cl = arch.claims.get(f["claim_key"])
+        if cl is None or cl.status != "4":
+            continue
+        svcs = {(a.billed_code, a.dos) for a in cl.lines if a.dos and a.billed_code} or services.get(cl.bill, set())
+        ans = [x for code, dos in sorted(svcs) for x in arch.service(cl.bill, code, dos) if x.claim_key != cl.claim_key]
+        before = [x for x in ans if (x.paid_on or "") < (cl.paid_on or "") or ((x.paid_on or "") == (cl.paid_on or "") and x.trace != cl.trace)]
+        paid = [x for x in before if x.status in PRIMARY_STATUSES and x.standing > 0 and x.line_key not in gone and not _same_payer_loose(x, cl)]
+        if not paid or (cl.kind == "medicare" and all(x.kind == "medicare" for x in paid)):
+            continue                # (two Medicare contractors: rule 2 reads that per line)
+        p = paid[0]
+        # the primary's answers of the claim's services: what it paid, and what it put wholly on the patient
+        mine = [x for x in before if x.status in PRIMARY_STATUSES and x.line_key not in gone and _same_payer(x, p)
+                and (x.standing > 0 or x.to_patient_only())]
+        share = sum(x.pr_cents(COST_SHARE_CARCS) for x in mine)
+        taken = {x.line_key for x in mine}
+        later = [x for x in ans if x.line_key not in taken and x.status != REVERSAL_STATUS and x.line_key not in gone
+                 and not any(_same_payer(x, q) for q in mine)
+                 and (x.standing > 0 or (x.status in SECONDARY_STATUSES and x.pr_cents(COST_SHARE_CARCS)))]
+        claim_paid = max(0, (cl.paid or 0) - sum(max(x.paid or 0, 0) for x in cl.lines))
+        settled = sum(x.standing for x in later) + sum(x.pr_cents(COST_SHARE_CARCS) for x in later if x.status in SECONDARY_STATUSES) + claim_paid
+        denier_paid = claim_paid + sum(x.standing for x in later if _same_payer(x, cl))
+        left = max(0, share - settled)
+        who = cl.payer_name or "the payer"
+        rs = _claim_reasons(cl)
+        reasons = {r for _g, r, _c in rs}
+        said = ", ".join(f"{g}-{r}" for g, r, _c in rs[:3]) or "no reason code"
+        rem = set(cl.rem or []) | {r for a in cl.lines for r in (a.rem or [])}
+        not_its = bool(reasons & NOT_ITS_CARCS) or bool(rem & WRONG_PAYER_RARCS)
+        other_plan = next((x for x in ans if x.status != REVERSAL_STATUS and not _void(x) and not _same_payer_loose(x, cl)
+                           and not any(_same_payer_loose(x, q) for q in mine)), None)
+        paid_later = [x for x in later if x.standing > 0]
+        hint = (f"Paid by {p.payer_name} as primary on {p.paid_on} ({_usd(sum(x.standing for x in mine))})"
+                + (f", and by {paid_later[0].payer_name} ({_usd(sum(x.standing for x in paid_later))})" if paid_later else ""))
+        state, size = ("work_now" if left else "done"), left
+        if left and denier_paid > 0 and not reasons & INFO_CARCS:
+            hint += (f": {who} paid {_usd(denier_paid)} of the patient's share as secondary and declined the rest of the claim ({said}). "
+                     f"The rest, {_usd(left)}, is the patient's, billed as usual (a Medicaid member is never billed: it is written off).")
+            state, size = "done", 0
+        elif left and not_its and not reasons & COB_CARCS:
+            if other_plan is not None:
+                hint += (f": {who} says the claim is not its to pay ({said}). The patient's share the primary left, {_usd(left)}, goes to "
+                         f"{other_plan.payer_name} as a secondary claim.")
+            else:
+                hint += (f": {who} says the claim is not its to pay ({said}), and no other plan answered it. No payer owes the patient's "
+                         f"share the primary left ({_usd(left)}): it is the patient's, billed as usual, unless the patient has another plan "
+                         "for that day.")
+                state, size = "done", 0
+        elif left and reasons & COB_CARCS:
+            hint += (f": {who} says another payer covers this claim first ({said}): it is not its to pay as primary. Send it as a "
+                     f"secondary claim with {p.payer_name}'s payment: the patient's share the primary left, {_usd(left)}, is what is left "
+                     "(never billed to a Medicaid member).")
+        elif left:
+            hint += (f": this claim denial by {who} ({said}) is about the patient's share the primary left, {_usd(left)}, not the whole "
+                     "claim. Fix what it asks and send it as a secondary claim, or bill the patient where the plan allows it (never a "
+                     "Medicaid member).")
+        else:
+            hint += f": this claim denial by {who} is another payer's answer, not a denial to appeal. Nothing is left to collect from a payer."
+        proof = [_proof(x, "payment", True) for x in paid] + [_proof(x, _kind(x), False) for x in later]
+        proof += [_proof(cl.lines[0], _kind(cl.lines[0]), False)] if cl.lines else []
+        out.append(_reclass(R_OTHER_PAYER, f, "other_payer_paid", "Paid by another payer first", hint, size, state, proof, "proven",
+                            paid_by=p.payer_name, patient_share_left_cents=left))
     return out
 
 
@@ -2923,7 +3015,8 @@ def apply_actions(det, actions: Iterable[Mapping]) -> dict:
             if act.get("strength") != "proven":
                 f["hint"] = act.get("note")
                 _merge_evidence(f, "archive_rule", {"rule": act["rule"], "action": kind, "reclass": "likely_paid", "label": "Likely paid: check first",
-                                                    "state_hint": "done", "strength": act.get("strength"), "proof": _kept_proof(act.get("proof"))})
+                                                    "hint": act.get("note"), "state_hint": "done", "strength": act.get("strength"),
+                                                    "proof": _kept_proof(act.get("proof"))})
                 n["likely_close_kept_open"] += 1
                 continue
             det._mark_paid(f, act["paid_date"], act["paid_cents"], act["note"], dict(act["detail"]), counts=bool(act.get("counts_as_recovery")))
@@ -2936,7 +3029,9 @@ def apply_actions(det, actions: Iterable[Mapping]) -> dict:
             n[kind] += 1
         elif kind == "reclassify" and f is not None and not f.get("auto_status"):
             f["hint"] = act["hint"]
-            info = {k: act.get(k) for k in ARCHIVE_RULE_KEYS if act.get(k) is not None}
+            # the rule's sentence is kept with its label: a state the reading decides shows it (remitwatch.states), whatever
+            # a later step writes on the item's hint
+            info = {k: act.get(k) for k in ARCHIVE_RULE_KEYS + ("hint",) if act.get(k) is not None}
             info["proof"] = _kept_proof(act.get("proof"))
             new = act.get("shortfall_cents")
             if new is not None and new != f.get("shortfall_cents"):
