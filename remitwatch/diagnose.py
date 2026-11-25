@@ -48,7 +48,7 @@ BUNDLE_PARTS = ("README.md", "REPRODUCE.md", "bundle.json", "runs/", "events/", 
                 "decisions.json", "examples/", "store.json", "settings.json")
 # meta keys whose values go into the bundle (scrubbed): figures and states, never a key, a cursor or a patient's data
 SAFE_META = {"schema_version", "derived_schema", "cloud:data_rev", "cloud:detect_seconds", "cloud:detect_pending", "pipeline:last_cycle",
-             "pipeline:last_report", "sync:last_run", "ema:wiring", "ema:map_coverage", "ema:map_dirty", "ema:keep_dirty",
+             "pipeline:last_report", "sync:last_run", "ema:wiring", "ema:map_coverage", "ema:map_dirty", "ema:keep_dirty", "ema:keep_rule",
              "ema:ledger_seq", "ema:retain_held", "ema:refind_v1", "states:response_days", "repair:state", "backup:last",
              "activity:built", "activity:version", "activity:error", "selfcheck:safe_mode", "selfcheck:last", "archive:last"}
 NEVER_META = re.compile(r"(salt|cursor|token|secret|password|key$|howto|hostkey|credential|refusal)", re.I)

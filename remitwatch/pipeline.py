@@ -436,7 +436,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
     older build read as exports, the uploads handed to the intake folder (remitwatch.intake), the report files the
     Dropbox position passed before this build (once), every Production file of the cycle applied to the posting ledger
     (opened once, only when one comes), the reports waiting to be read again, and the ledger's summaries refreshed
-    before detection (and once more after it when detection kept new lines)."""
+    before detection (and once more after it when a bill came back from the cold archive meanwhile)."""
     from . import ema_ledger, ema_reports, intake
     from .alerts import notify, run_alerts
     from .detect import run_detection
@@ -601,7 +601,8 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         heartbeat(store.conn, token)
         if "detect" in out and store.conn.execute("SELECT 1 FROM meta WHERE key=?", (ema_ledger.META_KEEP_DIRTY,)).fetchone() \
                 and (lg_box or os.path.exists(ema_ledger.ledger_path(db_path))):
-            # detection gave new bills an item: their EMA lines are kept now rather than at the next Production file (X10)
+            # a bill came back from the cold archive (archive.restore): its EMA lines are read from the ledger again now
+            # (detection never asks for this: the summaries keep every line, whatever it lists)
             r = _ema_step(out, "ema_refresh_after", ema_ledger.refresh, store, ledger(), log=beat_log)
             if r and r.get("part_a"):
                 out["ema_refresh_after"] = {"seconds": r.get("seconds")}

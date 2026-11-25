@@ -1,6 +1,6 @@
 """
 The posting ledger for EMA's Production report (remitwatch.ema_ledger): staging, the holds, the box invariant, retention,
-the lean summaries (Part A), the claim-link map, the in-835 marks and the keep rule (Part B), the catalog repair, and the
+the summaries (Part A), the claim-link map, the in-835 marks and the keep rules (Part B), the catalog repair, and the
 serverless handle that keeps the ledger in the state folder.
 
 Every row is invented (tests/ema_fixtures.py); the 835 side is written straight into the store's remittance tables.
@@ -527,8 +527,9 @@ def test_the_map_by_ar_payment_votes_and_patient_day(store, ledger, tmp_path):
     assert ck[F.check_no(1)] == "exact" and ck["000880000005"] == "exact" and ck["ACH-0099"] == "loose"
     assert dict(rows(store.conn, "SELECT check_no, in_835 FROM ema_line_payments"))["ACH-0099"] == 0
     assert one(store.conn, "SELECT trace_paid_cents FROM ema_checks WHERE check_no=?", F.check_no(1)) == (8000,)
-    lines = dict(rows(store.conn, "SELECT link, map_method FROM ema_lines"))
-    assert lines[F.link_no(3)] == "conflict" and lines[F.link_no(8)] == "ar" and F.link_no(1) not in lines   # paid: pruned
+    lines = {r[0]: r[1:] for r in rows(store.conn, "SELECT link, map_method, keep FROM ema_lines")}
+    assert lines[F.link_no(3)][0] == "conflict" and lines[F.link_no(8)][0] == "ar"
+    assert lines[F.link_no(1)] == ("payment", "")             # mapped and paid on the 835: a settled line, kept all the same
 
 
 def test_an_ar_pair_wins_over_payment_votes_and_marks_a_conflict(store, ledger, tmp_path):
@@ -601,12 +602,13 @@ def test_the_map_with_remittances_read_by_the_835_parser(store, ledger, tmp_path
     el.refresh(store, ledger, log=Log())
     assert one(store.conn, "SELECT bill, method FROM ema_link_map WHERE link=?", F.link_no(1)) == (F.bill_id(1), "payment")
     assert one(store.conn, "SELECT match FROM ema_checks") == ("exact",)
-    assert one(store.conn, "SELECT COUNT(*) FROM ema_lines") == (0,)            # mapped and paid on the 835: pruned
+    assert one(store.conn, "SELECT keep FROM ema_lines") == ("",)              # mapped and paid on the 835: settled, kept
 
 
 # ======================================================================================================= 6. keep rule
 def keep_world(store, ledger, tmp_path):
-    """One link per keep rule, each meeting that rule alone, and one that meets none (it is pruned)."""
+    """One link per keep rule, each meeting that rule alone, and settled lines that meet none: one whose bill has an
+    open item, one whose item the rules closed, and a second line of a bill."""
     rows_ = []
     traces = []
     for n, (cpt, status) in enumerate([("99213", "Resolved/Paid")] * 6, start=1):
@@ -625,18 +627,41 @@ def keep_world(store, ledger, tmp_path):
     add_finding(store, F.claim_id(3), status="resolved", auto_note="Paid on a later remittance")   # closed by the rules
 
 
-def test_each_keep_rule_keeps_its_line_and_the_rest_are_pruned(store, ledger, tmp_path):
+def test_each_keep_rule_names_its_line_and_every_line_is_kept(store, ledger, tmp_path):
     keep_world(store, ledger, tmp_path)
     out = el.refresh(store, ledger, log=Log())
     got = {(r[0] - 90_000_000, r[1]): r[2] for r in rows(store.conn, "SELECT link, cpt, keep FROM ema_lines")}
-    assert got == {(1, "99213"): "nonroutine", (2, "17000"): "no835", (4, "99213"): "on_ar", (5, "99213"): "finding",
-                   (6, "99213"): "open_status", (7, "99213"): "no835,unmapped"}
-    assert out["part_b"]["keep"]["lines"] == 8 and out["published"]["lines"] == 6
-    assert set(rows(store.conn, "SELECT DISTINCT link FROM ema_line_payments")) == {(F.link_no(n),) for n in (1, 2, 4, 5, 6, 7)}
-    # the rule as one SQL condition over the store's lines
+    assert got == {(1, "99213"): "nonroutine", (2, "99213"): "", (2, "17000"): "no835", (3, "99213"): "", (4, "99213"): "on_ar",
+                   (5, "99213"): "", (6, "99213"): "open_status", (7, "99213"): "no835,unmapped"}
+    assert out["part_b"]["keep"]["lines"] == 8 and out["part_b"]["keep"]["kept"] == 5 and out["published"]["lines"] == 8
+    assert set(rows(store.conn, "SELECT DISTINCT link FROM ema_line_payments")) == {(F.link_no(n),) for n in range(1, 8)}
+    assert one(store.conn, "SELECT value FROM meta WHERE key='ema:keep_rule'") == (el.KEEP_RULE,)
+    # the rules as one SQL condition over the store's lines: the settled lines meet none and are there all the same
     er.register_functions(store.conn)
-    assert one(store.conn, f"SELECT COUNT(*) FROM ema_lines WHERE {el.keep_rule_sql(conn=store.conn)}") == (6,)
-    assert one(store.conn, f"SELECT COUNT(*) FROM ema_lines WHERE NOT {el.keep_rule_sql()}") == (0,)
+    assert one(store.conn, f"SELECT COUNT(*) FROM ema_lines WHERE {el.keep_rule_sql()}") == (5,)
+    assert one(store.conn, f"SELECT COUNT(*) FROM ema_lines WHERE NOT {el.keep_rule_sql()}") == (3,)
+
+
+def test_the_summary_never_depends_on_the_items_detection_listed(store, ledger, tmp_path):
+    """The lines, payments and reasons a refresh writes are the same whatever items the store holds: detection reads
+    them, so an item must never decide what the next run reads (a second cycle would undo the first)."""
+    keep_world(store, ledger, tmp_path)
+    tables = ("ema_lines", "ema_line_payments", "ema_line_reasons", "ema_link_map")
+
+    def summary() -> dict:
+        cols = {t: [r[1] for r in store.conn.execute(f"PRAGMA table_info({t})") if r[1] not in ("mapped_at",)] for t in tables}
+        return {t: sorted(rows(store.conn, f"SELECT {', '.join(cols[t])} FROM {t}"), key=repr) for t in tables}
+    el.refresh(store, ledger, parts="AB", log=Log())
+    with_items = summary()
+    assert with_items["ema_line_reasons"]          # routine reasons too, for every line
+    store.conn.execute("DELETE FROM findings")
+    store.conn.commit()
+    el.refresh(store, ledger, parts="AB", log=Log())
+    assert summary() == with_items
+    add_finding(store, F.claim_id(2, sub=3))
+    add_finding(store, F.claim_id(6))
+    el.refresh(store, None, parts="B", log=Log())    # Part B alone, from the store's own tables
+    assert summary() == with_items
 
 
 def test_a_line_with_a_second_payer_on_file_and_a_balance_left_is_kept_though_its_bill_has_no_item(store, ledger, tmp_path):
@@ -657,7 +682,7 @@ def test_a_line_with_a_second_payer_on_file_and_a_balance_left_is_kept_though_it
     assert one(store.conn, "SELECT secondary_payer, balance FROM ema_lines WHERE link=?", F.link_no(8)) == (second, 7000)
 
 
-def test_part_b_alone_maps_a_link_once_its_remittance_arrives_and_prunes_it(store, ledger, tmp_path):
+def test_part_b_alone_maps_a_link_once_its_remittance_arrives_and_keeps_its_line(store, ledger, tmp_path):
     keep_world(store, ledger, tmp_path)
     el.refresh(store, ledger, log=Log())
     assert one(store.conn, "SELECT keep FROM ema_lines WHERE link=?", F.link_no(7)) == ("no835,unmapped",)
@@ -667,10 +692,10 @@ def test_part_b_alone_maps_a_link_once_its_remittance_arrives_and_prunes_it(stor
     out = el.refresh(store, None, log=Log())                       # no ledger: Part B from the store alone
     assert out["part_a"] is None and out["part_b"] is not None
     assert one(store.conn, "SELECT bill, method FROM ema_link_map WHERE link=?", F.link_no(7)) == (F.bill_id(7), "payment")
-    assert one(store.conn, "SELECT COUNT(*) FROM ema_lines WHERE link=?", F.link_no(7)) == (0,)
-    assert one(store.conn, "SELECT COUNT(*) FROM ema_line_payments WHERE link=?", F.link_no(7)) == (0,)
+    # mapped and paid on an 835 now: a settled line, still in the store with its payment
+    assert one(store.conn, "SELECT keep, bill FROM ema_lines WHERE link=?", F.link_no(7)) == ("", F.bill_id(7))
+    assert one(store.conn, "SELECT in_835 FROM ema_line_payments WHERE link=?", F.link_no(7)) == (1,)
     assert one(store.conn, "SELECT value FROM meta WHERE key='ema:map_dirty'") is None
-    # links mapped earlier keep their map rows though their lines were pruned
     assert one(store.conn, "SELECT bill, method FROM ema_link_map WHERE link=?", F.link_no(3)) == (F.bill_id(3), "payment")
     assert el.refresh(store, None, log=Log())["part_b"] is None      # nothing to do
 

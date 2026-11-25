@@ -1289,9 +1289,9 @@ def test_the_audit_counts_lines_remitwatch_closed_or_expired_on_its_own_as_misse
 
 
 def test_the_self_audit_reads_the_stores_own_lines_and_needs_no_ledger(ledger_world):
-    """The audit's rules read the store's EMA lines, which keep every line they look at (the lean keep rule keeps a line
-    with a non-routine write-off whether or not it has an item): a write-off at posting with no item is found without the
-    ledger, which the audit therefore does not take (finding 7)."""
+    """The audit's rules read the store's EMA lines, which keep every line they look at (the summary keeps every line
+    the ledger holds, item or not): a write-off at posting with no item is found without the ledger, which the audit
+    therefore does not take (finding 7)."""
     import inspect
     s, _lg = ledger_world
     assert "ledger" not in inspect.signature(sc.self_audit).parameters

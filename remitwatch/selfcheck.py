@@ -2791,9 +2791,9 @@ def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True)
 def _charges_since(conn: sqlite3.Connection, newest: str, today: str) -> tuple[int, bool]:
     """Charges billed to insurance for services after the newest remittance that have no payer's answer on file: from the
     store's EMA lines, line by line (a line whose insurer's answer EMA posted, a payment or a denial, is not blind; the
-    lean keep rule keeps every line with no answer), exact; else EMA's monthly charges (the ledger's cells when the money
-    check has run, else ema_months), the newest remittance's month prorated by days: 'about', and they cannot tell an
-    answered claim from one with none."""
+    summary keeps every line), exact; else EMA's monthly charges (the ledger's cells when the money check has run, else
+    ema_months), the newest remittance's month prorated by days: 'about', and they cannot tell an answered claim from
+    one with none."""
     if _has_table(conn, "ema_lines") and conn.execute("SELECT 1 FROM ema_lines LIMIT 1").fetchone():
         cols = set(_cols(conn, "ema_lines"))
         if {"svc", "charges"} <= cols:
@@ -3116,9 +3116,8 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
     after or before, the patient's share, worked and waiting, a duplicate listing, a facility twin, past every window) is
     possible wasted work; (c) the confusion matrix by count and dollars, kept week by week; (d) the alert when any new gap
     (no dollar floor) or more than 10 new wasted items appear. Its rules are its own (the answer keys' rules, simplified),
-    never the detection code. It reads the 835 archive and the store's own EMA lines (the lean keep rule keeps every line
-    its rules look at: a non-routine write-off, a line not paid, a second payer with a balance), the same on both hosts, so
-    it takes no ledger. Returns the summary."""
+    never the detection code. It reads the 835 archive and the store's own EMA lines (the summary keeps every line the
+    ledger holds), the same on both hosts, so it takes no ledger. Returns the summary."""
     ensure_tables(conn)
     t = today_of(today)
     if not force and not audit_due(conn, t):
