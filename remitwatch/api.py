@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 from contextvars import ContextVar
 
-from . import __version__, runtime
+from . import __version__, runlog, runtime
 from .actions import STATUSES, apply_alert_ack, apply_status
 from .codes import CARC, RARC, member_number
 from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema, pattern_windows
@@ -490,6 +490,19 @@ def meta(_: str = Depends(require_auth)):
                            "bulk_appeal": bulk_appeals_on(),
                            # whether this build has the run's decision log for an item ("Why did this change?" in its panel)
                            "decisions": _route_here("/api/findings/probe/decisions")}
+    # the self-check's banner (safe mode, what the app cannot see, a red check): every page shows it above everything and
+    # never "all clear" while it is set (remitwatch.selfcheck; it reads meta only, so the dashboard's copy shows it too)
+    try:
+        from . import selfcheck
+        c = db()
+        try:
+            out["banner"] = selfcheck.banner(c)
+        finally:
+            if not runtime.serverless():
+                c.close()
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        runlog.caught(exc, "meta:banner", level="warning")
+        out["banner"] = None
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -1340,8 +1353,15 @@ def finding_detail(finding_id: str, _: str = "ok"):
 @app.get("/api/findings/{finding_id}")
 def finding_page(finding_id: str, story: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
     """An item's panel: finding_detail. story=1 adds what /api/findings/{id}/explain gives, in the same answer. The state
-    is the one the lists show: a status a person set since the newest run decides it (state_by_status says so)."""
-    out = finding_detail(finding_id, "ok")
+    is the one the lists show: a status a person set since the newest run decides it (state_by_status says so). An item
+    the archive took (an older settled claim) opens from the archive, its history ending in why it left."""
+    try:
+        out = finding_detail(finding_id, "ok")
+    except HTTPException as exc:
+        got = api_ops.archived_finding(finding_id) if exc.status_code == 404 and re.fullmatch(r"[0-9a-f]{8,64}", finding_id) else None
+        if got is None:
+            raise
+        return got
     f = out["finding"]
     anchor = _run_anchor()
     if anchor and "work_state" in f and str(f.get("status_changed_at") or "") > anchor:
@@ -1993,6 +2013,11 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
                           charge_cents=max(((x["charge_cents"] or 0) for x in rem), default=0), paid_cents=sum((x["paid_cents"] or 0) for x in rem),
                           open_findings=len(open_ids), exact=(b == up)))
     items.sort(key=lambda x: (not x["exact"], -(int((x["last_payment"] or "0000-00-00").replace("-", "")))))
+    if len(items) < 25:
+        try:        # older settled claims the archive took (remitwatch.archive): by claim id, bill or payer claim number
+            items += api_ops.archived_search(text, {x["bill"] for x in items})[:25 - len(items)]
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "claims_search:archive", level="warning")
     out = {"items": items, "more": len(bills) > len(items) and len(items) >= 25}
     if not items and runtime.serverless():
         # this host's copy holds the claims of bills with items only: "nothing matches" would be a guess
@@ -5956,3 +5981,5 @@ from . import api_ema  # noqa: E402  (unit C2: Today's EMA figures, the Data tab
 app.include_router(api_ema.router)
 from . import api_results  # noqa: E402  (unit R: the Results tab, the scoreboard Today shows, the daily spot checks)
 app.include_router(api_results.router)
+from . import api_ops  # noqa: E402  (the Data tab's operations panels, the diagnostic bundle, the decision log, the archive)
+app.include_router(api_ops.router)

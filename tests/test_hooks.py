@@ -741,3 +741,207 @@ def test_the_weekly_self_audit_takes_the_first_idle_serverless_run_and_a_journal
     asked = _cloud(state, client)
     assert asked["actions_folded"] == 1
     assert raw_conn(state).execute("SELECT COUNT(*) FROM selfcheck_audits").fetchone()[0] == n0 + 1
+
+
+# ======================================================================================================================
+# 5. The routes (remitwatch.api_ops, and the archive in Find a claim and an item's panel), on both hosts
+# ======================================================================================================================
+from tests.test_cloud import PW, site  # noqa: E402,F401
+
+XHR = {"X-Requested-With": "remitwatch"}
+
+
+def _server_client(monkeypatch, db):
+    """The API of a server reading the store at db, with a password."""
+    import base64
+
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    api.ensure_server_schema(db)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "SHOW_PHI", False)
+    monkeypatch.setattr(api, "_FAILED", {})
+    auth = {"Authorization": "Basic " + base64.b64encode(f"oda:{PW}".encode()).decode()}
+    return TestClient(api.app), auth
+
+
+def test_the_ops_routes_answer_on_a_server_and_the_bundle_holds_no_patient_data(tmp_path, monkeypatch):
+    """needs_H W6, needs_G section 6: the decision log of an item closed by a later payment, the three panels, the
+    self-check's lists, the bundle (a zip with runs and events and no planted name), the banner in /api/meta. Every route
+    needs the sign-in."""
+    import shutil
+
+    from remitwatch import diagnose, pipeline, runlog
+    from tests.test_runlog import LAST, MEMBER, denial_files
+    db = _db(tmp_path)
+    p1, p2 = denial_files(tmp_path / "f", paid_later=True)
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    shutil.copy(p1, one / "r001.RMT")
+    shutil.copy(p2, two / "r002.RMT")
+    pipeline.run_cycle(db, sync=False, local=str(one), email=False, report=False, log=lambda *a: None)
+    s = Store(db)
+    fid = s.conn.execute("SELECT finding_id FROM findings WHERE patient_control_number LIKE 'CB0000300%'").fetchone()[0]
+    s.close()
+    pipeline.run_cycle(db, sync=False, local=str(two), email=False, report=False, log=lambda *a: None)
+    tc, auth = _server_client(monkeypatch, db)
+    got = tc.get(f"/api/findings/{fid}/decisions", headers=auth).json()["items"]
+    assert [x["kind"] for x in got][:1] == ["closed"] and got[0]["rule"] == "paid_later:later_payment"
+    panels = tc.get("/api/ops/panels", headers=auth).json()
+    assert {"selfcheck", "archive", "logs"} <= set(panels) and panels["logs"]["runs"] and panels["logs"]["bundle"]["what"]
+    assert panels["selfcheck"]["lines"] and panels["archive"]["lines"]
+    meta = tc.get("/api/meta", headers=auth).json()
+    assert "banner" in meta and meta["decisions"] is True
+    assert tc.get("/api/ops/selfcheck/audit/gap", headers=auth).json()["list"] == "gap"
+    assert tc.get("/api/ops/selfcheck/offenders/vanished", headers=auth).status_code == 200
+    r = tc.get("/api/ops/diagnostic-bundle?days=2", headers=auth)
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store" and r.headers["content-type"] == "application/zip"
+    files = diagnose.unpack(r.content)
+    assert any(n.startswith("runs/") for n in files) and not any(LAST.encode() in b or MEMBER.encode() in b for b in files.values())
+    assert [m["name"] for m in runlog.DirSink(runlog.logs_dir_for(db)).list("downloads")]      # who and when, kept
+    audit = tc.post("/api/ops/selfcheck/audit", headers=dict(auth, **XHR)).json()
+    assert audit["ran"] is True
+    for path in ("/api/ops/panels", "/api/ops/logs", "/api/ops/diagnostic-bundle", f"/api/findings/{fid}/decisions", "/api/ops/archive"):
+        assert tc.get(path).status_code == 401, path
+    assert tc.post("/api/ops/selfcheck/audit", headers=auth).status_code in (400, 403)      # no cross-site request
+
+
+def test_the_ops_routes_read_what_the_run_stored_on_vercel(site):
+    """The same routes on a serverless host read the dashboard's copy and the state folder (never worked out again on
+    the copy), and the Data tab's requests are journaled for the next run."""
+    from remitwatch import cloud, diagnose
+    tc, auth, _api, state = site
+    fid = tc.get("/api/findings?status=all&limit=5", headers=auth).json()["items"][0]["finding_id"]
+    assert tc.get(f"/api/findings/{fid}/decisions", headers=auth).json()["items"][0]["kind"] == "raised"
+    panels = tc.get("/api/ops/panels", headers=auth).json()
+    assert panels["logs"]["runs"] and panels["selfcheck"]["lines"] is not None
+    files = diagnose.unpack(tc.get("/api/ops/diagnostic-bundle?days=2", headers=auth).content)
+    assert any(n.startswith("runs/") for n in files)
+    asked = tc.post("/api/ops/selfcheck/audit", headers=dict(auth, **XHR)).json()
+    assert asked["asked"] is True
+    assert any(a.get("kind") == "selfcheck_request" for _n, a in cloud.read_actions(state))
+
+
+def test_find_a_claim_and_an_items_panel_open_what_the_archive_took_and_a_reopening_brings_it_back(tmp_path, monkeypatch):
+    """needs_E section 5: Find a claim finds an archived bill by its claim id (archived: true); an item the archive took
+    opens by its id with its history ending in why it left; a reopening asked from the page is queued, and the next
+    cycle brings the bill and its item back."""
+    from remitwatch import pipeline
+    from tests.test_archive import NEW, OLD, denial, ingest, visits
+    db = _db(tmp_path)
+    s = Store(db)
+    ingest(s, tmp_path, [(visits(1, 8, OLD) + [denial(50, OLD)], "20220415"), (visits(100, 8, NEW), "20260415")])
+    s.close()
+    out = pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    assert out["archive"]["bills"] >= 8 and out["archive"]["findings"] >= 1
+    s = Store(db)
+    fid, bill = s.conn.execute("SELECT finding_id, bill FROM archive_findings LIMIT 1").fetchone()
+    claim_id = s.conn.execute("SELECT id FROM archive_ids WHERE bill=? AND kind='pcn' LIMIT 1", (bill,)).fetchone()[0]
+    s.close()
+    tc, auth = _server_client(monkeypatch, db)
+    found = tc.get("/api/claims/search", headers=dict(auth, **{"X-Search": claim_id})).json()["items"]
+    assert found and found[0]["archived"] is True and found[0]["bill"] == bill
+    item = tc.get(f"/api/findings/{fid}", headers=auth).json()
+    assert item["archived"] is True and item["finding"]["finding_id"] == fid and item["events"][-1]["kind"] == "archived"
+    r = tc.post("/api/archive/reopen", json={"finding_id": fid, "reason": "a late payment"}, headers=dict(auth, **XHR)).json()
+    assert r["queued"] is True
+    back = pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    assert back["archive_back"]["asked"] == 1
+    assert tc.get(f"/api/findings/{fid}", headers=auth).json().get("archived") is not True
+
+
+def _browser_ready() -> bool:
+    import shutil
+    import subprocess
+    return bool(shutil.which("node")) and subprocess.run(["node", "-e", "require('playwright')"], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
+def test_the_data_tabs_three_panels_draw_in_plain_words_at_a_desk_and_on_a_phone(tmp_path):
+    """static/ops.js in a browser over an invented store after one cycle: "Running on its own", "Logs and diagnostics" and
+    "Store size and memory" draw with no page error, in plain words (no em dash), the bundle button says what it is for,
+    and at a phone's width nothing runs off the side."""
+    import json
+    import socket
+    import subprocess
+    import time
+    import urllib.request
+
+    from remitwatch import pipeline
+    db = _db(tmp_path)
+    pipeline.run_cycle(db, sync=False, local=_feed(tmp_path), email=False, report=False, log=lambda *a: None)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DROPBOX_", "TRIZETTO_", "SRFAX_", "ANTHROPIC_", "SMTP_", "MODMED_"))
+           and k not in ("REPORT_TO", "ALERT_WEBHOOK_URL", "REMITWATCH_MODE", "REMITWATCH_OWNER_PASSWORD", "REMITWATCH_SHOW_PHI",
+                         "REMITWATCH_SYNC_INTERVAL_MINUTES", "REMITWATCH_ALLOW_OPEN", "REMITWATCH_STATE_DIR")}
+    env.update(REMITWATCH_PASSWORD=PW, REMITWATCH_USER="oda", REMITWATCH_DB=db, PYTHONDONTWRITEBYTECODE="1")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    srv = subprocess.Popen([sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port", str(port),
+                            "--log-level", "warning"], cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        got = subprocess.run(["node", os.path.join(repo, "tests", "ops_page.js"), str(port), "oda", PW, str(tmp_path)],
+                             capture_output=True, text=True, timeout=240)
+    finally:
+        srv.terminate()
+        srv.wait(timeout=10)
+    assert got.returncode == 0, got.stderr[-2000:]
+    out = json.loads(got.stdout.strip().splitlines()[-1])
+    assert not out["errors"] and not [f for f in out["failed"] if "/api/ops/" in f], out
+    for width, w in out["widths"].items():
+        assert w["running"].startswith("Running on its own") and "check" in w["running"], (width, w["running"][:300])
+        assert w["logs"].startswith("Logs and diagnostics") and "Give this file and the repository to Claude" in w["logs"], width
+        assert w["store"].startswith("Store size and memory") and w["bundle"], width
+        assert "—" not in w["running"] + w["logs"] + w["store"]
+    assert out["widths"]["390"]["overflow"] <= 1, out["widths"]["390"]["overflow"]
+
+
+# ======================================================================================================================
+# 6. The command line (remitwatch.cli): diagnose, self-audit, archive, archive-restore
+# ======================================================================================================================
+def test_the_command_line_writes_the_bundle_runs_the_self_audit_and_moves_old_claims(tmp_path, capsys):
+    """needs_H W7 and the brief's commands: `diagnose` writes the zip, `self-audit` runs it now, `archive --dry-run` says what
+    would move (counts only, never a claim number), `archive --run` moves it, `archive-restore` brings a bill back."""
+    import json
+
+    from remitwatch import cli, diagnose, pipeline
+    from remitwatch.detect import Detector
+    from tests.test_archive import NEW, OLD, ingest, visits
+    db = _db(tmp_path)
+    s = Store(db)
+    ingest(s, tmp_path, [(visits(1, 8, OLD), "20220415"), (visits(100, 8, NEW), "20260415")])
+    Detector(s, "run-20261101T000000Z-aaaa").run()                 # the year baselines the archive waits for
+    s.close()
+    capsys.readouterr()
+    assert cli.main(["--db", db, "archive", "--dry-run"]) == 0
+    said = capsys.readouterr().out
+    assert json.loads(said.strip().splitlines()[-1])["bills"] == 8 and "CB00000" not in said     # counted, never named
+    assert cli.main(["--db", db, "archive", "--run"]) == 0
+    s = Store(db)
+    bill = s.conn.execute("SELECT bill FROM archive_bills LIMIT 1").fetchone()[0]
+    assert s.conn.execute("SELECT COUNT(*) FROM archive_bills").fetchone()[0] == 8
+    s.close()
+    assert cli.main(["--db", db, "archive-restore", bill]) == 0
+    s = Store(db)
+    assert s.conn.execute("SELECT COUNT(*) FROM archive_bills WHERE bill=?", (bill,)).fetchone()[0] == 0
+    s.close()
+    pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)       # a run log for the bundle
+    z = tmp_path / "bundle.zip"
+    assert cli.main(["--db", db, "diagnose", "--days", "2", "--out", str(z)]) == 0 and z.exists()
+    assert any(n.startswith("runs/") for n in diagnose.unpack(z.read_bytes()))
+    capsys.readouterr()
+    assert cli.main(["--db", db, "self-audit"]) == 0
+    assert set(json.loads(capsys.readouterr().out.strip().splitlines()[-1])) >= {"gaps_n", "wasted_n"}

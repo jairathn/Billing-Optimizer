@@ -149,6 +149,8 @@ remitwatch/
   archive.py      retention and the cold archive: old, settled bills leave the store for compressed files the daily run never reads (so its memory stays flat), and come back whole when new data names them
   runlog.py       run manifests, the event log, the decision log of automatic changes to items, the one scrubber every log line and error message goes through, and where the logs live and for how long
   repair.py       self-repair by fixed rules when an operational step fails (a network call tried again, a file that cannot be read held, a derived table rebuilt once, a lock left by a dead run removed); it never edits its own code
+  selfcheck.py    the checks after every run (safe mode keeps the last good worklist when one fails), the self-regulation of memory and time, the weekly self-audit, the track record, money given up without a decision, what the app cannot see in dollars
+  diagnose.py     the diagnostic bundle: a run's logs, errors, checks and repairs in one zip with no patient data, for whoever finds the cause
   actions.py      status changes and acknowledgements, applied to the store or written to the journal
   runtime.py      which of the two modes is in effect, and what the host offers
   dropbox_sync.py Dropbox client (refresh token, cursor deltas, downloads, uploads)
@@ -157,8 +159,9 @@ remitwatch/
   api_ema.py      the EMA pages' routes: Today's EMA figures, the Data tab's EMA panels, the owner's write-off policy page, the reconcile summary and its CSVs
   api_results.py  the Results tab's routes: its figures, the exact items behind each, the owner's minutes and costs, the daily spot checks
   api_uploads.py  the Upload page's large files, sent in pieces that carry on after a break (both hosts), and its checklist of the five EMA exports
-  static/         dashboard (index.html, today.js, desk.js, features.js, claim.js, faxes.js, providers.js, results.js for the Results tab, data.js for the Data tab, policy.js for the owner's write-off policy page, calc*.js, lab*.js, asc*.js), the setup checklist (setup.html), the Upload page (upload.html, upload.js) and the big-change banner all three show (swing.js); no build step
-  cli.py          cycle | weekly | sync | ingest-835 | ingest-ema | link | detect | activity | alerts | ema-reports | stats | serve | oauth | modmed-key | modmed-check | prepare-appeals | send-appeals | fax-cycle | import-cloud | compare-cloud | accept-store | backup
+  api_ops.py      the Data tab's panels of what runs by itself (Running on its own, Logs and diagnostics, Store size and memory), the diagnostic bundle, an item's "Why did this change?", reopening an archived claim
+  static/         dashboard (index.html, today.js, desk.js, features.js, claim.js, faxes.js, providers.js, results.js for the Results tab, data.js for the Data tab, ops.js for its panels of what runs by itself, policy.js for the owner's write-off policy page, calc*.js, lab*.js, asc*.js), the setup checklist (setup.html), the Upload page (upload.html, upload.js) and the big-change banner all three show (swing.js); no build step
+  cli.py          cycle | weekly | sync | ingest-835 | ingest-ema | link | detect | activity | alerts | ema-reports | stats | serve | oauth | modmed-key | modmed-check | prepare-appeals | send-appeals | fax-cycle | import-cloud | compare-cloud | accept-store | backup | diagnose | self-audit | archive | archive-restore
 api/index.py      Vercel entry point
 vercel.json       one function behind every address, two daily schedules (the cycle at 10:17 UTC, the fax line at 15:43 UTC)
 public/           robots.txt only: Vercel serves nothing else from the repository
