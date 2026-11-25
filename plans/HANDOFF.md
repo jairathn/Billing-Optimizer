@@ -6,7 +6,103 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-25, 05:15 UTC.
+Last updated: 2026-11-25, 13:50 UTC.
+
+## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
+
+The session that wrote this ran out of usage. Everything is pushed. Nothing is on `main` since the release (f601b6c,
+2026-11-24 04:22 UTC); both live sites run it.
+
+**The integration branch** `claude/epic-davinci-imb6tj`: push 2 + the release + fixers 1-6, fix837, fix5, fix4 (with the
+f773a10 follow-up), fix7a (cycles converge) and fix7b (a bare $0 row is no answer; 26/TC). Tests:
+- the full suite passed on f773a10 (2,798);
+- fix7a and fix7b were merged after it; their tests and the earlier fixers' pass together (423);
+- the full suite has not been run on the tip yet.
+
+Two clock tests fail between 00:00 and about 05:00 UTC on the tip; `wip/fix7d` fixes them.
+
+**Work in progress, pushed as `wip/*` branches** (each agent stopped at the account's 5-hour usage limit; resume by
+checking out the branch and continuing from its state below):
+1. `wip/fix7d` (b560e0e, on d9366ee): **one practice day for the whole site.**
+   - Done: every window, day count and freshness figure now counts from `runtime.practice_today()`, never SQL's
+     `date('now')` or the machine's UTC date (commit f76260a). The tests that assumed Eastern or a fixed UTC hour now run
+     on the practice's calendar (b560e0e). New test module: tests/test_practice_day.py.
+   - Left: `states.facts` dates a person's Sent/Started/packet, appealed_at and a fax's sent_at by the UTC date of the
+     moment (use `runtime.practice_date`, with a test on both stores); a few display-only words (features.js
+     "Appealed", fax.py "number was changed on").
+   - Then run the suite three times: normally, with `REMITWATCH_TZ=Etc/GMT-14` and with `REMITWATCH_TZ=Etc/GMT+12`.
+     Those two zones reproduce the US evening window at any hour. Then merge.
+2. `wip/hook` (71b6971; it has merged the tip through fix7a): **the hook-in unit**
+   (`plans/brief_HOOK_2026-11-24.md`).
+   - Done: the hooks of needs_E, needs_G and needs_H on both hosts; the 1 GiB fix; regulation carried over idle Vercel
+     runs; self-check facts count only new input; a left_record check.
+   - Measured on the real data:
+     - three server cycles converge;
+     - the five fault injections are each detected, contained or repaired;
+     - the fresh-agent drill found the injected bug in about 5 minutes;
+     - forced high memory sheds work to level 4 with the alert and the panel;
+     - NEAR_CEILING is raised at 76% of the 1,024 MB;
+     - the PHI scan of 129 log, manifest and bundle files found nothing.
+   - Left, in order:
+     1. the ceiling budgets (the image against 1,024 MB, a loud warning in dollars and items);
+     2. `api_ops.py` and its include line, the archive routes, data health and the banner;
+     3. `ops.js` and its index.html tag;
+     4. the CLI commands, and fax calls wrapped as `resilient`;
+     5. the README layout and the docs names (tests/test_docs.py);
+     6. merge the tip again;
+     7. the real-data runs again (world2 server ×2, the image chain plus an idle run, img_ema, the faults, forced
+        memory, the PHI scan);
+     8. the suites (3.13, 3.12, 3.11.1) and the node checks.
+3. `wip/fix7c` (237951e, on d2aa861): **underpayment rules from the hand-check**, unfinished and uncommitted when it
+   stopped (committed as WIP).
+   - Built: rates keyed by plan (the 835 group number or contract class), the PA/NP tier by the office's state, a
+     separate surgical site's schedule, cross-claim procedure ranking, and new-year services paid on the old schedule;
+     tests in tests/test_plan_rates.py.
+   - Left: finish moving the yardstick loop onto cached arrays, run the tests and the suite, then measure on a private
+     copy against the base and hand-check.
+   - The bar from the hand-check (`plans/next_fixes_2026-11-24.md`, section 3): the 7 real underpayments come back (4
+     Humana MA Mohs and surgery-center repair pairs, 3 UHC MA January lines), and the 23 plan-rate cases stay off.
+4. **Auditor A17**: not started (the agent stopped before writing anything). Brief: copy
+   `plans/tools/claim_audit_a16.py` to `claim_audit_a17.py`, then add:
+   - plan-level rate keys and the office-state PA/NP rule;
+   - the separate-site schedule;
+   - cross-claim procedure ranking;
+   - a payer window table with sources (not a flat 180 days);
+   - the never-answered twins and $0-to-patient answers.
+
+   It must agree with the two hand-checked samples (31 underpayments, 76 dropped never-answered claims; their verdicts
+   are summarised in `plans/next_fixes_2026-11-24.md` and section 3 below). Keep its 182 self-checks.
+
+**Then, in order:**
+1. Merge `wip/fix7d`, `wip/hook` and `wip/fix7c` as each finishes. Run the full suite on each merge, from a frozen
+   worktree of the merge commit. Check `git status` before every merge commit: the fix4 merge once committed a file
+   staged before its last edit.
+2. A17.
+3. **fix7e, the residuals.** These were measured on m9 = 0efcb74 (section 3, "m9"; `plans/next_fixes_2026-11-24.md`
+   sections 2, 4, 5 and 7):
+   - denials paid on an 835 but routed to note or check-first;
+   - $0 lines, voided claims, short-paid denials;
+   - late resends routed to 'call' (judge them by hand);
+   - C6's copay and the Medicaid catch-all;
+   - takebacks seen by paid_proof;
+   - the bare-$0 reading left in selfcheck, the turnaround, status_class and SECONDARY_NOT_BILLED.
+4. The owner's four decisions (section 3b). Until they come, rule 8 and rule 4.2 items stay pursued.
+5. The final measurement on world2 (the full 837 history) with A17, and a fresh hand-trace sample per class (at least
+   95% agreement).
+6. The release gates:
+   - the four environments and the node checks;
+   - the catch-up harness on a fresh live copy;
+   - the PHI scan;
+   - the docs (stale OPERATIONS.md lines, the README table, the runbook's ledger backup, .env.example).
+
+   Then push to main and check `/api/health` on both sites.
+
+**Rebuilding the private data** (a new session has none of it): see `plans/tools/world/README.md`. The store image is in
+the Dropbox state folder, and EMA's four reports are in Dropbox. Build world.sqlite with `world_ingest.py`, and world2
+with `build_world2.py`. Score runs with `plans/tools/claim_audit_a16.py` and `plans/tools/a16/`.
+
+**Usage:** this account's 5-hour limit stopped every agent three times in a day with 4 or 5 agents running. Run at most
+3 at a time, and push after each milestone.
 
 ## 1. Where things are
 
