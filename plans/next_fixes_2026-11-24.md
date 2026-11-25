@@ -42,16 +42,19 @@ The probes are `plans/tools/a16/residual_probe.py` and `offfeed_probe.py`. Run t
   that shows them with the due day (blindness is loud).
 
 ## 3. Amounts (after fix4 is merged; its leftovers join this list)
-- **The underpayment threshold (fix4 against A16; to decide by hand-tracing).** fix4 requires a 60% share and backing (20
-  lines, or a clear majority). A16 calls a 50% or larger mode firm. Measured on the four merged fixers (f773a10): 151
-  underpayment items ($9,400) that A16 calls owed are no longer listed:
-  - by payer: UMR 54, UnitedHealthcare 26, Anthem 23, Humana MA 22, UHC MA 20, others 6;
-  - money left on the table, short below the rate: 104 services ($5,908) became 188 ($12,810);
-  - in the same change, 201 items A16 calls not short ($9,081) rightly left the list.
+- **The underpayment threshold: settled by hand (04:40 UTC 11-25; workflow wf_74399af8-fcf).** Of a stratified sample of
+  31 of the 151 dropped underpayments (blind second check on every real one):
+  - 23 were rightly dropped. The payer-group mode mixes firm plan rates: UMR employer plans by the 835 group number, with
+    one large plan on its own schedule and PAs at 85.7%; UHC commercial PA/NP pay by the office's state (KY in full, IN at
+    85%); Anthem's products and a separate surgical site.
+  - 7 were real underpayments wrongly dropped:
+    - Humana MA ranks the Mohs and a repair billed on a separate surgery-center claim by processing order (4 items, about
+      $940);
+    - UHC MA paid January 2026 services on the 2025 schedule and never reprocessed them (3 items, about 18 lines in all).
+  - 1 is a credentialing question.
 
-  A stratified sample of 31 is in the private folder (`verify_under/`) for a hand-trace against each payer's own payment
-  history: the same plan, year, place and provider type.
-
+  A16 overstates money left on the table for multi-plan payers: its rate needs the same plan keys. Fixer fix7c (started
+  04:45 UTC) builds plan-level rates, cross-claim procedure ranking and rate changes by date of service.
 - A claim item is sized without its units (example: $98 where the units say $196).
 - A claim sent to a payer as its secondary is priced at that payer's full rate: the 837's SBR01 and the claim filing
   indicator are not read.

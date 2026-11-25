@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-25, 03:20 UTC.
+Last updated: 2026-11-25, 04:20 UTC.
 
 ## 1. Where things are
 
@@ -227,6 +227,20 @@ Last updated: 2026-11-25, 03:20 UTC.
       rerunning. Both rule bugs found (that one and the 26/TC one) are in `plans/next_fixes_2026-11-24.md`.
       Usage limits stopped every agent at 10:45 and again at about 17:00 UTC on 11-24; fix7a and the hook-in unit were
       resumed at 03:15 UTC on 11-25.
+      **fix7a merged (d9366ee, 04:00 UTC 11-25)**: a cycle converges in one run (release gate 4). The EMA line summary
+      keeps every line, so a run's input no longer depends on the last run's items; three cycles on the real copy give
+      16,043 items each, identical in every field. A16: second-payer items on Work now 688 -> 422, already done 157 -> 145,
+      money left on the table unchanged. The server's EMA line tables grow 37 -> 145 MB, and Vercel's image with
+      Production 779 -> 894 MB.
+      **Two "todays" (found 04:05 UTC)**: push 2's api_ema.py and other modules count windows and days from the UTC or
+      machine date, while the release's lists use the practice's day. Between 7 or 8 PM and midnight Eastern, views
+      disagree on whether a deadline passed. A partial fix and a pinned-zone test are on branch `fix7d` (9f3fda6, not
+      merged). Fixer fix7d is finishing it (every 'today' in the app, the suite run under zones a day off UTC).
+      **The self-repair drill (hook-in unit, acceptance 4, 04:55 UTC 11-25)**: a fresh agent given only a diagnostic
+      bundle and a repository copy with one injected code bug (DENIED_AUTH raised only after a later payment) found the
+      file, function, line and cause in about 5 minutes. It worked from the run manifests' rule version, the decision log's
+      `no_longer_raised` rows and the vanished check's examples. It noted that the vanished check excuses a flip as
+      `facts_changed` when only RemitWatch's own summary changed; this was passed to the hook-in unit to tighten.
       **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
       same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered

@@ -20,9 +20,11 @@ refresh() turns the ledger into small store tables:
 
   Part A (from the ledger)  ema_lines, ema_line_payments, ema_line_reasons, ema_checks, ema_months, ema_link_events
   Part B (store only)       the claim-link map (ema_link_map), which EMA payments an 835 carries (in_835), the ASC's
-                            facility links, payer groups, and the lean keep rule that prunes the lines nothing needs
+                            facility links, payer groups, and why each line matters (its keep rules)
 
-Part B runs alone after 835s or an A/R arrived; Part A runs when the ledger changed. Neither writes findings.
+Part B runs alone after 835s or an A/R arrived; Part A runs when the ledger changed. Neither writes findings, and neither
+reads them: every line of the ledger is kept, so the lines a detection run reads never depend on the items the last run
+listed (a second cycle with no new data changes nothing).
 
 Names, dates of birth and record numbers never reach the ledger: the reader (remitwatch.ema_reports.iter_production)
 turns them into keyed hashes first. No log line, exception or status reason here holds a cell value.
@@ -88,6 +90,7 @@ META_SEQ = "ema:ledger_seq"
 META_REV = "ema:ledger_rev"
 META_MAP_DIRTY = er.META_MAP_DIRTY
 META_KEEP_DIRTY = "ema:keep_dirty"
+META_KEEP_RULE = "ema:keep_rule"            # the keep rule the store's summaries were built by (KEEP_RULE)
 META_MAP_COVERAGE = "ema:map_coverage"
 META_RETAIN_HELD = "ema:retain_held"        # retention that waits for a person (the Data tab shows it)
 
@@ -1269,26 +1272,19 @@ def sync_catalog(store: Any, ledger: Ledger, file_ids: Iterable[str] | None = No
 
 
 # ---------------------------------------------------------------------------------------------------- the keep rule
-KEEP_RULES = ("nonroutine", "no835", "unmapped", "on_ar", "finding", "open_status", "second_payer")
-_LIVE_FINDING = ("COALESCE(stale, 0) = 0 AND (status IN ('open','in_progress','appealed','lost','dismissed') "
-                 "OR notes IS NOT NULL OR appealed_at IS NOT NULL OR (status = 'resolved' AND auto_note IS NULL))")
+# Every line of the ledger is kept, with every payment and every reason. The lean rule of spec 7.1 kept a settled line
+# only while its bill had an item, and detection reads these lines, so one run's items decided what the next run read:
+# a crossover whose carrier answered only in EMA was listed from the remittance alone, kept its line, was dropped by the
+# next run, lost its line and came back, every other cycle; and a new item's state was decided before its lines were
+# kept (a plan exclusion the patient paid was work, then done a cycle later). The rules below no longer prune anything:
+# they name why a line matters (the keep column, and the counts a refresh returns). Real data, two service years:
+# 204,359 lines, 281,391 payments and 319,656 reasons take 145 MB of the store, where the lean rule's 63,000 lines took
+# 37 MB (a serverless image of 894 MB instead of 779 MB, about 0.85 KB a line with the checks and the map).
+KEEP_RULE = "2"                     # meta ema:keep_rule: a store summarized by another rule is summarized again, once
+KEEP_RULES = ("nonroutine", "no835", "unmapped", "on_ar", "open_status", "second_payer")
 
 
-def _finding_bills_sql(conn: sqlite3.Connection) -> str | None:
-    """SELECT bill FROM the store's findings that are open, started, sent or worked (by a person), or None when the store
-    has no findings yet."""
-    cols = set(_columns(conn, "main", "findings")) if _table_exists(conn, "main", "findings") else set()
-    if "patient_control_number" not in cols:
-        return None
-    cond = _LIVE_FINDING
-    for c in ("stale", "status", "notes", "appealed_at", "auto_note"):
-        if c not in cols:
-            cond = "status IN ('open','in_progress','appealed')" if "status" in cols else "1"
-            break
-    return f"SELECT rw_bill(patient_control_number) AS bill FROM main.findings WHERE patient_control_number IS NOT NULL AND {cond}"
-
-
-def _keep_conditions(lines: str, payments: str, link_map: str, claim_links: str, finding_bills: str | None) -> list[tuple[str, str]]:
+def _keep_conditions(lines: str, payments: str, link_map: str, claim_links: str) -> list[tuple[str, str]]:
     L = lines.split(".")[-1]
     return [
         ("nonroutine", f"{L}.denial_first_posted IS NOT NULL"),
@@ -1296,31 +1292,23 @@ def _keep_conditions(lines: str, payments: str, link_map: str, claim_links: str,
                   f"AND COALESCE(y.in_835, 0) = 0 AND COALESCE(y.ins_paid, 0) <> 0)"),
         ("unmapped", f"{L}.link NOT IN (SELECT link FROM {link_map} WHERE COALESCE(conflict, 0) = 0 AND bill IS NOT NULL)"),
         ("on_ar", f"{L}.link IN (SELECT link FROM {claim_links} WHERE link IS NOT NULL)"),
-        ("finding", (f"{L}.link IN (SELECT m.link FROM {link_map} m WHERE COALESCE(m.conflict, 0) = 0 AND m.bill IN ({finding_bills}))"
-                     if finding_bills else "0")),
         ("open_status", f"COALESCE({L}.status_class, 'none') <> 'paid'"),
-        # a second payer on file, the first payer paid and EMA still shows a balance: detection's "second payer never
-        # billed" needs the line whether or not the bill has an item yet (3,861 more lines of 70,285 on the real archive)
+        # a second payer on file, the first payer paid and EMA still shows a balance (detection's "second payer never
+        # billed" reads the line)
         ("second_payer", f"COALESCE({L}.secondary_payer, '') <> '' AND COALESCE({L}.ins_paid, 0) > 0 "
                          f"AND COALESCE({L}.balance, 0) > 0"),
     ]
 
 
 def keep_rule_sql(lines: str = "ema_lines", payments: str = "main.ema_line_payments", link_map: str = "main.ema_link_map",
-                  claim_links: str = "main.ema_claim_links", finding_bills: str | None = "auto",
-                  conn: sqlite3.Connection | None = None) -> str:
-    """The lean keep rule (spec 7.1) as one SQL condition over a lines table (ema_lines by default). A line stays when any
-    of these holds: a non-routine insurance adjustment (a payer's CARC, group not PR, code not in detect.IGNORE_CARCS);
-    an insurance payment under a check that is not an 835 trace; its link is not mapped to a bill (or is a conflict);
-    its link is on the A/R; its mapped bill has a finding that is open, started, sent or worked; its newest status is not
-    Resolved/Paid; a second payer is on file, the first payer paid and a balance is left. The finding rule reads the
-    store's findings (pass `conn` to leave it out when there are none) and needs rw_bill registered
-    (ema_reports.register_functions)."""
-    if finding_bills == "auto":
-        finding_bills = _finding_bills_sql(conn) if conn is not None else (
-            "SELECT rw_bill(patient_control_number) AS bill FROM main.findings WHERE patient_control_number IS NOT NULL "
-            f"AND {_LIVE_FINDING}")
-    return "(" + " OR ".join(f"({cond})" for _n, cond in _keep_conditions(lines, payments, link_map, claim_links, finding_bills)) + ")"
+                  claim_links: str = "main.ema_claim_links") -> str:
+    """The keep rules (spec 7.1, without its item rule) as one SQL condition over a lines table (ema_lines by default):
+    true for a line that matters for one of these reasons: a non-routine insurance adjustment (a payer's CARC, group not
+    PR, code not in detect.IGNORE_CARCS); an insurance payment under a check that is not an 835 trace; its link is not
+    mapped to a bill (or is a conflict); its link is on the A/R; its newest status is not Resolved/Paid; a second payer
+    is on file, the first payer paid and a balance is left. A line that meets none is a settled line: it is kept all the
+    same (the items of its bill read it)."""
+    return "(" + " OR ".join(f"({cond})" for _n, cond in _keep_conditions(lines, payments, link_map, claim_links)) + ")"
 
 
 # ------------------------------------------------------------------------------------------------------- refresh work
@@ -1967,14 +1955,10 @@ def _map_lines(conn: sqlite3.Connection) -> None:
 
 
 def _keep(conn: sqlite3.Connection) -> dict:
-    """Evaluate the lean keep rule on every line in the work database; `keep` lists the rules a line meets."""
+    """Evaluate the keep rules on every line in the work database; `keep` lists the rules a line meets ('' for a settled
+    line, kept all the same). Nothing here reads the store's items."""
     W = _W
-    fb = _finding_bills_sql(conn)
-    if fb:
-        conn.execute(f"CREATE TABLE {W}.pb_fbills AS SELECT DISTINCT CAST(bill AS TEXT) AS bill FROM ({fb}) WHERE bill IS NOT NULL")
-        conn.execute(f"CREATE UNIQUE INDEX {W}.ix_pb_fbills ON pb_fbills(bill)")
-    conds = _keep_conditions(f"{W}.pa_full", f"{W}.pa_pay", f"{W}.pb_map", "main.ema_claim_links",
-                             f"SELECT bill FROM {W}.pb_fbills" if fb else None)
+    conds = _keep_conditions(f"{W}.pa_full", f"{W}.pa_pay", f"{W}.pb_map", "main.ema_claim_links")
     expr = " || ".join(f"CASE WHEN {c} THEN '{n},' ELSE '' END" for n, c in conds)
     conn.execute(f"UPDATE {W}.pa_full SET keep = rtrim({expr}, ',')")
     total, kept = conn.execute(f"SELECT COUNT(*), SUM(keep <> '') FROM {W}.pa_full").fetchone()
@@ -2026,36 +2010,30 @@ def _part_b(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box], log: 
 
 
 # ---------------------------------------------------------------------------------------------------------- publishing
-def _publish(conn: sqlite3.Connection, *, part_a: bool, pruned: bool, meta: dict, cutoff: str | None) -> dict:
-    """Write the work database's tables into the store in one transaction."""
+def _publish(conn: sqlite3.Connection, *, part_a: bool, meta: dict, cutoff: str | None) -> dict:
+    """Write the work database's tables into the store in one transaction: every line, with its payments and its
+    reasons (the routine ones too, which Part A read from the ledger): nothing is pruned (see the keep rule)."""
     W = _W
     x = conn.execute
-    keep = "(keep IS NULL OR keep <> '')" if not pruned else "keep <> ''"
-    lkeep = keep.replace("keep", "l.keep")
 
     def cols(t: str) -> str:
         return ", ".join(_columns(conn, "main", t))
 
+    line_of = "{0}.link = l.link AND {0}.svc = l.svc AND {0}.cpt = l.cpt"
     try:
         x("DELETE FROM main.ema_lines")
-        n_lines = x(f"INSERT INTO main.ema_lines ({cols('ema_lines')}) SELECT {cols('ema_lines')} FROM {W}.pa_full WHERE {keep}").rowcount
+        n_lines = x(f"INSERT INTO main.ema_lines ({cols('ema_lines')}) SELECT {cols('ema_lines')} FROM {W}.pa_full").rowcount
         x("DELETE FROM main.ema_line_payments")
         pc = cols("ema_line_payments")
         n_pay = x(f"""INSERT INTO main.ema_line_payments ({pc}) SELECT {', '.join('y.' + c for c in pc.split(', '))} FROM {W}.pa_pay y
-                      WHERE EXISTS (SELECT 1 FROM {W}.pa_full l WHERE l.link = y.link AND l.svc = y.svc AND l.cpt = y.cpt AND {lkeep})""").rowcount
+                      WHERE EXISTS (SELECT 1 FROM {W}.pa_full l WHERE {line_of.format('y')})""").rowcount
         x("DELETE FROM main.ema_line_reasons")
         rc = cols("ema_line_reasons")
-        routine = ",".join(f"'{c}'" for c in ("routine", "patient", "none"))
         n_rsn = x(f"""INSERT INTO main.ema_line_reasons ({rc}) SELECT {', '.join('r.' + c for c in rc.split(', '))} FROM {W}.pa_rsn r
-                      JOIN {W}.pa_full l ON l.link = r.link AND l.svc = r.svc AND l.cpt = r.cpt
-                      WHERE {lkeep} AND (COALESCE(r.reason_class, 'other') NOT IN ({routine}) OR l.keep IS NULL
-                                         OR instr(',' || l.keep || ',', ',finding,') > 0)""").rowcount
+                      WHERE EXISTS (SELECT 1 FROM {W}.pa_full l WHERE {line_of.format('r')})""").rowcount
         if part_a:
-            # every reason, routine ones too, of the lines whose bill has a finding (Part A read them from the ledger)
-            fk = "(l.keep IS NULL OR instr(',' || l.keep || ',', ',finding,') > 0)"
             n_rsn += x(f"""INSERT OR IGNORE INTO main.ema_line_reasons ({rc}) SELECT {', '.join('r.' + c for c in rc.split(', '))}
-                           FROM {W}.pa_rsr r JOIN {W}.pa_full l ON l.link = r.link AND l.svc = r.svc AND l.cpt = r.cpt
-                           WHERE {fk}""").rowcount
+                           FROM {W}.pa_rsr r WHERE EXISTS (SELECT 1 FROM {W}.pa_full l WHERE {line_of.format('r')})""").rowcount
         x("DELETE FROM main.ema_checks")
         cc = cols("ema_checks")
         n_chk = x(f"INSERT INTO main.ema_checks ({cc}) SELECT {cc} FROM {W}.pa_chk").rowcount
@@ -2072,6 +2050,7 @@ def _publish(conn: sqlite3.Connection, *, part_a: bool, pruned: bool, meta: dict
             if cutoff:
                 x(f"DELETE FROM main.ema_link_events WHERE first_seen < ? AND link NOT IN (SELECT link FROM {W}.pa_lk)", (cutoff,))
             x("DELETE FROM meta WHERE key=?", (META_KEEP_DIRTY,))
+            _meta_set(conn, META_KEEP_RULE, KEEP_RULE)      # only a summary read from the ledger holds every line
         for k, v in meta.items():
             if v is None:
                 x("DELETE FROM meta WHERE key=?", (k,))
@@ -2099,6 +2078,8 @@ def _ledger_changed(conn: sqlite3.Connection, ledger: Ledger) -> bool:
         return True
     if ledger.rev is not None and ledger.rev != _meta_get(conn, META_REV):
         return True
+    if _meta_get(conn, META_KEEP_RULE) != KEEP_RULE:
+        return True             # summarized by another keep rule (an older build pruned lines by its items): once again
     return _meta_get(conn, META_KEEP_DIRTY) is not None
 
 
@@ -2107,10 +2088,12 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     """Bring the store's EMA summaries up to date.
 
     parts: 'auto' runs Part A when a ledger is given and it changed since the store last read it (its seq, or the state
-    folder revision on a serverless host, differs from meta ema:ledger_seq / ema:ledger_rev; retention deleted rows; or
-    meta ema:keep_dirty is set), and Part B after Part A or when meta ema:map_dirty is set. 'A', 'B' and 'AB' run those
-    parts. Part A needs the ledger; Part B reads only the store. With a ledger, retention runs first and the catalog is
-    brought in line with the ledger (sync_catalog). The store changes in one transaction at the end.
+    folder revision on a serverless host, differs from meta ema:ledger_seq / ema:ledger_rev; retention deleted rows;
+    meta ema:keep_dirty is set; or the store was summarized by another keep rule, meta ema:keep_rule), and Part B after
+    Part A or when meta ema:map_dirty is set. 'A', 'B' and 'AB' run those parts. Part A needs the ledger; Part B reads
+    only the store. With a ledger, retention runs first and the catalog is brought in line with the ledger
+    (sync_catalog). The store changes in one transaction at the end. Nothing here reads the store's items: the same data
+    gives the same summaries, whatever the last detection run listed.
 
     `release` (serverless): called with no argument as soon as the ledger is no longer needed (after Part A, before Part
     B), to save the scratch ledger to the state folder and delete it, so the temporary folder never holds the ledger and
@@ -2183,7 +2166,7 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
                        conflicts=out["part_b"]["map"]["conflicts"], facility=out["part_b"]["map"]["facility"],
                        patient_day=out["part_b"]["map"]["patient_day"], at=_now())
             meta[META_MAP_COVERAGE] = json.dumps(cov, sort_keys=True)
-        out["published"] = _publish(conn, part_a=want_a, pruned=want_b, meta=meta, cutoff=cutoff)
+        out["published"] = _publish(conn, part_a=want_a, meta=meta, cutoff=cutoff)
     out["seconds"] = round(time.time() - t0, 1)
     pb = out.get("part_b") or {}
     if pb:
@@ -2300,10 +2283,12 @@ class LedgerHandle:
         return (m or {}).get("rev") if m else None
 
     def behind(self, conn: sqlite3.Connection) -> bool:
-        """Whether the store last read another revision of the ledger than the state folder holds: a run saved the
-        ledger and died before saving the store. The next run that opens the ledger runs Part A again (refresh)."""
+        """Whether the store last read another revision of the ledger than the state folder holds (a run saved the
+        ledger and died before saving the store), or its summaries were built by another keep rule (an older build's,
+        which pruned lines by the items of its last run). The next run opens the ledger and runs Part A again
+        (cloud.repair_ledger, refresh)."""
         rev = self.state_rev()
-        return rev is not None and rev != _meta_get(conn, META_REV)
+        return rev is not None and (rev != _meta_get(conn, META_REV) or _meta_get(conn, META_KEEP_RULE) != KEEP_RULE)
 
     def open(self) -> Ledger:
         if self.ledger is not None:
