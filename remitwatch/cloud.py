@@ -1801,8 +1801,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         killed = rl.manifest["sections"].get("killed_runs") or None     # their open markers; else the lock taken over
         if not killed and takeover:
             killed = [{"started_at": takeover.get("since"), "last_step": None}]
+        sc.adopt_regulation(conn, prev_status)         # an idle run before this one saved no store: its state is in its status
         plan = sc.plan_next(conn, prev_status, mode="serverless", budget_s=budget, killed=killed)
         out["plan"] = {k: plan[k] for k in ("level", "name", "skip", "overdue")}
+        out["regulate"] = sc.regulation_state(conn)     # in status.json, for the next run whether or not this one saves
         rl.set("self_regulation", plan)
         if plan["actions"]:
             out["self_regulation"] = plan["actions"]

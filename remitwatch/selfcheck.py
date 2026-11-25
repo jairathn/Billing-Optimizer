@@ -631,9 +631,34 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
     _defer(conn, reg, plan, t)
     reg["plan"] = {k: plan[k] for k in ("level", "name", "spread", "archive_tight", "skip", "overdue", "alert", "actions")}
     reg["mode"] = mode
+    reg["seq"] = int(reg.get("seq") or 0) + 1         # which state is newer: the store's or a status's (adopt_regulation)
     meta_set(conn, K_REGULATE, reg)
     conn.commit()
     return plan
+
+
+def regulation_state(conn: sqlite3.Connection) -> dict:
+    """The self-regulation state the run leaves (meta selfcheck:regulate). A serverless run writes it in its status.json:
+    an idle run saves no store, and without it the next run would start from the level the last saving run left."""
+    return meta_get(conn, K_REGULATE, {}) or {}
+
+
+def adopt_regulation(conn: sqlite3.Connection, status: dict | None) -> bool:
+    """Before plan_next on a serverless host: the state the last run left in its status (status['regulate']) when it is
+    newer than the store's (a higher 'seq': that run saved no store). Calm runs then count toward a step down and runs
+    past a budget toward the alert, saved store or not. Returns True when adopted."""
+    got = (status or {}).get("regulate")
+    if not isinstance(got, dict):
+        return False
+    have = meta_get(conn, K_REGULATE, {}) or {}
+    try:
+        newer = int(got.get("seq") or 0) > int(have.get("seq") or 0)
+    except (TypeError, ValueError):
+        return False
+    if newer:
+        meta_set(conn, K_REGULATE, got)
+        conn.commit()
+    return newer
 
 
 STEP_WORDS = {"activity": "the provider tables", "report": "the weekly report email", "backfill": "the export-time backfill",

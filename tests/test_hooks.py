@@ -695,6 +695,51 @@ def test_a_status_over_the_memory_mark_makes_the_next_serverless_run_spread(box,
     assert shed["plan"]["level"] >= 3 and "activity" in shed["shed"] and "activity" not in shed
 
 
+def test_idle_serverless_runs_carry_the_self_regulation_to_the_next_run(box):
+    """An idle Vercel run saves no store, so what self-regulation counted in it would be lost: each idle run started from
+    the level the last saving run left, a site under memory pressure never reached the alert, and calm runs never brought
+    the level down (found on the real image: four idle runs read past 80% and the level stayed one step up). The run's
+    regulation rides in its status.json and the next run adopts it."""
+    import json
+
+    from remitwatch import cloud, selfcheck
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes()[:30])
+    assert _cloud(state, client)["plan"]["level"] == 0
+
+    hour = iter(range(1, 24))
+
+    def reading(peak):
+        # the run before, read as it ended (runs here start within a second; on a site they are hours apart)
+        st = json.loads(state.get(cloud.STATUS))
+        st["started"], st["memory_mb"] = f"2026-11-24T{next(hour):02d}:00:00+00:00", dict(st.get("memory_mb") or {}, peak=peak)
+        state.put(cloud.STATUS, json.dumps(st).encode())
+    levels = []
+    for i in range(4):                  # four runs, each after a reading past 80% of the 2,188 MB budget
+        reading(2100)
+        got = _cloud(state, client)
+        assert i == 3 or not got.get("store"), (i, got.get("store"))      # idle (the fourth saves its new alert)
+        levels.append(got["plan"]["level"])
+    assert levels == [1, 2, 3, 4], levels
+    alerts = {r[0] for r in raw_conn_of_status(state)}
+    assert "NEAR_LIMIT" in alerts, alerts
+    calm = []
+    for _ in range(3):
+        reading(900)
+        calm.append(_cloud(state, client)["plan"]["level"])
+    assert calm[-1] == 3, calm              # three calm runs bring it down one step
+    assert json.loads(state.get(cloud.STATUS))["regulate"]["level"] == 3
+
+
+def raw_conn_of_status(state):
+    """The alert kinds the last run's status names (an idle run does not save the store; its alerts are in its status)."""
+    import json
+
+    from remitwatch import cloud
+    st = json.loads(state.get(cloud.STATUS))
+    return [(k,) for k in ((st.get("alerts") or {}).get("by_kind") or {})]
+
+
 def test_a_serverless_run_held_by_the_self_check_keeps_the_copy_as_it_was(box, monkeypatch):
     """needs_G section 3: a run whose detection closes an item with no proof is held: meta selfcheck:safe_mode is on in the
     saved store, and the dashboard's copy shows the item open (the last good worklist), with the alert."""
