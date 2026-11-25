@@ -1519,7 +1519,8 @@ def _answered_since(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
 def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
     """A fingerprint of what each item's own claim shows in the data now: the 835 answers on its bill (how many, the
     newest date, the money), and for its EMA claim number EMA's lines (count, insurer paid, balance, newest posting, status
-    classes) and the newest A/R rows (claim status, balance); for an item with no bill, the remittance feed as a whole.
+    classes) and the newest A/R rows (claim status, balance), or with no EMA claim number EMA's lines on file for its bill,
+    date and code; for an item with no bill, the remittance feed as a whole.
     Two runs that see the same fingerprint saw the same facts, so an item that left between them left because a rule
     changed, not because its claim did."""
     out: dict[str, str] = {}
@@ -1532,6 +1533,7 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
                 .fetchone()) if has_835 else None
     by_bill: dict[str, list] = {}
     by_link: dict[int, list] = {}
+    by_service: dict[tuple, list | None] = {}
     for it in items:
         b = bill_of(it.get("patient_control_number"))
         if b and has_835 and b not in by_bill:
@@ -1557,7 +1559,20 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
                                                        WHERE link = ? AND as_of = (SELECT MAX(as_of) FROM ema_ar WHERE link = ?)
                                                        GROUP BY 1 ORDER BY 1""", (link, link))]
             by_link[link] = [ema, ar]
-        raw = json.dumps([by_bill.get(b) if b else feed, by_link.get(link) if link is not None else None], default=str)
+        parts = [by_bill.get(b) if b else feed, by_link.get(link) if link is not None else None]
+        svc, code = str(it.get("service_date") or "")[:10], it.get("procedure_code")
+        if link is None and b and has_lines and svc and code:
+            # an item raised before EMA's line was on file (the item makes the next summary keep the line): the line's
+            # coming is new facts on its own claim. Only a line on file is added, so an item with none keeps its fingerprint
+            k = (b, svc, str(code))
+            if k not in by_service:
+                n, paid, bal, posted = conn.execute("""SELECT COUNT(*), SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(balance, 0)),
+                                                              MAX(last_posted) FROM ema_lines WHERE bill = ? AND svc = ? AND cpt = ?""",
+                                                    k).fetchone()
+                by_service[k] = [n, paid, bal, posted] if n else None
+            if by_service[k] is not None:
+                parts.append(by_service[k])
+        raw = json.dumps(parts, default=str)
         out[it["finding_id"]] = hashlib.sha1(raw.encode()).hexdigest()[:16]
     return out
 

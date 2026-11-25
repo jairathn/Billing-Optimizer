@@ -1598,6 +1598,25 @@ def test_an_answer_delivered_again_leaves_by_the_delivery_that_keeps_the_item(st
     assert van["info"]["routes"].get("delivered_again") == 1
 
 
+def test_an_item_that_waited_for_emas_line_leaves_when_the_line_comes(store):
+    """A second payer's item raised before EMA's line was on file (SECONDARY_NOT_BILLED: the item makes the next summary
+    keep the line, and EMA then shows any answer) leaves when the line comes: new facts on its own claim, a route. Found on
+    the real world copy: the refresh after detection brought 299 such lines and the next detection's departures were all
+    kept. An item whose line is still not on file is kept."""
+    c = store.conn
+    snb = dict(signal="SECONDARY_NOT_BILLED", category="denial", carc=None, service_date="2026-03-02", procedure_code="99213")
+    add_item(c, "F-waited", line_key="La", patient_control_number="ZZ00T0001C001", **snb)
+    add_item(c, "F-still", line_key="Lb", patient_control_number="ZZ00T0002C001", **snb)
+    run(c, None, "r1")
+
+    def save(cn):
+        cn.execute("DELETE FROM findings")
+        ema_line(cn, 7001, bill="ZZ00T0001", ins_paid=4000, balance=0, status_class="paid")     # the line came: paid
+    out = run(c, save, "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert van["examples"] == ["F-still"] and van["info"]["routes"] == {"facts_changed": 1} and out["kept"] == 1, van
+
+
 def test_the_precision_guard_counts_a_service_sent_again_once(kind):
     """Two lines of one code on one claim are two units (their shortfalls add up); the same line sent again on a new claim
     is the same money (finding 12)."""
