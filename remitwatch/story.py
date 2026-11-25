@@ -2024,6 +2024,18 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         who = "Owner"
         buttons += ["copy_instructions"]
         deadline, basis = None, "the agreement's renewal or notice date"
+    elif route == "repricing":
+        ev = S._ev(f)
+        year, prev = ev.get("year") or f.get("year") or "its new", ev.get("previous_year") or "its earlier"
+        n = int(ev.get("lines_open") or ev.get("lines") or 0)
+        action = (f"Ask {grp} to reprocess the {n} claim{'s' if n != 1 else ''} listed at its {year} rates: it paid them on its {prev} "
+                  f"fee schedule after its {year} rates took effect ({usd(f.get('shortfall_cents'))} in all). One repricing request lists them all.")
+        steps.append("Send the list (claim, date of service, code, amount paid, the rate owed) through the payer's portal or provider "
+                     "line, and ask for one reference number for the whole request.")
+        steps.append("Each claim keeps its own filing window: the item lists only those still inside it.")
+        who = "Biller"
+        buttons += ["copy_instructions", "mark_sent"]
+        expected, expected_basis = int(f.get("shortfall_cents") or 0), f"the {year} rate less what was paid, claim by claim"
     elif route == "policy":
         action, steps, who, pattern = _policy_step(f)
         buttons += ["accept_pattern", "copy_instructions"]
