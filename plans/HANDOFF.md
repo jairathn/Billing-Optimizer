@@ -236,6 +236,11 @@ Last updated: 2026-11-25, 04:20 UTC.
       machine date, while the release's lists use the practice's day. Between 7 or 8 PM and midnight Eastern, views
       disagree on whether a deadline passed. A partial fix and a pinned-zone test are on branch `fix7d` (9f3fda6, not
       merged). Fixer fix7d is finishing it (every 'today' in the app, the suite run under zones a day off UTC).
+      **The self-repair drill (hook-in unit, acceptance 4, 04:55 UTC 11-25)**: a fresh agent given only a diagnostic
+      bundle and a repository copy with one injected code bug (DENIED_AUTH raised only after a later payment) found the
+      file, function, line and cause in about 5 minutes. It worked from the run manifests' rule version, the decision log's
+      `no_longer_raised` rows and the vanished check's examples. It noted that the vanished check excuses a flip as
+      `facts_changed` when only RemitWatch's own summary changed; this was passed to the hook-in unit to tighten.
       **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
       same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
