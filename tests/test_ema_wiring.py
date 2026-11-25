@@ -776,8 +776,8 @@ def test_a_medicaid_second_payer_is_never_a_bill_it_item(store, ledger, tmp_path
 
 def test_a_crossover_whose_ema_line_is_not_on_file_is_chased_from_the_remittance(store, ledger, tmp_path):
     """Medicare crossed the claim over to a Medigap carrier (claim status 19, the carrier named) and nothing came from it in
-    45 days. EMA's line is not in the store (its summary keeps only the lines of bills with an item), so the remittance
-    alone lists it, to chase the carrier; a Medicaid carrier is never listed."""
+    45 days. EMA shows no line of the bill for it (Production holds none), so the remittance alone lists it, to chase
+    the carrier; a Medicaid carrier is never listed. (A crossover whose carrier answered in EMA: test_cycle_converges.)"""
     _primary_with_share(store, 10, "777000224", status="19", crossover="TEST MEDIGAP LIFE", payer="MEDICARE OF KENTUCKY TEST",
                         paid_on="2026-03-28")
     _primary_with_share(store, 11, "777000225", status="19", crossover="KENTUCKY MEDICAID TEST", payer="MEDICARE OF KENTUCKY TEST",

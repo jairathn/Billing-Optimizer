@@ -6581,9 +6581,9 @@ class Detector:
             crossed = l.get("claim_status_code") == "19" or bool(self.crossover_carrier(l["claim_key"]))
             pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
             if not e:
-                # EMA's line is not in the store (its summary keeps the lines of bills with an item): a claim the first payer
-                # crossed over is still a second payer to chase, named by the remittance; the item makes the next summary
-                # keep the line, and EMA then shows any answer
+                # EMA shows no line of this bill for the date and code (the Production reports hold none, or its claim is not
+                # mapped to the bill): a claim the first payer crossed over is still a second payer to chase, named by the
+                # remittance
                 carrier = self.crossover_carrier(l["claim_key"]) if crossed else None
                 if not carrier:
                     continue
@@ -7453,18 +7453,7 @@ class Detector:
         self._overridden = overridden
         self._set_states(out_rows)
         rows = [tuple(r.get(k) for k in cols) for r in out_rows]
-        if self.ema_on:
-            # the bills of the items open, started, sent or worked changed: the ledger's next summary keeps their lines
-            from .ema_reports import bill_of_claim
-
-            def live(r: dict) -> bool:
-                return not r.get("stale") and (r.get("status") in ("open", "in_progress", "appealed", "lost", "dismissed")
-                                               or bool(r.get("notes")) or bool(r.get("appealed_at"))
-                                               or (r.get("status") == "resolved" and not r.get("auto_note")))
-            before_b = {bill_of_claim(r["patient_control_number"]) for r in existing.values() if r.get("patient_control_number") and live(r)}
-            after_b = {bill_of_claim(r["patient_control_number"]) for r in out_rows if r.get("patient_control_number") and live(r)}
-            if before_b != after_b:
-                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:keep_dirty', '1')")
+        # (the EMA line summary keeps every line, whatever this run lists: no refresh waits on the items saved here)
         c.execute("DELETE FROM findings")
         c.executemany(f"INSERT INTO findings ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", rows)
         if events:

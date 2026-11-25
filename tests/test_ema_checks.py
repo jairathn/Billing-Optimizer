@@ -160,7 +160,8 @@ TODAY = "2026-05-03"
 
 
 def keep(store, *pcns):
-    """Items on file for these claims, so the lean keep rule keeps their EMA lines (as the store's findings do in a cycle)."""
+    """Items on file for these claims, as a cycle's detection run leaves them (the summary keeps their EMA lines either
+    way: it keeps every line)."""
     from remitwatch import detect
     detect.ensure_schema(store.conn)
     for pcn in pcns:
