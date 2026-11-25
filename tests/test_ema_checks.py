@@ -425,10 +425,14 @@ def test_a_rejected_claim_on_the_ar_becomes_rejected_pre_payer(store, ledger, tm
 
 
 def answers_world(store, ledger, tmp_path):
-    """Claims with no remittance: 1 paid in EMA by a paper check; 2 answered with a $0 row; 3 a payer's CO-197; 4 only
-    a status (Resolved/Paid); 5 paid only by the ASC's separate-payee check; 6 and 16 the same content (a tie)."""
+    """Claims with no remittance: 1 paid in EMA by a paper check; 2 answered with a $0 row that carries the payer's allowed
+    amount (put on the patient); 3 a payer's CO-197; 4 only a status (Resolved/Paid); 5 paid only by the ASC's
+    separate-payee check; 6 and 16 the same content (a tie); 7 only a bare $0 row on a check (no reason, no allowed amount,
+    no adjustment: a check that lists the claim and pays nothing)."""
     rows = [charge(F.link_no(1), status="Payment Pending"), pay(F.link_no(1), "PAPER-1", 60, posted=D(2026, 4, 20)),
-            charge(F.link_no(2), patient=1), pay(F.link_no(2), "ZEROANS", 0, patient=1, posted=D(2026, 4, 20)),
+            charge(F.link_no(2), patient=1), pay(F.link_no(2), "ZEROANS", 0, patient=1, posted=D(2026, 4, 20), allowed=90),
+            charge(F.link_no(7), cpt="99214", amount=170, patient=2), pay(F.link_no(7), "BATCH-7", 0, cpt="99214", patient=2,
+                                                                        posted=D(2026, 4, 20)),
             charge(F.link_no(3), patient=2), adj(F.link_no(3), "CO-197", 150, patient=2, posted=D(2026, 4, 20)),
             charge(F.link_no(4), patient=3, status="Resolved/Paid"),
             charge(F.link_no(5), cpt="11102", patient=1), pay(F.link_no(5), "ASC-77", 70, cpt="11102", patient=1, posted=D(2026, 4, 20)),
@@ -444,9 +448,9 @@ def test_claim_answers_from_emas_postings(store, ledger, tmp_path):
     answers_world(store, ledger, tmp_path)
     claims = [{"claim_id": F.claim_id(i), "sent": "2026-03-05", "payer_group": BCBS, "lines": [(S, cpt, chg)]}
               for i, cpt, chg in ((1, "99213", 15000), (2, "99213", 15000), (3, "99213", 15000), (4, "99213", 15000),
-                                  (5, "11102", 15000), (6, "17000", 21000))]
+                                  (5, "11102", 15000), (6, "17000", 21000), (7, "99214", 17000))]
     # claims 1-5 share a date, code and charge with each other: tie them by their claim ids, as the A/R does
-    for i in range(1, 6):
+    for i in (1, 2, 3, 4, 5, 7):
         store.conn.execute("INSERT INTO ema_claim_links (claim_id, link, bill, first_seen, last_seen) VALUES (?,?,?,?,?)",
                            (F.claim_id(i), F.link_no(i), F.bill_id(i), "2026-04-01", "2026-04-01"))
     store.conn.commit()
@@ -456,6 +460,8 @@ def test_claim_answers_from_emas_postings(store, ledger, tmp_path):
     assert not got[F.claim_id(4)]["answered"]                 # a status alone never answers
     assert not got[F.claim_id(5)]["answered"]                 # the ASC's separate-payee money never answers
     assert got[F.claim_id(6)]["link"] is None                 # two EMA claims with the same content: no bridge
+    # a bare $0 row on a check answers nothing; the item can say EMA shows one
+    assert not got[F.claim_id(7)]["answered"] and got[F.claim_id(7)]["bare_zero"]["on"] == "2026-04-20"
     # sent after the answer: not answered
     assert not ec.claim_answers(store.conn, [dict(claims[0], sent="2026-04-25")])[F.claim_id(1)]["answered"]
 
@@ -487,6 +493,9 @@ def test_unanswered_claims_from_production(store, ledger, tmp_path):
     rows = [charge(F.link_no(1), status="Payment Pending", posted=D(2026, 3, 3)),                   # no answer at all: listed
             charge(F.link_no(2), patient=1, status="Payment Pending", posted=D(2026, 3, 3)),
             pay(F.link_no(2), "ZEROANS", 0, patient=1, posted=D(2026, 4, 1)),                         # a $0 answer: not listed
+            adj(F.link_no(2), "CO-45", 150, patient=1, posted=D(2026, 4, 1), contractual=True),      # (its reason, that day)
+            charge(F.link_no(6), cpt="99214", amount=170, patient=3, status="Payment Pending", posted=D(2026, 3, 3)),
+            pay(F.link_no(6), "BATCH-6", 0, cpt="99214", patient=3, posted=D(2026, 4, 1)),            # a bare $0 row: listed
             charge(F.link_no(3), patient=2, status="Rejected", posted=D(2026, 3, 3)),               # rejected: C3f's
             charge(F.link_no(4), cpt="11102", patient=1, status="Payment Pending", posted=D(2026, 4, 20)),   # not due yet
             charge(F.link_no(5), cpt="17000", patient=2, status="Payment Pending", posted=D(2026, 3, 3)),   # its 835 exists
@@ -496,18 +505,23 @@ def test_unanswered_claims_from_production(store, ledger, tmp_path):
     remit(store, trace="ZZDEN5", paid_on="2026-04-01", claims=[{"pcn": F.claim_id(5), "last": "EXAMPLE", "first": "CHARLIE",
                                                                 "lines": [(S, "17000", 150, 0)]}])
     items = ec.unanswered_claims(store.conn, today=TODAY, rate=lambda g, c, y: 7000)
-    assert [i["key_parts"] for i in items] == [(f"link:{F.link_no(1)}",)]
+    assert [i["key_parts"] for i in items] == [(f"link:{F.link_no(1)}",), (f"link:{F.link_no(6)}",)]
     it = items[0]
     assert it["signal"] == "NO_ANSWER" and it["id_signal"] == "EMA_OPEN_CLAIM" and it["expected_cents"] == 7000
     assert it["title"] == f"Charged 2026-03-03, no answer from {BCBS} in 59 days: 99213"
     assert it["evidence"]["answer_due"] == "2026-04-17" and it["ema_link"] == F.link_no(1)
+    # EMA claim 6's only answer is a bare $0 row: listed, and the item says what EMA shows
+    z = items[1]
+    assert z["evidence"]["ema_bare_zero"]["on"] == "2026-04-01"
+    assert z["hint"].startswith("EMA shows a $0 row for this claim on a check (ending") and "no reason, allowed amount or adjustment" in z["hint"]
     # once the A/R names the claim, the item is keyed by its claim id and inherits the link-keyed item's work
     store.conn.execute("INSERT INTO ema_claim_links (claim_id, link, bill, first_seen, last_seen) VALUES (?,?,?,?,?)",
                        (F.claim_id(1), F.link_no(1), F.bill_id(1), "2026-04-30", "2026-04-30"))
     store.conn.commit()
     items = ec.unanswered_claims(store.conn, today=TODAY)
     assert items[0]["key_parts"] == (F.claim_id(1),) and items[0]["heir_keys"] == [("EMA_OPEN_CLAIM", f"link:{F.link_no(1)}")]
-    assert ec.unanswered_claims(store.conn, today=TODAY, skip_claim_ids={F.claim_id(1)}) == []
+    assert [i["key_parts"] for i in ec.unanswered_claims(store.conn, today=TODAY, skip_claim_ids={F.claim_id(1)})] == [
+        (f"link:{F.link_no(6)}",)]
     assert ec.unanswered_claims(store.conn, today="2026-06-30") == []          # Production 60 days old: nothing
 
 
