@@ -168,6 +168,54 @@ def test_the_serverless_save_goes_through_the_one_block_image(tmp_path, monkeypa
     store.close()
 
 
+def test_the_image_near_the_one_block_ceiling_counts_as_pressure_and_says_what_would_stop(tmp_path):
+    """The serverless budgets count the store image against the 1,024 MB block its save goes through (a bigger one is
+    saved with a third copy: past Vercel's memory), as well as memory, time and /tmp: an image at 80% of it makes the
+    next run act (archive at the tighter end: E's horizon tightens), and the warning says, in dollars and items, what
+    would stop being checked if it went on."""
+    from remitwatch import alerts, selfcheck as sc
+    from remitwatch.detect import ensure_schema
+    s = Store(str(tmp_path / "s.sqlite"))
+    ensure_schema(s.conn)
+    for i in range(3):
+        s.conn.execute("INSERT INTO findings (finding_id, signal, category, status, work_state, shortfall_cents, stale) "
+                       "VALUES (?, 'DENIED_AUTH', 'denial', 'open', 'work_now', 125000, 0)", (f"F-{i}",))
+    s.conn.commit()
+    status = {"started": "2026-11-24T10:17:00+00:00", "finished": "2026-11-24T10:20:00+00:00", "mode": "serverless",
+              "seconds": 180, "budget_seconds": 240, "memory_mb": {"peak": 1500}, "store": {"image_mb": 860.0}}
+    p = sc.pressure_of(status, sc.budgets("serverless"))
+    assert p["pressured"] and p["worst"] == "image" and p["image"] >= 0.8 and "1,024 MB" in p["text"]
+    plan = sc.plan_next(s.conn, status, mode="serverless")
+    assert plan["level"] == 1 and sc.archive_budget_state(plan)["share"] >= 0.8       # E's horizon takes six months more
+    alerts.run_alerts(s.conn, today="2026-11-24")
+    near = s.conn.execute("SELECT severity, title FROM alerts WHERE kind='NEAR_CEILING' AND status!='cleared'").fetchone()
+    assert near and "860 MB" in near[1] and "3 open items" in near[1] and "$3,750" in near[1], near
+    assert any(i["key"] == "selfcheck_ceiling" and not i["ok"] for i in sc.data_health(s.conn))
+    calm = dict(status, started="2026-11-24T11:17:00+00:00", store={"image_mb": 500.0})
+    sc.plan_next(s.conn, calm, mode="serverless")
+    alerts.run_alerts(s.conn, today="2026-11-24")
+    assert not s.conn.execute("SELECT 1 FROM alerts WHERE kind='NEAR_CEILING' AND status!='cleared'").fetchone()
+    s.close()
+
+
+def test_the_archive_counts_a_serverless_store_against_the_ceiling(tmp_path, monkeypatch):
+    """E's own measure and budget: on a serverless host the store's size against the one-block ceiling is a share too,
+    and the larger share decides (the horizon tightens, Data health warns)."""
+    from remitwatch import archive, store as store_mod
+    monkeypatch.setattr(store_mod, "MEMDB_CEILING_MB", 1)               # a 1 MB block: this small store is past 80% of it
+    s = Store.from_bytes(bytearray(_image(rows=8000)))
+    m = archive.measure(s.conn, peak=100, mode="serverless", budget=2188)
+    assert m["ceiling_share"] >= 0.8 and m["share"] == m["ceiling_share"] and m["level"] in ("warn", "over")
+    archive.record_run(s.conn, run_id="r1", measured=m)
+    assert archive.budget_state(s.conn)["share"] >= 0.8
+    assert archive.effective_horizon(s.conn, budget_state=archive.budget_state(s.conn))["months"] == archive.DEFAULT_HORIZON_MONTHS - 6
+    item = next(i for i in archive.data_health(s.conn) if i["key"] == "store_memory")
+    assert not item["ok"] and "1 MB" in item["title"]
+    server = archive.measure(s.conn, peak=100, mode="server", budget=2188)
+    assert server.get("ceiling_share") is None and server["share"] < 0.8   # a server's store is a file: no ceiling
+    s.close()
+
+
 # ======================================================================================================================
 # 2. Detection (both hosts: Detector.run serves the server's cycle and the serverless one)
 # ======================================================================================================================

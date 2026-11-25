@@ -24,6 +24,8 @@ SAFE_MODE          a run was held by RemitWatch's self-check: the worklist from 
                    (remitwatch.selfcheck; the rest of these kinds are the self-check's too)
 CHECK_FAILED       a critical self-check failed, or could not run (the guard it gives is off until it runs again)
 NEAR_LIMIT         the runs keep passing 80% of a budget (memory, time, /tmp, the store's size) and nothing more can be shed
+NEAR_CEILING       a serverless store near the 1,024 MB block its save goes through: what would stop being checked, in
+                   dollars and items
 AUDIT_GAPS         the weekly self-audit found lines with money to recover that no item is working (any new gap)
 WASTED_WORK        the weekly self-audit found items on Work now that look settled already
 TRACK_RECORD       a closure rule whose closures are reopened too often

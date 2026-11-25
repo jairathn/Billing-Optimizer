@@ -471,7 +471,11 @@ def budgets(mode: str, *, budget_s: Any = None) -> dict:
                                                             "REMITWATCH_CYCLE_BUDGET_SECONDS", 240 if serverless else 3600))
     except (TypeError, ValueError):
         secs = 240.0 if serverless else 3600.0
-    return {"memory_mb": mem_mb, "seconds": secs, "tmp_mb": TMP_BUDGET_MB if serverless else None, "share": PRESSURE_SHARE}
+    # serverless: the store image's save goes through one block SQLite caps at 1,024 MB (store.MEMDB_CEILING_MB); a bigger
+    # image is saved with a third copy of the store, past what the function's memory holds
+    from .store import MEMDB_CEILING_MB
+    return {"memory_mb": mem_mb, "seconds": secs, "tmp_mb": TMP_BUDGET_MB if serverless else None, "share": PRESSURE_SHARE,
+            "ceiling_mb": MEMDB_CEILING_MB if serverless else None}
 
 
 def mark(out: dict, step: str, started: float | None = None, *, tmp: bool | None = None) -> dict:
@@ -507,9 +511,12 @@ def pressure_of(status: dict | None, b: dict) -> dict:
         except (TypeError, ValueError):
             secs = None
     budget_s = st.get("budget_seconds") or b.get("seconds")
+    image = (st.get("store") or {}).get("image_mb") if isinstance(st.get("store"), dict) else None
+    image = image if isinstance(image, (int, float)) and image > 0 else None
     share = {"memory": (peak / b["memory_mb"]) if peak and b.get("memory_mb") else None,
              "time": (float(secs) / float(budget_s)) if isinstance(secs, (int, float)) and budget_s else None,
-             "tmp": (tmp / b["tmp_mb"]) if tmp is not None and b.get("tmp_mb") else None}
+             "tmp": (tmp / b["tmp_mb"]) if tmp is not None and b.get("tmp_mb") else None,
+             "image": (image / b["ceiling_mb"]) if image and b.get("ceiling_mb") else None}
     err = str(st.get("error") or "")
     killed = bool(re.search(r"MemoryError|OutOfTime|out of time|Killed|Timeout|timed out", err, re.I)) or \
         (bool(st.get("started")) and not st.get("finished") and not st.get("skipped"))
@@ -522,11 +529,13 @@ def pressure_of(status: dict | None, b: dict) -> dict:
         parts.append(f"{secs:,.0f} s of a {float(budget_s):,.0f} s budget ({share['time']:.0%})")
     if tmp is not None and b.get("tmp_mb"):
         parts.append(f"/tmp {tmp:,} MB of {b['tmp_mb']:,} MB ({share['tmp']:.0%})")
+    if image and b.get("ceiling_mb"):
+        parts.append(f"the store {image:,.0f} MB in memory, of the {b['ceiling_mb']:,} MB a run saves in one piece ({share['image']:.0%})")
     if killed:
         parts.append(err[:160] if err else "the run stopped before it finished")
     return {**{k: (round(v, 3) if v is not None else None) for k, v in share.items()}, "peak_mb": peak, "seconds": secs,
-            "tmp_mb": tmp, "pressured": bool(over) or killed, "killed": killed, "worst": worst or ("killed" if killed else None),
-            "text": "; ".join(parts)}
+            "tmp_mb": tmp, "image_mb": image, "ceiling_mb": b.get("ceiling_mb"), "pressured": bool(over) or killed,
+            "killed": killed, "worst": worst or ("killed" if killed else None), "text": "; ".join(parts)}
 
 
 def plan_for(level: int, pressure: dict | None = None) -> dict:
@@ -696,11 +705,36 @@ def archive_budget_state(plan: dict) -> dict:
     months more, never below its floor or the windows open items need), and the measured share otherwise (so a calm run
     lets the horizon relax)."""
     p = (plan or {}).get("pressure") or {}
-    share = p.get("memory")
+    shares = [s for s in (p.get("memory"), p.get("image")) if isinstance(s, (int, float))]
+    share = max(shares) if shares else None          # memory against its budget, or the image against its one-block ceiling
     if (plan or {}).get("archive_tight"):
         share = max(float(share or 0), PRESSURE_SHARE)
     return {"peak_mb": p.get("peak_mb"), "budget_mb": SERVERLESS_MEMORY_BUDGET_MB if p.get("peak_mb") else None, "share": share,
             "level": (plan or {}).get("level", 0), "why": p.get("text")}
+
+
+CEILING_WARN_SHARE = 0.75           # the store image at this share of its one-block ceiling: said loudly, well before it
+
+
+def ceiling_warning(conn: sqlite3.Connection) -> dict | None:
+    """The serverless store image near the one block its save goes through (store.MEMDB_CEILING_MB), from the last run's
+    figures (meta selfcheck:regulate): what would stop being checked if it went on, in dollars and items (the open items
+    on the lists, and every new remittance). None below CEILING_WARN_SHARE or on a server."""
+    p = (meta_get(conn, K_REGULATE, {}) or {}).get("last_pressure") or {}
+    share, image, ceiling = p.get("image"), p.get("image_mb"), p.get("ceiling_mb")
+    if not (isinstance(share, (int, float)) and share >= CEILING_WARN_SHARE and image and ceiling):
+        return None
+    n = cents = 0
+    if _has_table(conn, "findings") and "work_state" in _cols(conn, "findings"):
+        n, cents = conn.execute("""SELECT COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE COALESCE(stale, 0) = 0
+                                   AND work_state IN ('work_now', 'waiting')""").fetchone()
+    title = (f"The store is {image:,.0f} MB in memory, {share:.0%} of the {ceiling:,} MB a run can save in one piece. Past it, "
+             f"each save needs a third copy of the store, more than this host's memory: the runs would stop, and "
+             f"{_n(int(n), 'open item')} ({usd0(cents)}) and every new remittance would no longer be checked. RemitWatch moves "
+             "older settled claims to the archive sooner to keep it down; if this stays, tell whoever looks after the hosting "
+             "(a shorter horizon, REMITWATCH_RETENTION_MONTHS, or the server as the host that analyses).")
+    return {"image_mb": image, "ceiling_mb": ceiling, "share": share, "n": int(n), "cents": int(cents),
+            "severity": "high" if share >= PRESSURE_SHARE else "medium", "title": title}
 
 
 def regulation(conn: sqlite3.Connection) -> dict:
@@ -4165,6 +4199,11 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
                                  f"({usd0(c.get('cents'))}). "
                                  f"{c.get('what_to_check') or ''}",
                         "detail": {"check": c["id"], "examples": c.get("examples"), "info": c.get("info")}})
+    ceil = ceiling_warning(conn)
+    if ceil:
+        out.append({"kind": "NEAR_CEILING", "severity": ceil["severity"], "payer_group": None, "key": ("NEAR_CEILING",),
+                    "n": ceil["n"], "cents": ceil["cents"], "title": ceil["title"],
+                    "detail": {k: ceil[k] for k in ("image_mb", "ceiling_mb", "share")}})
     reg = regulation(conn)
     if reg["level"] >= len(LEVELS) - 1:
         p = reg.get("pressure") or {}
@@ -4440,6 +4479,11 @@ def data_health(conn: sqlite3.Connection, today: Any = None) -> list[dict]:
     if safe.get("on"):
         out.append({"key": "selfcheck_safe_mode", "ok": False, "title": "Safe mode: the worklist is from before the last run",
                     "detail": safe.get("text") or "", "who": "Owner: download the diagnostic bundle from the Data tab for the maintainer."})
+    ceil = ceiling_warning(conn)
+    if ceil:
+        out.append({"key": "selfcheck_ceiling", "ok": False, "severity": ceil["severity"],
+                    "title": f"The store is near what a run can save in one piece ({ceil['share']:.0%})",
+                    "detail": ceil["title"], "who": "Whoever looks after the hosting, if this stays for a week."})
     last = meta_get(conn, K_LAST, {}) or {}
     for c in last.get("checks") or []:
         if c.get("status") not in ("fail", "error") or c.get("id") in ("feed_835", "feed_ema"):
