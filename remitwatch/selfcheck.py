@@ -147,13 +147,16 @@ def _int_setting(name: str, default: int) -> int:
 
 
 def today_of(today: Any = None) -> str:
-    """Today as YYYY-MM-DD: the run's own day when it passes one, else REMITWATCH_TODAY (simulated days), else the clock."""
+    """Today as YYYY-MM-DD: the run's own day when it passes one, else REMITWATCH_TODAY (simulated days), else the
+    practice's day by the clock (runtime.practice_today), the day every list counts from; never UTC's, a day ahead of a
+    US practice each evening."""
     if today:
         return str(today)[:10]
     v = setting("REMITWATCH_TODAY")
     if v and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v)[:10]):
         return str(v)[:10]
-    return datetime.now(timezone.utc).date().isoformat()
+    from .runtime import practice_today
+    return practice_today()
 
 
 def now_of(now: Any = None) -> str:
@@ -576,7 +579,8 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
     level = int(reg.get("level") or 0)
     calm = int(reg.get("calm") or 0)
     pressure = reg.get("last_pressure") or {}
-    t = today_of(str(now)[:10] if now else None)
+    from .runtime import practice_date
+    t = today_of(practice_date(str(now)) if now else None)        # the practice's date of the run's start, as record_did's
 
     def step(st: dict, b: dict) -> None:
         nonlocal level, calm, pressure
@@ -1603,6 +1607,7 @@ def _reapply_person_changes(conn: sqlite3.Connection, since_id: int | None) -> i
     those history entries belong to no run, so the item must say what its history says. Returns the changes put back."""
     if since_id is None or not _has_table(conn, "finding_events"):
         return 0
+    from .runtime import practice_date
     cols = set(_cols(conn, "findings"))
     n = 0
     marks = ",".join("?" * len(PERSON_KINDS))
@@ -1615,7 +1620,7 @@ def _reapply_person_changes(conn: sqlite3.Connection, since_id: int | None) -> i
             for col, expr, vals in (("notes", "notes = COALESCE(?, notes)", [note]),
                                     ("status_changed_at", "status_changed_at = ?", [at]),
                                     ("recovered_cents", "recovered_cents = ?", [amount if to == "resolved" else None]),
-                                    ("recovered_date", "recovered_date = ?", [str(at or "")[:10] if to == "resolved" else None]),
+                                    ("recovered_date", "recovered_date = ?", [practice_date(at) if to == "resolved" else None]),
                                     ("appealed_at", "appealed_at = CASE WHEN ? = 'appealed' AND appealed_at IS NULL THEN ? "
                                                     "ELSE appealed_at END", [to, at]),
                                     ("auto_note", "auto_note = NULL", []), ("prev_status", "prev_status = NULL", [])):

@@ -1824,3 +1824,28 @@ def test_today_and_the_pattern_counts_take_the_practices_day_not_utcs(server, mo
     a = {p["pattern"]: p for p in pol["patterns"]}[P_AUTH]
     assert (a["appealable"], a["appealable_cents"]) == ((1, 9000) if behind else (0, 0)), (behind, a)
     assert pol["today"] == day
+
+
+def test_the_data_tab_and_today_count_the_reports_ages_to_the_practices_day_on_both_hosts(worlds, tmp_path, monkeypatch):
+    """The reports' ages on the Data tab and Today (fresh: ar_days, production_days) count to the practice's day, as the
+    blind spot beside them and every list do. They counted to the machine's day (ema_checks' default, UTC on both hosts):
+    from 7 PM Eastern an A/R pulled eight days ago read nine, past the eight that still counts as fresh. The zone puts the
+    practice a day off UTC whatever the hour. Both hosts: the server's store, and the serverless host's dashboard copy."""
+    from tests.test_practice_day import pin_zone
+    pin_zone(monkeypatch)
+    day = dt.date.fromisoformat(runtime.practice_today())
+    db = copied(worlds, tmp_path)
+    ar_as_of = rows(db, "SELECT MAX(as_of) FROM ema_report_files WHERE report='ar_report'")[0][0]
+    prod_as_of = rows(db, "SELECT MAX(as_of) FROM ema_report_files WHERE report='production'")[0][0]
+    want = {"today": day.isoformat(), "ar_days": (day - dt.date.fromisoformat(ar_as_of)).days,
+            "production_days": (day - dt.date.fromisoformat(prod_as_of)).days}
+
+    def check(c, host):
+        for path in ("/api/ema/data", "/api/ema/today"):
+            fr = c.get(path).json()["fresh"]
+            assert {k: fr[k] for k in want} == want, (host, path, fr)
+        feeds = {f["feed"]: f["days"] for f in c.get("/api/ema/data").json()["blind"]["feeds"]}
+        assert (feeds["ar"], feeds["production"]) == (want["ar_days"], want["production_days"]), (host, feeds)
+    check(_site(monkeypatch, db), "server")           # asked before the serverless site switches the mode
+    (tmp_path / "vercel").mkdir()
+    check(_site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel"), "serverless")

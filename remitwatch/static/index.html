@@ -504,7 +504,9 @@ async function findingsTable(v, container, base, opts={}){
   const res = await api('/api/findings?'+qs(params), find);
   const sigs = base.signal ? base.signal.split(',') : state.summary.by_signal.filter(r=>!base.category||base.category.split(',').includes(r.category)).map(r=>r.signal);
   const payers = state.summary.by_payer.map(r=>r.payer_group);
-  const last = ((state.meta||{}).remits||{}).last_payment, behind = last ? Math.floor((Date.now() - new Date(last+'T00:00:00Z'))/86400000) : null;
+  // the newest remittance's age in days to the practice's day (today.js daysUntil, from the brief), as the server counts
+  // days behind: never the browser's clock against midnight UTC, a day ahead of a US practice each evening
+  const last = ((state.meta||{}).remits||{}).last_payment, behind = last ? -daysUntil(last) : null;
   container.innerHTML = `${behind!=null && behind > 10 && !opts.noStale ? `<div class="warnbox"><b>Payments after ${esc(last)} are not in the files yet.</b> The newest remittance in the Dropbox folder is ${behind} days old, so anything paid since then, including corrected claims, still shows here as open. Someone needs to put the latest TriZetto downloads in the folder.</div>` : ''}
     <div class="filters">
       <select data-f="signal"><option value="">All signals</option>${sigs.map(x=>`<option ${f.signal===x?'selected':''}>${x}</option>`).join('')}</select>

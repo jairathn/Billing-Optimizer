@@ -106,7 +106,12 @@ PENDING_ACTIONS = ("appeal", "corrected", "records", "reprocess")
 
 # ------------------------------------------------------------------------------------------------------------ helpers
 def _today(today: Any) -> str:
-    return str(today or date.today().isoformat())[:10]
+    """The day an item's state is decided on: the caller's (the run's day), else the practice's (runtime.practice_today),
+    never the machine's (UTC on both hosts, a day ahead of a US practice each evening)."""
+    if today:
+        return str(today)[:10]
+    from .runtime import practice_today
+    return practice_today()
 
 
 def _d(iso: Any) -> date | None:
@@ -278,7 +283,7 @@ def classify_note(text: str | None, as_of: str | None = None) -> dict:
     kinds = [k for k, rx in _NOTE_KINDS if rx.search(t)]
     if _NO_APPEAL.search(t):
         kinds = [k for k in kinds if k not in ("appeal", "resubmitted")] + ["no_appeal"]
-    ref = _d(as_of) or date.today()
+    ref = _d(as_of) or _d(_today(None))         # the practice's day, where the note was written
     dates = []
     for m in _NOTE_DATE.finditer(t):
         mo, dy, yr = int(m.group(1)), int(m.group(2)), m.group(3)

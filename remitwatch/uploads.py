@@ -679,11 +679,10 @@ def _finish(conn: sqlite3.Connection, up: dict, errors: dict) -> None:
 
 # --------------------------------------------------------------------------- the words shown for each upload
 def _day(d: str | None) -> str:
-    try:
-        x = date.fromisoformat(str(d)[:10])
-        return f"{x:%b} {x.day}, {x.year}"
-    except (TypeError, ValueError):
-        return str(d or "")
+    """A day in words (Nov 24, 2026). A stored moment is said on its date where the practice is (runtime.practice_date):
+    a file read at 8 PM Eastern was read that day, not the next, as the checklist counts its age."""
+    x = _iso_day(d)
+    return f"{x:%b} {x.day}, {x.year}" if x else str(d or "")
 
 
 def _n(x: int, one: str, many: str | None = None) -> str:
@@ -2563,10 +2562,18 @@ def _scope_words(row: dict) -> str:
 
 
 def _iso_day(v: Any) -> date | None:
+    """A stored day, or the practice's date of a stored moment (an ISO time with its zone, as every record is written):
+    what a day count compares with the practice's today. A plain date, or a time with no zone, is taken as written."""
+    from .runtime import practice_date
     try:
-        return date.fromisoformat(str(v)[:10])
+        return date.fromisoformat(practice_date(str(v))[:10]) if v else None
     except (TypeError, ValueError):
         return None
+
+
+def _practice_today() -> date:
+    from .runtime import practice_today
+    return date.fromisoformat(practice_today())
 
 
 def upload_checks(row: dict, today: date | None = None) -> list[dict]:
@@ -2578,7 +2585,7 @@ def upload_checks(row: dict, today: date | None = None) -> list[dict]:
         acct = json.loads(row.get("account") or "{}") if isinstance(row.get("account"), str) else (row.get("account") or {})
     except ValueError:
         acct = {}
-    came = _iso_day(row.get("received_at")) or today or date.today()
+    came = _iso_day(row.get("received_at")) or today or _practice_today()       # the practice's day it arrived
     if row.get("report") == "ar_report":
         if acct.get("aging_window") == 30:
             out.append({"code": "ar_30_days", "message": "This A/R export lists only lines with activity in the last 30 days, "
@@ -2821,7 +2828,7 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
     here and is kept because this site does not read that report: ema_reports.reads). 'age_days' is the age of the
     newest data read (None when none was read)."""
     from . import ema_reports
-    today = today or datetime.now(timezone.utc).date()
+    today = today or _practice_today()      # ages count to the practice's day, as the Data tab's do (never UTC's)
     seen = arrivals(conn)
     howto = howto or {}
     word = _next_read()

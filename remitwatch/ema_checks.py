@@ -150,7 +150,12 @@ NOT_SENT_DAYS, INVALID_DAYS = 14, 3
 
 # ------------------------------------------------------------------------------------------------------------ helpers
 def _today(today: str | None) -> str:
-    return str(today or date.today().isoformat())[:10]
+    """The day a check counts to: the caller's (the run's day), else the practice's (runtime.practice_today), as every
+    list counts. Never the machine's: UTC on both hosts, a day ahead of a US practice from 7 PM Eastern."""
+    if today:
+        return str(today)[:10]
+    from .runtime import practice_today
+    return practice_today()
 
 
 def _d(iso: Any) -> date | None:

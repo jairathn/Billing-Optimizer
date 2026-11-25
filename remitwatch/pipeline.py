@@ -671,7 +671,8 @@ def _store_alert(db_path: str, why: str, log=print) -> None:
     needs the store fails while it is missing, and the hourly run says why in the log."""
     from .store import _marker, _read_marker, _write_marker
     marker = _read_marker(db_path) or {}
-    today = datetime.now(timezone.utc).date().isoformat()
+    from .runtime import practice_today
+    today = practice_today()        # once a day where the practice is: an evening's second stop is the same day
     if marker.get("alerted_on") == today:
         return
     try:

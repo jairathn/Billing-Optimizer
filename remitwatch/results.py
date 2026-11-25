@@ -169,11 +169,13 @@ class ResultsError(ValueError):
 
 # --------------------------------------------------------------------------------------------------------- helpers
 def _today(today: Any = None) -> str:
-    """The day the figures are for: the run's day when it passes one, else today in UTC (the one place the clock is read
-    for a date)."""
+    """The day the figures are for: the run's day when it passes one, else the practice's (runtime.practice_today), the
+    day every list counts its windows from; never UTC's, a day ahead of a US practice each evening. The one place the
+    clock is read for a date."""
     if today:
         return str(today)[:10]
-    return datetime.now(timezone.utc).date().isoformat()
+    from .runtime import practice_today
+    return practice_today()
 
 
 def _now() -> str:

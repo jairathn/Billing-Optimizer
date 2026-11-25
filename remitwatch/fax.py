@@ -117,6 +117,15 @@ class Provider:
         raise FaxError("This fax service cannot list what it sent.")
 
 
+def _range_days() -> tuple[date, date]:
+    """The days a date range asked of the fax service must hold, earliest first: the practice's today and UTC's. SRFax
+    dates a fax in its account's zone, which may be either; a range that stopped at the earlier day would leave the
+    evening's faxes out until the next day. Never the machine's own day, which is neither by rule."""
+    from .runtime import practice_today
+    days = sorted({datetime.now(timezone.utc).date(), date.fromisoformat(practice_today())})
+    return days[0], days[-1]
+
+
 class SRFax(Provider):
     """SRFax's web service: one HTTPS POST per call, `action` naming it, the account's ID and password with every call;
     the answer is {Status: Success|Failed, Result}."""
@@ -165,8 +174,8 @@ class SRFax(Provider):
                 "error": str(r.get("ErrorCode") or "")[:200] if state == "failed" else "", "at": r.get("DateSent") or ""}
 
     def inbox(self, days: int) -> list[dict]:
-        end = date.today()
-        res = self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=(end - timedelta(days=days)).strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
+        first, end = _range_days()
+        res = self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=(first - timedelta(days=days)).strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
         out = []
         for r in res if isinstance(res, list) else []:
             name = str(r.get("FileName") or "")
@@ -186,7 +195,8 @@ class SRFax(Provider):
     def check(self) -> dict:
         steps = []
         try:
-            self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=date.today().strftime("%Y%m%d"), sEndDate=date.today().strftime("%Y%m%d"))
+            first, end = _range_days()
+            self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=first.strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
             steps.append({"step": "Sign-in", "ok": True, "detail": "SRFax accepted the account ID and password"})
         except FaxError as exc:
             steps.append({"step": "Sign-in", "ok": False, "detail": str(exc)})
@@ -199,11 +209,12 @@ class SRFax(Provider):
     def find_sent(self, filename: str, number: str, since: str) -> str | None:
         """SRFax's outbox (Get_Fax_Outbox) from the day before `since`: a fax to `number` whose submitted file has this name.
         Not yet tried against the real service: anything it cannot read is FaxError, and a person checks."""
+        first, end = _range_days()
         try:
             start = date.fromisoformat((since or "")[:10]) - timedelta(days=1)
         except ValueError:
-            start = date.today() - timedelta(days=7)
-        res = self._call("Get_Fax_Outbox", sPeriod="RANGE", sStartDate=start.strftime("%Y%m%d"), sEndDate=date.today().strftime("%Y%m%d"))
+            start = first - timedelta(days=7)
+        res = self._call("Get_Fax_Outbox", sPeriod="RANGE", sStartDate=start.strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
         if not isinstance(res, list):
             raise FaxError("SRFax's outbox did not come back as a list.")
         for r in res:
