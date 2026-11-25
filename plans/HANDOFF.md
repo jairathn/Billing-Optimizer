@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 15:15 UTC.
+Last updated: 2026-11-25, 03:20 UTC.
 
 ## 1. Where things are
 
@@ -212,6 +212,21 @@ Last updated: 2026-11-24, 15:15 UTC.
       SECONDARY_NOT_BILLED items flipping every cycle, and a one-time settle of 34 PR-204 and coverage-date items after the
       first cycle. Cause: the EMA line summary keeps a bill's lines by the run's own items. Fixer fix7a started 16:50
       (release gate 4: a second cycle changes nothing).
+      **f773a10** fixes the fix4 merge commit (it staged detect.py before a shadowed variable was renamed, so every
+      never-answered claim raised TypeError at 32e4de6). Suite on f773a10: 2,798 passed, 0 failed. A16 on f773a10 (Work
+      now, in scope; c52a54c in brackets): correct 1,301 [1,433]; already done 157 [155]; already worked 21 [21];
+      duplicate 4 [5]; wrong amount 144, $10,193 [343, $22,344]; undecided 26 [41]; closed wrongly 1 [1]; closures whose
+      recovery differs 123 [507]; money left on the table $72,808 [$66,686], up because fix4's firmer rate rule (a 60%
+      share plus backing) dropped 151 underpayments ($9,400) that A16 (a 50% mode) still calls owed, while 201 it calls
+      not short ($9,081) rightly left. That threshold is being settled by hand: workflow wf_74399af8-fcf (03:20 UTC), a
+      stratified sample of 31 against each payer's own paid history.
+      **The 76 dropped never-answered claims, hand-traced (workflow wf_d630475e-230):** 75 rightly dropped (58 paid, 8 a
+      $0 answer or to the patient, 3 denied with the denial listed elsewhere, 5 owed but covered by another item or not
+      yet due, 1 settled otherwise); 1 wrongly dropped: a bare $0 row on a batch check (no CARC, no allowed amount) taken
+      as an answer, the claim still pending in EMA ($167.22). Its blind second trace was cut by the usage limit and is
+      rerunning. Both rule bugs found (that one and the 26/TC one) are in `plans/next_fixes_2026-11-24.md`.
+      Usage limits stopped every agent at 10:45 and again at about 17:00 UTC on 11-24; fix7a and the hook-in unit were
+      resumed at 03:15 UTC on 11-25.
       **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
       same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
