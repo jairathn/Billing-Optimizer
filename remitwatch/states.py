@@ -62,11 +62,14 @@ MONEY = ("denial", "bundling", "downcoding", "underpayment")
 CLAIM_SIGNALS = ("NO_ANSWER", "REJECTED_PRE_PAYER", "NOT_SENT")
 EMA_ONLY = ("EMA_DENIED", "NO_ANSWER", "REJECTED_PRE_PAYER", "NOT_SENT", "REMIT_NOT_POSTED")
 INFO_ONLY = ("MIPS_ADJUSTMENT", "SEQUESTRATION")
-CONTRACT = ("CONTRACT_RATE_GAP", "MA_BELOW_MEDICARE", "MPPR_POLICY", "CHARGE_BELOW_RATE", "SECOND_RATE",
+CONTRACT = ("CONTRACT_RATE_GAP", "MA_BELOW_MEDICARE", "MPPR_POLICY", "CHARGE_BELOW_RATE", "SECOND_RATE", "PROVIDER_RATE_GAP",
             "EMA_DENIAL_AS_CONTRACTUAL", "G2211_DENIED")
 FEES = ("FEE_SKIM", "TAKEBACK")
 OWN_RULES = ("SECONDARY_NOT_BILLED", "CREDIT_BALANCE")    # items whose money no denial rule judges: they have their own
 DUP_CARCS = frozenset({"18", "B13"})
+# reasons that say the claim is another payer's to pay (coordination of benefits, not its member, coverage dates, sent on to
+# another carrier; detect.OTHER_PAYER_CARCS): the bill sent to another payer after one is the denial's work
+OTHER_PAYER_CARCS = frozenset({"22", "109", "B11", "31", "26", "27", "200", "177", "B9"})
 SHORT = ("downcoding", "underpayment")
 PATIENT_SHARE = frozenset({"1", "2", "3"})               # PR deductible, coinsurance, copay: the patient's share
 PAID_STATUS = ("1", "2", "3", "19", "20")                 # claim statuses that carry a payer's processing
@@ -954,6 +957,111 @@ def _export_rows(conn: sqlite3.Connection, items: list[dict]) -> dict[str, list]
     return out
 
 
+def _s837(conn: sqlite3.Connection, items: list[dict]) -> dict[str, list]:
+    """The 837 sends of each remittance item's bill (every submission, every payer: claims_837, one row per claim in a
+    file, BHT04 the day it went out): {finding id: [{'claim_id', 'date', 'freq', 'payer_id', 'payer', 'services': {(date,
+    code)}}]}. Only items from a remittance (a denial the bill can be sent again after) are looked up."""
+    out: dict[str, list] = {f["finding_id"]: [] for f in items}
+    if not _table(conn, "claims_837"):
+        return out
+    want: dict[str, list] = {}
+    for f in items:
+        if f.get("payment_date") and f.get("signal") not in CLAIM_SIGNALS:
+            b = bill_of(f.get("patient_control_number"))
+            if b:
+                want.setdefault(b, []).append(f["finding_id"])
+    if not want:
+        return out
+    has_lines = _table(conn, "lines_837")
+    for part in _chunks(sorted(want)):
+        _temp(conn, "st_8b", ["bill TEXT PRIMARY KEY", "hi TEXT"], [(b, b + "~") for b in part])
+        sends: dict[str, dict] = {}
+        for b, key, cid, bht, freq, pid, pname in conn.execute(
+                """SELECT b.bill, c.claim_837_key, c.patient_control_number, c.bht_created, TRIM(COALESCE(c.frequency_code, '')),
+                          c.payer_id, c.payer_name
+                   FROM temp.st_8b b JOIN claims_837 c ON c.patient_control_number >= b.bill AND c.patient_control_number < b.hi"""):
+            if bill_of(cid) != b or not bht:
+                continue
+            sends[key] = {"bill": b, "claim_id": cid, "date": str(bht)[:10], "freq": freq, "payer_id": pid, "payer": pname,
+                          "services": set()}
+        if has_lines and sends:
+            for key, dos, code in conn.execute(
+                    """SELECT l.claim_837_key, l.service_date, l.procedure_code FROM temp.st_8b b
+                       JOIN lines_837 l ON l.patient_control_number >= b.bill AND l.patient_control_number < b.hi"""):
+                s = sends.get(key)
+                if s is not None and code:
+                    s["services"].add((str(dos or "")[:10], code))
+        for s in sends.values():
+            for fid in want.get(s["bill"], []):
+                out[fid].append(s)
+    _drop(conn, "st_8b")
+    return out
+
+
+def _837_payer(s: dict) -> tuple[str, str]:
+    """An 837 send's payer group and the company it stands for: the VA's network by its payer id (named after its
+    administrator), else the payer name's group."""
+    from .detect import VA_GROUP, VA_PAYER_IDS, payer_company
+    if str(s.get("payer_id") or "").strip().upper() in VA_PAYER_IDS:
+        return VA_GROUP[0], "va"
+    g = _grp_kind(s.get("payer"))[0] if s.get("payer") else ""
+    return g, payer_company(g)
+
+
+def _resends_837(fx: dict) -> list[dict]:
+    """The bill sent again electronically after this item's remittance (the 837s; the catch-up trace's T-I4: 45 items on
+    Work now were resends EMA's exports do not show), as work on the item: to the denying payer (the payer id of the
+    send it answered, or the company the payer's name stands for), or to any payer after a reason that says the claim is
+    another payer's (the calibration's fix 10). A send that did not carry the item's service, or a void, is not."""
+    f = fx["item"]
+    after = f.get("payment_date") or ""
+    sends = fx.get("s837") or []
+    if not after or not sends:
+        return []
+    from .detect import payer_company
+    keys = set(_service_keys(f))
+    mine = payer_company(f.get("payer_group"))
+    answered = {s["payer_id"] for s in sends if s["claim_id"] == f.get("patient_control_number") and s["date"] <= after and s.get("payer_id")}
+    carcs = {c for c in re.split(r"[^A-Z0-9]+", str(f.get("carc") or "").upper()) if c}
+    elsewhere = bool(carcs & OTHER_PAYER_CARCS)
+    out = []
+    for s in sends:
+        if s["date"] <= after or s["freq"] == "8":
+            continue
+        if keys and s["services"] and not (keys & s["services"]):
+            continue
+        grp, company = _837_payer(s)
+        same = (s.get("payer_id") in answered) or (bool(company) and company == mine)
+        if not same and not elsewhere:
+            continue
+        who = f.get("payer_group") if same else (grp or "another payer")
+        row = {"date": s["date"], "kind": "resubmitted", "source": "837", "dated_by": "event", "confirmed": True,
+               "payer_group": f.get("payer_group") if same else grp,
+               "text": f"Sent again electronically to {who or 'the payer'} on {day(s['date'])} (837 claim file"
+                       + (", a replacement claim" if s["freq"] == "7" else "") + ")"}
+        # it waits the payer's usual answer time after a send, as the 837s measure it (95th percentile), where known
+        wait = _answer_wait(fx.get("ctx") or {}, row["payer_group"])
+        if wait:
+            row["wait_days"] = wait
+        out.append(row)
+    return out
+
+
+def _answer_wait(ctx: dict, group: Any) -> int | None:
+    """The payer group's answer time after a send, from the 837s (detect.ANSWER_DAYS_META): its own 95th percentile where
+    20 answers are measured, else a group of the same family's, else all payers'; None when nothing is measured."""
+    t = ctx.get("answer_837") or {}
+    groups = t.get("groups") or {}
+    g = groups.get(group or "")
+    if g is None and group:
+        g = next((v for k, v in groups.items() if _same_payer(k, group)), None)
+    g = g or t.get("all")
+    try:
+        return int(g["p95"]) if g and g.get("p95") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _context(conn: sqlite3.Connection, today: str) -> dict:
     """What every item's state shares: the reports' dates, freshness, the first report of each kind, the write-off policy."""
     ctx: dict = {"today": today, "prod_as_of": None, "prod_fresh": False, "ar_as_of": None, "first_prod": None, "first_ar": None,
@@ -993,6 +1101,8 @@ def _context(conn: sqlite3.Connection, today: str) -> dict:
         ctx["group_last_835"] = names
     ctx["policy"] = _meta(conn, "ema:writeoff_policy", {}) or {}
     ctx["ema_names"] = _ema_names(conn)
+    # each payer group's answer time after a send, from the 837s (detect.ANSWER_DAYS_META): how long a bill sent again waits
+    ctx["answer_837"] = _meta(conn, "detect:answer_days_837", {}) or {}
     return ctx
 
 
@@ -1023,9 +1133,10 @@ def facts_of(conn: sqlite3.Connection, items: list[dict], *, outcomes: dict | No
     ar = _ar(conn, items, links)
     rw = _rw(conn, items)
     ex = _export_rows(conn, items)
+    s8 = _s837(conn, items)
     return {f["finding_id"]: {"item": f, "outcome": outcomes.get(f["finding_id"]), "r835": r835[f["finding_id"]],
                               "ema": ema[f["finding_id"]], "ar": ar[f["finding_id"]], "rw": rw[f["finding_id"]],
-                              "exports": ex[f["finding_id"]], "ctx": ctx} for f in items}
+                              "exports": ex[f["finding_id"]], "s837": s8[f["finding_id"]], "ctx": ctx} for f in items}
 
 
 # ----------------------------------------------------------------------------------------------- the work on an item
@@ -1152,6 +1263,8 @@ def _evidence(fx: dict) -> list[dict]:
         if x.get("submitted") and after and x["submitted"] > after and submission_no(x["claim_id"]) > submission_no(f.get("patient_control_number")):
             out.append({"date": x["submitted"], "kind": "resubmitted", "source": "claim_status", "dated_by": "event", "confirmed": True,
                         "text": f"EMA's claim-status export shows the claim sent again on {day(x['submitted'])}"})
+    # the 837 claim files: the bill sent again electronically after this item's remittance (T-I4)
+    out += _resends_837(fx)
     uniq, seen = [], set()
     for e in sorted(out, key=lambda e: (e.get("date") or "", e["source"], e["kind"])):
         k = (e.get("date"), e["source"], e["kind"], e["text"])
@@ -1430,6 +1543,10 @@ def _archive_hint(f: dict) -> dict | None:
     a = _ev(f).get("archive_rule")
     if not isinstance(a, dict) or a.get("state_hint") not in ("done", "work_now", "waiting"):
         return None
+    if not a.get("hint") and f.get("hint"):
+        # the rule's sentence (archive_rules.apply_actions keeps it on the item's hint; an item saved before it was kept
+        # with the label too): a state it decides shows the sentence, not the label alone
+        a = dict(a, hint=f["hint"])
     return a
 
 
@@ -1513,6 +1630,10 @@ def paid_proof(fx: dict) -> dict | None:
                         + (f"(check ending {fp['check_tail']}, no 835)" if fp.get("check_tail") else "(no 835)") + "; EMA shows the line settled"}
     rows = fx["r835"]["rows"]
     stand = standing_rows(rows)
+    # the payments a recoupment (PLB) took back since, which the detection run's ledger names on the item: they pay nothing
+    gone = set(_ev(f).get("taken_back_lines") or [])
+    if gone:
+        stand = [x for x in stand if x.get("line_key") not in gone]
     own = own_rows(fx)
     once = code_once(fx)
     lcns = {x.get("lcn") for x in own if x.get("lcn")}
@@ -2403,9 +2524,25 @@ def _decide(fx: dict, today: str) -> dict:
         res["appeal_block"] = "owner"
         return put("work_now", "owner_decision", "A contract or billing-policy question for the owner, not a claim to appeal")
     if sig in FEES:
+        tb = _ev(f).get("taken_back") if sig == "TAKEBACK" else None
+        if isinstance(tb, dict) and tb.get("date"):
+            # a service the recoupment left unpaid (detect._taken_back_items): its own payment came back to the payer. Paid
+            # again since on a check no 835 on file carries (EMA posted it after the takeback, and its postings of the line
+            # still hold the money): done
+            pays = fx["ema"]["pays"]
+            again = [p for p in pays if (p["cents"] or 0) > 0 and (p["posted"] or "") > str(tb["date"]) and not p.get("in_835")]
+            if again and sum(p["cents"] or 0 for p in pays) >= 0.95 * int(tb.get("cents") or 0):
+                p0 = again[0]
+                res["appeal_block"] = "paid"
+                text = (f"Paid again after the takeback: EMA shows {usd(sum(p['cents'] for p in again))} from {p0['payer'] or 'insurance'} "
+                        f"posted {day(p0['posted'])} (check ending {p0['check_tail'] or '?'}, no 835)")
+                return put("done", "repaid_after_takeback", text, [{"source": "production", "kind": "proof", "date": p0["posted"], "text": text}])
         if past_all:
             return expired()
         res["appeal_block"] = "fees"
+        if isinstance(tb, dict) and tb.get("date"):
+            return put("work_now", "fees", f"Paid, then taken back by {grp or 'the payer'} on {day(tb['date'])}: find out why, then dispute "
+                       "or bill the right payer")
         return put("work_now", "fees", "A takeback to match to the payer's overpayment letter, and to dispute if it was not owed"
                    if sig == "TAKEBACK" else "A payment fee the payer's vendor took: ask for standard EFT with no fee")
     if sig == "REMIT_NOT_POSTED":

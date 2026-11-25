@@ -57,7 +57,10 @@ def test_the_disputed_money_written_off_in_ema_is_recorded_on_its_item(store):
     # once, though two exports carry it, and only the part in dispute: the payer's usual $117.60, not the $223.65 charge
     assert line["written_off_cents"] == 11760 and line["written_off_on"] == "2026-11-12"
     whole = next(v for k, v in f.items() if v["patient_control_number"] == WHOLE)
-    assert whole["written_off_cents"] == 15000 and whole["written_off_on"] == "2026-11-13"       # a whole claim: its lines' write-offs
+    # a whole claim: its lines' write-offs, only the part in dispute. Anthem has no rate of its own for 99213, so the claim is
+    # worth Anthem's own level against the fee schedule (its 99214 at 92 percent of Medicare's $127.80) times Medicare's 99213
+    # ($89.52): $82.38 of the $150.00
+    assert whole["written_off_cents"] == round(11760 / 12780 * 8952) and whole["written_off_on"] == "2026-11-13"
     # a payer's denial moved on to the patient counts; the patient's share and EMA's routine contractual posting do not
     assert written_off_of([{"adjustment_status": "TRANSFER_RESPONSIBILITY", "carc": "CO-50", "adjustments_cents": 100}]) == (100, None)
     assert written_off_of([{"adjustment_status": "WRITE_OFF", "carc": "PR-3", "adjustments_cents": 100}]) == (None, None)
@@ -102,7 +105,7 @@ def test_the_list_the_tiles_the_counts_and_today_agree(site):
     assert ids == {DENIED, WHOLE} and all(i["written_off_cents"] for i in items["items"])
     cents = sum(i["shortfall_cents"] or 0 for i in items["items"])
     wo = c.get("/api/brief").json()["written_off"]
-    assert wo["n"] == 2 and wo["cents"] == cents and wo["written_off_cents"] == 11760 + 15000 and wo["since"] == "2026-11-12"
+    assert wo["n"] == 2 and wo["cents"] == cents and wo["written_off_cents"] == 11760 + round(11760 / 12780 * 8952) and wo["since"] == "2026-11-12"
     assert wo["payers"][0]["payer_group"] == "Anthem / BCBS"
     desk = c.get(f"/api/desk?category={cats}&status=open,in_progress&deadline=valid&handling=written_off").json()
     assert desk["tiles"]["valid"]["n"] == 2 and desk["scope"]["n"] == 2

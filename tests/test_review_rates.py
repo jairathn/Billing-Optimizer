@@ -71,8 +71,11 @@ def test_R1_the_same_named_clinician_paid_both_amounts_is_called_the_pa_rate(tmp
     names = {r[0] for r in store.query("SELECT DISTINCT c.rendering_provider_name FROM claims c")}
     print("rendering NPIs on every claim:", npis, names)
     assert npis == {DOC_NPI} and names == {"DOCTOR QUINN"}
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6, \
+    assert not any("physician assistant or nurse practitioner" in r["evidence"]["note"] for r in rows if r["signal"] == "SECOND_RATE"), \
         "the clinician paid $117.60 on 25 visits is grouped as 'the rate for a PA or NP' on the other 6"
+    # the owner's rule (trace finding T-N4): an amount seen on 5 lines or more with no reason the remittances support is one
+    # routine-rate item to review, with every claim and its dollars, not one appeal per line
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["evidence"]["lines"] == 6 and rows[0]["shortfall_cents"] == 6 * 1760
     store.close()
 
 
@@ -101,7 +104,7 @@ def test_R2_a_lone_biopsy_billed_to_a_secondary_payer_is_called_the_multiple_pro
     store.close()
     secondary = [claim(200 + i, "11102", "180.00", "45.00", status="2", paid="9.00") for i in range(6)]
     store = build_store(tmp_path, secondary, pay_date="20260501", payer="MUTUAL OF OMAHA")
-    Detector(store, run_id="t").run()
+    Detector(store, run_id="t", today="2026-05-15").run()           # Aetna's 180 days from the April remittance still run
     rows = findings(store, "signal IN ('SECOND_RATE','UNDERPAID_VS_OWN_RATE') AND payer_group='Aetna' AND COALESCE(stale,0)=0")
     print([(r["signal"], r["shortfall_cents"]) for r in rows])
     for r in rows:
@@ -109,19 +112,23 @@ def test_R2_a_lone_biopsy_billed_to_a_secondary_payer_is_called_the_multiple_pro
             print("NOTE:", r["evidence"]["note"])
     per_claim = Counter(r[0] for r in store.query("SELECT patient_control_number FROM lines WHERE procedure_code='11102' AND patient_control_number >= 'CB0000200'"))
     print("lines per claim id:", dict(per_claim))
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6, \
+    assert not any("multiple-procedure" in r["evidence"]["note"] for r in rows if r["signal"] == "SECOND_RATE"), \
         "a lone procedure paid at half is grouped as 'the multiple-procedure rule' because the secondary payer's copy counts as another procedure"
+    # six lines at one amount with no reason: one routine-rate item to review (T-N4), not six appeals
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["evidence"]["lines"] == 6 and rows[0]["shortfall_cents"] == 6 * 4500
     store.close()
 
 
 def test_R2b_without_the_secondary_copy_the_same_lines_stay_one_offs(tmp_path):
-    """Control for R2: the same primary lines with no secondary claim stay one-offs."""
+    """Control for R2: the same primary lines with no secondary claim: one routine-rate item with no reason (T-N4: an amount
+    seen on 5 lines or more with no known reason is one item to review, not one appeal per line)."""
     usual = [claim(100 + i, "11102", "180.00", "90.00") for i in range(25)]
     half = [claim(200 + i, "11102", "180.00", "45.00") for i in range(6)]
     store = build_store(tmp_path, usual + half, payer="AETNA")
-    Detector(store, run_id="t").run()
+    Detector(store, run_id="t", today="2026-05-15").run()
     rows = findings(store)
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["evidence"]["lines"] == 6
+    assert "multiple-procedure" not in rows[0]["evidence"]["note"]
     store.close()
 
 
@@ -141,8 +148,10 @@ def test_R3_one_plan_on_three_of_ten_lines_explains_all_ten(tmp_path):
     sr = [r for r in rows if r["signal"] == "SECOND_RATE"]
     for r in sr:
         print("NOTE:", r["evidence"]["note"], "| by plan:", r["evidence"]["by_plan"])
-    ppo_one_offs = [r for r in rows if r["signal"] == "UNDERPAID_VS_OWN_RATE" and r["plan"] == "PPO"]
-    assert len(ppo_one_offs) == 7, "seven PPO visits underpaid with no reason are folded under a plan reason that covers three other visits"
+    assert not any("HMO GOLD" in r["evidence"]["note"] for r in sr), \
+        "seven PPO visits underpaid with no reason are folded under a plan reason that covers three other visits"
+    # ten lines at one amount with no reason that holds for them: one routine-rate item to review (T-N4), every claim in it
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and sr[0]["evidence"]["lines"] == 10
     store.close()
 
 
@@ -550,8 +559,10 @@ def test_R4_three_indiana_visits_explain_ten_lines(tmp_path):
     for r in rows:
         if r["signal"] == "SECOND_RATE":
             print("NOTE:", r["evidence"]["note"], "| by office:", r["evidence"]["by_office_state"])
-    unexplained = [r for r in rows if r["signal"] == "UNDERPAID_VS_OWN_RATE"]
-    assert len(unexplained) >= 7, "seven visits with no known office are folded under 'Indiana visits' on the strength of three"
+    assert not any("Indiana" in r["evidence"]["note"] for r in rows if r["signal"] == "SECOND_RATE"), \
+        "seven visits with no known office are folded under 'Indiana visits' on the strength of three"
+    # ten lines at one amount, no reason that holds for them: one routine-rate item to review (T-N4), every claim in it
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["evidence"]["lines"] == 10
     store.close()
 
 
@@ -586,14 +597,16 @@ def test_R2c_a_lone_biopsy_resubmitted_after_a_denial_is_called_the_multiple_pro
     store.close()
     half = [claim(200 + i, "11102", "180.00", "45.00", pcn=f"CB{200 + i:07d}C024") for i in range(6)]
     store = build_store(tmp_path, half, payer="AETNA", pay_date="20260520")
-    Detector(store, run_id="t").run()
+    Detector(store, run_id="t", today="2026-06-01").run()           # inside Aetna's 180 days
     rows = findings(store, "signal IN ('SECOND_RATE','UNDERPAID_VS_OWN_RATE') AND COALESCE(stale,0)=0")
     print([(r["signal"], r["shortfall_cents"]) for r in rows])
     for r in rows:
         if r["signal"] == "SECOND_RATE":
             print("NOTE:", r["evidence"]["note"][:160])
-    assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6, \
+    assert not any("multiple-procedure" in r["evidence"]["note"] for r in rows if r["signal"] == "SECOND_RATE"), \
         "a lone procedure paid at half on a resubmission is grouped as 'the multiple-procedure rule' because its own denied first submission counts as another procedure"
+    # six lines at one amount with no reason: one routine-rate item to review (T-N4), not six appeals
+    assert [r["signal"] for r in rows] == ["SECOND_RATE"] and rows[0]["evidence"]["lines"] == 6
     store.close()
 
 

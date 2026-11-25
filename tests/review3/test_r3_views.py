@@ -91,14 +91,15 @@ def test_the_weekly_report_says_fewer_findings_are_due_than_it_capped(tmp_path):
 
 
 def _big_pattern(tmp_path):
-    """Aetna 99214: usual $117.60 on 560 January visits. From March, $100.00 (a rate change): 500 visits paid 215 days ago
-    (windows closed) and 30 visits paid 10 days ago (windows open for 170 more days)."""
+    """Aetna 99214: usual $117.60 on 850 January visits (a clear majority of the year's: a usual rate needs one, trace finding
+    T-N4). From March, $100.00 (a rate change): 500 visits paid 215 days ago (windows closed) and 30 visits paid 10 days ago
+    (windows open for 170 more days)."""
     today = date.today()
     old_pay, new_pay = today - timedelta(days=215), today - timedelta(days=10)
     old_dos, new_dos = old_pay - timedelta(days=15), new_pay - timedelta(days=15)
     jan = date(old_dos.year, 1, 5)
     assert jan < old_dos and old_dos.year == new_dos.year
-    store = build_store(tmp_path, [claim(10000 + i, "99214", "223.65", "117.60", dos=f8(jan)) for i in range(560)], payer="AETNA",
+    store = build_store(tmp_path, [claim(10000 + i, "99214", "223.65", "117.60", dos=f8(jan)) for i in range(850)], payer="AETNA",
                         pay_date=f8(jan + timedelta(days=15)))
     store.close()
     store = build_store(tmp_path, [claim(20000 + i, "99214", "223.65", "100.00", dos=f8(old_dos)) for i in range(500)], payer="AETNA", pay_date=f8(old_pay))

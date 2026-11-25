@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-24, 10:45 UTC.
+Last updated: 2026-11-25, 03:20 UTC.
 
 ## 1. Where things are
 
@@ -165,6 +165,70 @@ Last updated: 2026-11-24, 10:45 UTC.
       837 pass, `plans/design_837_never_answered.md`, base 2b72f47 + 6c34e08), fix4 (item amounts, base 383d99e), fix5
       (ledger and leftovers, base 0e6ef4a), fix6 (EMA paid before the denial, base 0e6ef4a). Integrate each (merge, the
       suite, push), bump DETECT_RULES once, then measure the whole on world2 with A16 and hand-trace.
+      **15:15 UTC.** All four fixers stopped at the account's 5-hour usage limit at 10:45; they were resumed at 14:55
+      after it reset (a fixer stopped that way resumes from its saved transcript with SendMessage). fix6 is merged
+      (d27ce98): a Medicaid plan's denial of a service another payer had paid first (EMA's first payer on the claim is a
+      Medicare Advantage plan; UHC's checks are posted in EMA under a 'Medicaid Community Plan' name, which the name rules
+      put in the Medicaid catch-all and C6 read as the denier's own) and a duplicate denial of a service the same payer
+      paid first are done, with the payments as proof rows. A16: already done on Work now 324 -> 249 (paid 204 -> 133),
+      closed wrongly unchanged, money left on the table +$18.42. Left from it: the Medicaid catch-all is still read as one
+      family in C6's same-payer reading and the older paid-before branch; C6 ignores the patient's copay when it compares a
+      payment with half of the expected amount (an Anthem MA 99212 fully paid with the copay stays listed); about 70 of the
+      denials carry KY Medicaid provider-enrollment reasons (B7, N570, N288): a question for the owner, no money on these
+      items. The hook-in unit (E, G, H wired into both cycles, the Data tab panels, the 1 GiB fix) started at 15:10 as a
+      background agent on branch `hook` from d27ce98.
+      fix837 is merged (c52a54c): the 837s are a source of sends (a send date where EMA has none; a resend to the denying
+      payer waits for its answer); claims only the 837s know get one item each (837_OPEN_CLAIM, priced at the payer's own
+      rate per line and component, capped at the charge; voids end a claim; CH-8 holds a payer whose remittances stop; the
+      Data tab names payers with no ERAs and holes in either feed); one "answered in EMA" rule serves every never-answered
+      and rejected claim (exports, reports, 837s). A16 against the merged tip: already done on Work now 324 -> 219, paid
+      204 -> 113, undecided 71 -> 41; of the 103 EMA-paid never-answered and rejected items 7 stay (claims dated only by the
+      visit day with look-alikes). Detection 163 s (was 129 s). Open points from it: a claim sent to a payer as its
+      secondary is priced at that payer's full rate (the 837's SBR01 is not read); export claims dated only by the visit day
+      get no send-day twins; a print-batch duplicate made after the visit was paid stays listed; a dependent's 837 carries
+      the subscriber's id; 2024 sends cannot be checked against EMA (its ledger starts later); story.py shows no 837 rows
+      (full visibility); the claim filing indicator is not read; unanswered claims are not grouped by send week (T-N13).
+      **Both merged, measured (c52a54c, 15:52 UTC; A16 on a fresh copy of world.sqlite, Work now, in scope; the merged tip
+      in brackets):** correct 1,433 [1,449]; already done 155, $19,591 [324, $77,541] (paid 42, $7,030 [204, $64,163]);
+      already worked 21 [29]; duplicate 5 [8]; wrong amount 343 [346]; undecided 41 [71]; closed wrongly 1 [1]; money
+      left on the table 666 services, $66,686 [656, $66,823]. EMA-paid items still listed: 16 ($4,269) [181, $61,896].
+      Full suite on c52a54c: 2,694 passed, 0 failed (python 3.13). Item by item against the merged tip
+      (`plans/tools/a16/moves_w.py`): resent denials now wait for the resend's answer (correct: they were already worked);
+      25 never-answered claims came onto the list ($8,695, owed); 76 never-answered or rejected claims left it
+      ($16,546: 43 the auditor calls owed, 33 undecided). These 76 are being hand-traced by an independent workflow
+      (16:00 UTC) before the merge is trusted: any wrongly dropped claim becomes a failing test.
+      fix5 is merged (373da95, 16:08 UTC; no textual conflicts, the three fixers' tests pass together: 420): money taken
+      back is listed at any amount, reversals pair under the claim payer's joined ids, Medicare's J1 entries are read, a
+      secondary's share counts in recoveries, a whole-charge CO-45 that is no denial is not listed, one answer delivered
+      twice is one item, a second payer's claim-level denial names the primary's payment. A16 on its own run: closures
+      whose recovery differs 507 -> 123, money left on the table -$563, closed wrongly unchanged. Its open points, and
+      every other fixer's, are in `plans/next_fixes_2026-11-24.md` (the next batch, in order; determinism first).
+      fix4 is merged (32e4de6, 16:45 UTC): sizes by units and component, the payer's own rate by product class and
+      recognised tier (PROVIDER_RATE_GAP for an unexplained clinician discount), backed underpayments. Merge resolutions:
+      one pricing for every never-answered pass (fix4's price_unanswered_lines; the 837 pass's own pricer removed), and one
+      component_of (two definitions existed; the later silently won and returned None where fix4's rate tables key on '').
+      All four fixers' and the touched tests pass together (608). **Determinism measured (16:45 UTC)**: two fresh copies
+      give identical items, but consecutive cycles on one store do not: 17,829 -> 17,509 -> 17,828 items, 321
+      SECONDARY_NOT_BILLED items flipping every cycle, and a one-time settle of 34 PR-204 and coverage-date items after the
+      first cycle. Cause: the EMA line summary keeps a bill's lines by the run's own items. Fixer fix7a started 16:50
+      (release gate 4: a second cycle changes nothing).
+      **f773a10** fixes the fix4 merge commit (it staged detect.py before a shadowed variable was renamed, so every
+      never-answered claim raised TypeError at 32e4de6). Suite on f773a10: 2,798 passed, 0 failed. A16 on f773a10 (Work
+      now, in scope; c52a54c in brackets): correct 1,301 [1,433]; already done 157 [155]; already worked 21 [21];
+      duplicate 4 [5]; wrong amount 144, $10,193 [343, $22,344]; undecided 26 [41]; closed wrongly 1 [1]; closures whose
+      recovery differs 123 [507]; money left on the table $72,808 [$66,686], up because fix4's firmer rate rule (a 60%
+      share plus backing) dropped 151 underpayments ($9,400) that A16 (a 50% mode) still calls owed, while 201 it calls
+      not short ($9,081) rightly left. That threshold is being settled by hand: workflow wf_74399af8-fcf (03:20 UTC), a
+      stratified sample of 31 against each payer's own paid history.
+      **The 76 dropped never-answered claims, hand-traced (workflow wf_d630475e-230):** 75 rightly dropped (58 paid, 8 a
+      $0 answer or to the patient, 3 denied with the denial listed elsewhere, 5 owed but covered by another item or not
+      yet due, 1 settled otherwise); 1 wrongly dropped: a bare $0 row on a batch check (no CARC, no allowed amount) taken
+      as an answer, the claim still pending in EMA ($167.22). Its blind second trace was cut by the usage limit and is
+      rerunning. Both rule bugs found (that one and the 26/TC one) are in `plans/next_fixes_2026-11-24.md`.
+      Usage limits stopped every agent at 10:45 and again at about 17:00 UTC on 11-24; fix7a and the hook-in unit were
+      resumed at 03:15 UTC on 11-25.
+      **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
+      same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
       pass (T-I2, T-I4, T-N11, T-N13; needs the full 837 history from Vercel's image), one item per unit leftovers
       (duplicates 40 in scope), sizes (T-C7, T-N9), paid-before leftovers (T-C4), short payments.

@@ -95,8 +95,8 @@ def sink_of(tmp_path, kind: str):
     return archive.DirSink(str(tmp_path / "archive")) if kind == "file" else archive.StateSink(LocalState(str(tmp_path / "state")))
 
 
-def detect(store: Store, run_id: str = "r1") -> None:
-    Detector(store, run_id=run_id, today=TODAY).run()
+def detect(store: Store, run_id: str = "r1", today: str = TODAY) -> None:
+    Detector(store, run_id=run_id, today=today).run()
 
 
 def counts(conn) -> dict:
@@ -371,6 +371,7 @@ def test_a_year_the_archive_took_keeps_the_rates_measured_on_the_whole_year(tmp_
     store = Store(":memory:", compact=True)
     ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 1, "20220311", paid="90.00"), "20220415"),
                              (visits(100, 6, NEW), "20260415")])
+    detect(store, "r0", today="2022-05-02")    # found while its window was open (no new rate item is born past it: T-N4)
     detect(store)
     under = {f: v for f, v in items(store.conn).items() if v[0] == "CB0000060C017"}
     assert len(under) == 1
@@ -1248,6 +1249,7 @@ def test_late_underpayments_of_a_locked_year_are_listed_once_beside_the_kept_pat
     store = Store(":memory:", compact=True)
     ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 5, "20220315", paid="100.00"), "20220415"),
                              (visits(100, 6, NEW), "20260415")])
+    detect(store, "r0", today="2022-05-02")    # found while its windows were open (no new rate item is born past them: T-N4)
     detect(store)
     pat = store.conn.execute("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'").fetchall()
     assert len(pat) == 1
@@ -1297,6 +1299,7 @@ def test_a_kept_pattern_and_the_one_off_items_of_its_own_lines_are_never_both_li
     store = Store(":memory:", compact=True)
     ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 6, "20220915", paid="82.32"), "20221015"),
                              (visits(100, 6, NEW), "20260415")])
+    detect(store, "r0", today="2022-11-01")    # found while its windows were open (no new rate item is born past them: T-N4)
     detect(store)
     pat = store.conn.execute("SELECT finding_id, work_state, shortfall_cents, evidence FROM findings WHERE signal='SECOND_RATE'").fetchall()
     assert len(pat) == 1 and pat[0][1] in archive.OPEN_STATES
