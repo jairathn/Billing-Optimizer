@@ -1040,11 +1040,8 @@ def test_no_planted_identifier_reaches_any_log_byte_on_a_serverless_host(tmp_pat
     monkeypatch.setattr(cloud, "repair_ledger", poisoned_repair)
     outs = []
     for _ in range(6):
-        rl = runlog.start_run("cycle", trigger="test", state=state, host="serverless")
-        with rl.step("cycle"):
-            out = cloud.run_cloud_cycle(state, client, budget_s=600, email=False, log=rl.log)
+        out = cloud.run_cloud_cycle(state, client, budget_s=600, email=False)       # its own run log (needs_H C2, W4)
         outs.append(out)
-        rl.finish(out=out)
         if not out.get("more"):
             break
     assert not outs[-1].get("more") and any("detect" in o for o in outs)
@@ -1066,7 +1063,7 @@ H_MODULES = ["runlog.py", "repair.py", "diagnose.py"]
 PKG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "remitwatch")
 # the cycle files' silent except blocks, counted when runlog was built: the hook-in adds a runlog.caught to each step
 # boundary's block, so these numbers may only go down (lower them when a block starts logging)
-SILENT_CEILING = {"pipeline.py": 9, "cloud.py": 11}
+SILENT_CEILING = {"pipeline.py": 0, "cloud.py": 0}       # the hook-in made every broad except in both cycles log (W9)
 
 
 def test_runlogs_own_modules_swallow_nothing():

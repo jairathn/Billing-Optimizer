@@ -55,9 +55,10 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "9"                 # bump when SERVING_TABLES changes: a copy made by another build is made again (7: the
+SERVING_BUILD = "10"                # bump when SERVING_TABLES changes: a copy made by another build is made again (7: the
                                     # release's heirs, or push 2's EMA reports; 8: what the A/R's billing notes say, and the
-                                    # 835 claims of whole bills; 9: both together)
+                                    # 835 claims of whole bills; 9: both together; 10: the runs' logs, the decision log, the
+                                    # self-check's lists and the archive's index)
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -93,7 +94,9 @@ def peak_mb() -> int | None:
     try:
         import resource
         return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
-    except Exception:
+    except Exception as exc:        # no measure on this platform: the run records none
+        from . import runlog
+        runlog.caught(exc, "peak_mb", level="warning")
         return None
 
 
@@ -141,9 +144,14 @@ def gzip_chunks(data, level: int = 1, piece: int = 8 << 20) -> Iterator[bytes]:
 
 # --------------------------------------------------------------------------- lock
 
+LAST_TAKEOVER: dict | None = None   # the stale lock the last acquire() took over: a run killed before it wrote its status
+
+
 def acquire(state) -> str | None:
     """Take the cycle lock; None when another cycle holds it. A lock older than any run can be was left by a run that was
-    killed and is taken over, but only if nobody else took it first."""
+    killed and is taken over, but only if nobody else took it first (LAST_TAKEOVER then says when it was taken)."""
+    global LAST_TAKEOVER
+    LAST_TAKEOVER = None
     token = secrets.token_hex(8)
     body = json.dumps({"token": token, "started": _now()}).encode()
     for _ in range(2):
@@ -158,6 +166,7 @@ def acquire(state) -> str | None:
                 return None
             try:
                 state.put(LOCK, body, mode="update", rev=m["rev"])
+                LAST_TAKEOVER = {"since": m.get("modified")}
                 return token
             except Conflict:
                 return None
@@ -169,8 +178,9 @@ def release(state, token: str) -> None:
         raw = state.get(LOCK)
         if raw and json.loads(raw).get("token") == token:
             state.delete(LOCK)
-    except Exception:
-        pass        # a lock that cannot be released goes stale and is taken over
+    except Exception as exc:        # a lock that cannot be released goes stale and is taken over
+        from . import runlog
+        runlog.caught(exc, "release", level="warning")
 
 
 def lock_state(state) -> tuple[dict | None, dict | None]:
@@ -391,10 +401,18 @@ def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> 
                                                   (a.get("seen") or {}).get(fid), a.get("entry"))
                          for fid in a.get("ids") or []]
                 ok = all(found)
+            elif a.get("kind") == "selfcheck_request":
+                # the Data tab: the self-audit now, or the owner's acceptance of the offenders of the run the page showed
+                # (a later run's offenders nobody has seen are never accepted: remitwatch.selfcheck.apply_request)
+                from . import selfcheck
+                selfcheck.apply_request(conn, a)
+                ok = True
             else:
                 ok = actions_mod.apply(conn, a) is not False
             (done if ok else left).append(name)
-        except Exception:
+        except Exception as exc:
+            from . import runlog
+            runlog.caught(exc, "journal", level="warning")
             done.append(name)       # malformed: nothing a later run could do with it either
     conn.commit()
     return done, left, conn.total_changes > before
@@ -572,7 +590,9 @@ def report_kind(data: bytes, name: str) -> str | None:
         rec = er.recognize(data, name)
     except er.ReportRefused:
         return "refused"
-    except Exception:       # noqa: BLE001  (not something recognition can open: not a report)
+    except Exception as exc:       # noqa: BLE001  (not something recognition can open: not a report)
+        from . import runlog
+        runlog.caught(exc, "report_kind", level="warning")
         return None
     return rec.report if rec else None
 
@@ -702,12 +722,22 @@ class ProductionSlot:
         self.used = True
         lg = h.open()
         self.seq0 = lg.seq()
+        from . import runlog
+        from . import selfcheck as sc
+        try:        # (G) the store's summaries and the ledger, both as the last apply left them (the money checks)
+            sc.check_ledger(conn, lg)
+        except Exception as exc:               # noqa: BLE001  (measured next apply; detection is not held for it)
+            runlog.caught(exc, "selfcheck:money")
         kw = {"name": name} if _takes(er.ingest_file, "name") else {}
         try:
             res = er.ingest_file(self.store, path, rec, via=via, origin=origin, ledger=lg, deadline=self.deadline, log=say, **kw)
         except BaseException:
             h.discard()
             raise
+        try:        # (G) money posted in a closed month never leaves the ledger: seen in the run that applies the newer export
+            sc.check_posted(conn, lg)
+        except Exception as exc:               # noqa: BLE001
+            runlog.caught(exc, "selfcheck:posted")
         members = res.get("members") if res.get("status") == "zip" else [res]
         statuses = {m.get("status") for m in members or []}
         if "waiting" in statuses or lg.seq() == self.seq0:
@@ -792,8 +822,9 @@ class ProductionSlot:
                 if self.state.meta(sp):
                     self.state.delete(sp)
                     n += 1
-            except Exception:       # noqa: BLE001  (tried again after the next Production file)
-                pass
+            except Exception as exc:       # noqa: BLE001  (tried again after the next Production file)
+                from . import runlog
+                runlog.caught(exc, "drop_copies", level="warning")
         self.drop = []
         if n:
             self.log(f"  {n} kept upload cop{'y' if n == 1 else 'ies'} of replaced Production files removed")
@@ -849,7 +880,9 @@ def repair_ledger(store, state, log=print) -> dict | None:
     h = ema_ledger.LedgerHandle(state)
     try:
         behind = h.behind(conn)
-    except Exception:       # noqa: BLE001  (the state folder did not answer: the next run looks again)
+    except Exception as exc:       # noqa: BLE001  (the state folder did not answer: the next run looks again)
+        from . import runlog
+        runlog.caught(exc, "repair_ledger", level="warning")
         return None
     if not (behind or pending):
         return None
@@ -1041,7 +1074,9 @@ def report_kind_path(path: str, name: str) -> str | None:
         rec = er.recognize(path, name)
     except er.ReportRefused:
         return "refused"
-    except Exception:       # noqa: BLE001
+    except Exception as exc:       # noqa: BLE001  (not something recognition can open: not a report)
+        from . import runlog
+        runlog.caught(exc, "report_kind_path", level="warning")
         return None
     return rec.report if rec else None
 
@@ -1308,6 +1343,12 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
     # when each EMA export and report was pulled (the claim view's "as of" day): names, times and counts, no patient data
     ("ema_sources", None, None),
+    # what the runs logged (remitwatch.runlog, repair): the Data tab's panel and the drawer's "Why did this change?"
+    ("run_log", None, None), ("repair_log", None, None),
+    ("item_decisions", None, "finding_id IN (SELECT finding_id FROM main.findings) AND at >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-180 days')"),
+    # the self-check's lists behind a red check and the weekly self-audit's gaps and wasted work (remitwatch.selfcheck):
+    # finding ids, keys and cents, so the Data tab lists them and a person accepts exactly what was shown
+    ("selfcheck_audit_items", None, None), ("selfcheck_offenders", None, None),
 ]
 
 
@@ -1327,6 +1368,9 @@ def empty_serving(path: str) -> None:
     activity.ensure_schema(c)
     actions_mod.ensure_fax_tables(c)
     actions_mod.ensure_hide_rules(c)
+    from . import archive, selfcheck
+    archive.ensure_schema(c)            # Find a claim opens archived bills from the copy (the archive's index)
+    selfcheck.ensure_tables(c)          # the lists behind a red check and the self-audit's (build_serving copies shared columns)
     c.commit()
     c.close()
 
@@ -1349,9 +1393,9 @@ def serving_tables(conn: sqlite3.Connection) -> list[tuple[str, str | None, str 
     """What the dashboard's copy holds: SERVING_TABLES and EMA's report tables (remitwatch.ema_reports.serving_tables:
     no origin, no key or keyed hash, only the claim numbers the pages can show), with the meta filter that also leaves
     out the key salt."""
-    from . import ema_reports
+    from . import archive, ema_reports
     out = [(t, c, ema_reports.SERVING_META_FILTER if t == "meta" else w) for t, c, w in SERVING_TABLES]
-    return out + list(ema_reports.serving_tables(conn))
+    return out + list(ema_reports.serving_tables(conn)) + list(archive.SERVING_TABLES)
 
 
 def build_serving(conn: sqlite3.Connection, path: str) -> int:
@@ -1383,6 +1427,16 @@ def build_serving(conn: sqlite3.Connection, path: str) -> int:
 def save_serving(state, conn: sqlite3.Connection) -> dict:
     path = os.path.join(runtime.tmp_dir(), "build-serving.sqlite")
     size = build_serving(conn, path)
+    from . import selfcheck
+    try:        # (G) the copy against the store: what the pages show is what the store holds (meta selfcheck:serving)
+        copy = sqlite3.connect(path)
+        try:
+            selfcheck.check_serving(conn, copy)
+        finally:
+            copy.close()
+    except Exception as exc:                   # noqa: BLE001  (the copy goes out; the next run checks again)
+        from . import runlog
+        runlog.caught(exc, "selfcheck:serving")
     with open(path, "rb") as fh:
         data = fh.read()
     os.remove(path)
@@ -1684,14 +1738,17 @@ def _image_alert(prev: dict, out: dict, email: bool, log=print) -> None:
 def write_status(state, out: dict) -> None:
     try:
         state.put(STATUS, json.dumps(out, default=str).encode())
-    except Exception:
-        pass
+    except Exception as exc:        # the next run writes it again; the run's log keeps the failure
+        from . import runlog
+        runlog.caught(exc, "write_status", level="warning")
 
 
 def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger: str = "manual", full: bool = False,
                     force_detect: bool = False, email: bool = True, delay_s: int = 0, log=print) -> dict:
     """One cycle against the state folder. Returns a summary; `more` is true when a fresh invocation should continue.
     `delay_s` is a wait taken after the lock, used when a notification arrives with the first file of a batch."""
+    from . import repair, runlog
+    from . import selfcheck as sc
     from .alerts import ALERTS_DDL, notify, run_alerts
     from .detect import Detector, ensure_schema
 
@@ -1700,6 +1757,12 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
     token = acquire(state)
     if not token:
         return {"skipped": "another cycle is running"}
+    takeover = LAST_TAKEOVER
+    # (H) the run's manifest and event log in the state folder's logs/; the cycle's own lines go there (scrubbed), and
+    # Vercel's function log gets the one line printed at the end
+    rl = runlog.start_run("cycle", trigger=trigger, state=state, host="serverless")
+    log = rl.log
+    reg = None
     store = None
     t0 = time.time()
     try:
@@ -1710,7 +1773,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if prev_status.get(IMAGE_KEY):
             out[IMAGE_KEY] = prev_status[IMAGE_KEY]        # the record of the last save, kept by a run that saves nothing
         try:
-            store, existed = load_raw(state, status=out)
+            with rl.step("load"):
+                store, existed = load_raw(state, status=out)
         except StoreImageProblem as exc:
             # the store is missing or is not the one last saved: stop before anything is read, folded or saved. The status
             # this run writes keeps the proof that a store existed, so the next run stops too until the image is back
@@ -1726,6 +1790,25 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         out["load_seconds"] = round(time.time() - t0, 1)
         mem = {"load": peak_mb()}
         out["memory_mb"] = mem
+        # (H) the scrubber learns the store's names, the feed positions, the run_log rows of earlier runs, the registry
+        runlog.SCRUB.learn(conn)
+        rl.manifest["positions"] = {"before": runlog.positions(conn, state)}
+        runlog.sync_store_from_index(conn, rl.sink)
+        reg = repair.registry_for(rl, conn=conn)
+        if takeover:
+            repair.note_stale_lock(reg, ["lock.json"], "cloud.acquire")
+        # (G) self-regulation: the last run's status (and a run the platform killed) decide what this one spreads or sheds
+        killed = rl.manifest["sections"].get("killed_runs") or None     # their open markers; else the lock taken over
+        if not killed and takeover:
+            killed = [{"started_at": takeover.get("since"), "last_step": None}]
+        plan = sc.plan_next(conn, prev_status, mode="serverless", budget_s=budget, killed=killed)
+        out["plan"] = {k: plan[k] for k in ("level", "name", "skip", "overdue")}
+        rl.set("self_regulation", plan)
+        if plan["actions"]:
+            out["self_regulation"] = plan["actions"]
+            repair.note_pressure(reg, [{"action": a} for a in plan["actions"]], reading=plan["pressure"])
+        sc.mark(out, "load")
+        ran: list[str] = []             # the optional steps this run did (an optional step's deferral ends once it has)
 
         # EMA's reports: the clean-up of report rows an older build read as exports (once per host; rows go only once
         # the fetched file is seen to be a report), and the repair of a run that saved the ledger and not the store
@@ -1741,6 +1824,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 if mig.get("candidates"):
                     out["ema_migrate"] = {k: v for k, v in mig.items() if isinstance(v, int)}
         except Exception as exc:       # noqa: BLE001
+            runlog.caught(exc, "ema_migrate")
             out["ema_migrate"] = {"error": type(exc).__name__}
         try:
             rep = repair_ledger(store, state, log=log)
@@ -1748,13 +1832,17 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 out["ema_repair"] = rep
                 ema_dirty = True
         except Exception as exc:       # noqa: BLE001
+            runlog.caught(exc, "ema_repair")
             out["ema_repair"] = {"error": type(exc).__name__}
+        if rl.manifest["sections"].get("killed_runs"):
+            repair.note_killed_runs(reg, rl.manifest["sections"]["killed_runs"], repaired=out.get("ema_repair"))
         # the practice's "How we pull this in our EMA" boxes (the Upload page keeps them in the state folder): a copy in the
         # store, so a move to the server keeps them
         howto_changed = False
         try:
             howto_changed = copy_howto(state, conn)
         except Exception as exc:       # noqa: BLE001
+            runlog.caught(exc, "ema_howto")
             out["ema_howto"] = {"error": type(exc).__name__}
         # one Production file per run, read in the time it leaves for its summaries and the saves (75 s)
         slot = ProductionSlot(store, state, deadline=t0 + budget - 75, log=log, status=out)
@@ -1765,7 +1853,12 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         serving_stale = bool(data_rev) and (mark.get("data_rev") != data_rev or mark.get("build") != SERVING_BUILD)
 
         journal = read_actions(state)
+        # (E) a reopening asked in the app is the archive's (it brings the bill back before detection)
+        from . import archive
+        arc_sink = archive.StateSink(state)
+        taken, journal = archive.take_journal(conn, journal, sink=arc_sink) if journal else ([], journal)
         done, left, wrote = apply_actions(conn, journal) if journal else ([], [], False)
+        done, wrote = done + taken, wrote or bool(taken)
 
         # uploads cut off part-way (their pieces and records, after a day) go at every run, not only when someone opens the
         # Upload page (a cut-off report can hold patient data)
@@ -1775,13 +1868,16 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             if swept:
                 out["uploads_swept"] = swept
         except Exception as exc:       # noqa: BLE001  (tried again by the next run)
+            runlog.caught(exc, "uploads_sweep")
             out["uploads_sweep"] = {"error": type(exc).__name__}
         # what people uploaded in the app (remitwatch.intake): read before the Dropbox folder
         up_in: dict = {}
         try:
-            up_in = intake.process_state(store, state, production=lambda p, rec, **kw: slot.apply(p, rec, via="upload", leave=True, **kw),
-                                         deadline=t0 + budget * 0.5, max_bytes=MAX_FILE_BYTES, defer_close=True, log=log)
+            with rl.step("intake"):
+                up_in = intake.process_state(store, state, production=lambda p, rec, **kw: slot.apply(p, rec, via="upload", leave=True, **kw),
+                                             deadline=t0 + budget * 0.5, max_bytes=MAX_FILE_BYTES, defer_close=True, log=log)
         except Exception as exc:       # noqa: BLE001
+            runlog.caught(exc, "intake")
             up_in = {"error": type(exc).__name__}
         if up_in.get("pairs") or up_in.get("error") or up_in.get("remaining"):
             out["intake"] = {k: v for k, v in up_in.items() if k not in ("results", "to_close")}
@@ -1790,8 +1886,13 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         tz: dict = {}
         if trizetto.configured():
             try:
-                tz = trizetto.pull(conn, lambda items: _ingest_batch(store, items, log), deadline=t0 + budget * 0.4, log=log)
+                # (H) a whole pull is safe to repeat; a refused sign-in, and anything the ingest raises, are not
+                with rl.step("trizetto"):
+                    tz = repair.retry_call(trizetto.pull, conn, repair.not_retried(lambda items: _ingest_batch(store, items, log)),
+                                           deadline=t0 + budget * 0.4, log=log, target="trizetto", registry=reg,
+                                           until=t0 + budget * 0.3)
             except Exception as exc:
+                runlog.caught(exc, "trizetto")
                 tz = {"error": str(exc)[:300] if isinstance(exc, trizetto.TriZettoError) else f"{type(exc).__name__}: {str(exc)[:200]}"}
                 if getattr(exc, "seen_changed", False):
                     tz["seen_changed"] = True   # a refused password's hold is in the store: save it, or the next run signs in again
@@ -1800,14 +1901,18 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             out["trizetto"] = {k: v for k, v in tz.items() if k != "seen_changed"}
         ingest: dict = {"skipped": "Dropbox credentials are not configured"}
         if client is not None:
+            # (H) a network error on a read is tried again; the state folder is never wrapped (its writes go once)
+            client = repair.resilient(client, "dropbox", registry=reg, until=t0 + budget * 0.5)
             # leave room for detection and for saving: ingestion gets at most half of the budget
-            ingest = sync_and_ingest(store, client, state, deadline=t0 + budget * 0.5, full=full, log=log, slot=slot)
+            with rl.step("dropbox"):
+                ingest = sync_and_ingest(store, client, state, deadline=t0 + budget * 0.5, full=full, log=log, slot=slot)
         out["ingest"] = {k: v for k, v in ingest.items() if k not in ("cursor", "remit_stats", "seen_changed", "ema_changed")}
         # reports kept waiting: fetched again by their Dropbox id (or from the state folder, for an upload)
         rr: dict = {}
         try:
             rr = reread_waiting(store, client, state, slot, deadline=t0 + budget * 0.5, log=log)
         except Exception as exc:       # noqa: BLE001
+            runlog.caught(exc, "ema_waiting")
             rr = {"error": type(exc).__name__}
         if rr.get("read") or rr.get("gone") or rr.get("error"):
             out["ema_waiting"] = rr
@@ -1820,17 +1925,25 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         ema_dirty = bool(ema_dirty or getattr(store, "ema_changed", False) or up_in.get("changed") or rr.get("changed")
                          or applied or "ema_apply" in out)
         mem["ingest"] = peak_mb()
+        sc.mark(out, "ingest")
         # a release that changed which copies of a remittance stand decides them again once, new files or not: the store is
         # then saved and analysed as after new files
         if store.recheck_supersession():
             ingested = True
 
         # exports read by a release that did not yet keep their pull time: fetch that once (see backfill_export_times)
-        if client is not None and not remaining:
+        if client is not None and not remaining and "backfill" not in plan["skip"]:
             got = backfill_export_times(store, client, deadline=t0 + budget * 0.6, log=log)
+            ran.append("backfill")
             if got:
                 out["export_times"] = got
                 activity.mark_pending(conn)     # the recent-weeks figures depend on them
+
+        # (E) reopenings asked in the app, and archived bills new data arrived for, come back before detection
+        back = [archive.process_requests(conn, sink=arc_sink, log=log), archive.restore_touched(conn, sink=arc_sink, log=log)]
+        if any(b.get("changed") for b in back):
+            ingested = True             # the bills that came back are analysed in this run (or the deferred one)
+            out["archive_back"] = {"asked": back[0].get("restored", 0), "new_data": back[1].get("restored", 0)}
 
         pending = conn.execute("SELECT 1 FROM meta WHERE key='cloud:detect_pending'").fetchone() is not None
         has_run = conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone() is not None
@@ -1858,14 +1971,15 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             estimate = float(last[0]) if last else 60.0
             left_s = budget - (time.time() - t0)
             # Hand detection to a fresh invocation when this one may not have the time left for it, or has just read a
-            # large batch: a fresh process starts with clean memory, and detection is the step that needs the most.
-            if ingested and (left_s < estimate * 1.5 + 45 or n_ingested >= DEFER_DETECT_AFTER_FILES):
+            # large batch: a fresh process starts with clean memory, and detection is the step that needs the most. Under
+            # pressure (the self-regulation's level 1 and up) any run that read something hands it over.
+            if ingested and (plan["spread"] or left_s < estimate * 1.5 + 45 or n_ingested >= DEFER_DETECT_AFTER_FILES):
                 conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
                 out["deferred"] = "detection"
             else:
                 t1 = time.time()
-                det = Detector(store)
-                with deadline_guard(conn, t0 + budget, "Detection"):
+                det = Detector(store, rl.run_id)    # the detection run and the run log share one id
+                with rl.step("detect"), deadline_guard(conn, t0 + budget, "Detection"):
                     summary = det.run()
                 del det
                 gc.collect()
@@ -1875,16 +1989,38 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 out["detect"] = {"findings": sum(summary.values()), "seconds": round(time.time() - t1, 1)}
                 ran_detect = True
                 mem["detect"] = peak_mb()
+                sc.mark(out, "detect")
         elif need_detect:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
         conn.commit()
 
+        # (E) retention in a run that did not analyse (its memory is free), with time left; the image is this host's memory
+        # and its upload, so the pages the archive frees are given back (VACUUM)
+        arc: dict = {}
+        if has_lines and not ran_detect and not remaining and "deferred" not in out and budget - (time.time() - t0) > 120:
+            try:
+                with rl.step("archive"):
+                    arc = archive.run(conn, sink=arc_sink, budget_state=sc.archive_budget_state(plan), run_id=rl.run_id,
+                                      mode="serverless", deadline=t0 + budget - 90, log=log)
+            except Exception as exc:       # noqa: BLE001  (the archive waits for the next run; the store stands)
+                runlog.caught(exc, "archive")
+                out["archive"] = {"error": type(exc).__name__}
+            if arc.get("bills") or (arc.get("ar") or {}).get("files"):
+                out["archive"] = {k: arc.get(k) for k in ("bills", "lines", "findings", "cutoff", "more")}
+                out["archive_compact"] = archive.compact(conn)
+                ema_dirty = True                            # the store and the dashboard's copy are saved (items left)
+            if arc:
+                rl.set("archive", {k: arc.get(k) for k in ("bills", "claims", "lines", "findings", "files", "cutoff", "seconds")})
+
         # What each clinician did: rebuilt after detection, after an upgrade that changed how it is built, and by the next
-        # run when this one has no time left for it (the store keeps a note that the tables are behind).
+        # run when this one has no time left for it (the store keeps a note that the tables are behind). Under pressure the
+        # self-regulation leaves them for a calm run (never for more than a week: selfcheck.plan_next).
         ran_activity = False
-        if has_lines and not remaining and "deferred" not in out and activity.stale(conn) and budget - (time.time() - t0) > 45:
+        if has_lines and not remaining and "deferred" not in out and activity.stale(conn) and "activity" not in plan["skip"] \
+                and budget - (time.time() - t0) > 45:
             before = activity.status(conn)["error"]
-            with deadline_guard(conn, t0 + budget, "The provider tables", hard=False):
+            ran.append("activity")
+            with rl.step("activity"), deadline_guard(conn, t0 + budget, "The provider tables", hard=False):
                 out["activity"] = activity.refresh(store, log=log)
             # a build that failed is saved once too, so the dashboard can say why the tab is empty
             ran_activity = "error" not in out["activity"] or out["activity"]["error"] != before
@@ -1905,7 +2041,35 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         marks = _read_json(state, MARKS) if settled else {}
         marks.setdefault("alerts", {})
         if settled:
-            out["alerts"] = run_alerts(conn, today=runtime.practice_today())   # deadlines close at midnight where the practice is
+            # (G) the track record, money given up without a decision, what the app cannot see (in dollars), the weekly
+            # self-audit (in a run that did not analyse: its tables never meet detection's peak), housekeeping
+            today = sc.today_of()
+            for step, fn in (("selfcheck_track", lambda: sc.track_record(conn, today=today)),
+                             ("selfcheck_given_up", lambda: sc.given_up(conn, today=today)),
+                             ("selfcheck_blind", lambda: sc.blindness(conn, today=today))):
+                try:
+                    fn()
+                except Exception as exc:       # noqa: BLE001  (measured again by the next run)
+                    runlog.caught(exc, step)
+                    out[step] = {"error": type(exc).__name__}
+            if not ran_detect and "audit" not in plan["skip"] and sc.audit_due(conn, today):
+                try:
+                    with rl.step("self_audit"):
+                        audit = sc.self_audit(conn, today=today)
+                    if audit and not audit.get("skipped"):
+                        out["self_audit"] = {k: audit.get(k) for k in ("gaps_n", "gaps_cents", "wasted_n", "alert")}
+                        ran.append("audit")
+                        ema_dirty = True        # its lists and figures are saved with the store
+                except Exception as exc:       # noqa: BLE001
+                    runlog.caught(exc, "selfcheck_audit")
+                    out["selfcheck_audit"] = {"error": type(exc).__name__}
+            try:
+                out["housekeeping"] = sc.housekeeping(mode="serverless", state=state, conn=conn,
+                                                      archive_result=out.get("archive_compact"), uploads=False)
+            except Exception as exc:       # noqa: BLE001
+                runlog.caught(exc, "housekeeping")
+            with rl.step("alerts"):
+                out["alerts"] = run_alerts(conn, run_id=rl.run_id, today=runtime.practice_today())   # deadlines close at midnight where the practice is
             # What was mailed is recorded outside the store (the store is not saved on an idle run): put it back. The
             # record names the alert as it was raised then; one that cleared and has been raised again is a new alert.
             conn.executemany("UPDATE alerts SET notified_at=? WHERE alert_id=? AND first_seen=? AND notified_at IS NULL",
@@ -1924,11 +2088,45 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             data_rev = str(int(data_rev or 0) + 1)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
             conn.commit()
+        # (G) what this run shed and ran; the weekly report is due when it goes out after the saves below
+        every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))
+        last_report = marks.get("last_report") or (conn.execute("SELECT value FROM meta WHERE key='pipeline:last_report'").fetchone() or [None])[0]
+        report_due = bool(settled and (not last_report or _age_seconds(last_report) >= every * 86400) and "report" not in plan["skip"]
+                          and conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone())
+        if report_due:
+            ran.append("report")
+        out["shed"] = list(plan["skip"])
+        try:
+            sc.record_did(conn, {"shed": plan["skip"], "level": plan["level"], "ran": ran})
+        except Exception as exc:       # noqa: BLE001
+            runlog.caught(exc, "selfcheck_did")
+        # (E) this run's size and memory, for the Data tab and the next run's horizon
+        try:
+            archive.record_run(conn, run_id=rl.run_id, result=arc or None,
+                               measured=archive.measure(conn, peak=peak_mb(), mode="serverless", limit_mb=runtime.memory_mb()))
+        except Exception as exc:        # noqa: BLE001  (a measure that fails never stops the run; it is logged)
+            runlog.caught(exc, "archive_measure")
+            out["archive_measure"] = {"error": type(exc).__name__}
+        # (H) reports the readers held, the steps that went well (a killed run's count clears), old log rows; the
+        # registry's rows are saved with the store
+        try:
+            repair.sweep_reports(conn, reg, rl.manifest["started_at"])
+            repair.note_run_finished(reg, rl.manifest["steps"])
+            runlog.prune_store(conn)
+            repair.prune(conn)
+        except Exception as exc:       # noqa: BLE001
+            runlog.caught(exc, "repair_sweep", level="warning")
+        repairs_dirty = bool(reg is not None and reg.dirty)
+        if repairs_dirty:
+            reg.save()                  # meta repair:state (saved with the store) and logs/repair_state.json
+        rl.save_to_store(conn)
         if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed") or ema_dirty \
-                or howto_changed:
+                or howto_changed or repairs_dirty:
             t2 = time.time()
-            meta = save_raw(state, store, log, status=out)      # a lost answer leaves its pending record in this run's status
-            out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
+            with rl.step("save_store"):
+                meta = save_raw(state, store, log, status=out)      # a lost answer leaves its pending record in this run's status
+            out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1),
+                            "image_mb": (meta or {}).get("image_mb")}
             out[IMAGE_KEY] = meta.get(IMAGE_KEY)        # recorded in status.json at the save; the run's status keeps it
             slot.clear_attempts()           # the Production file read this run is in the saved ledger and store
         # the uploads read this run go to intake/done/ now that what they changed is saved (a run stopped before this
@@ -1940,19 +2138,22 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             if kept.get("removed") or kept.get("error"):
                 out["intake_retain"] = kept
         except Exception as exc:       # noqa: BLE001  (tried again by the next run)
+            runlog.caught(exc, "intake_retain")
             out["intake_retain"] = {"error": type(exc).__name__}
         # an upload finished while this run went on (its own request to start a run was turned away by this run's lock):
         # a follow-up run reads it now, not tomorrow
         try:
             left_pairs = 0 if up_in.get("error") else len(intake.state_pending(state))
-        except Exception:       # noqa: BLE001  (the next scheduled run reads it)
+        except Exception as exc:       # noqa: BLE001  (the next scheduled run reads it)
+            runlog.caught(exc, "intake_pending", level="warning")
             left_pairs = 0
         if left_pairs:
             out["intake_waiting"] = left_pairs
         if applied:
             slot.drop_copies()
         if shown_changed or serving_stale:
-            out["serving"] = save_serving(state, conn)
+            with rl.step("save_serving"):
+                out["serving"] = save_serving(state, conn)
             state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "build": SERVING_BUILD, "at": _now()}).encode())
         # after the store, so the position never runs ahead of what was saved; and only beside a store image (saved now, or
         # there when the run started): a cursor proves an earlier save (_saved_before), so a first run that found an empty
@@ -1967,21 +2168,20 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         # Mail goes out after everything is saved, and what was sent is written down at once in its own small file, so
         # neither a failed save nor an idle run can send the same alert or report again.
         if settled:
-            out["notified"] = notify(conn, log=log) if email else {"sent": 0, "skipped": True}
+            with rl.step("mail"):
+                out["notified"] = notify(conn, log=log) if email else {"sent": 0, "skipped": True}
             if out["notified"].get("sent"):
                 marks["alerts"] = {r[0]: [r[1], r[2]] for r in conn.execute(
                     "SELECT alert_id, notified_at, first_seen FROM alerts WHERE notified_at IS NOT NULL AND status != 'cleared'")}
                 _write_json(state, MARKS, marks)
-            every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))
-            last_report = marks.get("last_report") or (conn.execute("SELECT value FROM meta WHERE key='pipeline:last_report'").fetchone() or [None])[0]
-            due = not last_report or _age_seconds(last_report) >= every * 86400
-            if due and conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone():
+            if report_due:             # (G) under pressure the weekly report waits for a calm run (never past a week)
                 from .report import build_report, email_report
                 try:
                     text = build_report(store, ingest_stats=ingest if "remits" in ingest else None)
                     state.put(f"reports/remitwatch-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.md", build_report(store, detail=True).encode())
                     out["report_emailed"] = email_report(text) if email else False
                 except Exception as exc:
+                    runlog.caught(exc, "report")
                     out["report_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
                 marks["last_report"] = _now()
                 _write_json(state, MARKS, marks)
@@ -1993,14 +2193,15 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             out["totals"] = {"remit_files": one("SELECT COUNT(*) FROM files WHERE kind='835'"),
                              "findings": one("SELECT COUNT(*) FROM findings WHERE COALESCE(stale,0)=0") if has_run or ran_detect else 0,
                              "newest_payment": one("SELECT MAX(payment_date) FROM transactions WHERE superseded=0")}
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "totals", level="warning")
         out["finished"] = _now()
         out["seconds"] = round(time.time() - t0, 1)
         mem["peak"] = peak_mb()
         mem["limit"] = runtime.memory_mb()
         return out
     except Exception as exc:
+        rl.fail(exc, "cycle")
         out["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
         out["finished"] = _now()
         out["seconds"] = round(time.time() - t0, 1)
@@ -2009,8 +2210,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         try:
             if store is not None:
                 store.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            runlog.caught(exc, "store_close", level="warning")
         try:        # every run writes its status, so the dashboard can say when Dropbox was last checked
             if out.get("changed"):
                 out["last_change"] = out.get("finished")
@@ -2018,9 +2219,15 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 prev = json.loads(state.get(STATUS) or b"{}")
                 out["last_change"] = prev.get("last_change")
                 out.setdefault("totals", prev.get("totals"))
-        except Exception:
-            pass
+        except Exception as exc:
+            runlog.caught(exc, "last_change", level="warning")
         write_status(state, out)        # before the lock goes, so nobody reads "not running" beside the previous run's status
+        try:
+            if reg is not None and reg.dirty:
+                reg.save()              # a failed run still counts its failure in the state folder
+            print(rl.finish(out=out, state=state), flush=True)      # the one line in Vercel's function log
+        except Exception as exc:        # noqa: BLE001
+            print(f"RemitWatch run {rl.run_id}: the log could not be written ({type(exc).__name__})", flush=True)
         release(state, token)
 
 
@@ -2044,7 +2251,9 @@ def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0
             r = requests.post(target, headers=headers, timeout=(5, 1.5), allow_redirects=False)
     except requests.exceptions.ReadTimeout:
         return True         # the normal case: the run is under way and will outlast this call
-    except Exception:
+    except Exception as exc:        # the next scheduled run starts all the same
+        from . import runlog
+        runlog.caught(exc, "trigger_cycle", level="warning")
         return False
     return r.status_code < 300
 
@@ -2059,7 +2268,9 @@ def _same_site(a: str, b: str) -> bool:
         return False
     try:
         y = urlsplit(requests.Request("POST", b).prepare().url)
-    except Exception:
+    except Exception as exc:        # an address the client cannot read is not this site
+        from . import runlog
+        runlog.caught(exc, "same_site", level="warning")
         return False
     x = urlsplit(a)
     strip = lambda h: (h or "").lower().removeprefix("www.")       # noqa: E731

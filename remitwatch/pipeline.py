@@ -722,7 +722,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                 out["self_audit"] = {k: audit.get(k) for k in ("gaps_n", "gaps_cents", "wasted_n", "alert")}
                 ran.append("audit")
         out["housekeeping"] = _ema_step(out, "housekeeping_error", sc.housekeeping, mode="server", db_path=db_path,
-                                        conn=store.conn, archive_result=out.get("archive_compact"))
+                                        conn=store.conn, archive_result=out.get("archive_compact"), uploads=False)
         store.conn.commit()
         from .runtime import practice_today
         with rl.step("alerts"):

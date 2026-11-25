@@ -56,6 +56,10 @@ def box(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
     monkeypatch.setenv("DROPBOX_ROOT_PATH", f"/{DATA}")
+    # the weekly self-audit takes the first run that does not analyse and saves the store for it: these tests are about
+    # what idle runs leave alone, so it is not due here (tests/test_hooks.py tests it on this host)
+    from remitwatch import selfcheck
+    monkeypatch.setattr(selfcheck, "audit_due", lambda *a, **k: False)
     root = tmp_path / "dbx"
     client = FakeDropbox(str(root))
     state = DropboxState(client, "/RemitWatch-state")
@@ -95,13 +99,16 @@ def test_first_load_then_nothing_new_then_one_new_file(box):
 
     # nothing new: no download of data, no detection, and neither the store nor the dashboard's copy is uploaded again
     revs = (state.meta(cloud.RAW)["rev"], state.meta(cloud.SERVING)["rev"], state.get(cloud.CURSOR))
-    uploads = client.calls.get("upload", 0)
+    paths: list = []
+    real_upload = client.upload
+    client.upload = lambda path, data, **kw: (paths.append(path), real_upload(path, data, **kw))[1]
     time.sleep(0.01)
     again = cycle(state, client)
+    del client.upload
     assert again["ingest"]["mode"] == "delta" and again["ingest"]["downloaded"] == 0 and "detect" not in again
     assert again["more"] is False and again["changed"] is False and "store" not in again and "serving" not in again
     assert (state.meta(cloud.RAW)["rev"], state.meta(cloud.SERVING)["rev"], state.get(cloud.CURSOR)) == revs
-    assert client.calls.get("upload", 0) - uploads == 2            # the lock and the status
+    assert len([p for p in paths if "/logs/" not in p]) == 2 and paths     # the lock and the status (and the run's own logs)
     status = json.loads(state.get(cloud.STATUS))
     assert status["started"] == again["started"] and status["last_change"] == out["finished"]
     assert status["totals"] == {"remit_files": 6, "findings": out["detect"]["findings"], "newest_payment": "2026-04-15"}
@@ -529,12 +536,16 @@ def test_an_unreadable_file_is_remembered_and_starts_nothing_again(box, monkeypa
     # the position moved past it and the store remembers it, so neither the next run nor a notification asks for it again
     assert state.get(cloud.CURSOR) != position and state.meta(cloud.RAW)["rev"] != store_rev
     assert cloud.has_new_files(state, client) is False
-    downloads = client.calls["download"]
+    read: list = []
+    real_get = client.download_bytes
+    client.download_bytes = lambda path, *a, **kw: (read.append(path), real_get(path, *a, **kw))[1]
     again = cycle(state, client)
+    del client.download_bytes
     assert again["ingest"]["downloaded"] == 0 and again["ingest"]["errors"] == 0
     # the store and a few small state files (status.json, which the release reads for the image it saved, the how-to
-    # boxes, the serving mark, the position, the mail marks, the lock), never the bad file
-    assert client.calls["download"] - downloads <= 9
+    # boxes, the serving mark, the position (once more for the run's log of the feed positions), the mail marks, the
+    # lock), and the run's own logs, never the bad file
+    assert len([p for p in read if "/logs/" not in p]) <= 10 and not any("Claim Status" in p for p in read), read
     # a file far larger than any remittance is not read at all
     monkeypatch.setattr(cloud, "MAX_FILE_BYTES", 200)
     time.sleep(0.01)

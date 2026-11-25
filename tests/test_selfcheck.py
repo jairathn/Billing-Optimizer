@@ -242,6 +242,23 @@ def test_mark_records_memory_tmp_and_seconds():
     assert "tmp_mb" not in server and "detect" in server["memory_mb"]
 
 
+def test_mark_measures_remitwatchs_own_temp_folder(tmp_path, monkeypatch):
+    """The /tmp figure is RemitWatch's temporary folder (REMITWATCH_TMP, as runlog measures it; on Vercel /tmp is the
+    function's own), never the whole of a shared machine's /tmp: 18 GB of other programs' files there made every run on
+    a test machine read as pressured (found wiring the cycle)."""
+    import tempfile
+    ours, theirs = tmp_path / "ours", tmp_path / "theirs"
+    (ours / "remitwatch").mkdir(parents=True)
+    theirs.mkdir()
+    (ours / "remitwatch" / "a.bin").write_bytes(b"x" * (2 << 20))
+    (theirs / "b.bin").write_bytes(b"x" * (5 << 20))
+    monkeypatch.setenv("REMITWATCH_TMP", str(ours))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(theirs))
+    out = {"mode": "serverless"}
+    sc.mark(out, "ingest")
+    assert out["tmp_mb"]["ingest"] == 2
+
+
 # =================================================================================================== 2. the checks
 def test_every_check_passes_on_a_clean_store(store):
     c = store.conn
@@ -1500,6 +1517,66 @@ def test_a_payment_emas_report_shows_names_its_amount_claim_and_report(store):
              evidence={"paid_later": dict(ema, paid_cents=0)})
     r = sc.check_closure_proof(c, TODAY)
     assert sorted(r["examples"]) == ["F-no-claim", "F-no-report", "F-nothing-paid"], r["examples"]
+
+
+def test_a_closure_by_the_payers_own_settling_answer_is_proof(store):
+    """detect._close_by_answer closes a denial the same payer later settled (processed it as secondary applying the
+    primary's answer, or put it on the patient's share): nothing more is owed, and the payer's dated answer on its claim
+    is the proof (evidence settled_by), with no money. Found by wiring: such closures held the run. A settled_by with
+    no date or no claim is no proof."""
+    c = store.conn
+    sb = {"payer": "Medicaid KY", "date": "2026-11-10", "claim": "ZZ00T0001C017", "how": "processed as secondary", "paid_cents": 0}
+    later = {"payment_date": "2026-11-10", "claim": "ZZ00T0001C017", "trace": "TRACE0001", "paid_cents": 0, "how": "processed as secondary"}
+    add_item(c, "F-settled", status="resolved", work_state="done", auto_note="Processed as secondary",
+             evidence={"settled_by": sb, "paid_later": later})
+    add_item(c, "F-undated", status="resolved", work_state="done", auto_note="Processed as secondary",
+             evidence={"settled_by": dict(sb, date=None), "paid_later": dict(later, payment_date=None)})
+    add_item(c, "F-no-claim", status="resolved", work_state="done", auto_note="Processed as secondary",
+             evidence={"settled_by": dict(sb, claim=None), "paid_later": dict(later, claim=None, trace=None)})
+    r = sc.check_closure_proof(c, TODAY)
+    assert sorted(r["examples"]) == ["F-no-claim", "F-undated"], r["examples"]
+
+
+def test_items_regrouped_by_a_pattern_this_run_made_are_not_kept(store):
+    """Underpaid one-offs leave when this run groups their lines into a routine-rate pattern (an item that lists the lines
+    in its evidence, line_keys), and a pattern leaves when this run lists its lines one by one again: both are routes,
+    not vanishings (found by wiring: the one-offs were kept beside the pattern, their dollars counted twice). A one-off
+    whose line no new item covers is still kept."""
+    c = store.conn
+    for fid, lk in (("F-one-1", "L1"), ("F-one-2", "L2"), ("F-lone", "L9")):
+        add_item(c, fid, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", line_key=lk)
+    add_item(c, "F-pattern", signal="SECOND_RATE", category="underpayment", line_key=None, claim_key=None,
+             patient_control_number=None, evidence={"line_keys": ["L5", "L6"]})
+    run(c, None, "r1")
+
+    def regroup(cn):
+        cn.execute("DELETE FROM findings")
+        add_item(cn, "F-new-pattern", signal="SECOND_RATE", category="underpayment", line_key=None, claim_key=None,
+                 patient_control_number=None, evidence={"line_keys": ["L1", "L2"]})
+        for fid, lk in (("F-new-5", "L5"), ("F-new-6", "L6")):
+            add_item(cn, fid, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", line_key=lk)
+    out = run(c, regroup, "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert out["kept"] == 1 and set(van["examples"]) == {"F-lone"}, van
+
+
+def test_a_pattern_whose_lines_an_older_pattern_takes_back_is_not_kept(store):
+    """A continuation of a routine-rate pattern leaves when the earlier continuation a person reopened lists its lines
+    again (review3's continuations case): the older item's own lines grew this run to cover them, a route. A pattern
+    nothing covers is still kept."""
+    c = store.conn
+    pat = dict(signal="SECOND_RATE", category="underpayment", line_key=None, claim_key=None, patient_control_number=None)
+    add_item(c, "F-older", evidence={"line_keys": ["L1", "L2"]}, **pat)
+    add_item(c, "F-continuation", evidence={"line_keys": ["L3"]}, **pat)
+    add_item(c, "F-alone", evidence={"line_keys": ["L7"]}, **pat)
+    run(c, None, "r1")
+
+    def take_back(cn):
+        cn.execute("DELETE FROM findings WHERE finding_id IN ('F-continuation', 'F-alone')")
+        cn.execute("UPDATE findings SET evidence=? WHERE finding_id='F-older'", (json.dumps({"line_keys": ["L1", "L2", "L3"]}),))
+    out = run(c, take_back, "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert out["kept"] == 1 and set(van["examples"]) == {"F-alone"}, van
 
 
 def test_the_precision_guard_counts_a_service_sent_again_once(kind):

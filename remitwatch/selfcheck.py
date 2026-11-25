@@ -481,7 +481,8 @@ def mark(out: dict, step: str, started: float | None = None, *, tmp: bool | None
     fig = {"mem": peak_mb()}
     out.setdefault("memory_mb", {})[step] = fig["mem"]
     if tmp if tmp is not None else (out.get("mode") == "serverless"):
-        fig["tmp"] = tmp_used_mb()
+        # RemitWatch's temporary folder (REMITWATCH_TMP, as runlog.tmp_usage reads it; on Vercel /tmp is the function's own)
+        fig["tmp"] = tmp_used_mb(setting("REMITWATCH_TMP") or None)
         out.setdefault("tmp_mb", {})[step] = fig["tmp"]
     if started is not None:
         fig["seconds"] = round(time.time() - started, 1)
@@ -883,6 +884,9 @@ def has_proof(ev: dict) -> bool:
     rows = list(pl.get("proof") or []) + (list(ar.get("proof") or []) if ar.get("action") == "close_with_proof" else [])
     if proof_money(rows) > 0:
         return True
+    sb = ev.get("settled_by") if isinstance(ev.get("settled_by"), dict) else {}
+    if sb.get("date") and sb.get("claim") and sb.get("how"):
+        return True             # the payer's own later answer settled it (detect._close_by_answer): dated, on its claim, nothing owed
     paid = pl.get("paid_cents")
     if not (isinstance(paid, (int, float)) and paid > 0):
         return False
@@ -1319,6 +1323,18 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
     states_kept = any(r.get("work_state") for r in before.values())
     new_rows = [r for f, r in after.items() if f not in before and not r.get("stale")]
     lines = {r["line_key"] for r in new_rows if r.get("line_key")}
+    own_lines = set(lines)
+    for r in new_rows:                  # a routine-rate pattern this run made lists the lines it groups (evidence line_keys)
+        if not r.get("line_key") and r.get("evidence") and "line_keys" in str(r["evidence"]):
+            lines.update(str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x)
+    for f, r in after.items():          # ... and an older pattern this run gave more lines (a reopened continuation takes back
+        b = before.get(f)               # the lines a later one held): its lines grew this run
+        if b is None or r.get("stale") or r.get("line_key") or not r.get("evidence") or "line_keys" not in str(r["evidence"]):
+            continue
+        grown = {str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x} - \
+            {str(x) for x in (_ev(b.get("evidence")).get("line_keys") or []) if x}
+        lines.update(grown)
+        own_lines.update(grown)
     claim_codes = {(r.get("claim_key"), r.get("procedure_code")) for r in new_rows if r.get("claim_key")}
     service = {(bill_of(r.get("patient_control_number")), str(r.get("service_date") or "")[:10], r.get("procedure_code"))
                for r in new_rows if r.get("patient_control_number")}
@@ -1358,6 +1374,8 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             routes["claim_answered"] += 1       # the claim's answer brought items of its own
         elif fid in folded:
             routes["folded"] += 1
+        elif not lk and r.get("evidence") and own_lines & {str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x}:
+            routes["regrouped"] += 1            # a pattern whose lines this run lists one by one again
         else:
             cands.append(r)
     superseded: set[str] = set()
@@ -4195,23 +4213,27 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
 # 6. Housekeeping
 # =====================================================================================================================
 def housekeeping(*, mode: str, db_path: str | None = None, state: Any = None, conn: sqlite3.Connection | None = None,
-                 now: float | None = None, keep_days: int = 30, archive_result: dict | None = None) -> dict:
+                 now: float | None = None, keep_days: int = 30, archive_result: dict | None = None, uploads: bool = True) -> dict:
     """The clean-ups of units A1, A2 and E, called from the cycle with what each did: upload pieces left unfinished for a
     day (uploads.sweep), the ledger's and refreshes' work files (ema_ledger.clean_work_files), kept upload copies the
     reports' catalog no longer needs after `keep_days` (only a file whose report was applied and later replaced or
     superseded, or read as 'already'; the sidecar, the record of what happened, stays; never a held or waiting file's, and
     never the newest of a report). It does not compact the archive (VACUUM needs the store's size again; unit E runs
     archive.compact before detection): the cycle passes that result as `archive_result` to record it with the rest. Each
-    step reports or records its error; nothing waits for a person."""
+    step reports or records its error; nothing waits for a person. `uploads=False`: the cycle swept the uploads at its
+    start already (a cut-off report can hold patient data: it goes first), so they are not swept twice."""
     now = now or time.time()
     out: dict = {"at": now_of(), "mode": mode}
     try:
-        from . import uploads
-        if mode == "serverless" and state is not None:
-            out["uploads"] = uploads.state_uploads(state).sweep(now)
+        from . import uploads as up
+        if not uploads:
+            out["uploads"] = {"swept_at_start": True}
+        elif mode == "serverless" and state is not None:
+            out["uploads"] = up.state_uploads(state).sweep(now)
         elif db_path:
-            out["uploads"] = uploads.ServerUploads(db_path).sweep(now)
+            out["uploads"] = up.ServerUploads(db_path).sweep(now)
     except Exception as exc:       # noqa: BLE001  (recorded: the next cycle tries again)
+        _caught(exc, "housekeeping:uploads")
         out["uploads"] = {"error": type(exc).__name__}
     try:
         from . import ema_ledger, runtime

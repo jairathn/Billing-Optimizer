@@ -544,3 +544,152 @@ def test_old_settled_bills_go_to_the_archive_in_the_cycle_and_a_reopening_comes_
     c = sq.connect(db)
     assert c.execute("SELECT COUNT(*) FROM archive_bills WHERE bill=?", (bill,)).fetchone()[0] == 0
     c.close()
+
+
+# ======================================================================================================================
+# 4. The serverless cycle (remitwatch.cloud.run_cloud_cycle): a fake Dropbox, the state folder inside it
+# ======================================================================================================================
+from tests.test_cloud import DATA, box, raw_conn, visits_with_downcodes, write_remits  # noqa: E402,F401
+
+
+def _cloud(state, client, **kw):
+    from remitwatch import cloud
+    kw.setdefault("budget_s", 600)
+    return cloud.run_cloud_cycle(state, client, email=False, **kw)
+
+
+def test_every_serverless_run_logs_to_the_state_folder_and_prints_one_line(box, capsys):
+    """needs_H W2: the run's manifest and events go to the state folder's logs/ (with its index); Vercel's function log
+    gets exactly one line, the run id and its outcome, and nothing else (the cycle's own lines go to the run log)."""
+    import re
+
+    from remitwatch import runlog
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    capsys.readouterr()
+    out = _cloud(state, client, log=print)
+    printed = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert "detect" in out and len(printed) == 1, printed
+    assert re.match(r"^RemitWatch run run-\d{8}T\d{6}Z-[0-9a-f]{4}: ok \(", printed[0]), printed
+    names = [m["name"] for m in state.list("logs")]
+    assert "logs/index.json" in names and any(n.startswith("logs/runs/") and n.endswith(".jsonl.gz") for n in names), names
+    sink = runlog.sink_for(state=state)
+    m, events = runlog.read_run(sink, runlog.read_index(sink)[-1]["run_id"])
+    assert m["outcome"] == "ok" and {"load", "detect", "save_store", "save_serving"} <= {s["step"] for s in m["steps"]}
+    assert m["sections"]["decisions"]["by_kind"].get("raised") and m["invariants"] and m["self_regulation"]["level"] == 0
+    assert out["store"]["image_mb"] > 0                 # the store's size in memory: its share of the one-block ceiling
+
+
+def test_a_status_over_the_memory_mark_makes_the_next_serverless_run_spread(box, monkeypatch):
+    """needs_G section 3: the last run's status.json past 80% of the 2,188 MB budget (a peak of 1,800 MB) makes the next
+    run spread: a run that read something hands detection to a fresh invocation (more). A run at level 3 sheds the
+    provider tables and says what it shed."""
+    import json
+
+    from remitwatch import cloud, selfcheck
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes()[:30])
+    first = _cloud(state, client)
+    assert "detect" in first and first["plan"]["level"] == 0
+    st = json.loads(state.get(cloud.STATUS))
+    st["started"], st["memory_mb"] = "2026-11-24T00:00:00+00:00", dict(st.get("memory_mb") or {}, peak=1800)
+    state.put(cloud.STATUS, json.dumps(st).encode())
+    write_remits(root / DATA, visits_with_downcodes()[30:], prefix="b", start_ctrl=40)
+    second = _cloud(state, client)
+    assert second["plan"]["level"] == 1 and second["ingest"]["remits"] >= 1 and second.get("deferred") == "detection"
+    assert second["more"] is True and "detect" not in second
+    third = _cloud(state, client)                       # the fresh invocation analyses
+    assert "detect" in third
+    conn = raw_conn(state)
+    selfcheck.meta_set(conn, selfcheck.K_REGULATE, dict(selfcheck.meta_get(conn, selfcheck.K_REGULATE), level=3, calm=0))
+    conn.commit()
+    store, _e = cloud.load_raw(state)
+    store.conn.execute("UPDATE meta SET value=? WHERE key=?", (json.dumps(selfcheck.meta_get(conn, selfcheck.K_REGULATE)), selfcheck.K_REGULATE))
+    from remitwatch import activity
+    activity.mark_pending(store.conn)
+    store.conn.commit()
+    cloud.save_raw(state, store)
+    store.close()
+    shed = _cloud(state, client)
+    assert shed["plan"]["level"] >= 3 and "activity" in shed["shed"] and "activity" not in shed
+
+
+def test_a_serverless_run_held_by_the_self_check_keeps_the_copy_as_it_was(box, monkeypatch):
+    """needs_G section 3: a run whose detection closes an item with no proof is held: meta selfcheck:safe_mode is on in the
+    saved store, and the dashboard's copy shows the item open (the last good worklist), with the alert."""
+    from remitwatch import cloud, selfcheck
+    from remitwatch.detect import Detector
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    _cloud(state, client)
+    fid = raw_conn(state).execute("SELECT finding_id FROM findings WHERE status='open' AND COALESCE(stale,0)=0 LIMIT 1").fetchone()[0]
+    real_hide = Detector.hook_hide
+
+    def hide_then_a_bug(self):
+        real_hide(self)
+        self.conn.execute("UPDATE findings SET status='resolved', work_state='done', auto_note='Paid', evidence='{}' "
+                          "WHERE finding_id=?", (fid,))
+        self.conn.commit()
+    monkeypatch.setattr(Detector, "hook_hide", hide_then_a_bug)
+    out = _cloud(state, client, force_detect=True)
+    assert "detect" in out and "serving" in out
+    conn = raw_conn(state)
+    assert selfcheck.safe_mode(conn)["on"] and conn.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "open"
+    monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
+    copy = cloud.ServingCopy().connection()
+    assert copy.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "open"
+    assert copy.execute("SELECT COUNT(*) FROM alerts WHERE kind='SAFE_MODE' AND status!='cleared'").fetchone()[0] == 1
+    # the copy carries the runs' logs and the decision log (the Data tab and the drawer read them there)
+    assert copy.execute("SELECT COUNT(*) FROM run_log").fetchone()[0] >= 1
+    assert copy.execute("SELECT COUNT(*) FROM item_decisions").fetchone()[0] >= 1
+
+
+def test_old_settled_bills_leave_in_a_serverless_run_that_did_not_analyse_and_a_reopening_comes_back(box, monkeypatch):
+    """needs_E section 4: retention runs in a run that did not analyse (its memory is free): the settled bills of three
+    years ago go to the state folder's archive/ and the image is compacted; the next idle run takes nothing; a reopening
+    the dashboard journals is taken by the next run and the bill is back. The dashboard's copy holds the archive's
+    index (Find a claim opens archived bills)."""
+    from remitwatch import archive, cloud
+    from tests.test_archive import NEW, OLD, visits
+    from tests.test_remitwatch import remit
+    root, client, state = box
+    folder = root / DATA
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "old.RMT").write_bytes(remit("".join(visits(1, 8, OLD)), "100.00", seg_count=99, isa_ctrl="000000001", pay_date="20220415"))
+    (folder / "new.RMT").write_bytes(remit("".join(visits(100, 8, NEW)), "100.00", seg_count=99, isa_ctrl="000000002", pay_date="20260415"))
+    first = _cloud(state, client)
+    assert "detect" in first and "archive" not in first           # a run that analysed leaves the archive for the next
+    idle = _cloud(state, client)
+    assert idle["archive"]["bills"] == 8 and "archive_compact" in idle and "store" in idle
+    assert [m for m in state.list("archive") if m["name"].endswith(".jsonl.gz")]
+    conn = raw_conn(state)
+    bill = conn.execute("SELECT bill FROM archive_bills LIMIT 1").fetchone()[0]
+    assert conn.execute("SELECT COUNT(*) FROM archive_bills").fetchone()[0] == 8
+    monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
+    copy = cloud.ServingCopy().connection()             # the dashboard's copy holds the archive's index
+    assert copy.execute("SELECT COUNT(*) FROM archive_bills").fetchone()[0] == 8
+    assert "archive" not in _cloud(state, client)
+    cloud.record_action(state, archive.journal_entry(bill, actor="biller@example.test", reason="a late payment"))
+    back = _cloud(state, client)
+    assert back["archive_back"]["asked"] == 1
+    assert raw_conn(state).execute("SELECT COUNT(*) FROM archive_bills WHERE bill=?", (bill,)).fetchone()[0] == 0
+
+
+def test_the_weekly_self_audit_takes_the_first_idle_serverless_run_and_a_journaled_request_runs_it(box, monkeypatch):
+    """needs_G section 3: the self-audit runs in a run that did not analyse and saves its lists with the store; the next
+    idle run uploads nothing; a request from the Data tab (journaled on Vercel) runs it again in the next run."""
+    from remitwatch import cloud, selfcheck
+    monkeypatch.undo()                                  # the box fixture leaves the audit out: here it is the subject
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    assert "self_audit" not in _cloud(state, client)    # it analysed: the audit waits
+    audit = _cloud(state, client)
+    assert "self_audit" in audit and "store" in audit
+    assert selfcheck.meta_get(raw_conn(state), selfcheck.K_AUDIT)["latest"]
+    idle = _cloud(state, client)
+    assert "self_audit" not in idle and "store" not in idle
+    n0 = raw_conn(state).execute("SELECT COUNT(*) FROM selfcheck_audits").fetchone()[0]
+    cloud.record_action(state, {"kind": "selfcheck_request", "what": "audit", "user": "owner@example.test"})
+    asked = _cloud(state, client)
+    assert asked["actions_folded"] == 1
+    assert raw_conn(state).execute("SELECT COUNT(*) FROM selfcheck_audits").fetchone()[0] == n0 + 1
