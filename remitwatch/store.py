@@ -538,7 +538,10 @@ class Store:
             try:
                 empty = sqlite3.connect(":memory:")
                 try:                                    # an empty database of the store's page size (a block of another
-                    empty.execute(f"PRAGMA page_size={page_size}")      # page size refuses the copy)
+                    empty.execute(f"PRAGMA page_size={page_size}")      # page size refuses the copy), given its first
+                    empty.execute("CREATE TABLE _seed (x)")             # page by a table made and dropped: before
+                    empty.execute("DROP TABLE _seed")                   # Python 3.13, serialize refuses a database
+                    empty.commit()                                      # with no page ("unable to serialize")
                     seed = empty.serialize()
                 finally:
                     empty.close()
