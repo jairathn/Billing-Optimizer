@@ -431,6 +431,10 @@ K_BLIND = "selfcheck:blind"
 K_RATES = "selfcheck:rates"
 K_HOUSE = "selfcheck:housekeeping"
 K_ANSWER = "selfcheck:answer_days"
+K_FACTS_VERSION = "selfcheck:facts_version"
+# the fingerprint's own version (_facts_of): a build that reads another part of an item's claim changes every fingerprint,
+# so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else)
+FACTS_VERSION = "2"
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
@@ -1578,9 +1582,13 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
 
 
 def _stored_facts(conn: sqlite3.Connection) -> dict[str, str]:
+    """The fingerprints the run before stored, when this build makes them the same way (else none: never compared)."""
+    if meta_get(conn, K_FACTS_VERSION) != FACTS_VERSION:
+        return {}
     try:
         return {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        _caught(exc, "facts")
         return {}
 
 
@@ -1592,6 +1600,7 @@ def _save_facts(conn: sqlite3.Connection) -> int:
     fps = _facts_of(conn, listed)
     conn.execute("DELETE FROM selfcheck_facts")
     conn.executemany("INSERT OR REPLACE INTO selfcheck_facts (finding_id, fp) VALUES (?, ?)", list(fps.items()))
+    meta_set(conn, K_FACTS_VERSION, FACTS_VERSION)
     return len(fps)
 
 

@@ -1617,6 +1617,25 @@ def test_an_item_that_waited_for_emas_line_leaves_when_the_line_comes(store):
     assert van["examples"] == ["F-still"] and van["info"]["routes"] == {"facts_changed": 1} and out["kept"] == 1, van
 
 
+def test_fingerprints_another_build_made_never_let_an_item_go(store):
+    """The fingerprint is code: a build that reads more of an item's claim (the EMA line above) makes every fingerprint
+    the build before stored differ, and a departure that would read as new facts is only the new code. Found on the world
+    copy: 1,086 items kept for a person's decision left in one run when the EMA line part came. Fingerprints of another
+    build are not compared: the item is kept, and this run stores its own for the next."""
+    c = store.conn
+    snb = dict(signal="SECONDARY_NOT_BILLED", category="denial", carc=None, service_date="2026-03-02", procedure_code="99213")
+    add_item(c, "F-waited", line_key="La", patient_control_number="ZZ00T0001C001", **snb)
+    ema_line(c, 7001, bill="ZZ00T0001", ins_paid=4000, balance=0, status_class="paid")      # on file all along
+    run(c, None, "r1")
+    sc.meta_set(c, sc.K_FACTS_VERSION, "an older build")        # the fingerprints were stored by the build before
+    c.execute("UPDATE selfcheck_facts SET fp = 'fp-of-old-code'")
+    c.commit()
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings"), "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert van["examples"] == ["F-waited"] and not van["info"]["routes"] and out["kept"] == 1, van
+    assert sc.meta_get(c, sc.K_FACTS_VERSION) == sc.FACTS_VERSION      # this run's own, compared next time
+
+
 def test_the_precision_guard_counts_a_service_sent_again_once(kind):
     """Two lines of one code on one claim are two units (their shortfalls add up); the same line sent again on a new claim
     is the same money (finding 12)."""
