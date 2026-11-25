@@ -164,8 +164,10 @@ def ema_section(store: Store) -> list[str]:
         r = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE signal=? AND COALESCE(stale,0)=0
                  AND status IN ('open','in_progress')""", (sig,))[0]
         out.append(f"- {words}: {r['n']:,}, {money(r['cents'])}")
+    from . import runtime
     auto = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE ema_outcome='auto_written_off'
-                AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') AND appeal_deadline >= date('now')""")[0]
+                AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') AND appeal_deadline >= ?""",
+             (runtime.practice_today(),))[0]           # the practice's day, never SQL's date('now') (UTC)
     out.append(f"- Written off automatically by EMA and still appealable: {auto['n']:,} items, {money(auto['cents'])}")
     acc = _meta(store, "ema:ar_accounted") or {}
     if acc.get("buckets"):

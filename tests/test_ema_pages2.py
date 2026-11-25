@@ -25,7 +25,7 @@ import subprocess
 
 import pytest
 
-from remitwatch import cloud, ema_checks as ec, ema_ledger as el, ema_reports as er
+from remitwatch import cloud, ema_checks as ec, ema_ledger as el, ema_reports as er, runtime
 from remitwatch.detect import Detector
 from remitwatch.state import LocalState
 from remitwatch.store import Store
@@ -35,7 +35,7 @@ P = F.PAYERS
 SALT_HEX = "cd" * 32
 XHR = {"X-Requested-With": "remitwatch"}
 BCBS = "Anthem / BCBS"
-T = dt.datetime.now(dt.timezone.utc).date()          # the site's day: the lists count windows from it (SQL date('now'))
+T = dt.date.fromisoformat(runtime.practice_today())  # the site's day: the practice's, as every list counts windows
 TODAY = T.isoformat()
 _N = itertools.count(1)
 _TX = itertools.count(1)
@@ -1800,3 +1800,27 @@ def test_the_unposted_line_counts_every_row_of_its_file(page_run):
     out, _ = page_run({"/api/ema/data": data})
     text = re.sub(r"<[^>]+>", "", out["data_html"])
     assert "1 payment the payer reported but never sent, $524 (ask the payer for it)" in text
+
+
+def test_today_and_the_pattern_counts_take_the_practices_day_not_utcs(server, monkeypatch):
+    """The Today page's day and the write-off patterns' "still appealable" counts are the practice's day
+    (runtime.practice_today), as every list is. SQL's date('now') is UTC, a day off the practice's for hours each evening in
+    the US: an item whose last day is the practice's today was counted lost, and one whose last day passed there was
+    counted appealable. The zone below puts the practice a day off UTC whatever the hour the test runs."""
+    behind = dt.datetime.now(dt.timezone.utc).hour < 12
+    monkeypatch.setenv("REMITWATCH_TZ", "Etc/GMT+12" if behind else "Etc/GMT-14")     # UTC-12 before noon UTC, UTC+14 after
+    day = runtime.practice_today()
+    assert day != dt.datetime.now(dt.timezone.utc).date().isoformat()
+    c, db = server.c, server.db
+    f = fid(db, "DENIED_AUTH", "auto_written_off")
+    # behind UTC: the last day is the practice's today, still appealable; ahead of UTC: the last day was yesterday there, lost
+    last = day if behind else runtime.practice_today(-1)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET appeal_deadline=?, legal_deadline=NULL WHERE finding_id=?", (last, f))
+    conn.commit()
+    conn.close()
+    assert c.get("/api/ema/today").json()["today"] == day
+    pol = c.get("/api/ema/policy").json()
+    a = {p["pattern"]: p for p in pol["patterns"]}[P_AUTH]
+    assert (a["appealable"], a["appealable_cents"]) == ((1, 9000) if behind else (0, 0)), (behind, a)
+    assert pol["today"] == day
