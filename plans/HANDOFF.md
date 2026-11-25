@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-25, 04:20 UTC.
+Last updated: 2026-11-25, 05:15 UTC.
 
 ## 1. Where things are
 
@@ -241,6 +241,16 @@ Last updated: 2026-11-25, 04:20 UTC.
       file, function, line and cause in about 5 minutes. It worked from the run manifests' rule version, the decision log's
       `no_longer_raised` rows and the vanished check's examples. It noted that the vanished check excuses a flip as
       `facts_changed` when only RemitWatch's own summary changed; this was passed to the hook-in unit to tighten.
+      **fix7b merged (0efcb74)**: a bare $0 row is no answer (it needs an allowed amount or the payer's reason), and an answer
+      counts only for its own part (26, TC or the whole). 31 claims back on the list on the real copy, 23 owed ($7,017).
+      **m9 = 0efcb74 measured (05:07 UTC; A16, Work now, in scope; push 2 alone in brackets)**: correct 1,305 [1,419];
+      already done 146 [374]; already worked 21 [41]; duplicate 5 [112]; wrong amount 144 [330]; undecided 29 [75]; closed
+      wrongly 1 [9]. Money left on the table, as A16 counts it: $72,518. That figure is inflated: A16 still mixes plan rates
+      (A17, running, fixes it). EMA-paid items still listed: 16 ($4,095), 10 of them never-answered claims dated only by
+      the visit day. Residuals for the next batch (fix7e): denials paid on an 835 but routed to note or check-first (about
+      20), $0 lines (9), voided (6), short (5), resends whose answer is late routed to 'call' (A16 counts 20 as already
+      worked: to decide by hand). Waiting on the owner: rule 8 (58 patient-share denials, $4,234) and rule 4.2 (20
+      code-change items for codes the payer almost never pays, $7,150).
       **Determinism**: fix837 saw the SECONDARY_NOT_BILLED "already done" count swing between 690 and 424 across runs of the
       same code on fresh copies (it blames the ledger refresh after detection): to check (two runs, compare item by item).
       Next after them: the 837 as a source of sends and the never-answered
