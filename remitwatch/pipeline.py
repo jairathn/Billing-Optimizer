@@ -635,11 +635,21 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             if lg_box:
                 _ema_step(out, "ema_copies", drop_kept_copies, store, lg_box[0], db_path, log=beat_log)
             # (G) the money checks every cycle: the ledger against the store's summaries, money conservation, EMA's A/R
-            # against the postings, and money posted in a closed month that a newer export dropped
-            money = _ema_step(out, "selfcheck_money", sc.check_ledger, store.conn, ledger())
+            # against the postings, and money posted in a closed month that a newer export dropped. (H) Summaries that
+            # no longer match the ledger are rebuilt from it once and checked again (repair.rebuild_if_failing)
+            def ledger_check() -> dict:
+                got = sc.check_ledger(store.conn, ledger())
+                st = {c["id"]: c["status"] for c in got.get("checks") or []}
+                return {"ok": st.get("ledger_store") != "fail", "checks": st, "gaps": got.get("gaps")}
+            money = _ema_step(out, "selfcheck_money", repair.rebuild_if_failing, "ledger_summaries", ledger_check,
+                              lambda: ema_ledger.refresh(store, ledger(), parts="AB", log=beat_log), registry=reg)
             if money:
-                out["money_checks"] = {c["id"]: c["status"] for c in money.get("checks") or []}
-                out["money_gaps"] = money.get("gaps")
+                got = money.get("after") or money.get("before") or {}
+                out["money_checks"] = got.get("checks")
+                out["money_gaps"] = got.get("gaps")
+                if money.get("rebuilt"):
+                    out["ledger_rebuilt"] = {"ok": bool(money.get("ok"))}
+                    changed = True          # the rebuilt summaries are analysed in this cycle
             heartbeat(store.conn, token)
         # (E) reopenings asked in the app, and archived bills new data arrived for, come back before detection
         from . import archive

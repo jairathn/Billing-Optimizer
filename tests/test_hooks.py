@@ -490,6 +490,39 @@ def test_a_trizetto_pull_is_tried_again_and_a_bug_in_its_ingest_is_raised_at_onc
     assert calls["n"] == 1 and "timed out" in out["trizetto"]["error"] and "finished" in out      # raised at once, never retried
 
 
+def test_ledger_summaries_that_stop_matching_the_ledger_are_rebuilt_once_in_the_cycle(tmp_path, monkeypatch):
+    """needs_H section 8 and CLAUDE.md: a derived table that fails its check is rebuilt once. The store's EMA summaries
+    off by $50 against the posting ledger (selfcheck's ledger_store check) are rebuilt from the ledger in the cycle
+    (repair.rebuild_if_failing), checked again, and the repair is logged; no safe mode."""
+    import sqlite3 as sq
+
+    from remitwatch import ema_ledger as el, ema_reports as er, pipeline
+    from tests import ema_fixtures as F
+    from tests.test_selfcheck import SALT_HEX, prod_rows
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    db = _db(tmp_path)
+    s = Store(db)
+    from remitwatch.detect import ensure_schema
+    ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (SALT_HEX,))
+    s.conn.commit()
+    lg = el.open_for_store(db)
+    res = er.ingest_file(s, F.write(str(tmp_path / "prod.csv"), F.production_csv(prod_rows())), via="test", ledger=lg, log=lambda *a: None)
+    assert res["status"] == "current", res
+    el.refresh(s, lg, log=lambda *a: None)
+    lg.close()
+    s.conn.execute("UPDATE ema_months SET cents = cents + 5000 WHERE measure = 'ins_paid'")      # the summaries drift
+    s.conn.commit()
+    s.close()
+    out = pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    assert out["ledger_rebuilt"] == {"ok": True} and out["money_checks"]["ledger_store"] == "ok", (out.get("ledger_rebuilt"), out.get("money_checks"))
+    c = sq.connect(db)
+    rows = [r[0] for r in c.execute("SELECT outcome FROM repair_log WHERE remedy='derived_table' AND target='ledger_summaries'")]
+    assert rows == ["repaired"] and not c.execute("SELECT value FROM meta WHERE key='selfcheck:safe_mode' AND value LIKE '%\"on\": true%'").fetchone()
+    c.close()
+
+
 def test_a_scheduled_cycle_that_dies_before_its_lock_is_visible_on_the_panel(tmp_path, monkeypatch):
     """needs_H W10 (P0a): a store that cannot be opened makes the cycle fail before its lock; with no run log yet, the
     failure is still written as a failed run, and the panel shows it."""
