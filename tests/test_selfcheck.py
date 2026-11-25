@@ -1579,6 +1579,25 @@ def test_a_pattern_whose_lines_an_older_pattern_takes_back_is_not_kept(store):
     assert out["kept"] == 1 and set(van["examples"]) == {"F-alone"}, van
 
 
+def test_an_answer_delivered_again_leaves_by_the_delivery_that_keeps_the_item(store):
+    """The payer's same answer delivered twice the same day is one item (detect._answer_copies, trace finding T-I3): the
+    delivery a person worked keeps it and the other delivery's item leaves the list. The detector names the lines it
+    passed by (ctx `delivered_again`): a route, not a vanishing (found by wiring: the item was kept beside the worked one,
+    one underpayment listed twice). An item on a line the detector did not name is still kept."""
+    c = store.conn
+    add_item(c, "F-copy", signal="UNDERPAID_VS_OWN_RATE", category="underpayment", line_key="L1")
+    add_item(c, "F-worked", signal="UNDERPAID_VS_OWN_RATE", category="underpayment", line_key="L2", status="in_progress")
+    add_item(c, "F-lone", signal="UNDERPAID_VS_OWN_RATE", category="underpayment", line_key="L9")
+    run(c, None, "r1")
+    ctx = sc.begin_detection(c, run_id="r2", today=TODAY)
+    c.execute("DELETE FROM findings WHERE finding_id IN ('F-copy', 'F-lone')")
+    c.commit()
+    out = sc.after_detection(c, dict(ctx, delivered_again=["L1"]), mode="server", today=TODAY, run_id="r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert out["kept"] == 1 and set(van["examples"]) == {"F-lone"}, van
+    assert van["info"]["routes"].get("delivered_again") == 1
+
+
 def test_the_precision_guard_counts_a_service_sent_again_once(kind):
     """Two lines of one code on one claim are two units (their shortfalls add up); the same line sent again on a new claim
     is the same money (finding 12)."""

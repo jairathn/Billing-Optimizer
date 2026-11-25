@@ -3243,7 +3243,7 @@ class Detector:
                 self.billed_units_of(o) for o in self.lines_by_claim.get(l["claim_key"], [])
                 if o["line_key"] != l["line_key"] and o.get("procedure_code") == code and o.get("service_date") == l.get("service_date")
                 and (o.get("paid_cents") or 0) > 0))
-        copies = self._answer_copies()
+        copies = self.answer_copies = self._answer_copies()
         # a denied visit with a lower level paid in its place is one event: the paid line must not also count as a downcode
         swap_paid: set[str] = set()
         primary_changes: set[tuple] = set()
@@ -7642,8 +7642,10 @@ class Detector:
             self.value_summary = selfcheck.apply_expected_values(self.conn, selfcheck.recovery_rates(self.conn))
         except Exception as exc:       # noqa: BLE001  (the ranking waits for the next run; the items stand)
             runlog.caught(exc, "selfcheck:values")
+        # the lines passed by as copies of an answer delivered again the same day: their one item is the other delivery's
+        ctx = dict(getattr(self, "_selfcheck_ctx", None) or {}, delivered_again=sorted(getattr(self, "answer_copies", ()) or ()))
         try:
-            self.selfcheck = selfcheck.after_detection(self.conn, getattr(self, "_selfcheck_ctx", None),
+            self.selfcheck = selfcheck.after_detection(self.conn, ctx,
                                                        mode="serverless" if runtime.serverless() else "server",
                                                        today=self.today, run_id=self.run_id)
         except Exception as exc:       # noqa: BLE001  (a self-check that crashes is a guard that is off: said every run, never silent)

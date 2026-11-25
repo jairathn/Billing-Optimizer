@@ -44,6 +44,7 @@ def test_the_vercel_sites_data_moves_to_the_server_once(box, tmp_path, monkeypat
                                        "last_report": "2026-11-17T08:00:00+00:00"}).encode())
     state.put("reports/remitwatch-20261117-0800.md", b"# Weekly summary")
     db = str(tmp_path / "server" / "remitwatch.sqlite")
+    capsys.readouterr()             # the Vercel run's one line for the platform's log (runlog), not the command's output
     assert cli.main(["--db", db, "import-cloud"]) == 0
     out = json.loads(capsys.readouterr().out.split("\n", 1)[1])
     assert out["journal_applied"] == 3 and out["packets_moved"] == 1 and out["reports_moved"] >= 1 and out["practice_figures"] is True

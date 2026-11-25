@@ -1343,7 +1343,7 @@ def _is_listed(r: dict, states_kept: bool) -> bool:
 
 
 def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dict[str, dict], *,
-                   facts: dict[str, str] | None = None) -> dict:
+                   facts: dict[str, str] | None = None, delivered_again: Any = None) -> dict:
     """Open items people were shown as work (Work now or Waiting) before the run that the run no longer has, or keeps only
     as a stale row (an item a person worked that no rule produces any more: it is on no list), with no route out: a
     person's own decision on it while the run ran; an item THIS run made for the same line, claim and code, or service (an
@@ -1351,9 +1351,12 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
     (no answer, rejected, never sent), an item this run made for its bill and day or an 835 answer on its bill since it
     was raised; a fold into another item; its remittance superseded; or new facts on its own claim since the run before
     (`facts`: the fingerprints that run stored, selfcheck_facts: the 835 answers on its bill, EMA's lines and newest A/R
-    rows for its EMA claim number), as the rules' answer may then rightly change."""
+    rows for its EMA claim number), as the rules' answer may then rightly change; or its line is a copy of an answer the
+    payer delivered again the same day (`delivered_again`: the lines the detector passed by, detect._answer_copies), whose
+    one item the other delivery keeps."""
     if not before:
         return _skip("vanished", "no items before this run")
+    again = {str(x) for x in (delivered_again or ()) if x}
     states_kept = any(r.get("work_state") for r in before.values())
     new_rows = [r for f, r in after.items() if f not in before and not r.get("stale")]
     lines = {r["line_key"] for r in new_rows if r.get("line_key")}
@@ -1410,6 +1413,8 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             routes["folded"] += 1
         elif not lk and r.get("evidence") and own_lines & {str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x}:
             routes["regrouped"] += 1            # a pattern whose lines this run lists one by one again
+        elif lk and lk in again:
+            routes["delivered_again"] += 1      # one answer delivered twice is one item: the other delivery keeps it (T-I3)
         else:
             cands.append(r)
     superseded: set[str] = set()
@@ -1848,7 +1853,7 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
     try:
-        results.append(check_vanished(conn, before, after, facts=_stored_facts(conn)))
+        results.append(check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again")))
     except Exception as exc:       # noqa: BLE001
         _caught(exc, "vanished")
         results.append(_check_error("vanished", exc))

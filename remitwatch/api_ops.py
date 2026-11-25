@@ -205,7 +205,8 @@ def _log_bundle(user: str, days: int, run: Optional[str]) -> None:
 
 
 @router.get("/api/findings/{finding_id}/decisions")
-def finding_decisions(finding_id: str = Path(..., pattern=r"^[0-9a-f]{8,64}$"), _: str = Depends(_user)):
+def finding_decisions(finding_id: str = Path(..., min_length=1, max_length=128), _: str = Depends(_user)):
+    # any id the store holds (an item kept from an earlier release has another shape): it is only a bound parameter
     with _Conn() as c:
         return runlog.decisions_for(c, finding_id)
 

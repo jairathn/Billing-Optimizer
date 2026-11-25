@@ -844,6 +844,19 @@ def test_the_ops_routes_answer_on_a_server_and_the_bundle_holds_no_patient_data(
     assert tc.post("/api/ops/selfcheck/audit", headers=auth).status_code in (400, 403)      # no cross-site request
 
 
+def test_an_item_kept_from_an_earlier_release_opens_with_an_empty_change_log(tmp_path, monkeypatch):
+    """The item panel asks every item for its "Why did this change?" log. An item kept from an earlier release can carry
+    an id of another shape (found by the page check in tests/test_review_rates.py: the route refused it, a red line in
+    the browser's console): the answer is an empty log, never an error."""
+    db = _db(tmp_path)
+    s = Store(db)
+    s.close()
+    tc, auth = _server_client(monkeypatch, db)
+    r = tc.get("/api/findings/legacy00000000000000aaaa/decisions", headers=auth)
+    assert r.status_code == 200 and r.json()["items"] == [], r.text
+    assert tc.get("/api/findings/legacy00000000000000aaaa/decisions").status_code == 401
+
+
 def test_the_ops_routes_read_what_the_run_stored_on_vercel(site):
     """The same routes on a serverless host read the dashboard's copy and the state folder (never worked out again on
     the copy), and the Data tab's requests are journaled for the next run."""
