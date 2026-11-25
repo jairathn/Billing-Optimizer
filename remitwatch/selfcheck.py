@@ -432,9 +432,10 @@ K_RATES = "selfcheck:rates"
 K_HOUSE = "selfcheck:housekeeping"
 K_ANSWER = "selfcheck:answer_days"
 K_FACTS_VERSION = "selfcheck:facts_version"
+K_FACTS_INPUT = "selfcheck:facts_input"
 # the fingerprint's own version (_facts_of): a build that reads another part of an item's claim changes every fingerprint,
 # so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else)
-FACTS_VERSION = "2"
+FACTS_VERSION = "3"
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
@@ -842,6 +843,11 @@ CHECKS: dict[str, tuple] = {
     "feed_ema": ("warning", None, 0, "EMA's reports are current",
                  "The Production report is at most 14 days old and the A/R at most 8.",
                  "Pull the weekly EMA reports (Upload page lists them)."),
+    "left_record": ("warning", None, 0, "No item left the record without a reason",
+                    "An item no list shows (expired past its windows, done, closed with its proof) is the scoreboard's record: "
+                    "one the run no longer produced, with no reason found, is counted here (it is not put back).",
+                    "The run no longer produced these items: find the rule that stopped (the signal of the examples, 'gone' "
+                    "in the run's decision log). A rule changed on purpose explains them; a whole signal gone is a bug."),
     "line_balance": ("warning", None, 0, "EMA's A/R agrees with its postings",
                      "Each line carries on EMA's newest A/R the balance its postings leave, to the dollar, both ways (a denied "
                      "line by its Denial Amount); a line the A/R no longer lists (settled in EMA) leaves nothing open in its "
@@ -1417,35 +1423,55 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             elif isinstance(x, str):
                 folded.add(x)
     routes: Counter = Counter()
+    uroutes: Counter = Counter()        # the same routes for the items no list shows (the left_record check)
     cands: list[dict] = []
+    ucands: list[dict] = []
     for fid, r in before.items():
-        if not _is_listed(r, states_kept):
-            continue
+        listed = _is_listed(r, states_kept)
         a = after.get(fid)
         if a is not None and not a.get("stale"):
             continue                            # still on record: where it went is the other checks' business
+        if not listed and (a is not None or r.get("stale")):
+            continue                            # not on a list, and still on record (a stale row): nothing left it
+        rt = routes if listed else uroutes
         if a is not None and a.get("status") not in OPEN_STATUSES:
-            routes["decided"] += 1              # a person let it go, lost it or marked it paid while the run ran
+            rt["decided"] += 1                  # a person let it go, lost it or marked it paid while the run ran
             continue
         lk = r.get("line_key")
         b = bill_of(r.get("patient_control_number"))
         svc = str(r.get("service_date") or "")[:10]
         if lk and lk in lines:
-            routes["same_line"] += 1
+            rt["same_line"] += 1
         elif r.get("claim_key") and (r["claim_key"], r.get("procedure_code")) in claim_codes:
-            routes["same_claim_code"] += 1
+            rt["same_claim_code"] += 1
         elif not lk and b and (b, svc, r.get("procedure_code")) in service:
-            routes["same_service"] += 1         # a claim-level item carried on by an item for its service
+            rt["same_service"] += 1             # a claim-level item carried on by an item for its service
         elif not lk and b and r.get("signal") in CLAIM_SIGNALS and (b, svc) in bill_days:
-            routes["claim_answered"] += 1       # the claim's answer brought items of its own
+            rt["claim_answered"] += 1           # the claim's answer brought items of its own
         elif fid in folded:
-            routes["folded"] += 1
+            rt["folded"] += 1
         elif not lk and r.get("evidence") and own_lines & {str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x}:
-            routes["regrouped"] += 1            # a pattern whose lines this run lists one by one again
+            rt["regrouped"] += 1                # a pattern whose lines this run lists one by one again
         elif lk and lk in again:
-            routes["delivered_again"] += 1      # one answer delivered twice is one item: the other delivery keeps it (T-I3)
+            rt["delivered_again"] += 1          # one answer delivered twice is one item: the other delivery keeps it (T-I3)
         else:
-            cands.append(r)
+            (cands if listed else ucands).append(r)
+    left = _no_route(conn, cands, routes, facts)
+    uleft = _no_route(conn, ucands, uroutes, facts)
+    offs = [(r["finding_id"], int(r.get("shortfall_cents") or 0), r["finding_id"]) for r in left]
+    by_signal = Counter(r.get("signal") for r in left)
+    out = _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10)),
+                                          "stale": sum(1 for r in left if r["finding_id"] in after)})
+    uoffs = [(r["finding_id"], int(r.get("shortfall_cents") or 0), r["finding_id"]) for r in uleft]
+    out["left_record"] = _result("left_record", uoffs, info={
+        "routes": dict(uroutes), "by_signal": dict(Counter(r.get("signal") for r in uleft).most_common(10)),
+        "by_state": dict(Counter(str(r.get("work_state") or r.get("status")) for r in uleft).most_common(10))})
+    return out
+
+
+def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, facts: dict[str, str] | None) -> list[dict]:
+    """The candidates the store's own records give no route out: not their remittance superseded, not a claim answered or
+    sent again since, not the owner's accepted pattern, not new facts on their own claim (`facts`). Counts the routes."""
     superseded: set[str] = set()
     tks = sorted({r.get("transaction_key") for r in cands if r.get("transaction_key")})
     if tks and _has_table(conn, "transactions"):
@@ -1480,10 +1506,7 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             else:
                 kept_left.append(r)
         left = kept_left
-    offs = [(r["finding_id"], int(r.get("shortfall_cents") or 0), r["finding_id"]) for r in left]
-    by_signal = Counter(r.get("signal") for r in left)
-    return _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10)),
-                                           "stale": sum(1 for r in left if r["finding_id"] in after)})
+    return left
 
 
 _SUB_NO = re.compile(r"C(\d{1,3})$")
@@ -1606,10 +1629,27 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
     return out
 
 
+def _input_position(conn: sqlite3.Connection) -> list:
+    """How much source data the store has read: the 835 transactions (count, newest row), the 835 files and EMA's report
+    files applied (count, newest). New facts on a claim can only come with a file read: when this has not moved, a
+    fingerprint that changed is RemitWatch's own summaries changing (a refresh, a rebuild, a release), not new input."""
+    pos: list = []
+    for sql in ("SELECT COUNT(*), MAX(rowid) FROM transactions", "SELECT COUNT(*), MAX(ingested_at) FROM files",
+                "SELECT COUNT(*), MAX(applied_at) FROM ema_report_files WHERE applied_at IS NOT NULL"):
+        try:
+            pos.append(list(conn.execute(sql).fetchone()))
+        except sqlite3.Error:           # a store without that table (an old copy, a test's): nothing read of that kind
+            pos.append(None)
+    return pos
+
+
 def _stored_facts(conn: sqlite3.Connection) -> dict[str, str]:
-    """The fingerprints the run before stored, when this build makes them the same way (else none: never compared)."""
+    """The fingerprints the run before stored, when this build makes them the same way and a source file was read since
+    (else none: never compared, so no departure is excused as new facts)."""
     if meta_get(conn, K_FACTS_VERSION) != FACTS_VERSION:
         return {}
+    if meta_get(conn, K_FACTS_INPUT) == _input_position(conn):
+        return {}                       # nothing read since the run before: no claim has new facts
     try:
         return {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
     except sqlite3.Error as exc:
@@ -1618,14 +1658,14 @@ def _stored_facts(conn: sqlite3.Connection) -> dict[str, str]:
 
 
 def _save_facts(conn: sqlite3.Connection) -> int:
-    """The fingerprints of the items people see now (the next run's vanished check compares against them)."""
+    """The fingerprints of the items on record now, listed or not (the next run's vanished and left_record checks compare
+    against them), and the source data read so far."""
     rows = _after_rows(conn)
-    states_kept = any(r.get("work_state") for r in rows.values())
-    listed = [r for r in rows.values() if _is_listed(r, states_kept)]
-    fps = _facts_of(conn, listed)
+    fps = _facts_of(conn, [r for r in rows.values() if not r.get("stale")])
     conn.execute("DELETE FROM selfcheck_facts")
     conn.executemany("INSERT OR REPLACE INTO selfcheck_facts (finding_id, fp) VALUES (?, ?)", list(fps.items()))
     meta_set(conn, K_FACTS_VERSION, FACTS_VERSION)
+    meta_set(conn, K_FACTS_INPUT, _input_position(conn))
     return len(fps)
 
 
@@ -1902,7 +1942,11 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
     try:
-        results.append(check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again")))
+        van = check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again"))
+        left_record = van.pop("left_record", None)
+        results.append(van)
+        if left_record:
+            results.append(left_record)     # the items no list shows that left the record: counted, never put back
     except Exception as exc:       # noqa: BLE001
         _caught(exc, "vanished")
         results.append(_check_error("vanished", exc))

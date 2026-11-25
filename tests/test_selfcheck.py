@@ -1599,10 +1599,9 @@ def test_an_answer_delivered_again_leaves_by_the_delivery_that_keeps_the_item(st
 
 
 def test_an_item_that_waited_for_emas_line_leaves_when_the_line_comes(store):
-    """A second payer's item raised before EMA's line was on file (SECONDARY_NOT_BILLED: the item makes the next summary
-    keep the line, and EMA then shows any answer) leaves when the line comes: new facts on its own claim, a route. Found on
-    the real world copy: the refresh after detection brought 299 such lines and the next detection's departures were all
-    kept. An item whose line is still not on file is kept."""
+    """A second payer's item raised before EMA's line was on file (SECONDARY_NOT_BILLED: EMA then shows any answer)
+    leaves when a Production report read since the run before brings the line: new facts on its own claim, a route. Found
+    on the real world copy (299 such items kept). An item whose line is still not on file is kept."""
     c = store.conn
     snb = dict(signal="SECONDARY_NOT_BILLED", category="denial", carc=None, service_date="2026-03-02", procedure_code="99213")
     add_item(c, "F-waited", line_key="La", patient_control_number="ZZ00T0001C001", **snb)
@@ -1611,10 +1610,71 @@ def test_an_item_that_waited_for_emas_line_leaves_when_the_line_comes(store):
 
     def save(cn):
         cn.execute("DELETE FROM findings")
+        report_read(cn, "prod-2")                                                   # a Production report read since
         ema_line(cn, 7001, bill="ZZ00T0001", ins_paid=4000, balance=0, status_class="paid")     # the line came: paid
     out = run(c, save, "r2")
     van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
     assert van["examples"] == ["F-still"] and van["info"]["routes"] == {"facts_changed": 1} and out["kept"] == 1, van
+
+
+def report_read(conn, file_id: str, report: str = "production") -> None:
+    """One EMA report file read and applied (ema_report_files), as the readers record it."""
+    conn.execute("INSERT INTO ema_report_files (file_id, report, status, applied_at) VALUES (?, ?, 'current', ?)",
+                 (file_id, report, f"2026-11-22T0{len(file_id) % 9}:00:00+00:00"))
+    conn.commit()
+
+
+def test_facts_are_new_only_when_a_file_was_read_since_the_run_before(store):
+    """New facts on an item's own claim are new source data: an 835 or an EMA report read since the run before. The
+    store's own summaries changing with nothing read (a refresh, a rebuild, a release) are no new facts: an item that leaves
+    then is kept (found by the code-bug drill: a summary RemitWatch kept and dropped by itself excused 320 departures every
+    other run). Once a report is read, the same change is a route."""
+    c = store.conn
+    snb = dict(signal="SECONDARY_NOT_BILLED", category="denial", carc=None, service_date="2026-03-02", procedure_code="99213")
+    ema_line(c, 7001, bill="ZZ00T0001", ins_paid=0, balance=4000)
+    report_read(c, "prod-1")
+    add_item(c, "F-derived", line_key="La", patient_control_number="ZZ00T0001C001", **snb)
+    run(c, None, "r1")
+
+    def summary_only(cn):
+        cn.execute("DELETE FROM findings")
+        cn.execute("UPDATE ema_lines SET ins_paid = 4000, balance = 0 WHERE link = 7001")    # nothing read: derived only
+    out = run(c, summary_only, "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert van["examples"] == ["F-derived"] and "facts_changed" not in van["info"]["routes"] and out["kept"] == 1, van
+
+    def read_then(cn):
+        cn.execute("DELETE FROM findings WHERE finding_id = 'F-derived'")
+        report_read(cn, "prod-22")
+        cn.execute("UPDATE ema_lines SET ins_paid = 3900 WHERE link = 7001")
+    run(c, read_then, "r3")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert van["status"] == "ok" and van["info"]["routes"] == {"facts_changed": 1}, van
+
+
+def test_items_no_list_shows_that_a_run_stops_raising_are_counted_not_kept(store):
+    """A rule change, or a bug, that stops raising a category also drops its items no list shows (expired past their
+    windows, done, closed with their proof): the scoreboard's record. Found by the code-bug drill: 255 authorization
+    denials, expired or done, left the record and no check counted them. A warning check of their own counts them, by
+    signal and state, with examples; only listed items are put back. An item this run made for the same line is a route."""
+    c = store.conn
+    add_item(c, "F-listed", line_key="L1")
+    add_item(c, "F-expired", line_key="L2", work_state="expired")
+    add_item(c, "F-done", line_key="L3", status="resolved", work_state="done", auto_note="Paid on a later remittance")
+    add_item(c, "F-replaced", line_key="L4", work_state="expired")
+    run(c, None, "r1")
+
+    def save(cn):
+        cn.execute("DELETE FROM findings")
+        add_item(cn, "F-new-on-L4", line_key="L4", signal="DENIED_OTHER", work_state="expired")
+    out = run(c, save, "r2")
+    checks = sc.meta_get(c, sc.K_LAST)["checks"]
+    van, left = check_of(checks, "vanished"), check_of(checks, "left_record")
+    assert van["examples"] == ["F-listed"] and out["kept"] == 1, van
+    assert left["status"] == "fail" and left["severity"] == "warning" and sorted(left["examples"]) == ["F-done", "F-expired"], left
+    assert left["info"]["by_signal"] == {"DENIED_AUTH": 2} and left["info"]["by_state"] == {"done": 1, "expired": 1}, left
+    assert left["info"]["routes"].get("same_line") == 1, left
+    assert c.execute("SELECT COUNT(*) FROM findings WHERE finding_id IN ('F-expired', 'F-done')").fetchone()[0] == 0
 
 
 def test_fingerprints_another_build_made_never_let_an_item_go(store):
