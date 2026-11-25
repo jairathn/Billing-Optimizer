@@ -10,6 +10,15 @@ import pytest
 from remitwatch import fax
 from tests.fake_fax import FakeLine, FakeSRFax, pdf_of, pdf_text
 
+
+def _paid_a_week_ago() -> str:
+    """A payment date a week before the practice's day (YYYYMMDD): the remittances stay current, so an appeal is never
+    held as stale whatever day the suite runs. A fixed date went stale two weeks after it was written."""
+    from datetime import date, timedelta
+
+    from remitwatch import runtime
+    return (date.fromisoformat(runtime.practice_today()) - timedelta(days=7)).strftime("%Y%m%d")
+
 XHR = {"X-Requested-With": "remitwatch"}
 PAYER_FAX = "(800) 555-0142"
 LEVEL2_FAX = "800-555-0177"
@@ -81,7 +90,7 @@ def _store(tmp_path):
     under = claim(202, svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~", dos="20261101"), dos="20261101") \
         .replace("NM1*QC*1*SAMPLE*PAT", "NM1*QC*1*OTHER*PAT", 1)
     fixit = claim(203, svc("17000", "150.00", "0.00", None, "CAS*CO*4*150.00~", dos="20261101") + "LQ*HE*N519~", dos="20261101")
-    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied, under, fixit], pay_date="20261110")
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied, under, fixit], pay_date=_paid_a_week_ago())
     Detector(store, run_id="t").run()
     store.conn.execute("""INSERT INTO ema_rows (row_fingerprint, family, claim_id, patient_id, service_date, cpt)
                           VALUES ('fp1', 'charges', 'CB0000300C017', 'EMA77', '2026-11-01', '99214')""")
@@ -321,6 +330,15 @@ def test_a_note_that_falls_short_becomes_a_suggested_template(site):
 
 
 # --------------------------------------------------------------------------- the follow-up calendar
+def _noon(day: str) -> str:
+    """Noon of `day` where the practice is, as the store writes a time (UTC): a fax of that day is of that day in any
+    zone the practice may be in (a fixed UTC hour falls on another day somewhere)."""
+    from datetime import datetime, timedelta
+
+    from remitwatch import runtime
+    return (datetime.fromisoformat(runtime.practice_day_start(day)) + timedelta(hours=12)).isoformat()
+
+
 def _book(rows: list[tuple], finding_status: str = "appealed", payer_kind: str = "commercial") -> sqlite3.Connection:
     from remitwatch.actions import apply_fax, ensure_fax_tables
     conn = sqlite3.connect(":memory:")
@@ -332,7 +350,7 @@ def _book(rows: list[tuple], finding_status: str = "appealed", payer_kind: str =
         if direction == "in":           # the payer's answer, tied as a fax is tied by itself: by the claim number, from its number
             doc = dict({"tied_by": "claim_id"}, **(doc or {}))
         apply_fax(conn, {"fax_key": f"k{i}", "direction": direction, "finding_id": "F1", "purpose": purpose, "level": level, "status": status,
-                         "created_at": day + "T10:00:00+00:00", "doc": doc or {}})
+                         "created_at": _noon(day), "doc": doc or {}})
     return conn
 
 
@@ -424,7 +442,7 @@ def test_on_a_serverless_host_the_appeal_goes_out_and_lasts(box, monkeypatch):
     claims = visits_with_downcodes()
     (root / DATA).mkdir(parents=True, exist_ok=True)
     for n, i in enumerate(range(0, len(claims), 10)):          # paid last week: the filing windows are open
-        (root / DATA / f"r{n:03d}.RMT").write_bytes(remit("".join(claims[i:i + 10]), "100.00", seg_count=99, isa_ctrl=f"{n + 1:09d}", pay_date="20261110"))
+        (root / DATA / f"r{n:03d}.RMT").write_bytes(remit("".join(claims[i:i + 10]), "100.00", seg_count=99, isa_ctrl=f"{n + 1:09d}", pay_date=_paid_a_week_ago()))
     cycle(state, client)
     monkeypatch.setenv("REMITWATCH_MODE", "serverless")
     monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
@@ -1041,7 +1059,7 @@ def _named(i: int, last: str, first: str, lines: str, dos: str) -> str:
             f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~REF*CE*PPO~DTM*232*{dos}~{lines}")
 
 
-def _store_from(tmp_path, files: list[tuple[str, str, list[str]]], pay_date: str = "20261110") -> str:
+def _store_from(tmp_path, files: list[tuple[str, str, list[str]]], pay_date: str | None = None) -> str:
     from remitwatch.detect import Detector
     from remitwatch.store import Store
     from tests.test_remitwatch import remit
@@ -1050,7 +1068,8 @@ def _store_from(tmp_path, files: list[tuple[str, str, list[str]]], pay_date: str
     for n, (payer, pid, cl) in enumerate(files):
         for k, i in enumerate(range(0, len(cl), 20)):
             p = tmp_path / f"r{n}_{k}.RMT"
-            p.write_bytes(remit("".join(cl[i:i + 20]), "100.00", payer=payer, payer_id=pid, seg_count=99, isa_ctrl=f"{n * 100 + k + 1:09d}", pay_date=pay_date))
+            p.write_bytes(remit("".join(cl[i:i + 20]), "100.00", payer=payer, payer_id=pid, seg_count=99, isa_ctrl=f"{n * 100 + k + 1:09d}",
+                                pay_date=pay_date or _paid_a_week_ago()))
             paths.append(str(p))
     store.ingest_835_paths(paths)
     Detector(store, run_id="t").run()
