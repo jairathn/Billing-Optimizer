@@ -1,5 +1,7 @@
 // RemitWatch Data tab: the three panels of the parts that run by themselves (remitwatch.selfcheck, runlog, repair, diagnose,
-// archive), drawn into the empty <section id="ops-panels"> data.js leaves for them:
+// archive), drawn into the empty <section id="ops-panels"> data.js leaves for them, after (on the Vercel site only) the
+// panel "Analysis on this site" with its "Run the analysis now" button (the owner's decision 1: that site analyses only on
+// a press; the server analyses on its own schedule and shows no such panel):
 //   "Running on its own"       the checks every run makes and their history, safe mode, the weekly self-audit and its lists,
 //                              money given up without a decision, what the app cannot see, the self-regulation
 //   "Logs and diagnostics"     the last runs in words, problems the self-repair could not fix, the diagnostic bundle
@@ -21,8 +23,38 @@ async function opPanels(el){
   let p;
   try { p = await api('/api/ops/panels'); }
   catch(e){ el.innerHTML = `<div class="panel"><h2>Running on its own</h2><div class="note">These panels did not come back (${esc(e.message || 'no answer')}). Reload in a minute.</div></div>`; return; }
-  el.innerHTML = opSelfcheckHtml(p.selfcheck || {}) + opLogsHtml(p.logs || {}) + opStoreHtml(p.archive || {});
+  el.innerHTML = opAnalysisHtml(p.analysis || {}) + opSelfcheckHtml(p.selfcheck || {}) + opLogsHtml(p.logs || {}) + opStoreHtml(p.archive || {});
   opBind(el, p);
+  opBindRun(el);
+}
+
+// "Analysis on this site" (Vercel only): when the site last analysed, that it analyses only on a press, a run going now,
+// what the last run could not check (open items and dollars), and the button that starts the run chain.
+function opAnalysisHtml(a){
+  if(!a.press_only) return '';
+  const an = a.analysed || {}, run = a.running, un = a.unchecked;
+  const last = an.at ? `This site last analysed ${opWhen(an.at)} UTC${an.findings != null ? `, ${esc(opPl(Number(an.findings), 'item'))} on its lists` : ''}.`
+    : 'This site has not analysed yet.';
+  return `<div class="panel" id="opAnalysis"><div class="panel-head"><h2>Analysis on this site</h2>
+      <span class="small muted">${esc(a.text || '')}</span></div>
+    <div class="small"><b>${last}</b></div>
+    ${run ? `<div class="note small">A run is going (asked for or started ${opWhen(run.since)} UTC). It finishes by itself, and the lists change when it has.</div>` : ''}
+    ${un && un.text ? `<div class="warnbox small"><b>What the last run could not check.</b> ${esc(un.text)}</div>` : ''}
+    <div style="margin-top:8px"><button class="primary" data-op-run="1" ${run ? 'disabled' : ''}>Run the analysis now</button>
+      <span class="small muted" data-op-run-said></span></div>
+  </div>`;
+}
+
+function opBindRun(el){
+  const b = el.querySelector('[data-op-run]');
+  if(!b) return;
+  b.addEventListener('click', async () => {
+    const said = el.querySelector('[data-op-run-said]');
+    b.disabled = true; if(said) said.textContent = 'Asking…';
+    try { const r = await api('/api/ops/run', {method: 'POST'}); if(said) said.textContent = r.text || (r.started ? 'Started.' : '');
+      if(r.started && typeof refreshHeader === 'function') setTimeout(refreshHeader, 3000); }
+    catch(e){ if(said) said.textContent = 'Not started: ' + (e.message || 'no answer'); b.disabled = false; }
+  });
 }
 
 function opSelfcheckHtml(s){

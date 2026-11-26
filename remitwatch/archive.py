@@ -2829,7 +2829,7 @@ def data_health(conn: sqlite3.Connection) -> list[dict]:
         items.append({"key": "store_memory", "ok": ok, "share": share, "peak_mb": last["peak_mb"], "budget_mb": last["budget_mb"],
                       "title": (f"The store is {_mb_text(last.get('hot_mb'))} in memory, of the {_mb_text(last.get('ceiling_mb'))} a run "
                                 f"can save in one piece ({share:.0%})" if by_ceiling else
-                                f"The daily run used {_mb_text(last['peak_mb'])} of its {_mb_text(last['budget_mb'])} memory budget"
+                                f"The last run used {_mb_text(last['peak_mb'])} of its {_mb_text(last['budget_mb'])} memory budget"
                                 f" ({share:.0%})"),
                       "detail": "" if ok else (f"The largest tables: {largest}. RemitWatch moves older settled claims to the "
                                                "archive by itself and takes more when a run comes this close to its limit."),

@@ -29,7 +29,11 @@ async function refreshHeader(){
     const behind = st.days_behind;      // from the day the remittances reach for most payers, not one stray newer file
     const cls = behind==null ? 'muted' : (behind>14 ? 'sev-high' : (behind>7 ? 'sev-medium' : 'ok'));
     const reach = st.feed_date && st.newest_payment_date && st.feed_date < st.newest_payment_date ? ` · remittances reach ${esc(st.feed_date)} for most payers` : '';
-    const how = st.running ? 'syncing now' : (st.dropbox_configured ? (st.mode==='serverless' ? 'checks Dropbox daily and when files arrive' : (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand')) : 'Dropbox not connected');
+    // the Vercel site analyses only on a press (the owner's decision 1): every page says when it last did, and what its
+    // last run could not check
+    const an = st.analysed || {}, un = st.unchecked;
+    const press = st.press_only ? `${an.at ? 'analysed ' + esc(String(an.at).slice(0,16).replace('T',' ')) + ' UTC' : 'not analysed yet'} · analyses only when someone presses Run the analysis now (Data tab)${un && un.n ? ` · <span class="sev-medium">the last run could not check ${esc(String(un.n))} open item${un.n===1?'':'s'} (${money(un.cents)})</span>` : ''}` : '';
+    const how = st.running ? (st.press_only ? 'analysing now' : 'syncing now') : (st.press_only ? press : (st.dropbox_configured ? (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand') : 'Dropbox not connected'));
     $('#feedChip').innerHTML = reach ? `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${reach}${behind!=null?` (${behind} days ago)`:''} · ${how}`
       : `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${behind!=null?` (${behind} days ago)`:''} · ${how}`;
   } catch(e){ /* older store without these tables */ }
@@ -224,22 +228,23 @@ async function feedPanel(el){
   const yes = (b, t, f) => b ? `<span class="ok">${t}</span>` : `<span class="sev-medium">${f}</span>`;
   el.innerHTML = `<div class="panel"><h2>Feed</h2><table>
     <tr><td>Dropbox connection</td><td>${yes(s.dropbox_configured,'connected','not configured: set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN')}</td></tr>
-    ${cloud ? `<tr><td>Automatic sync</td><td>${yes(s.cron_ready,'once a day (between 10 and 11 UTC, early morning Central), and when Dropbox reports a new file','off: CRON_SECRET is not set')} · <a href="/setup">setup checklist</a></td></tr>
+    ${cloud ? `<tr><td>Analysis</td><td>only when someone presses Run the analysis now (below, in Analysis on this site)${s.analysed && s.analysed.at ? `; last analysed ${esc(String(s.analysed.at).replace('T',' ').slice(0,16))} UTC` : ''}${s.cron_ready ? '' : ' · <span class="sev-medium">off: CRON_SECRET is not set</span>'} · <a href="/setup">setup checklist</a></td></tr>
     ${s.storage_error?`<tr><td>Storage</td><td><span class="sev-high">${esc(s.storage_error)}</span></td></tr>`:''}
     ${s.stalled_since?`<tr><td>Last run</td><td><span class="sev-high">A run that started ${esc(String(s.stalled_since).replace('T',' ').slice(0,16))} UTC stopped without finishing (out of memory or time). The next run picks up where it left off.</span></td></tr>`:''}
     ${(lc.ingest&&lc.ingest.failed&&lc.ingest.failed.length)?`<tr><td>Files the last run could not use</td><td><span class="sev-medium">${lc.ingest.failed.map(esc).join(', ')}</span><div class="small muted">Each is skipped until it changes in Dropbox. Replace the file there to have it read.</div></td></tr>`:''}
     ${lc.halted?`<tr><td>Last run</td><td><span class="sev-high">Stopped after ${esc(lc.halted)}. Press Sync and analyse now to continue.</span></td></tr>`:''}
     ${mem.peak?`<tr><td>Memory used by the last run</td><td>${fmtInt(mem.peak)} MB at its peak${mem.limit?` of ${fmtInt(mem.limit)} MB available`:''}</td></tr>`:''}`
     : `<tr><td>Automatic sync</td><td>${s.interval_minutes?`every ${s.interval_minutes} minutes${s.next_run?', next about '+s.next_run.replace('T',' ').slice(0,16)+' UTC':''}`:'off (set REMITWATCH_SYNC_INTERVAL_MINUTES, for example 60)'} ${s.scheduler_running?'<span class="ok">· scheduler running</span>':''}</td></tr>`}
-    <tr><td>Instant sync on upload</td><td>${yes(s.webhook_ready,'ready: point the Dropbox app webhook at /api/dropbox/webhook','needs DROPBOX_APP_SECRET')}</td></tr>
+    ${cloud ? '' : `<tr><td>Instant sync on upload</td><td>${yes(s.webhook_ready,'ready: point the Dropbox app webhook at /api/dropbox/webhook','needs DROPBOX_APP_SECRET')}</td></tr>`}
     <tr><td>Newest payment in the store</td><td>${esc(s.newest_payment_date||'–')} ${s.days_behind!=null?`(${s.days_behind} days ago)`:''}</td></tr>
     <tr><td>Last new remittance file</td><td>${esc(String(s.last_remit_ingested||'–').replace('T',' ').slice(0,16))}</td></tr>
     <tr><td>Last cycle</td><td>${lc.finished?`${esc(String(lc.finished).replace('T',' ').slice(0,16))} UTC (${esc(lc.trigger||'')})${lc.error?' <span class="sev-high">failed: '+esc(lc.error)+'</span>':''} · ${lc.ingest?`${num(lc.ingest.remits)} remits, ${num(lc.ingest.ema)} EMA exports, ${num(lc.ingest.claims_837)} claim files`:''}${lc.alerts?` · ${num(lc.alerts.new)} new alerts`:''}`:'never'}</td></tr>
     <tr><td>Email (alerts and weekly summary)</td><td>${yes(s.smtp_configured,'configured','not configured: set SMTP_HOST and REPORT_TO')}</td></tr>
     <tr><td>Alert webhook</td><td>${s.alert_webhook?'<span class="ok">configured</span>':'off (optional: ALERT_WEBHOOK_URL)'}</td></tr>
     <tr><td>Clinical note review</td><td>${yes(s.note_review,'on','off: set ANTHROPIC_API_KEY to turn it on; packets are still built from the template without it')}</td></tr>
-    </table><div class="actions" style="margin-top:8px"><button class="primary" id="syncNow" ${s.running?'disabled':''}>${s.running?'Running…':'Sync and analyse now'}</button><span class="small muted">Pulls new files from Dropbox, ingests them, re-runs detection and the alert checks. Safe to press at any time.</span></div></div>`;
-  el.querySelector('#syncNow').onclick = async e => { e.target.disabled = true; e.target.textContent = 'Started…'; await post('/api/sync/run'); setTimeout(()=>{ refreshHeader(); feedPanel(el); }, 4000); };
+    </table>${cloud ? '' : `<div class="actions" style="margin-top:8px"><button class="primary" id="syncNow" ${s.running?'disabled':''}>${s.running?'Running…':'Sync and analyse now'}</button><span class="small muted">Pulls new files from Dropbox, ingests them, re-runs detection and the alert checks. Safe to press at any time.</span></div>`}</div>`;
+  const sn = el.querySelector('#syncNow');     // on the Vercel site the press is in Analysis on this site (ops.js)
+  if(sn) sn.onclick = async e => { e.target.disabled = true; e.target.textContent = 'Started…'; await post('/api/sync/run'); setTimeout(()=>{ refreshHeader(); feedPanel(el); }, 4000); };
 }
 
 // ---------------------------------------------------------------- finding detail: facts, history, note-based appeal builder

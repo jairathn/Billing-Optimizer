@@ -1326,3 +1326,65 @@ def test_a_run_that_sheds_work_says_what_it_could_not_check_in_items_and_dollars
     assert json.loads(state.get(cloud.STATUS))["unchecked"] == un
     done = _cloud(state, client, trigger="continue")
     assert "detect" in done and not done.get("unchecked")
+
+
+@pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
+def test_the_vercel_pages_say_the_site_analyses_only_on_a_press_and_the_press_runs_the_chain(box, tmp_path):
+    """The Vercel site in a browser (serverless mode over a state folder): the header's line on every tab, the Data tab's
+    "Analysis on this site" and the Feed, the Upload page and /setup each say when the site last analysed and that it
+    analyses only on a press; "Run the analysis now" starts the run (the site calls its own /api/cron/cycle with the
+    secret, as the scheduler did) and a second press says one is already going. Plain words, no em dash, and at a phone's
+    width nothing runs off the side."""
+    import json
+    import socket
+    import subprocess
+    import time
+    import urllib.request
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    _cloud(state, client)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DROPBOX_", "TRIZETTO_", "SRFAX_", "ANTHROPIC_", "SMTP_", "MODMED_", "VERCEL"))
+           and k not in ("REPORT_TO", "ALERT_WEBHOOK_URL", "REMITWATCH_OWNER_PASSWORD", "REMITWATCH_SHOW_PHI", "REMITWATCH_ALLOW_OPEN")}
+    env.update(REMITWATCH_MODE="serverless", REMITWATCH_STATE_DIR=str(root / "RemitWatch-state"), REMITWATCH_PASSWORD=PW,
+               REMITWATCH_USER="oda", CRON_SECRET="s3cret-value-for-the-scheduler", PYTHONDONTWRITEBYTECODE="1",
+               REMITWATCH_TMP=str(tmp_path / "scratch2"))
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    srv = subprocess.Popen([sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port", str(port),
+                            "--log-level", "warning"], cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        got = subprocess.run(["node", os.path.join(repo, "tests", "press_page.js"), str(port), "oda", PW, str(tmp_path)],
+                             capture_output=True, text=True, timeout=240)
+        for _ in range(100):            # the run the press started finishes (it holds the lock while it runs)
+            if not state.meta("lock.json"):
+                break
+            time.sleep(0.2)
+    finally:
+        srv.terminate()
+        srv.wait(timeout=20)
+    assert got.returncode == 0, got.stderr[-2000:]
+    out = json.loads(got.stdout.strip().splitlines()[-1])
+    assert not out["errors"] and not out["failed"], out
+    for width, w in out["widths"].items():
+        assert "analysed" in w["chip"] and "only when someone presses Run the analysis now" in w["chip"], (width, w["chip"])
+        assert w["panel"].startswith("Analysis on this site") and "Run the analysis now" in w["panel"], (width, w["panel"][:300])
+        assert "This site last analysed" in w["panel"] and "server" in w["panel"], (width, w["panel"][:400])
+        assert "only when someone presses Run the analysis now" in w["feed"] and "Sync and analyse now" not in w["feed"], width
+        assert "only when someone presses Run the analysis now" in w["upload"] and "last analysed" in w["upload"], (width, w["upload"])
+        assert "only when someone presses Run the analysis now" in w["setup"] and "last analysed" in w["setup"], (width, w["setup"])
+        assert "\u2014" not in w["chip"] + w["panel"] + w["upload"] + w["setup"]
+    assert out["widths"]["390"]["overflow"] <= 1, out["widths"]["390"]["overflow"]
+    assert out["first"].startswith("Started"), out["first"]
+    second = out["second"]
+    assert second.get("started") is False and "already going" in second.get("text", ""), second
+    status = json.loads(state.get("status.json"))
+    assert status["trigger"] == "press" and status.get("analysed", {}).get("trigger") == "press", {k: status.get(k) for k in ("trigger", "analysed")}

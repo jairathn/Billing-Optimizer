@@ -2657,6 +2657,10 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
             out["running"], out["stalled"] = lock_state(st)
         except Exception as exc:
             out["storage_error"] = str(exc)[:160]
+    if not server:      # the owner's decision 1: this site analyses only on a press; the page says when it last did
+        out["press_only"] = True
+        out["press_text"] = PRESS_ONLY_TEXT
+        out["analysed"] = (out.get("last_cycle") or {}).get("analysed")
     required = [c for c in checks if c["key"] in (("password", "dropbox_app", "dropbox_token", "data_folder", "store") if server else
                                                     ("password", "cron_secret", "dropbox_app", "dropbox_token", "data_folder", "state_folder"))]
     out["ready"] = all(c["ok"] for c in required)
