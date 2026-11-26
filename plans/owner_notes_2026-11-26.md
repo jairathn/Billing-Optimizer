@@ -58,3 +58,21 @@ the Medicare 77600 payments. Until you say so, every one of them stays on Work n
 - A staff member's first name was in a plan file on the working branches (not on main). It is replaced now, but it is
   in those branches' history and will reach main's history at the release unless that history is rewritten first. My
   recommendation: accept it (a first name, no patient data).
+
+## 5. Bill the patient (your decision 2): three cases where the law or a contract says no
+
+Built as you asked: 188 patient-group denials (plan exclusion, missing referral, coverage ended) now stay on Work now
+with "Bill the patient $X", X being the share the payer put on the patient, less what EMA shows the patient already
+paid; "Billed the patient" and "Done" are one click each. Measured on the 11-24 data: 140 items on Work now, $15,243 to
+bill. Three groups need your call, and my recommendation for each:
+- Medicaid members (21 items, all a missing referral, Humana's Medicaid plans): federal Medicaid rules require the
+  practice to take Medicaid's payment as payment in full, and a missing referral is the practice's to fix, so these
+  members should not get a bill. Recommendation: for Medicaid members the step becomes "Get a retroactive referral and
+  send a corrected claim; if the plan will not take one, mark it Done", never a patient bill. I will build it that way
+  unless you say otherwise.
+- A second payer answered with a contractual adjustment only (9 items, 3 of them Medicaid): the contract puts that
+  amount on the practice, so billing the patient would break it. Recommendation: these go straight to Done with the
+  reason shown (today the step warns first).
+- Age: 93 of the items had been expired and came back; their services go back to 2023 ($6,912 of patient share).
+  Recommendation: bill the 2026 and 2025 services; for older ones, decide as a batch (many practices write those off
+  rather than send a patient a two-year-old bill).
