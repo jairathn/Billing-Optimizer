@@ -951,6 +951,22 @@ def test_two_procedures_of_equal_worth_on_separate_claims_both_cut_owe_one_missi
     w.store.close()
 
 
+def test_a_claim_the_payer_split_in_two_answers_ranks_its_halves_together(tmp_path, kind):
+    """A guard for fix7c-r2-7's own-answer rule: the payer answered one claim id in two parts on one remittance (two payer
+    claim numbers), a 17311 halved in each ($292.56 of $585.12). They are two procedures of the day, not one service
+    answered again: ranked together, the day owes one missing half, $292.56, listed once."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16"), "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(801, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302").replace(pcn(801), pcn(800))], "20260410", **hum)
+    w.run(today="2026-06-15")
+    got = [(r["signal"], r["shortfall_cents"]) for r in w.rows("category='underpayment'")]
+    assert got == [("UNDERPAID_VS_OWN_RATE", 29256)], got
+    w.store.close()
+
+
 def test_a_family_members_procedure_on_the_same_subscriber_number_does_not_rank_the_patients_day(tmp_path, kind):
     """fix7c-r2-8. The subscriber had a Mohs at the office, paid $292.56 of $585.12, and nothing else that day. The spouse
     (another patient, under the subscriber's number on the 835's NM1*IL and as the 837's subscriber) had a 14301 at the

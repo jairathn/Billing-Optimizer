@@ -4645,9 +4645,12 @@ class Detector:
                         or x.get("payer_group") != l.get("payer_group"):
                     continue
                 if (bill_of(x.get("patient_control_number")), x.get("procedure_code"), x.get("service_date")) == mine:
-                    if (x.get("payment_date") or x.get("txn_payment_date") or "") > at and not self._gone(x):
-                        own_later.append(x)     # this very service paid again since: its own answer, not another procedure
-                    continue
+                    if (x.get("payment_date") or x.get("txn_payment_date") or "") > at:
+                        if not self._gone(x):
+                            own_later.append(x)     # this very service paid again since: its own answer, not another procedure
+                        continue
+                    if self._gone(x):
+                        continue                    # its own earlier answer, taken back
                 others.append(x)
             extra = self._billed_lines(l, billed.get(l["line_key"]) or [], others, ident.get(l["claim_key"]), ident)
             v = self._rank_day(l, rate, allowed, basis, one_off, [x for x in others if not self._gone(x)] + extra, cand_keys)
