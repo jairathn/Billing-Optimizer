@@ -155,6 +155,37 @@ def is_unlisted(code: str | None) -> bool:
     return (code or "").strip().upper() in UNLISTED_CODES
 
 
+# The parts of a service a line can bill: the professional reading (modifier 26) and the technical part (TC). A line with
+# neither bills the whole service.
+COMPONENTS = ("26", "TC")
+UNKNOWN_PART = "?"          # a line of a code billed in parts whose part nothing on file names
+
+
+def component_of(mods) -> str:
+    """The part of a service a line bills: '26' (the professional reading), 'TC' (the technical part) or '' (the whole
+    service), from its modifiers (a list, JSON text, or text such as '26', '26,59' or '26:59'). The rate tables key on it,
+    so the whole service is always '' (never None)."""
+    if not mods:
+        return ""
+    parts = mods if isinstance(mods, (list, tuple)) else re.split(r"[^A-Za-z0-9]+", str(mods))
+    for m in parts:
+        m = str(m or "").strip().upper()
+        if m in COMPONENTS:
+            return m
+    return ""
+
+
+def part_fits(want: str, got) -> bool:
+    """Whether answers for these parts of a service answer a claim's line for part `want` (the release's T-C1): a 26 by a
+    26 or the whole service, a TC by a TC or the whole service, the whole service by the whole service or by both parts.
+    A line whose part nothing names (UNKNOWN_PART) answers only a claim for the whole service: for a claim of one part it
+    may be the other part."""
+    got = set(got or ())
+    if want in COMPONENTS:
+        return want in got or "" in got
+    return "" in got or UNKNOWN_PART in got or set(COMPONENTS) <= got
+
+
 # What may be shown, exported, searched and printed in a letter as a member number. A payer can also send a Social
 # Security number (34), the old Medicare claim number built on one (HN) or a tax ID (FI) in the same place, and a
 # nine-digit number labelled as a medical record number can be a Social Security number too; none of those leave the

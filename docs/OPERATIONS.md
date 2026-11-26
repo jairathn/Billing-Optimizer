@@ -161,7 +161,14 @@ with how many claims and how many dollars), when nothing answers it:
 - when in doubt, a claim stays listed. A visit (same patient, date and code) leaves it only for a payment that still
   stands on that visit's own line under another bill (on its remittance, takebacks applied; in EMA's ERA lines; or EMA's
   Insurance Payments on that line), or when the same visit is chased under a newer bill (chased once). A denial of the
-  same bill's earlier submission, or of an older bill, never stops the claim sent again from being chased.
+  same bill's earlier submission, or of an older bill, never stops the claim sent again from being chased. A payment
+  counts only for its own part of the service: one for the technical part (modifier TC) never answers a claim for the
+  professional reading (26), or the other way round, and a claim for the whole service needs the whole service paid, or
+  both parts;
+- with EMA's A/R and Production reports, a payment or a payer's reason EMA posted on the claim after it was sent
+  answers it, and so does a $0 row on a check that carries the payer's proof (an allowed amount, or the payer's reason
+  posted that day). A $0 row with no reason, no allowed amount and no adjustment is no answer: a batch check can list a
+  claim it does not pay. Such a claim stays listed, and its item says EMA shows that row.
 
 These are "Chase the payer" items (Today's plan: "Chase claims the payer never answered"): look the claim up on the
 payer's portal or call; not on file, send it again within the first-filing limit (see the filing window on the item);
