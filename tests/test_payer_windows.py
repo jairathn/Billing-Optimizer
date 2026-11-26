@@ -447,3 +447,82 @@ def test_a_federal_employee_program_item_expires_after_its_own_window_not_anthem
     assert last == "2026-09-01", states.windows(f)
     g = dict(f, plan="PPO", appeal_deadline="2028-03-01", legal_deadline=None)
     assert max(w["date"] for w in states.windows(g)) == "2028-03-01"
+
+
+# ==================================================================== a second payer never billed: its last day decides
+@pytest.fixture
+def ema_env(monkeypatch):
+    """The settings the EMA wiring tests run under (tests/test_ema_wiring.py's _env)."""
+    from remitwatch import ema_checks as ec, ema_reports as er
+    from tests import ema_fixtures as F
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setenv("REMITWATCH_EMA_STRICT", "1")
+    for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES",
+              "REMITWATCH_EMA_LEDGER", "REMITWATCH_EMA_REPORT_KEEP", "REMITWATCH_EMA_CLOSES"):
+        monkeypatch.delenv(k, raising=False)
+    ec._LAST_POST.clear()
+
+
+def _second_payer_run(tmp_path, compact: bool, paid_on: str, today: str) -> tuple[list[dict], dict]:
+    """Blue Cross paid a December 15, 2025 visit on `paid_on` and left $30 of coinsurance; EMA shows an Ambetter plan on
+    file as the second payer, never billed. Ambetter's first filing: 90 days as the safe date, 180 days for a participating
+    provider (the payer's own last day), counted here from the first payer's remittance. Returns the run's
+    SECONDARY_NOT_BILLED items and its EMA counts."""
+    import datetime as dt
+    from remitwatch import ema_ledger as el, ema_reports as er
+    from remitwatch.detect import Detector
+    from remitwatch.store import Store
+    from tests import ema_fixtures as F, test_ema_wiring as W
+    st = Store(":memory:", compact=True) if compact else Store(str(tmp_path / "store.sqlite"))
+    er.ensure_schema(st.conn)
+    st.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (W.SALT_HEX,))
+    st.conn.commit()
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        visit = dt.date(2025, 12, 15)
+        posted = dt.date.fromisoformat(paid_on) + dt.timedelta(days=2)
+        sec = "Ambetter Sample Plan"
+        W.remit(st, trace="777000931", paid_on=paid_on,
+                claims=[{"pcn": F.claim_id(31), "last": "SAMPLE", "first": "ECHO",
+                         "lines": [(visit.isoformat(), "99213", 150, 90, [("CO", "45", 30), ("PR", "2", 30)], {"allowed_cents": 12000})]}])
+        rows = [W.charge(F.link_no(31), patient=2, svc=visit, posted=visit, secondary=sec),
+                W.pay(F.link_no(31), "777000931", 90, patient=2, svc=visit, posted=posted, secondary=sec),
+                W.adj(F.link_no(31), "CO-45", 30, patient=2, svc=visit, posted=posted, contractual=True, secondary=sec)]
+        ar = [F.ar_row(claim=F.claim_id(31), link=F.link_no(31), status="Payment Pending", current=30, aging=posted, svc=visit,
+                       patient=2, secondary=sec)]
+        W.denial_world(st, lg, tmp_path, rows, ar_rows=ar)
+        det = Detector(st, run_id="snb1", today=today)
+        det.run()
+        assert det.ema_errors == [], det.ema_errors
+        st.conn.row_factory = None
+        cols = [r[1] for r in st.conn.execute("PRAGMA table_info(findings)")]
+        got = [dict(zip(cols, r)) for r in st.conn.execute("SELECT * FROM findings WHERE signal='SECONDARY_NOT_BILLED'")]
+        wiring = json.loads(st.conn.execute("SELECT value FROM meta WHERE key='ema:wiring'").fetchone()[0])
+        return got, wiring.get("counts") or {}
+    finally:
+        lg.close()
+        st.close()
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["store_file", "compact_image"])
+def test_a_second_payer_past_its_safe_date_but_inside_its_own_limit_is_still_work(tmp_path, ema_env, compact):
+    """Paid January 2, 2026: Ambetter's 90 days ended April 2, more than a month before May 7, but a participating
+    provider has 180 days, to July 1. The share is still billable: the item is listed with both dates (it was dropped as a
+    loss because only the 90 days were read)."""
+    got, counts = _second_payer_run(tmp_path, compact, "2026-01-02", "2026-05-07")
+    assert len(got) == 1, (got, counts)
+    f = got[0]
+    assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-04-02", "2026-07-01")
+    assert f["work_state"] == "work_now", f["state_basis"]
+    assert "Ambetter" in f["deadline_basis"] and "180" in f["deadline_basis"], f["deadline_basis"]
+    assert not counts.get("snb_past_limit")
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["store_file", "compact_image"])
+def test_a_second_payer_past_its_own_limit_is_counted_not_dropped_silently(tmp_path, ema_env, compact):
+    """Paid October 1, 2025: Ambetter's 180 days ended March 30, 2026, more than a month before May 7. The share is a
+    loss, not work: no item, but the run counts it with its dollars (before, nothing recorded it)."""
+    got, counts = _second_payer_run(tmp_path, compact, "2025-10-01", "2026-05-07")
+    assert got == [], got
+    assert counts.get("snb_past_limit") == 1 and counts.get("snb_past_limit_cents") == 3000, counts

@@ -6705,8 +6705,16 @@ class Detector:
                 continue                    # forwarded by the first payer: its usual time has not passed yet
             rule = filing_rule(sgrp, skind)
             deadline = _add_days(paid_on, rule["days"])
-            if deadline and deadline < (_add_days(self.today, -30) or ""):
-                continue                    # past the second payer's limit (and a month's grace): a loss, not work
+            # the payer's own last day where its rule names a later one than the safe date (Ambetter's 180 days for a
+            # participating provider beside its 90): the item is a loss only once that has passed
+            last = legal_deadline(paid_on, rule)
+            last = last if last and deadline and last > deadline else None
+            if (last or deadline) and (last or deadline) < (_add_days(self.today, -30) or ""):
+                # past the second payer's limit (and a month's grace): a loss, not work; counted with its dollars, so a
+                # window that closed is never dropped without a trace
+                self.ema_counts["snb_past_limit"] += 1
+                self.ema_counts["snb_past_limit_cents"] += max(0, owed)
+                continue
             share = ", ".join(w for rc, w in (("1", "deductible"), ("2", "coinsurance"), ("3", "copay"))
                               if any(g == "PR" and c == rc for g, c, _a in self.adj.get(l["line_key"], [])))
             title = (f"{code}: crossed over to {sgrp}, nothing paid by it yet ({_usd(owed)} {share})" if crossed else
@@ -6722,7 +6730,7 @@ class Detector:
             f = self.findings.get(_fid("SECONDARY_NOT_BILLED", l["line_key"]))
             if f is None:
                 continue
-            f["appeal_deadline"], f["legal_deadline"] = deadline, None
+            f["appeal_deadline"], f["legal_deadline"] = deadline, last
             f["deadline_basis"] = (f"{sgrp}'s filing limit, counted from {l['payer_group']}'s remittance ({paid_on}): {rule['label']}"
                                    + ("" if rule["verified"] else ", not confirmed against the payer's current manual"))
             if link is not None:
