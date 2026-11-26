@@ -66,6 +66,9 @@ EMA_ONLY = ("EMA_DENIED", "NO_ANSWER", "REJECTED_PRE_PAYER", "NOT_SENT", "REMIT_
 INFO_ONLY = ("MIPS_ADJUSTMENT", "SEQUESTRATION")
 CONTRACT = ("CONTRACT_RATE_GAP", "MA_BELOW_MEDICARE", "MPPR_POLICY", "CHARGE_BELOW_RATE", "SECOND_RATE", "PROVIDER_RATE_GAP",
             "EMA_DENIAL_AS_CONTRACTUAL", "G2211_DENIED")
+# one request to the payer for many claims it priced alike, money it owes (not a contract question): its own work, a
+# repricing request, kept out of the bulk appeal like the contract items
+BATCH = ("OLD_FEE_SCHEDULE",)
 FEES = ("FEE_SKIM", "TAKEBACK")
 OWN_RULES = ("SECONDARY_NOT_BILLED", "CREDIT_BALANCE")    # items whose money no denial rule judges: they have their own
 DUP_CARCS = frozenset({"18", "B13"})
@@ -2090,7 +2093,7 @@ CHECK_RULES = ("check_first", "settled_in_ema")
 # route's reason, in unit C's BLOCK_WORDS
 ROUTE_BLOCKS = {"decide": "check_first", "corrected": "corrected", "call": "call", "cob": "cob", "eob_first": "eob_first",
                 "bill_secondary": "bill", "bill_patient": "bill", "post": "post", "refund": "credit", "contract": "owner",
-                "policy": "owner", "fees": "fees"}
+                "policy": "owner", "fees": "fees", "repricing": "batch"}
 
 
 def _same_check(a: Any, b: Any) -> bool:
@@ -2384,7 +2387,7 @@ def timely_proof(f: dict, fx: dict) -> dict:
 
 def route_of(fx: dict, st: dict, conn: sqlite3.Connection | None = None) -> str:
     """The kind of work the item takes, from its state and facts: appeal, corrected, call, post, bill_patient,
-    bill_secondary, refund, contract, policy, fees, eob_first, cob, rate, decide, wait, nothing. The one place it is
+    bill_secondary, refund, contract, policy, fees, eob_first, cob, rate, repricing, decide, wait, nothing. The one place it is
     decided: the story's next step follows it, and a work-now item whose route is not an appeal carries an appeal_block
     (ROUTE_BLOCKS) so a bulk appeal never takes it."""
     f = fx["item"]
@@ -2414,6 +2417,8 @@ def route_of(fx: dict, st: dict, conn: sqlite3.Connection | None = None) -> str:
         return "post"
     if sig == "EMA_DENIAL_AS_CONTRACTUAL":
         return "policy"
+    if sig in BATCH:
+        return "repricing"
     if sig in CONTRACT:
         return "contract"
     if sig in FEES:
@@ -2588,6 +2593,12 @@ def _decide(fx: dict, today: str) -> dict:
     if sig in CONTRACT:
         res["appeal_block"] = "owner"
         return put("work_now", "owner_decision", "A contract or billing-policy question for the owner, not a claim to appeal")
+    if sig in BATCH:
+        if past_all:
+            return expired()
+        res["appeal_block"] = "batch"
+        return put("work_now", "repricing", f"{grp or 'The payer'} priced the services listed on its earlier fee schedule after its new "
+                   "rates took effect: one repricing request covers every claim still inside its window")
     if sig in FEES:
         tb = _ev(f).get("taken_back") if sig == "TAKEBACK" else None
         if isinstance(tb, dict) and tb.get("date"):

@@ -2094,6 +2094,23 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         who = "Owner"
         buttons += ["copy_instructions"]
         deadline, basis = None, "the agreement's renewal or notice date"
+    elif route == "repricing":
+        ev = S._ev(f)
+        year, prev = ev.get("year") or f.get("year") or "its new", ev.get("previous_year") or "its earlier"
+        n_all = int(ev.get("lines") or 0)
+        n = int(ev.get("lines_open") if ev.get("lines_open") is not None else n_all)
+        # the item's amount is every claim's (as a routine-rate review's); what can still be asked for is the claims inside
+        # their windows (gap_live_cents)
+        live = int(ev.get("gap_live_cents") if ev.get("gap_live_cents") is not None else (f.get("shortfall_cents") or 0))
+        action = (f"Ask {grp} to reprocess the {n} claim{'s' if n != 1 else ''} listed at its {year} rates: it paid them on its {prev} "
+                  f"fee schedule after its {year} rates took effect ({usd(live)} in all). One repricing request lists them all.")
+        steps.append("Send the list (claim, date of service, code, amount paid, the rate owed) through the payer's portal or provider "
+                     "line, and ask for one reference number for the whole request.")
+        steps.append("Each claim keeps its own filing window: send only the claims still inside it"
+                     + (f" ({n} of the {n_all} listed)." if n_all > n else "."))
+        who = "Biller"
+        buttons += ["copy_instructions", "mark_sent"]
+        expected, expected_basis = live, f"the {year} rate less what was paid, claim by claim, for the claims still inside their windows"
     elif route == "policy":
         action, steps, who, pattern = _policy_step(f)
         buttons += ["accept_pattern", "copy_instructions"]
