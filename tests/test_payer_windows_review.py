@@ -110,6 +110,23 @@ def test_an_fep_clinical_denial_keeps_the_members_6_months():
         assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", FEP, carc=carc)) == ("2026-08-28", "2028-03-01"), carc
 
 
+def test_a_federal_employee_plan_takes_the_fep_windows_only_from_the_feps_own_payer():
+    """The FEP's windows are Anthem's provider terms for the program (the manual's 'Submission of Claims under the FEHBP and
+    PSHBP' and its Claim Payment Dispute): they reach a claim whose 835 names the plan and comes from Anthem, or from a
+    payer named for the program itself ('FEDERAL EMPLOYEE PROGRAM', 'FEP BLUE', whose groups are their own names). Another
+    payer's remittance answers by that payer's own rules whatever plan words it carries: Medicare's redetermination (42 CFR
+    405.942), TRICARE's 90 days, UnitedHealthcare's 12 months, Anthem's Medicare Advantage and Medicaid plans' own."""
+    for grp, kind in (("Anthem / BCBS", "commercial"), ("Federal Employee Program", "other"), ("Fep Blue", "other"),
+                      ("Fep", "other")):
+        assert dates("2026-03-01", appeal_rule(grp, kind, FEP)) == ("2026-08-28", "2028-03-01"), grp
+        assert window_end("2026-01-05", filing_rule(grp, kind, plan=FEP)) == "2026-04-05", grp
+    for grp, kind in (("Medicare KY (CGS J15)", "medicare"), ("Tricare", "tricare"), ("UnitedHealthcare", "commercial"),
+                      ("Anthem / BCBS Medicare Advantage", "medicare_advantage"), ("Anthem / BCBS Medicaid", "medicaid")):
+        assert appeal_rule(grp, kind, FEP)["label"] == appeal_rule(grp, kind)["label"], grp
+        assert dates("2026-03-01", appeal_rule(grp, kind, FEP)) == dates("2026-03-01", appeal_rule(grp, kind)), grp
+        assert filing_rule(grp, kind, plan=FEP)["label"] == filing_rule(grp, kind)["label"], grp
+
+
 # ===================================================================== r2-1: WellCare's Kentucky Medicaid plan, misspelt
 WK_NAME = "WellCare Sample Medcaid of Kentucky"      # the shape of the name EMA and the 837s carry: 'Medcaid'
 

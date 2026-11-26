@@ -44,6 +44,10 @@ CHANGED_ON_PURPOSE = {("Humana Medicaid", "medicaid"): 120, ("Humana Medicare Ad
                       # the deadlines unit (2026-11-26), each window from its source (tests/test_payer_windows.py): a remittance that
                       # does not say whether the plan is Anthem's Kentucky or Indiana Medicaid gets Indiana's 60-day dispute
                       ("Anthem / BCBS Medicaid", "medicaid"): 60}
+# the deadlines unit's review round (2026-11-26): the Federal Employee Program's windows are Anthem's provider terms for
+# the program, so a plan naming it changes only the window of the Anthem group its claims come through; any other payer's
+# remittance keeps that payer's own window whatever plan words it carries (tests/test_payer_windows_review.py)
+FEP_PAYER_GROUPS = ("Anthem / BCBS",)
 
 
 def test_no_payer_that_matched_before_gets_a_different_appeal_window():
@@ -53,6 +57,10 @@ def test_no_payer_that_matched_before_gets_a_different_appeal_window():
     for grp, kind in GROUPS:
         for plan in (None, "FEDERAL EMPLOYEE PROGRAM"):
             want = CHANGED_ON_PURPOSE.get((grp, kind)) if not plan else None
+            if plan and grp not in FEP_PAYER_GROUPS:
+                # its own window, which the pass without a plan holds to the live release's
+                assert appeal_rule(grp, kind, plan)["days"] == appeal_rule(grp, kind)["days"], (grp, kind, plan)
+                continue
             assert appeal_rule(grp, kind, plan)["days"] == (want or live.appeal_rule(grp, kind, plan)["days"]), (grp, kind, plan)
 
 

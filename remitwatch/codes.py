@@ -480,8 +480,11 @@ MEDICAL_NECESSITY_CARCS = frozenset({"50", "55", "56", "150", "151", "152"})
 GEHA_MATCH = r"(?i)^(geha\b|government employees (health|hospital) association)"
 FEP_PLAN = r"FEDERAL EMPLOYEE"
 # the Federal Employee Program reaches the practice through Anthem (the 835's contract class names it); Anthem's provider
-# manual, not the member's brochure, sets a participating provider's limits for it (deadlines reviews r1-1, r2-3, r2-4)
-FEP_GROUP = r"^Anthem / BCBS$"
+# manual, not the member's brochure, sets a participating provider's limits for it (deadlines reviews r1-1, r2-3, r2-4).
+# Its rows reach Anthem's group and a payer named for the program itself (normalize_payer keeps an unknown name as its
+# group: 'Federal Employee Program', 'Fep Blue'); another payer's remittance keeps its own payer's windows whatever plan
+# words it carries (Medicare's, TRICARE's, a Medicaid plan's)
+FEP_GROUP = r"^(?:Anthem / BCBS$|Federal Employee Program\b|Fep\b)"
 FEHBP_MANUAL = ("Anthem Blue Cross and Blue Shield Kentucky Provider Manual (2026, v1 and v2) and Indiana Provider Manual (2026), "
                 "Submission of Claims under the FEHBP and PSHBP")
 KY_FFS_NO_APPEAL_STEP = ("send a corrected or new claim within 12 months of the date of service (907 KAR 1:673); Kentucky Medicaid "
