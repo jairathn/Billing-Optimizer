@@ -114,6 +114,12 @@ PATIENT_DENIAL_CODES = frozenset({"288", "27", "26", "200", "49", "204"})
 BILLED_PATIENT = "Billed the patient"
 DONE_NOTE = "Done"
 PATIENT_WAIT_DAYS = 60
+# the rules of a patient-group denial whose work is on the patient's side (billing the patient, waiting on the patient's
+# payment, checking the patient's account, settled by the patient, or a person's Done): sized at the patient's share. Any
+# other work on it (a corrected claim or a resubmission sent to the payer, its follow-up) is with the payer and is worth
+# what the payer pays for the service (review r1-4)
+PATIENT_SIDE_RULES = frozenset({"bill_patient_denial", "patient_unpaid", "billed_patient", "cant_check_patient", "patient_paid",
+                                "moved_to_patient", "person_done"})
 
 
 # ------------------------------------------------------------------------------------------------------------ helpers
@@ -2232,20 +2238,45 @@ def patient_share(fx: dict) -> dict:
     pr = [(g, c, a) for x in own for g, c, a in x["adj"] if g == "PR" and a]
     charge = sum(x["charge"] or 0 for x in own)
     cents = max(min(sum(a for _g, _c, a in pr), charge - paid), 0)
+    # a payer that answered the service after this one (the next payer: a supplement, a Medicaid plan) set the patient's
+    # part itself: never more than the patient share it left; what it took off as contractual is not the patient's to pay
+    # (review r1-5). A next payer that put nothing on the patient leaves the share as it is (its contractual answer is said
+    # before billing: story._bill_patient_denial_step)
+    nxt = next_payer_answer(fx)
+    if nxt and nxt["pr"] > 0:
+        cents = min(cents, nxt["pr"])
     return {"cents": cents, "pr": pr, "charge": charge, "paid": paid, "patient_paid": by_patient, "left": max(cents - by_patient, 0)}
+
+
+def next_payer_answer(fx: dict) -> dict | None:
+    """The newest standing answer of the item's service (its code and date) by another line after the item's own answer:
+    the next payer (a supplement, a Medicaid plan), with what it put on the patient and on the practice. {'row', 'pr',
+    'co', 'paid', 'pr_codes', 'co_codes'}, or None."""
+    f = fx["item"]
+    mine, svc, code = str(f.get("payment_date") or "")[:10], str(f.get("service_date") or "")[:10], f.get("procedure_code")
+    later = [x for x in standing_rows(fx["r835"]["rows"]) if x.get("line_key") and x["line_key"] != f.get("line_key")
+             and x.get("status") != "22" and x.get("code") == code and str(x.get("svc") or "")[:10] == svc
+             and str(x.get("date") or "")[:10] > mine]
+    if not later:
+        return None
+    x = max(later, key=lambda r: (str(r.get("date") or ""), r.get("line_key") or ""))
+    pr = [(c, a) for g, c, a in x["adj"] if g == "PR" and a > 0]
+    co = [(c, a) for g, c, a in x["adj"] if g == "CO" and a > 0]
+    return {"row": x, "pr": sum(a for _c, a in pr), "co": sum(a for _c, a in co), "paid": int(x.get("paid") or 0),
+            "pr_codes": sorted({f"PR-{c}" for c, _a in pr}), "co_codes": sorted({f"CO-{c}" for c, _a in co})}
 
 
 def patient_side_settled(tot: dict, owed: int, *, adjusted: bool) -> bool:
     """EMA shows the patient's side of the line settled what is owed: one line (the patient's money not split across
-    several), the patient paid on it, and either the patient paid all of it, or the line closed with the patient's payment
-    at least half of it or (adjusted) with the patient's payments and the adjustments EMA took off the patient's balance
-    covering all of it. A line closed by a non-contractual write-off is not the patient's side: that write-off needs a
-    person's decision (the owner's rule 2)."""
+    several), the patient paid on it, and either the patient paid all of it, or the line closed with the patient's payments
+    and (adjusted) the adjustments EMA took off the patient's balance covering all of it. A line closed by a non-contractual
+    write-off is not the patient's side, however much the patient paid: that write-off needs a person's decision (the
+    owner's rule 2; review r1-6)."""
     if not tot["n"] or tot["several"] or tot["pat_paid"] <= 0 or owed <= 0:
         return False
     if tot["pat_paid"] >= owed:
         return True
-    return tot["balance"] <= 0 and (tot["pat_paid"] * 2 >= owed or (adjusted and tot["pat_paid"] + tot["pat_adj"] >= owed))
+    return tot["balance"] <= 0 and adjusted and tot["pat_paid"] + tot["pat_adj"] >= owed
 
 
 def _owed(f: dict, fx: dict) -> int:
@@ -2961,6 +2992,14 @@ def _billed_patient(res: dict, fx: dict, billed: dict, who: str, today: str, put
         return put("done", "patient_paid", f"{text} ({_lower(lead)})", rows + [{"source": "production", "kind": "proof", "text": text}])
     follow = _add(anchor, PATIENT_WAIT_DAYS) if anchor else None
     res["work"] = billed
+    if tot["n"] and tot["balance"] <= 0 and (tot["noncontractual"] or 0) > 0 and paid < share["cents"]:
+        # EMA closed the line by writing the rest off as non-contractual: a write-off with no owner (the owner's rule 2), on
+        # Work now at what is left, never closed as paid by the patient (review r1-6)
+        res["appeal_block"] = "bill"
+        left = max(share["cents"] - paid, 0)
+        return put("work_now", "patient_unpaid", f"{lead}; EMA shows {usd(tot['noncontractual'])} written off on this line with no decision "
+                   f"recorded" + (f" and {usd(paid)} paid by the patient" if paid > 0 else "") + f": the {usd(left)} left is a write-off "
+                   "without an owner. Reverse it and send the patient a statement, or mark it Done with the reason", rows, follow=follow)
     so_far = (f"; EMA shows {usd(paid)} of {usd(share['cents'])} paid so far" if paid > 0 else
               "; EMA shows no line for this service, so the patient's payment cannot be seen here" if not tot["n"] else "")
     if follow and follow >= today:

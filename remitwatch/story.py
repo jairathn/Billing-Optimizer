@@ -1912,6 +1912,16 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
     who = "Biller"
     action = ""
     expected, expected_basis = _expected(f, fx, story)
+    if S.patient_denial(f) and rule not in S.PATIENT_SIDE_RULES:
+        # a patient-group denial whose work is with the payer (a corrected claim or a resubmission sent, its follow-up): worth
+        # what the payer pays for the service (its rate, kept in the evidence by archive rule 8), never the patient's share
+        # under the payer's name (review r1-4). The patient's side (billing, waiting, checking) sizes it below
+        ev_ = S._ev(f)
+        rate = int(ev_.get("payer_rate_cents") or 0)
+        if rate > 0:
+            expected, expected_basis = rate, str(ev_.get("payer_rate_basis") or "the payer's usual rate for the code")
+        else:
+            expected_basis = "what the payer put on the patient on its 835 (no rate of the payer's for the code is on file)"
     clocks = _clocks(f, fx, st)
     url = _claim_url(conn, fx)
     appeal_block = st.get("appeal_block")
@@ -2406,19 +2416,27 @@ def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: 
     # a payer that answered after it on the same service (the next payer) and put it on the practice (CO), paying nothing
     # and putting nothing on the patient: billing the patient may break that payer's terms, so the step says so first. The
     # owner's decision still bills the patient by default; a person who finds the terms forbid it presses Done
-    mine, svc, code = str(f.get("payment_date") or "")[:10], str(f.get("service_date") or "")[:10], f.get("procedure_code")
-    later = [x for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key") and x["line_key"] != f.get("line_key")
-             and x.get("status") != "22" and x.get("code") == code and str(x.get("svc") or "")[:10] == svc
-             and str(x.get("date") or "")[:10] > mine]
-    groups = {g for x in later for g, _c, a in x["adj"] if a}
-    if later and groups == {"CO"} and not any((x.get("paid") or 0) > 0 for x in later):
-        nxt = max(later, key=lambda x: (str(x.get("date") or ""), x.get("line_key") or ""))
-        name, kind = S.row_group(nxt)
-        name = name if name and name != "Unknown" else str(nxt.get("payer") or "the next payer")
-        codes = ", ".join(sorted({f"CO-{c}" for x in later for g, c, a in x["adj"] if g == "CO" and a}))
+    nxt = S.next_payer_answer(fx)
+    if nxt and nxt["co"] > 0:
+        name, kind = S.row_group(nxt["row"])
+        name = name if name and name != "Unknown" else str(nxt["row"].get("payer") or "the next payer")
+        codes = ", ".join(nxt["co_codes"])
         medicaid = " (a Medicaid member is not billed for what Medicaid puts on the practice)" if kind == "medicaid" else ""
-        steps.append(f"Before billing: {name} answered after it and put this service on the practice ({codes}), with nothing paid. If that "
-                     f"plan's terms forbid billing the patient for it{medicaid}, do not bill: press Done.")
+        if nxt["pr"] <= 0 and nxt["paid"] <= 0:
+            steps.append(f"Before billing: {name} answered after it and put this service on the practice ({codes}), with nothing paid. If "
+                         f"that plan's terms forbid billing the patient for it{medicaid}, do not bill: press Done.")
+        elif nxt["pr"] > 0:
+            # the next payer took part off as contractual and set the patient's part itself (states.patient_share bills no
+            # more than that): the part on the practice is not the patient's to pay (review r1-5)
+            steps.append(f"Before billing: {name} answered after it: it took {usd(nxt['co'])} off as contractual ({codes}), which is not "
+                         f"the patient's to pay, and put {usd(nxt['pr'])} on the patient ({', '.join(nxt['pr_codes'])}): bill no more "
+                         f"than that{medicaid}.")
+        else:
+            # the next payer paid part, took the rest off as contractual and put nothing on the patient: its answer may have
+            # settled the service, which a person checks before billing (whether that closes it is not decided here)
+            steps.append(f"Before billing: {name} answered after it: it paid {usd(nxt['paid'])}, took {usd(nxt['co'])} off as contractual "
+                         f"({codes}), which is not the patient's to pay, and put nothing on the patient. If its answer settled the "
+                         f"service{medicaid}, do not bill: press Done.")
     if tot["n"] and tot["balance"] >= owed:
         steps.append(f"EMA shows {usd(tot['balance'])} open on this line: put {usd(owed)} on the patient's next statement.")
     elif tot["n"] and (tot["noncontractual"] or 0) > 0:

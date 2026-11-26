@@ -2485,9 +2485,14 @@ class Detector:
             lines.append({"allowed": o.get("allowed_cents"), "charge": o.get("charge_cents"), "paid": self.standing.get(o["line_key"], 0),
                           "adj": adj})
         served = {(o.get("procedure_code"), o.get("service_date")) for o in mine.values()}
-        others = sum(self.standing.get(o["line_key"], 0) for o in answers if not self._one_payer(o, itself)
-                     and (o.get("procedure_code"), o.get("service_date")) in served and o.get("claim_status_code") != "22")
-        return owed_in_second_role(lines, others, f.get("expected_cents"))
+        firsts = [o for o in answers if not self._one_payer(o, itself) and (o.get("procedure_code"), o.get("service_date")) in served
+                  and o.get("claim_status_code") != "22"]
+        others = sum(self.standing.get(o["line_key"], 0) for o in firsts)
+        # what the other payers left on the line (the patient share on their answers that paid): the most this payer can
+        # owe in its role (review r1-7)
+        paying = [o for o in firsts if self.standing.get(o["line_key"], 0) > 0]
+        left = sum(a for o in paying for g, _rc, a in self.adj.get(o["line_key"], []) if g == "PR") if paying else None
+        return owed_in_second_role(lines, others, f.get("expected_cents"), left)
 
     def _second_role_short(self, f: dict, due: dict, grp: str, day: str, primary: bool) -> None:
         """The payer paid as secondary less than it owes for the service in that role: the item stays listed at what is
@@ -7033,7 +7038,22 @@ class Detector:
             r["work_state"], r["follow_up_on"] = st.get("work_state"), st.get("follow_up_on")
             r["state_basis"] = (st.get("state_basis") or "")[:300] or None
             r["appeal_block"] = st.get("appeal_block") or self._never_payable_block(r, st)
+            self._payer_work_size(r, st, states)
             self.ema_counts["state_" + str(st.get("work_state"))] += 1
+
+    def _payer_work_size(self, r: dict, st: dict, states) -> None:
+        """A patient-group denial whose work is with the payer (a corrected claim or a resubmission sent, its follow-up: any
+        state but the patient's side, states.PATIENT_SIDE_RULES) is stored at what the payer pays for the service (its rate,
+        kept in the evidence by archive rule 8), not at the patient's share, so Work now's dollars and the ranking count what
+        that work can bring (review r1-4). The share stays in the evidence for the bill-the-patient step."""
+        if st.get("work_state") not in ("work_now", "waiting") or st.get("rule") in states.PATIENT_SIDE_RULES:
+            return
+        if not states.patient_denial(r):
+            return
+        rate = int(states._ev(r).get("payer_rate_cents") or 0)
+        if rate > 0 and r.get("shortfall_cents") != rate:
+            r["shortfall_cents"] = r["expected_cents"] = rate
+            self.ema_counts["patient_denial_payer_work"] += 1
 
     def _never_payable_block(self, r: dict, st: dict) -> str | None:
         """'never_payable' for an item to work now that a payer's published rule never pays (the owner's decision 4, the

@@ -431,15 +431,15 @@ def test_d2_a_patient_who_paid_part_is_billed_the_rest_and_one_who_paid_it_all_i
 
 def test_d2_billed_the_patient_is_not_closed_by_a_write_off_of_the_patients_share(sstore):
     """After Billed the patient, EMA closes the line by writing $130.00 off as non-contractual with only the $20.00 the
-    patient paid: that is a write-off, not the patient's payment, so the item keeps waiting (and is work again at the
-    follow-up day) for a person to decide; it is never closed as paid by the patient."""
+    patient paid: that is a write-off with no owner, not the patient's payment, so the item is back on Work now at the
+    $130.00 left for a person to decide (reverse it and bill, or Done); it is never closed as paid by the patient."""
     from remitwatch import actions
     _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
     actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-11-20T15:00:00+00:00")
     _ema_patient(sstore, balance=0, pat_paid=2000, noncontractual=13000)
     st = _state(sstore)
-    assert (st["work_state"], st["rule"]) == ("waiting", "billed_patient"), st["state_basis"]
-    assert st["state_basis"].endswith("EMA shows $20.00 of $150.00 paid so far"), st["state_basis"]
+    assert (st["work_state"], st["rule"]) == ("work_now", "patient_unpaid"), st["state_basis"]
+    assert "$130.00 written off on this line with no decision recorded and $20.00 paid by the patient" in st["state_basis"], st["state_basis"]
     late = _state(sstore, today="2027-01-20")
     assert (late["work_state"], late["rule"]) == ("work_now", "patient_unpaid"), late["state_basis"]
     _ema_patient(sstore, balance=0, pat_paid=2000, pat_adj=13000)

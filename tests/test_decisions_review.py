@@ -271,3 +271,232 @@ def test_r2_1_the_fax_window_and_a_stored_packet_carry_the_before_you_send_it_ch
     preview = src[i:src.index("\nasync function ", i + 10) if "\nasync function " in src[i + 10:] else i + 4000]
     assert "got.checklist" in preview and "Before you send it" in preview
     assert preview.index("Before you send it") < preview.index("Send the fax")
+
+
+# =============================================================================================================
+# r1-4: a patient-group denial whose work is with the payer is worth the payer's rate, not the patient's share
+# =============================================================================================================
+def test_r1_4_a_referral_denial_sent_back_to_the_payer_is_worth_the_payers_rate(sstore):
+    """PR-288 put $150.00 on the patient; the run kept the payer's usual rate, $60.00, in the evidence. The biller got a
+    retroactive referral and sent a corrected claim (Mark sent): the item waits on the payer, and is worth $60.00 on the
+    payer's basis, never the patient's $150.00 under "the payer's usual rate"."""
+    from remitwatch import actions, story
+    _patient_denial(sstore, "288", signal="DENIED_REFERRAL", deadline="2027-01-31")
+    ev = json.loads(sstore.conn.execute("SELECT evidence FROM findings WHERE finding_id='F1'").fetchone()[0])
+    ev.update(payer_rate_cents=6000, payer_rate_basis="Anthem / BCBS usual 2026 rate for 99213")
+    sstore.conn.execute("UPDATE findings SET evidence=? WHERE finding_id='F1'", (json.dumps(ev),))
+    sstore.conn.commit()
+    before = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert (before["route"], before["expected_cents"]) == ("bill_patient", 15000), before          # the patient's side
+    actions.apply_status(sstore.conn, "F1", "appealed", "Corrected claim sent with the retroactive referral", actor="Biller One",
+                         at="2026-11-20T15:00:00+00:00")
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["route"] != "bill_patient", n["action"]
+    assert (n["expected_cents"], n["expected_basis"]) == (6000, "Anthem / BCBS usual 2026 rate for 99213"), (n["expected_cents"], n["expected_basis"])
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_r1_4_the_run_stores_payer_work_at_the_payers_rate(tmp_path, kind):
+    """Through a detection run: Anthem put two visits on the patients (PR-204) beside 25 paid at its rate ($117.60). One
+    is billed to the patient (the patient's share, $223.65, stays its size); for the other a corrected claim went to the
+    payer (Mark sent): the next run stores it at Anthem's rate, so Work now's dollars count what that work can bring."""
+    from remitwatch import actions, ema_reports as er
+    from remitwatch.detect import Detector
+    from tests.test_settled_elsewhere import ANTHEM, _add, _clp, _line, _store, _usual
+    s = _store(tmp_path, kind)
+    er.ensure_schema(s.conn)
+    _production_covers(s, "2026-01-01", "2026-10-15")
+    pcns = ["CB0000P01C017", "CB0000P02C017"]
+    _add(s, tmp_path, _usual("12", "117.60") + [_clp(p, "1", _line("0.00", "CAS*PR*204*223.65~")) for p in pcns], "20261001", **ANTHEM)
+    Detector(s, run_id="t1", today="2026-10-20").run()
+
+    def items():
+        return {r["patient_control_number"]: dict(r) for r in s.query(
+            "SELECT * FROM findings WHERE signal='DENIED_PLAN_EXCLUSION' AND COALESCE(stale,0)=0")}
+    first = items()
+    assert {p: r["shortfall_cents"] for p, r in first.items()} == {pcns[0]: 22365, pcns[1]: 22365}
+    rate = json.loads(first[pcns[1]]["evidence"]).get("payer_rate_cents")
+    assert rate and 0 < rate < 22365, rate
+    actions.apply_status(s.conn, first[pcns[1]]["finding_id"], "appealed", "Corrected claim sent with the right diagnosis",
+                         actor="Biller One", at="2026-10-21T15:00:00+00:00")
+    s.conn.commit()
+    Detector(s, run_id="t2", today="2026-10-22").run()
+    now = items()
+    assert (now[pcns[0]]["shortfall_cents"], now[pcns[0]]["work_state"]) == (22365, "work_now")
+    assert (now[pcns[1]]["shortfall_cents"], now[pcns[1]]["work_state"]) == (rate, "waiting"), (now[pcns[1]]["shortfall_cents"], rate)
+    s.close()
+
+
+# =============================================================================================================
+# r1-5: the next payer's own answer caps what the patient is billed, and its contractual part is said first
+# =============================================================================================================
+def _supplement_answer(s, *, co=30, pr=120, allowed=120, paid=0):
+    """Medicare put a routine visit on the patient (PR-49 $150.00) and sent it on; the patient's supplement then answered:
+    `co` off as contractual (CO-45), `pr` on the patient's deductible (PR-1), `paid` paid."""
+    _crossed_over(s, "2", "TESTCARE SUPPLEMENT", "CI", ("PR", "1"))
+    s.conn.execute("DELETE FROM adjustments WHERE line_key IN (SELECT line_key FROM lines WHERE payer_name='TESTCARE SUPPLEMENT')")
+    lk = s.conn.execute("SELECT line_key, claim_key, transaction_key FROM lines WHERE payer_name='TESTCARE SUPPLEMENT'").fetchone()
+    rows = [(lk[2], lk[1], lk[0], "line", "CO", "45", co * 100)] + ([(lk[2], lk[1], lk[0], "line", "PR", "1", pr * 100)] if pr else [])
+    s.conn.executemany("INSERT INTO adjustments (transaction_key, claim_key, line_key, level, group_code, reason_code, amount_cents) "
+                       "VALUES (?,?,?,?,?,?,?)", rows)
+    s.conn.execute("UPDATE lines SET allowed_cents=?, paid_cents=? WHERE line_key=?", (allowed * 100, paid * 100, lk[0]))
+    s.conn.commit()
+
+
+def test_r1_5_the_next_payers_patient_share_caps_the_bill(sstore):
+    """The supplement allowed $120.00, took $30.00 off as contractual (CO-45) and put $120.00 on the patient (PR-1): the
+    patient owes $120.00, never Medicare's whole $150.00, and the step says first that the $30.00 is not the patient's."""
+    from remitwatch import story
+    _supplement_answer(sstore)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Bill the patient $120.00:") and n["expected_cents"] == 12000, (n["action"], n["expected_cents"])
+    first = n["steps"][0]
+    assert first == ("Before billing: Medicare Supplement carriers answered after it: it took $30.00 off as contractual (CO-45), which is "
+                     "not the patient's to pay, and put $120.00 on the patient (PR-1): bill no more than that."), first
+
+
+def test_r1_5_a_next_payer_that_put_nothing_on_the_patient_keeps_its_caution(sstore):
+    """The unit's own case stays: a next payer that answered with a contractual adjustment only (nothing paid, nothing on
+    the patient) is said before billing, and the bill is not capped to $0 (the owner's decision bills by default)."""
+    from remitwatch import story
+    _supplement_answer(sstore, co=150, pr=0, allowed=0)
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Bill the patient $150.00:"), n["action"]
+    assert n["steps"][0].startswith("Before billing:") and "put this service on the practice (CO-45), with nothing paid" in n["steps"][0]
+
+
+def test_r1_5_a_next_payer_that_paid_and_put_nothing_on_the_patient_is_said_plainly(sstore):
+    """A next payer that paid part ($100.00), took the rest off as contractual and put nothing on the patient: the step says
+    what it paid and took off, and that the patient may owe nothing (never "bill no more than that" with no amount)."""
+    from remitwatch import story
+    _supplement_answer(sstore, co=50, pr=0, allowed=100, paid=100)
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    first = n["steps"][0]
+    assert first == ("Before billing: Medicare Supplement carriers answered after it: it paid $100.00, took $50.00 off as contractual "
+                     "(CO-45), which is not the patient's to pay, and put nothing on the patient. If its answer settled the service, "
+                     "do not bill: press Done."), first
+
+
+def test_r1_5_archive_rule_8_sizes_the_item_at_the_next_payers_share(store):
+    """Archive rule 8 itself: Medicare's PR-49 $150.00, then the supplement's CO-45 $30.00 and PR-1 $120.00 with nothing
+    paid: the item it raises is sized $120.00."""
+    from remitwatch import archive_rules as ar
+    from tests.test_archive_rules import cl, ln, remit
+    remit(store, "2026-03-28", [cl("CB0000951C017", [ln("99213", 150.00, 0, None, [("PR", "49", 150.00)], lcn="1")], status="19")],
+          payer="MEDICARE TEST", payer_id="MCARE")
+    remit(store, "2026-04-06", [cl("CB0000951C017", [ln("99213", 150.00, 0, 120.00, [("CO", "45", 30.00), ("PR", "1", 120.00)], lcn="1")],
+                                   status="2")], payer="TESTCARE SUPPLEMENT", payer_id="TSUPP")
+    raised = [a for a in ar.pr_group_denials(store.conn, []) if a["action"] == "raise_item"]
+    assert [(a["carc"], a["shortfall_cents"]) for a in raised] == [("49", 12000)], [(a["carc"], a["shortfall_cents"]) for a in raised]
+
+
+from tests.test_decisions import store  # noqa: E402,F401  (a fixture: both store kinds)
+
+
+# =============================================================================================================
+# r1-6: Billed the patient is never closed as paid by the patient over a non-contractual write-off
+# =============================================================================================================
+def test_r1_6_billed_patient_is_not_closed_as_paid_when_ema_wrote_off_the_rest(sstore):
+    """Billed the patient for $150.00; EMA then shows the patient paid $80.00 and the other $70.00 written off as
+    non-contractual, the line closed. Not "paid by the patient": a write-off with no owner, on Work now at the $70.00 left
+    (reverse it and bill, or Done with the reason)."""
+    from remitwatch import actions, story
+    _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-11-20T15:00:00+00:00")
+    _ema_patient(sstore, balance=0, pat_paid=8000, noncontractual=7000)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "patient_unpaid"), st["state_basis"]
+    assert "$70.00 written off on this line with no decision recorded and $80.00 paid by the patient" in st["state_basis"], st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["expected_cents"] == 7000 and n["action"].startswith("Send the patient another statement for $70.00"), (n["expected_cents"], n["action"])
+    assert any(x.startswith("EMA wrote $70.00 off on this line: reverse that write-off") for x in n["steps"]), n["steps"]
+    # the patient's payments and what EMA took off the patient's balance covering it still close it, and so does paying it all
+    _ema_patient(sstore, balance=0, pat_paid=8000, pat_adj=7000)
+    assert (_state(sstore)["work_state"], _state(sstore)["rule"]) == ("done", "patient_paid")
+    _ema_patient(sstore, balance=0, pat_paid=15000)
+    assert (_state(sstore)["work_state"], _state(sstore)["rule"]) == ("done", "patient_paid")
+
+
+# =============================================================================================================
+# r1-7: what a payer owes as secondary is never more than the primary left on the line
+# =============================================================================================================
+def test_r1_7_a_secondary_that_paid_all_the_primary_left_owes_nothing_more(store):
+    """BETA paid as primary: allowed $100.00, paid $80.00, CO-45 $50.00, PR-2 $20.00. ACME, which had denied as primary
+    (CO-22), paid the $20.00 BETA left as secondary, with its own allowed amount of $120.00. Nothing more is owed: the
+    item closes with proof and the $20.00 is the recovery (its own allowed amount less BETA's payment, $40.00, is no debt)."""
+    from tests.test_archive_rules import BETA, cl, item, ln, only, remit
+    lk = remit(store, "2026-03-20", [cl("CB0000951C017", [ln("99213", 150.00, 0, None, [("CO", "22", 150.00)], lcn="1")])])[0]
+    remit(store, "2026-04-01", [cl("CB0000951C017", [ln("99213", 150.00, 80.00, 100.00, [("CO", "45", 50.00), ("PR", "2", 20.00)], lcn="1")])],
+          **BETA)
+    remit(store, "2026-04-20", [cl("CB0000951C017", [ln("99213", 150.00, 20.00, 120.00, [("OA", "23", 100.00), ("CO", "45", 30.00)], lcn="1")],
+                                   status="2")])
+    a = only(ar.units_split(store.conn, [item(store, lk, "DENIED_MISSING_PRIMARY", expected=9000)]))
+    assert a["action"] == "close_with_proof", (a["action"], a.get("reclass"), a.get("shortfall_cents"), a.get("hint"))
+    assert (a["paid_cents"], a["counts_as_recovery"]) == (2000, True)
+
+
+def test_r1_7_the_cap_is_what_the_others_left_and_only_with_their_remittances_on_file():
+    f = ar.owed_in_second_role
+    line = {"allowed": 12000, "charge": 15000, "paid": 1000, "adj": [("OA", "23", 10000), ("CO", "45", 3000)]}
+    # BETA's remittance on file: paid $80.00, left $20.00 (its PR): ACME owes at most $20.00 of its $40.00
+    due = f([line], 8000, 9000, 2000)
+    assert (due["owed_cents"], due["left_cents"], due["left_by_others_cents"]) == (2000, 1000, 2000)
+    assert "at most the $20.00 the other payers left on the line" in ar.second_role_words(due, "ACME", "as secondary", "2026-04-20")
+    # the others left more than ACME owes: no cap
+    assert f([line], 8000, 9000, 6000)["owed_cents"] == 4000 and f([line], 8000, 9000, 6000)["left_by_others_cents"] is None
+    # no remittance of the others on file (only the payer's own OA-23): nothing tells what they left, no cap
+    assert f([line], 0, 9000, None)["owed_cents"] == 2000 and f([line], 0, 9000, 0)["left_by_others_cents"] is None
+
+
+# =============================================================================================================
+# r1-8: the part that arrived as secondary counts as money returned while the rest stays listed
+# =============================================================================================================
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_r1_8_the_part_that_arrived_counts_while_the_rest_stays_listed(tmp_path, kind):
+    """The unit's Medicaid case: $10.00 of the $20.00 Medicaid owes as secondary arrived. The rest stays listed ($10.00,
+    open, work now); the payment that came is the item's proof, dated, and the Results tab counts it as money returned on
+    the item (the owner's scoreboard), so it is never lost if the rest never comes. recovered_cents stays a closure's
+    amount: the save keeps it on resolved items only."""
+    from remitwatch import actions, results
+    from remitwatch.detect import Detector
+    from tests.test_settled_elsewhere import COB, MEDICAID, _add, _clp, _line, _store, _usual
+    s = _store(tmp_path, kind)
+    first = [_clp(f"CB0000Q0{i}C017", "1", _line("91.31", "CAS*CO*45*86.25~", "91.31", code="17110", charge="177.56")
+                  + _line("0.00", COB, mods="25"), paid="91.31", cfi="MC") for i in (1, 2)]
+    _add(s, tmp_path, _usual("MC", "70.00") + first, "20261001", **MEDICAID)
+    Detector(s, run_id="t1").run()
+    second = [_clp("CB0000Q01C017", "2", _line("10.00", "CAS*OA*23*50.00~CAS*CO*45*153.65~CAS*CO*16*10.00~", "70.00", mods="25"),
+                   paid="10.00", cfi="MC")]
+    _add(s, tmp_path, second, "20261110", **MEDICAID)
+    Detector(s, run_id="t2", today="2026-11-20").run()
+    short = dict(next(iter(s.query("SELECT * FROM findings WHERE patient_control_number='CB0000Q01C017' AND procedure_code='99214' "
+                                   "AND category IN ('denial','bundling') AND COALESCE(stale,0)=0"))))
+    assert (short["status"], short["shortfall_cents"], short["work_state"]) == ("open", 1000, "work_now"), short["state_basis"]
+    due = json.loads(short["evidence"])["second_role"]
+    assert (due["paid_cents"], due["left_cents"], due["date"]) == (1000, 1000, "2026-11-10"), due
+    # flagged on October 2 (the run's own clock is today's): the payment of November 10 came after the flag
+    s.conn.execute("UPDATE findings SET first_seen='2026-10-02T08:00:00+00:00' WHERE finding_id=?", (short["finding_id"],))
+    s.conn.commit()
+    actions.ensure_fax_tables(s.conn)
+    results.refresh(s.conn, today="2026-11-20", force=True)
+    detail = results._meta(s.conn, results.LISTS_KEY, {})["detail"].get(short["finding_id"]) or {}
+    assert detail.get("returned") == 1000 and [e["cents"] for e in detail.get("events") or []] == [1000], detail
+    s.close()
+
+
+def test_r1_8_archive_rule_3_keeps_what_arrived_with_the_item_it_keeps_listed(store):
+    """Archive rule 3's own case (ACME paid $12.00 of the $20.00 it owes as secondary): the reclassification keeps the
+    $8.00 listed and carries what arrived after the denial ($12.00, dated) as its proof."""
+    from tests.test_archive_rules import cl, item, ln, only, remit
+    lk = remit(store, "2026-03-20", [cl("CB0000902C017", [ln("99213", 150.00, 0, None, [("CO", "22", 150.00)], lcn="1")])])[0]
+    remit(store, "2026-04-20", [cl("CB0000902C017", [ln("99213", 150.00, 12.00, 100.00,
+                                                        [("OA", "23", 80.00), ("CO", "45", 50.00), ("CO", "16", 8.00)], lcn="1")],
+                                   status="2")])
+    a = only(ar.units_split(store.conn, [item(store, lk, "DENIED_MISSING_PRIMARY", expected=9000)]))
+    assert (a["reclass"], a["shortfall_cents"]) == ("second_role_short", 800)
+    assert (a["second_role"]["arrived_cents"], a["second_role"]["date"]) == (1200, "2026-04-20")
+
+
+from remitwatch import archive_rules as ar  # noqa: E402
