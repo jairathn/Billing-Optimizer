@@ -409,6 +409,88 @@ def test_a_lock_left_by_a_run_that_finished_is_not_counted_as_a_kill(box, monkey
     assert nxt["plan"]["level"] == 0, f"level {nxt['plan']['level']} after a run that finished; regulation changes: {why}"
 
 
+def _finished_with_its_lock_left(state, monkeypatch, run):
+    """A run that finished and wrote its status but could not remove its lock (the state folder did not answer the
+    delete). Returns the run's status."""
+    from remitwatch import cloud
+    real_delete = state.delete
+
+    def no_delete(name):
+        if name == cloud.LOCK:
+            raise OSError("the state folder did not answer")
+        return real_delete(name)
+    monkeypatch.setattr(state, "delete", no_delete)
+    done = run()
+    monkeypatch.setattr(state, "delete", real_delete)
+    assert done.get("finished") and not done.get("error") and state.meta(cloud.LOCK) is not None
+    return json.loads(state.get(cloud.STATUS))
+
+
+def _as_an_older_builds_lock(state, status):
+    """The lock rewritten as an older build wrote it: no run named, taken when its run started (40 s before it finished:
+    a run takes seconds at least, and the times are kept to the second)."""
+    from remitwatch import cloud
+    lock = json.loads(state.get(cloud.LOCK))
+    lock.pop("run_id", None)
+    lock["started"] = (datetime.fromisoformat(status["finished"]) - timedelta(seconds=40)).isoformat()
+    state.put(cloud.LOCK, json.dumps(lock).encode())
+
+
+def test_an_older_builds_lock_left_by_a_run_that_finished_is_not_said_as_a_stopped_run(site, monkeypatch):
+    """The same with the lock an older build left (it names no run, as the first run after this build is deployed may
+    find): the run's status, written after the lock was taken, says it finished."""
+    from remitwatch import cloud
+    tc, auth, _api, state = site
+    status = _finished_with_its_lock_left(state, monkeypatch, lambda: cycle(state, None, trigger="press", force_detect=True))
+    _as_an_older_builds_lock(state, status)
+    monkeypatch.setattr(cloud, "lock_stale_seconds", lambda: 0)
+    cloud.SERVING_COPY._status = (0.0, None)
+    st = tc.get("/api/sync/status", headers=auth).json()
+    an = tc.get("/api/ops/panels", headers=auth).json()["analysis"]
+    assert not st.get("last_failed") and not st.get("stalled_since") and not an.get("failed"), (st.get("stalled_since"), an.get("failed"))
+
+
+def test_an_older_builds_lock_left_by_a_run_that_finished_is_not_counted_as_a_kill(box, monkeypatch):
+    """The next press takes over that older build's lock: no open marker of the run is left (it finished), and its status
+    is newer than the lock, so the regulation counts nothing."""
+    from remitwatch import cloud
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    assert _cloud(state, client)["plan"]["level"] == 0
+    status = _finished_with_its_lock_left(state, monkeypatch, lambda: _cloud(state, client, trigger="press", force_detect=True))
+    _as_an_older_builds_lock(state, status)
+    t_old = time.time() - 500
+    os.utime(root / "RemitWatch-state" / cloud.LOCK, (t_old, t_old))
+    nxt = _cloud(state, client, trigger="press", force_detect=True)
+    why = [c.get("why") for c in (json.loads(state.get(cloud.STATUS)).get("regulate") or {}).get("changes") or []]
+    assert nxt["plan"]["level"] == 0, f"level {nxt['plan']['level']} after a run that finished; regulation changes: {why}"
+
+
+def test_a_kill_found_by_its_marker_and_by_its_lock_in_one_run_is_counted_once(box):
+    """A run killed long enough ago that the next press finds its open marker at its start (runlog) and takes over its
+    lock, which names it: one run, counted once (the takeover leaves a run its markers found to them, and the regulation
+    counts each run once by its id)."""
+    from remitwatch import cloud, runlog
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    assert _cloud(state, client)["plan"]["level"] == 0
+    now = datetime.now(timezone.utc)
+    rid = (now - timedelta(seconds=900)).strftime("run-%Y%m%dT%H%M%SZ") + "-cafe"
+    state.put(cloud.LOCK, json.dumps({"token": "cafecafecafecafe", "started": (now - timedelta(seconds=900)).isoformat(),
+                                      "run_id": rid}).encode())
+    t_lock = time.time() - 900
+    os.utime(root / "RemitWatch-state" / cloud.LOCK, (t_lock, t_lock))
+    sink = runlog.sink_for(state=state)
+    sink.write_json(f"open/{rid}.json", {"run_id": rid, "kind": "cycle", "host_mode": "serverless", "trigger": "press",
+                                         "started_at": runlog._iso(now - timedelta(seconds=900)),
+                                         "last_at": runlog._iso(now - timedelta(seconds=800)), "last_step": "detect",
+                                         "steps_done": ["load", "intake", "dropbox"], "peak_mb": 1900})
+    pressed = _cloud(state, client, trigger="press", force_detect=True)
+    assert [r["outcome"] for r in runlog.read_index(sink) if r["run_id"] == rid] == ["killed"]
+    why = [c.get("why") for c in (json.loads(state.get(cloud.STATUS)).get("regulate") or {}).get("changes") or []]
+    assert pressed["plan"]["level"] == 1, (pressed["plan"], why)
+
+
 # ======================================================================================================================
 # hook-r1-4: NEAR_CEILING stays up across a run that saved no store; a save measured smaller clears it
 # ======================================================================================================================
