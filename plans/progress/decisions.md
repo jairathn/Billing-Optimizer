@@ -275,5 +275,5 @@ lows r2-2 to r2-5 (this section's commit).
   the code runs on both; the panel in node (r2-1, r2-2); the API on the server (r2-1, r2-2, r2-4).
 - `tests/test_decisions.py`: the run test declares a Production box (r1-1); the write-off case expects Work now
   (r1-6). `tests/test_payer_code_rules.py`: G6001 to 2025 is `claim` (r2-5).
-- Breaks: r1-1 2, r1-2 2, r1-3 and r2-1 6, r1-4 to r1-7 10, r2-2 to r2-5 9; each failed its tests and the restore left
-  `git status` clean.
+- Breaks: r1-1 2, r1-2 2, r1-3 and r2-1 6, r1-4 to r1-7 10, r2-2 to r2-5 10; each failed its tests and the restore
+  left `git status` clean (`$S/tk/units/decisions/probe/breaks.py` with a plan of old and new text per fix).

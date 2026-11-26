@@ -555,14 +555,18 @@ def test_r2_2_after_billed_the_patient_the_panel_waits_on_the_patient_and_keeps_
 
 def test_r2_2_a_reopen_since_the_run_keeps_the_stored_state(sstore):
     """Only the statuses a decision-2 action sets (Sent for Billed the patient, Paid with $0 for Done) give the state by
-    the person: a person's reopen since the run, on an item EMA shows the patient paid, keeps the run's stored state."""
+    the person: a let go and a reopen since the run, on an item EMA now shows the patient paid (live: paid by the
+    patient), keep the run's stored state, its live state beside it."""
     from remitwatch import actions, story
     _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
-    _ema_patient(sstore, balance=0, pat_paid=15000)
+    _ema_patient(sstore, balance=500, pat_paid=15000, charges=15500)
     _stored_by_run(sstore)
-    actions.apply_status(sstore.conn, "F1", "open", "looking again", actor="Biller One", at="2026-11-20T15:00:00+00:00")
+    actions.apply_status(sstore.conn, "F1", "dismissed", "not ours", actor="Biller One", at="2026-11-20T15:00:00+00:00")
+    actions.apply_status(sstore.conn, "F1", "open", "looking again", actor="Biller One", at="2026-11-20T15:05:00+00:00",
+                         seen="dismissed")
     sstore.conn.commit()
     st = story.explain(sstore.conn, "F1", today=TODAY2)["state"]
+    assert (st.get("live") or {}).get("rule") == "patient_paid", st.get("live")
     assert not st.get("by_person") and st["work_state"] == "work_now", (st["work_state"], st.get("rule"))
 
 
