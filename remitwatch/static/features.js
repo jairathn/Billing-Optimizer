@@ -480,9 +480,10 @@ const XP_STRENGTH = {proven:'Proven: two sources agree', one_source:'From one so
 const XP_SOURCE = {'835':'835', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
 const XP_BUTTON = {build_packet:'Build the appeal packet', attach_note:'Attach the visit note', find_note:'Find the note in EMA', upload_note:'Upload the note',
   fax_payer:'Fax it to the payer', copy_instructions:'Copy the steps', mark_sent:'Mark sent', log_outcome:'Log what happened', mark_posted:'Mark posted in EMA',
-  mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA'};
+  mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA',
+  billed_patient:'Billed the patient', mark_done:'Done'};
 // the one button that moves the item on, the first of these its next step offers (fax only once a packet can be read first)
-const XP_FIRST = ['fax_payer','build_packet','mark_posted','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
+const XP_FIRST = ['fax_payer','build_packet','mark_posted','billed_patient','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
 const XP_OUTCOME = {auto_written_off:'Auto write-off', written_off_while_pending:'Written off while pending', lost_to_timely_filing:'Lost to late filing'};
 // what stops an appeal outright (the server holds to it): a line paid, credited, reprocessed or waiting on the payer. A line
 // EMA shows settled, or the archive shows likely paid, is checked first: its fax stays under More and asks for the check
@@ -640,6 +641,11 @@ function xpBind(f, x, r, d, done){
       await event('posted', n.trim()); say('Noted in its history.'); },
     mark_billed: async () => { const n = prompt(`Who was billed, and when? (${nx.route === 'bill_patient' ? 'the patient' : 'the other payer'}; kept in its history)`, ''); if(n === null) return;
       if(!n.trim()){ err('Not changed: say who was billed.'); return; } await event('billed', n.trim()); await status('appealed', 'Billed: ' + n.trim()); },
+    // a service the payer put on the patient (the owner's decision 2): one change each, the server's own words in its history
+    billed_patient: async () => { const n = prompt('Billed the patient? It waits for the patient\'s payment in EMA and closes when EMA shows it.\n\nHow, and anything to remember (kept in its history; optional):', ''); if(n === null) return;
+      await status('appealed', 'Billed the patient' + (n.trim() ? ': ' + n.trim() : '')); },
+    mark_done: async () => { const n = prompt('Mark it done? It leaves the list and counts as done by you, with nothing recovered.\n\nWhy (kept in its history; optional):', ''); if(n === null) return;
+      await status('resolved', n.trim(), {recovered_cents: 0, done: true}); },
     accept_pattern: () => xpAccept(f, nx, err, say),
     let_go: async () => { const n = prompt('Let it go? It leaves the list and counts as let go.\n\nWhy (kept in its history; required):', ''); if(n === null) return;
       if(!n.trim()){ err('Not changed: letting an item go needs a reason.'); return; } await status('dismissed', n.trim()); },

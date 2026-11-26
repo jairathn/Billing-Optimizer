@@ -28,7 +28,8 @@ postings, never from EMA's claim status alone.
       the three at once, from one gathering of the facts (what the item drawer asks for).
 
 Button ids: build_packet, attach_note, find_note, upload_note, fax_payer, copy_instructions, mark_sent, log_outcome,
-mark_posted, mark_billed, accept_pattern, let_go, reopen, request_era, open_in_ema.
+mark_posted, mark_billed, accept_pattern, let_go, reopen, request_era, open_in_ema, billed_patient and mark_done (a
+patient-group denial: "Billed the patient" and "Done", the owner's decision 2).
 
 Dates are shown as the pages show them (behind the sign-in); patient details are left to the pages' names switch: the
 story holds no patient name, member id or record number, and only the last four characters of a check number.
@@ -45,7 +46,7 @@ from .states import day, tail, usd
 
 SOURCES = ("835", "production", "ar", "weekly", "claim_status", "remitwatch")
 BUTTONS = ("build_packet", "attach_note", "find_note", "upload_note", "fax_payer", "copy_instructions", "mark_sent", "log_outcome",
-           "mark_posted", "mark_billed", "accept_pattern", "let_go", "reopen", "request_era", "open_in_ema")
+           "mark_posted", "mark_billed", "accept_pattern", "let_go", "reopen", "request_era", "open_in_ema", "billed_patient", "mark_done")
 STATUS_WORDS = {"1": "processed as primary", "2": "processed as secondary", "3": "processed as tertiary", "4": "denied",
                 "19": "processed as primary and forwarded to the next payer", "20": "processed as secondary and forwarded",
                 "21": "processed as tertiary and forwarded", "22": "a reversal of an earlier answer",
@@ -1976,6 +1977,10 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         deadline, basis = st.get("follow_up_on"), "the payer's usual answer time after the work was seen" if st.get("follow_up_on") else None
         if rule == "ema_follow_up":
             basis = "the follow-up date a person set in EMA"
+        if rule == "billed_patient":
+            buttons.append("mark_done")
+            basis = "two monthly statements after the patient was billed"
+            expected, expected_basis = int((st.get("patient_share") or {}).get("cents") or 0), "what the payer put on the patient on its 835"
         expected, expected_basis = (expected, expected_basis)
     elif route == "refund":
         action, steps, who, deadline, basis = _refund_step(f, fx, st, bal, deadline, basis)
@@ -1988,6 +1993,11 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             expected, expected_basis = 0, "nothing to collect: a takeback to post"
         else:
             expected, expected_basis = int(f.get("paid_cents") or f.get("shortfall_cents") or 0), "the 835's payment"
+    elif route == "bill_patient" and rule in ("bill_patient_denial", "patient_unpaid"):
+        action, steps, who, owed, extra = _bill_patient_denial_step(f, fx, st, tot, deadline, t)
+        buttons += extra
+        expected, expected_basis = owed, "what the payer put on the patient on its 835, at most the charge less what any payer paid"
+        deadline, basis = None, "the next statement cycle"
     elif route == "bill_patient":
         action, steps, who, owed, extra = _bill_patient_step(f, fx, st, tot)
         buttons += extra
@@ -2253,6 +2263,10 @@ def _wait_step(f: dict, fx: dict, st: dict) -> tuple[str, list[str], str]:
     if rule == "ema_follow_up":
         return (f"Wait: a person set an EMA follow-up date of {day(follow)} on this claim. Read the claim's notes in EMA for what was done; on that "
                 "day, follow up as they say.", [], who)
+    if rule == "billed_patient":
+        return (f"Wait for the patient's payment: {_lower(st.get('state_basis') or '')}.",
+                [f"On {day(follow)}, look at the patient's balance in EMA: paid, and this item closes on its own; not paid, send another "
+                 "statement or mark it Done."], "Patient accounts")
     if f.get("signal") == "SECONDARY_NOT_BILLED" and work.get("kind") in ("billed", "sent", "secondary"):
         second = _second_name(fx)
         return (f"Wait for {_poss(second)} payment of the claim billed on {when}; follow up with {second} on {day(follow)} if nothing comes.",
@@ -2347,6 +2361,55 @@ def _bill_patient_step(f: dict, fx: dict, st: dict, tot: dict):
         extra = ["mark_posted"] + extra
     steps.append(f"Put {usd(owed)} on the patient's next statement; the payer owes nothing more on this line.")
     return f"Bill the patient {usd(owed)}: {proof.get('text') or st.get('state_basis')}.", steps, "Patient accounts", owed, extra
+
+
+PATIENT_DENIAL_WORDS = {"288": "no referral on file", "27": "the coverage had ended", "26": "the coverage had not started",
+                        "200": "the coverage had lapsed", "49": "a routine service the plan does not cover",
+                        "204": "a service the plan does not cover"}
+
+
+def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: str | None, today: str):
+    """A patient-group denial (the owner's decision 2 of 2026-11-26): bill the patient what the payer put on them, never
+    more than the charge less what any payer paid. A coverage-date answer also asks for the patient's current insurance
+    (a plan that covered the day pays more than the patient does, within its own filing window); a missing referral also
+    offers a retroactive one and a corrected claim. Billed the patient (it waits for the patient's payment in EMA) and
+    Done close it; a person's choice is never undone by a run."""
+    grp = f.get("payer_group") or "the payer"
+    share = st.get("patient_share") or S.patient_share(fx)
+    owed = int(share.get("cents") or 0)
+    carc = str(f.get("carc") or "")
+    pr = ", ".join(f"{g}-{c} {usd(a)}" for g, c, a in share.get("pr") or []) or f"PR-{carc}"
+    why = PATIENT_DENIAL_WORDS.get(carc, "not the payer's to pay")
+    if st.get("rule") == "patient_unpaid":
+        action = f"Send the patient another statement for {usd(owed)}, or mark it Done: {_lower(st.get('state_basis') or '')}."
+    else:
+        action = f"Bill the patient {usd(owed)}: {grp} put this service on the patient ({pr}: {why})."
+    steps: list[str] = []
+    if tot["n"] and tot["balance"] >= owed:
+        steps.append(f"EMA shows {usd(tot['balance'])} open on this line: put {usd(owed)} on the patient's next statement.")
+    elif tot["n"] and (tot["noncontractual"] or 0) > 0:
+        steps.append(f"EMA wrote {usd(tot['noncontractual'])} off on this line: reverse that write-off so the line shows {usd(owed)} owed by "
+                     "the patient, then put it on the patient's next statement.")
+    elif tot["n"]:
+        steps.append(f"EMA shows {usd(tot['balance'])} open on this line: move {usd(owed)} to the patient's responsibility, then put it on the "
+                     "patient's next statement.")
+    else:
+        steps.append(f"Put {usd(owed)} on the patient's next statement in EMA (EMA shows no line for this service here).")
+    open_window = bool(deadline) and str(deadline) >= today
+    if carc in ("27", "26", "200"):
+        steps.append("Ask the patient for their current insurance: a plan that covered that day pays more than the patient does. If they "
+                     "have one, update it in EMA and send the claim to that plan within its filing window, then mark it sent.")
+    elif carc == "288":
+        steps.append("Or get a retroactive referral from the patient's primary care office and send a corrected claim with the referral "
+                     "number" + (f" by {day(deadline)}" if open_window else "") + ", then mark it sent.")
+    elif carc == "49":
+        steps.append("If the visit treated a problem rather than a routine check, correct the diagnosis and send a corrected claim instead.")
+    elif carc == "204":
+        steps.append("If a covered code or diagnosis applies, send a corrected claim instead.")
+    steps.append("Once the patient is billed, press Billed the patient: the item waits for the patient's payment in EMA and closes when "
+                 "EMA shows it. Or press Done to close it yourself.")
+    extra = ["billed_patient", "mark_done", "copy_instructions"] + (["mark_sent"] if carc in ("288", "27", "26", "200") else [])
+    return action, steps, "Patient accounts", owed, extra
 
 
 def _policy_step(f: dict):

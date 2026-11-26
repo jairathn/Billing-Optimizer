@@ -2202,20 +2202,26 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
 
 
 # ------------------------------------------------------------------------------- 8. PR-group denials and CO-147
-# reason -> (signal, severity, actionable, who should pay, what to fix); the Medicaid wording is in _pr_words
+# reason -> (signal, severity, actionable, who should pay, what to fix). The patient-group reasons follow the owner's decision 2
+# of 2026-11-26: the payer put the service on the patient, so the patient is billed (Medicare's and Medicaid's alike: the
+# payer itself assigned the amount to the patient), and the fix names what else can still be done
 PR_REASONS: dict[str, tuple] = {
-    "288": ("DENIED_REFERRAL", "high", "correct_and_resubmit", "the payer, once a referral from the patient's primary care doctor is on file",
-            "Get the referral (a retroactive one if the plan allows it) and send a corrected claim with the referral number."),
-    "27": ("DENIED_COVERAGE_DATES", "high", "review", "the plan that covered the patient on the date of service, else the patient",
-           "Check the patient's coverage on the date of service, update the insurance in EMA and bill the plan that covered that day."),
-    "26": ("DENIED_COVERAGE_DATES", "high", "review", "the plan that covered the patient on the date of service, else the patient",
-           "Check the patient's coverage on the date of service, update the insurance in EMA and bill the plan that covered that day."),
-    "200": ("DENIED_COVERAGE_DATES", "high", "review", "the plan that covered the patient on the date of service, else the patient",
-            "The coverage had lapsed on that day: check for other coverage, bill it, or bill the patient."),
-    "49": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, when the visit was routine",
-           "If the visit treated a problem, correct the diagnosis and send a corrected claim; if it was routine, bill the patient."),
-    "204": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, under the plan's exclusion",
-            "Check the patient's benefits: bill the patient, or send a corrected claim if a covered code or diagnosis applies."),
+    "288": ("DENIED_REFERRAL", "high", "correct_and_resubmit", "the patient, as the payer set it (no referral on file)",
+            "Bill the patient; or get a referral from the patient's primary care office (a retroactive one if the plan allows it) "
+            "and send a corrected claim with the referral number."),
+    "27": ("DENIED_COVERAGE_DATES", "high", "review", "the patient, as the payer set it (the coverage had ended)",
+           "Bill the patient, and ask for their current insurance: a plan that covered that day pays more than the patient does, "
+           "and the claim then goes to it within its filing window."),
+    "26": ("DENIED_COVERAGE_DATES", "high", "review", "the patient, as the payer set it (the coverage had not started)",
+           "Bill the patient, and ask for their current insurance: a plan that covered that day pays more than the patient does, "
+           "and the claim then goes to it within its filing window."),
+    "200": ("DENIED_COVERAGE_DATES", "high", "review", "the patient, as the payer set it (the coverage had lapsed)",
+            "Bill the patient, and ask for their current insurance: a plan that covered that day pays more than the patient does, "
+            "and the claim then goes to it within its filing window."),
+    "49": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, as the payer set it (a routine service)",
+           "Bill the patient; if the visit treated a problem rather than a routine check, correct the diagnosis and send a corrected claim."),
+    "204": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, as the payer set it (not covered by the plan)",
+            "Bill the patient; send a corrected claim only if a covered code or diagnosis applies."),
     "147": ("DENIED_CONTRACT_RATE", "high", "review", "the payer, at the contracted rate, once the clinician is loaded on the agreement",
             "Ask the payer to link the clinician to the practice's agreement (credentialing), then to reprocess the claim."),
 }
@@ -2223,14 +2229,20 @@ PR_GROUP_CODES = frozenset({"288", "27", "26", "200", "49", "204"})
 
 
 def _pr_words(reason: str, kind: str | None) -> tuple[str, str]:
+    """Who should pay and what to fix. A Medicaid plan's referral answer names the member's assigned primary care office;
+    the patient is billed as for any payer (the owner's decision 2)."""
     signal, _sev, _act_, who, fix = PR_REASONS[reason]
-    if kind == "medicaid" and reason != "147":
-        who = "the payer: a Medicaid member cannot be billed for a covered service"
-        if reason == "288":
-            fix = "Get a referral from the member's assigned primary care office (a retroactive one if needed) and send a corrected claim with it."
-        elif reason in ("27", "26", "200"):
-            fix = "Check the member's eligibility on the date of service and bill the plan that covered that day; never bill the member."
+    if kind == "medicaid" and reason == "288":
+        fix = ("Bill the patient; or get a referral from the member's assigned primary care office (a retroactive one if needed) and "
+               "send a corrected claim with it.")
     return who, fix
+
+
+def patient_share_of(a: Ans, svc: Sequence[Ans]) -> tuple[int, int]:
+    """(what the payer put on the patient for the line: every PR amount on it, never more than the charge less what any
+    payer paid for the service; what the payers paid). The size of a patient-group denial (the owner's decision 2)."""
+    paid = sum(x.standing for x in svc if x.line_key != a.line_key and x.standing > 0 and x.status in PAYMENT_STATUSES)
+    return max(min(a.pr_cents(), (a.charge or 0) - paid), 0), paid
 
 
 COVERAGE_CODES = frozenset({"27", "26", "200"})        # coverage dates: the fix is to bill the plan that covered the day
@@ -2378,8 +2390,13 @@ def _pr_actions(conn: sqlite3.Connection, items: list, arch: Archive, cand: Mapp
             if shortfall is not None and shortfall <= 0:
                 continue
         else:
-            expected = usual or priced
-            shortfall = expected
+            # the owner's decision 2 (2026-11-26): the payer put the service on the patient, so the item is worth what the
+            # patient owes as the payer set it (patient_share_of); the payer's usual rate stays in the evidence for the
+            # other ways out (a retroactive referral, the plan that covered the day)
+            share, _paid_by = patient_share_of(a, svc)
+            if share <= 0:
+                continue                    # the payers paid the whole charge: the patient owes nothing
+            expected = shortfall = share
         label = {"288": "referral absent", "27": "coverage had ended", "26": "coverage had not started", "200": "coverage had lapsed",
                  "49": "routine service not covered", "204": "not covered by the plan", "147": "clinician not on the payer's contract"}[reason]
         rarc = ",".join(a.rem) if a.rem else None
@@ -2408,6 +2425,13 @@ def _pr_actions(conn: sqlite3.Connection, items: list, arch: Archive, cand: Mapp
                         usual_basis or "no baseline for this code"),
               "carc_group": g, "who_should_pay": who, "what_to_fix": fix,
               "archive_rule": {"rule": R_PR, "action": "raise_item", "strength": "proven"}}
+        if reason in PR_GROUP_CODES:
+            pr = [[f"{gg}-{rr}", c] for gg, rr, c in (a.adj or []) if gg == "PR" and c]
+            ev["basis"] = (f"what the payer put on the patient on its 835 ({', '.join(f'{k} {_usd(c)}' for k, c in pr)}), at most the "
+                           "charge less what any payer paid")
+            ev["patient_share"] = {"cents": shortfall, "pr": pr, "charge_cents": a.charge, "payers_paid_cents": _paid_by}
+            if usual or priced:
+                ev["payer_rate_cents"], ev["payer_rate_basis"] = usual or priced, (usual_basis if usual else "the payer's allowed amount on the line")
         if older:
             ev["replaces"] = [f["finding_id"] for f, _x in older]
         hint = f"Who should pay: {who}. What to fix: {fix}"

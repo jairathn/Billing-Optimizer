@@ -1490,6 +1490,11 @@ PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it L
 # items done with $0 recovered, by their work (remitwatch.states' appeal_block): a payment the 835 made that EMA never posted
 # ('post'), and a credit that is only a takeback EMA never posted ('credit'): the money already came, or none is owed
 ZERO_PAID_BLOCKS = ("post", "credit")
+# A person's Done (the owner's decision 2): a patient-group denial closed with $0 recovered, with who and when, by the
+# strict JSON true 'done' on a Paid; its note starts with states.DONE_NOTE so the item's history and state say Done
+DONE_ONLY = ("Done is for a service the payer put on the patient (no referral, coverage dates, a plan exclusion). Mark this "
+             "one Paid with the amount, or Let go with a reason.")
+DONE_STRICT = "Done is sent as true, or not at all. Reload the page."
 
 
 async def _body_object(request: Request) -> dict:
@@ -1540,18 +1545,22 @@ def _seen_ok(v: Any) -> bool:
 
 def _status_now(conn: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
     """Each item's status on this copy, whether the daily run set it by itself (a payment it found, a reason hidden for a
-    payer), and its charge (the bound on a Paid amount)."""
+    payer), its charge (the bound on a Paid amount), and whether it is a patient-group denial a person may mark Done (the
+    owner's decision 2: states.patient_denial)."""
     from .actions import LAST_DECISION
+    from .states import PATIENT_DENIAL_SIGNALS, patient_denial
     events = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_events'").fetchone())
     block = "f.appeal_block" if "appeal_block" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else "NULL"
+    sigs = ",".join("'" + x + "'" for x in PATIENT_DENIAL_SIGNALS)
     out: dict[str, dict] = {}
     for k in range(0, len(ids), 500):
         part = ids[k:k + 500]
         for r in conn.execute(f"""SELECT f.finding_id, f.status, f.auto_note, f.charge_cents, {LAST_DECISION if events else "NULL"} last,
-                                         {block} block
+                                         {block} block, f.signal, f.carc, CASE WHEN f.signal IN ({sigs}) THEN f.evidence END
                                   FROM findings f WHERE f.finding_id IN ({','.join('?' * len(part))})""", part):
             out[r[0]] = {"status": r[1], "charge_cents": r[3], "block": r[5],
-                         "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden")}
+                         "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden"),
+                         "patient_denial": patient_denial({"signal": r[6], "carc": r[7], "evidence": r[8]})}
     return out
 
 
@@ -1571,10 +1580,12 @@ def _sending_now(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
     return out | _preparing(conn, ids)
 
 
-def _person_status(ids: list[str], status: str, notes: str | None, rec: int | None, actor: str, seen: dict, single: bool) -> dict:
+def _person_status(ids: list[str], status: str, notes: str | None, rec: int | None, actor: str, seen: dict, single: bool,
+                   done: bool = False) -> dict:
     """A person's status change, checked and applied in one step: on a server inside one transaction on the store, on a
     serverless host against the copy it serves, then journaled. single: one item's change, refused as a whole (Refused)
-    when it must not be made; else the items that must not be changed are left as they are and named."""
+    when it must not be made; else the items that must not be changed are left as they are and named. done: a person's
+    Done on a patient-group denial (Paid with $0, the owner's decision 2), refused for any other item."""
     out: dict = {"n": 0, "changed": [], "in_flight": []}
 
     def sort(conn) -> list[str]:
@@ -1601,6 +1612,8 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                                                   f"{STATUS_LABELS.get(cur['status'], cur['status'])}. It was not changed.", status=cur["status"])
                 out["changed"].append(i)
                 continue
+            if single and done and not cur.get("patient_denial"):
+                raise Refused(400, "done", DONE_ONLY)
             if single and status == "resolved":
                 charge = cur.get("charge_cents") or 0
                 top = min(MAX_PAID_CENTS, PAID_TIMES_CHARGE * charge) if charge > 0 else MAX_PAID_CENTS
@@ -1608,7 +1621,7 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                     raise Refused(400, "amount", NO_AMOUNT)
                 if rec < 0:
                     raise Refused(400, "amount", "The amount paid cannot be below zero.")
-                if rec == 0 and cur.get("block") not in ZERO_PAID_BLOCKS:
+                if rec == 0 and not done and cur.get("block") not in ZERO_PAID_BLOCKS:
                     raise Refused(400, "amount", PAID_ZERO)   # nothing recovered: the item was not paid, it was lost or let go
                 if rec > top:
                     raise Refused(400, "amount", f"That is more than {'ten times the charge on this line' if top < MAX_PAID_CENTS else '$1,000,000'}"
@@ -1671,6 +1684,16 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
     and Lost take a reason (LET_GO_REASON), kept in the item's history."""
     body = await _body_object(request)
     status, notes, rec = _status_fields(body)
+    done = body.get("done")
+    if done is not None and done is not True:
+        raise HTTPException(400, DONE_STRICT)       # an override is strict JSON true (the hotfix rule): never "true" or 1
+    if done is True:
+        # Done (the owner's decision 2): Paid with $0.00, its note starting with Done so the history and the state say so
+        from .states import DONE_NOTE
+        if status != "resolved" or rec not in (None, 0):
+            raise HTTPException(400, "Done closes the item with nothing recovered: send it as Paid with $0.00.")
+        rec = 0
+        notes = DONE_NOTE + (f": {notes.strip()}" if notes and notes.strip() else "")
     seen = body.get("seen_status")
     if not _seen_ok(seen):
         raise HTTPException(400, "The status your page showed could not be read. Reload the page.")
@@ -1681,7 +1704,7 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
             raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
                                      "only with a note. Say why.")
         raise HTTPException(400, LET_GO_REASON)
-    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True)
+    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True, done is True)
     return {"ok": True}
 
 
