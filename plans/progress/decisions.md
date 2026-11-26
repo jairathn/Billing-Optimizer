@@ -123,7 +123,7 @@ then `fullsnap.py`, `diff_ba.py <base snap> <after snap> moved.json`, `pick.py m
       codes and EMA's books in the evidence (7b7d957). Tests on both store kinds and both hosts.
 - [x] Measured on a private world copy (11-24 data): base a6999b6 against ca14240, then the words of 7b7d957 on the same
       world. Hand checks with plain SQL; every work-now item a never-payable rule leads traced against its own rows.
-- [ ] Full suite at the final tip in python3 and 3.11.1 (see Tests).
+- [x] Full suite at 8cbaa10 in python3 and 3.11.1, node checks (see Tests). The private world copy is deleted.
 
 ## Design
 
@@ -209,6 +209,16 @@ then `fullsnap.py`, `diff_ba.py <base snap> <after snap> moved.json`, `pick.py m
 - Related suites (story, ema pages, decisions, docs, ema wiring, notes): 430 passed, 1 skipped, 4 failed in python3; the
   4 are test_notes_bodies_cli.py's date-bound failures, which fail the same way with this change stashed.
 - Node checks: calc_model_check 79 of 79, lab_review_check 143 of 143; features.js parses.
+- Full suite at 8cbaa10, python3 3.13.18 (SQLite 3.53.1): 2,815 passed, 56 failed, 29 skipped, 1 xfailed. 55 are the
+  date-bound failures the base has (test_fax.py 34, test_hotfix2.py 9, test_no_fax_route.py 5, test_notes_bodies_cli.py
+  4, test_hotfix2c.py 2, test_bulk_pause.py 1). The 56th, test_feed_and_day.py's banner page test (serverless), is
+  flaky: run alone 10 times on each tree it failed 2 times on the tree before decision 4 (8d067e5) and once on this
+  branch (the page reads Today before its banner is drawn).
+- Full suite at 8cbaa10, 3.11.1 (SQLite 3.40.0): 2,698 passed, 164 failed, 25 errors: the same 56, and 133 failures and
+  errors that are all `Connection.serialize` missing in that build (CLAUDE.md allows them; one is this unit's serverless
+  panel test, whose fixture builds an image).
+- 3.12.3 (SQLite 3.45.1) and the newest libraries (venv2_compat): test_payer_code_rules, test_story and test_docs,
+  169 passed and 1 skipped in each (at d38f78b, before the logging-only change of 8cbaa10).
 
 ## How to measure again (decision 4)
 
