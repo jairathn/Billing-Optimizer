@@ -1051,6 +1051,68 @@ def test_the_data_tabs_three_panels_draw_in_plain_words_at_a_desk_and_on_a_phone
 # ======================================================================================================================
 # 6. The command line (remitwatch.cli): diagnose, self-audit, archive, archive-restore
 # ======================================================================================================================
+class _FlakyLine:
+    """A fax line whose first status check loses its connection, and whose send always does (it may have gone out)."""
+    name = "srfax"
+
+    def __init__(self):
+        self.calls = {"status": 0, "send": 0}
+
+    def status(self, ref):
+        import requests
+        self.calls["status"] += 1
+        if self.calls["status"] == 1:
+            raise requests.ConnectionError("connection dropped")
+        return {"state": "sent"}
+
+    def send(self, *a, **kw):
+        import requests
+        self.calls["send"] += 1
+        raise requests.ConnectionError("connection dropped")
+
+
+def _fake_fax_run(monkeypatch, line):
+    """The fax run's own work replaced by one status check and one send through the provider it was handed."""
+    import requests
+
+    from remitwatch import api, fax, repair
+    seen = {}
+
+    def refresh(prov, budget_s=0, lock=None, **kw):
+        seen["status"] = prov.status("F1")
+        try:
+            prov.send("cover", "fax number")
+        except requests.ConnectionError:
+            seen["send_failed"] = True
+        return {}
+    monkeypatch.setattr(fax, "provider", lambda env=None: line)
+    monkeypatch.setattr(api, "_fax_refresh", refresh)
+    monkeypatch.setattr(api, "_send_followups", lambda prov, actor, budget_s=0, lock=None, **kw: {})
+    real = repair.resilient
+    monkeypatch.setattr(repair, "resilient", lambda c, t, **kw: real(c, t, **dict(kw, sleep=lambda s: None)))
+    return seen
+
+
+@pytest.mark.parametrize("entry", ["cycle", "cron"])
+def test_the_daily_fax_runs_reads_are_tried_again_and_a_send_never_is(entry, tmp_path, monkeypatch):
+    """needs_H L2 on both of the fax line's daily entries: the server cycle's fax run (cli._fax_run, which `cycle` and
+    `fax-cycle` call) and the fax line's own daily call (/api/cron/faxes). A status check that lost its connection is
+    tried again (remitwatch.repair); a send that lost it is never sent again (it may have gone out)."""
+    from remitwatch import cli
+    db = _db(tmp_path)
+    Store(db).close()
+    line = _FlakyLine()
+    seen = _fake_fax_run(monkeypatch, line)
+    if entry == "cycle":
+        cli._fax_run(db, budget_s=60)
+    else:
+        tc, auth = _server_client(monkeypatch, db)
+        r = tc.post("/api/cron/faxes", headers=dict(auth, **XHR))
+        assert r.status_code == 200, r.text
+    assert seen["status"] == {"state": "sent"} and line.calls["status"] == 2         # tried again after the dropped line
+    assert seen.get("send_failed") and line.calls["send"] == 1                      # a send goes once
+
+
 def test_the_command_line_writes_the_bundle_runs_the_self_audit_and_moves_old_claims(tmp_path, capsys):
     """needs_H W7 and the brief's commands: `diagnose` writes the zip, `self-audit` runs it now, `archive --dry-run` says what
     would move (counts only, never a claim number), `archive --run` moves it, `archive-restore` brings a bill back."""

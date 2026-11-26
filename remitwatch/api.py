@@ -5640,6 +5640,10 @@ def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = D
     prov = fax.provider()
     if prov is None:
         return {"skipped": fax.not_here() or "The fax line is not set up."}
+    # the line's reads are tried again after a dropped connection (remitwatch.repair), as in the cycle's fax run; a send
+    # is never wrapped: it may have gone out
+    from . import repair
+    prov = repair.resilient(prov, "srfax", only=("status", "inbox", "fetch", "check", "find_sent"))
     budget = max(60.0, runtime.max_seconds() - 60.0) if runtime.serverless() else 3600.0
     try:
         with fax_run("daily run") as lock:
