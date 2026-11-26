@@ -488,3 +488,30 @@ def test_an_837_read_before_the_patient_loop_was_read_is_filled_in_when_read_aga
     blob = json.dumps([list(r) for r in c.execute("SELECT * FROM claims_837")], default=str).upper()
     assert "DELTA" not in blob and "TESTLAST" not in blob and "2016-07-07" not in blob
     s.close()
+
+
+# ================================================================================================ a claim sent to its secondary
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_sent_to_a_payer_as_its_secondary_is_sized_by_what_the_primary_left(tmp_path, kind):
+    """(Residual: a claim sent to a payer as its secondary was priced at that payer's full rate.) Humana pays 99214 at
+    $117.60 as a primary. Three claims only the 837s know went to Humana as the secondary payer (SBR01 S) on September 15
+    after Anthem answered on paper (no Anthem remittance is on file), and Humana has not answered by November 10:
+    - CB0000Y01: Anthem paid $94.08 and left the patient $23.52 (AMT*EAF): the item is $23.52, not $117.60;
+    - CB0000Y02: Anthem's left amount is only in its PR adjustments on the line (no AMT*EAF): $30.00;
+    - CB0000Y03: Anthem left the patient nothing (AMT*EAF 0): Humana owes nothing, no item."""
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [
+        clm837("CB0000Y01C017", V, payer=HUMANA, resp="S", other={"payer": ANTHEM, "paid": 94.08, "left": 23.52, "lines": [(94.08, 23.52)]}),
+        clm837("CB0000Y02C017", V, payer=HUMANA, resp="S", other={"payer": ANTHEM, "paid": 87.60, "lines": [(87.60, 30.00)]}),
+        clm837("CB0000Y03C017", V, payer=HUMANA, resp="S", other={"payer": ANTHEM, "paid": 117.60, "left": 0.0, "lines": [(117.60, 0)]}),
+    ], "20260915")
+    _remits(s, tmp_path, _visits(), "20261110", payer="HUMANA", payer_id="61101")
+    found = _chased(s, "t1")
+    _show(found)
+    assert found["CB0000Y01C017"]["shortfall_cents"] == 2352
+    assert found["CB0000Y02C017"]["shortfall_cents"] == 3000
+    assert "CB0000Y03C017" not in found
+    ev = json.loads(found["CB0000Y01C017"]["evidence"])
+    assert ev["sent_837"]["payer_resp"] == "S" and ev["sent_as"]["left_cents"] == 2352
+    assert "as its secondary payer after ANTHEM answered" in found["CB0000Y01C017"]["hint"]
+    s.close()

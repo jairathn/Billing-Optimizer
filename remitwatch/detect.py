@@ -5274,6 +5274,23 @@ class Detector:
             # key of the claim in its file (a person finds the file by it)
             ev["sent_837"] = {"day": r8[0], "first": r8[1], "frequency": r8[2] or None, "payer_id": r8[4], "payer": r8[5],
                               "sends": r8[9], "claim_837_key": r8[7]}
+            got = (self._837_send_info([r8[7]]).get(r8[7]) or {}) if r8[7] else {}
+            resp = (got.get("payer_resp") or "").strip().upper()
+            if got.get("read_version"):
+                ev["sent_837"].update(payer_resp=resp or None, filing_indicator=got.get("filing_indicator"))
+            if (resp and resp != "P") or got.get("other_payer_resp") or got.get("other_paid_cents") is not None:
+                # sent to this payer after another payer answered it (its secondary or later payer: SBR01, and the other
+                # payer's loop): it owes at most what that payer left to the patient (AMT*EAF, else that payer's PR
+                # adjustments), never its own full rate
+                left = got["other_left_cents"] if got.get("other_left_cents") is not None else got.get("other_pr_cents")
+                ev["sent_as"] = {"place": resp or None, "other_payer": got.get("other_payer_name"),
+                                 "other_paid_cents": got.get("other_paid_cents"), "left_cents": left}
+                if left is not None and expected is not None and left < expected:
+                    expected = max(0, left)
+                if left is not None and left <= 0:
+                    # the payer before it left the patient nothing: this payer owes nothing on the claim
+                    self.ema_counts["open_claim_second_send_nothing_left"] += 1
+                    return False
         # only another payer answered (trace finding T-C2): what it paid comes off the item's size, and the item says that the
         # primary's remittance is missing
         sec = cd.get("secondary") or []
@@ -5387,9 +5404,21 @@ class Detector:
             hints.append(ec.bare_zero_note(cd["ema_bare_zero"]))
         if unsent:
             hints.append("EMA shows it waiting in its print batch, with no date it was sent: print and mail it, or send it electronically")
-        if cd.get("bill_answered"):
+        if cd.get("added_after_answer"):
+            hints.append(f"This bill was answered on {cd['bill_answered']}; it went out again on {sent} with "
+                         f"{'this service' if len(codes) == 1 else 'these services'} ({label}), which no remittance of the bill has "
+                         "answered: look the resent claim up on the payer's portal")
+        elif cd.get("bill_answered"):
             hints.append(f"Another submission of this bill was answered on {cd['bill_answered']}: if that answer was for this claim, "
                          "work it from that remittance")
+        sa = ev.get("sent_as")
+        if sa:
+            place = {"S": "secondary", "T": "tertiary"}.get(sa.get("place") or "", "second or later")
+            who_ = sa.get("other_payer") or "the payer before it"
+            paid_ = f" (paid ${sa['other_paid_cents'] / 100:,.2f})" if sa.get("other_paid_cents") is not None else ""
+            hints.append(f"Sent to {grp} as its {place} payer after {who_} answered{paid_}: " + (
+                f"{grp} owes at most what {who_} left to the patient, ${sa['left_cents'] / 100:,.2f}" if sa.get("left_cents") is not None else
+                f"the 837 does not say what {who_} left to the patient, so the size is {grp}'s own rate, more than a {place} payer pays"))
         if k["amb_paid"]:
             hints.append(f"EMA shows ${k['amb_paid']/100:,.2f} paid on this claim by a payment row that names {ema_payer} but is "
                          "not marked insurance or patient: if it is the insurer's, the claim was answered")
