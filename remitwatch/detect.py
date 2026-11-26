@@ -4288,6 +4288,7 @@ class Detector:
         cands = self.__dict__.pop("_mppr_cands", None) or []
         if not cands:
             return
+        cand_keys = {l["line_key"] for l, *_x in cands}
         billed = self._billed_same_day(cands)
         want = {(l.get("service_date"), l.get("rendering_provider_npi")) for l, *_x in cands}
         same_day: dict[tuple, list] = defaultdict(list)
@@ -4323,6 +4324,8 @@ class Detector:
                 rank = 2 if len(above) == 1 else 3
                 pct, learned = self.mppr_pct({"payer_group": l["payer_group"], "surg_rank": rank})
                 if abs(allowed - rate * pct) <= 100:
+                    if self._every_procedure_cut(l, rate, allowed, basis, one_off, day, worth, cand_keys):
+                        continue
                     self.ema_counts["mppr_other_claim"] += 1
                     continue                    # the payer's multiple-procedure share, as for any second procedure
                 if allowed / rate < pct - 0.07:
@@ -4378,6 +4381,52 @@ class Detector:
                      f"highest-valued one that day" + (f"; {_usd(net)} net with the other claim" if back else ""))
             self.ema_counts["mppr_highest_cut_other_claim"] += 1
             self._emit("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal", title, l, rate, net, one_off[8], one_off[9], ev)
+
+    def _every_procedure_cut(self, l, rate: int, allowed: int, basis: str, one_off: tuple, day: list, worth: dict,
+                             cand_keys: set) -> bool:
+        """A procedure rightly second on a split day (another procedure that day is worth more), paid at the payer's share,
+        on a day on which the payer paid no procedure as the first: the higher-valued one, on the other claim, was cut to
+        the same share (Humana MA cut a Mohs and the surgery center's repair alike: the world showed 7 such days, about
+        $2,000). One of the day's procedures is owed its missing half. The higher-valued one is the one by the payer's own
+        rates, but its rate in its own setting may rest on a few lines (too few to make it an item of its own), so the item
+        is listed on this line, at the least of the two missing halves (this line's rests on a firm rate). Emitted, True.
+        No item where any procedure of the day has no answer on file (the 837's), has no rate of the payer's own, or was
+        paid above its share, or where the higher-valued one is an item of its own (it carries the day)."""
+        pct2, _learned = self.mppr_pct({"payer_group": l["payer_group"], "surg_rank": 2})
+        rows, top = [], None
+        for x in sorted(day, key=lambda x: (-worth[x["line_key"]][0], -(x.get("allowed_cents") or 0), x["line_key"])):
+            if x.get("procedure_code") in ADD_ON_CODES:
+                continue
+            w, known = worth[x["line_key"]]
+            got = x.get("allowed_cents")
+            if got is None or not known or got > w * pct2 + 100:
+                return False
+            if top is None:
+                top = x
+            rows.append({"code": x.get("procedure_code"), "claim": x.get("patient_control_number"), "setting": x.get("pos_class") or "office",
+                         "allowed_cents": got, "rate_cents": w, "share": pct2})
+        if top is None or top["line_key"] in cand_keys or worth[top["line_key"]][0] <= rate:
+            return False
+        top_w, top_got = worth[top["line_key"]][0], top.get("allowed_cents") or 0
+        least = min(rate - allowed, top_w - top_got)
+        if least < 200 or least / rate < 0.05:
+            return False
+        code, tcode = l["procedure_code"], top.get("procedure_code")
+        grp = l.get("payer_group") or "The payer"
+        mine = rate - allowed <= top_w - top_got
+        note = (f"{grp} paid every procedure of the day at its share for a second procedure: {code} here ({_usd(allowed)} of "
+                f"{_usd(rate)}) and {tcode} on the patient's other claim that day ({_usd(top_got)} of {_usd(top_w)}, {grp}'s own rate "
+                f"for its setting). No procedure that day was paid as the first. The {tcode} is the higher-valued: it was owed in full, "
+                f"{_usd(top_w - top_got)} more. {_usd(least)} is the least owed for the day"
+                + (f" (the {code}'s own missing half, at its firm rate)" if mine else "")
+                + ". Ask the payer to reprocess the day's claims together")
+        ev = dict(one_off[10], every_cut=True, same_day=rows, net_cents=least, note=note,
+                  ranked_with="the patient's other claims of the day, by the payer's own rate in each setting")
+        title = (f"{code} allowed {_usd(allowed)} vs usual {_usd(rate)} ({grp}): every procedure of the day was paid as a second one; "
+                 f"{_usd(least)} owed at the least")
+        self.ema_counts["mppr_every_procedure_cut"] += 1
+        self._emit("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal", title, l, rate, least, one_off[8], one_off[9], ev)
+        return True
 
     def _billed_same_day(self, cands: list) -> dict[str, list[tuple]]:
         """The reducible procedures the 837s show billed by each candidate's clinician, on its date of service, for its

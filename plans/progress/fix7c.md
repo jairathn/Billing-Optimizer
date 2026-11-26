@@ -22,6 +22,16 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   a plan's own rate is read for the line's own year only; (3) `_rate` falls back to the facility setting (EMA-only claims
   of codes paid only at the surgery center had no size once the 837 named the setting).
 
+- 1d16cda: a split day reads the other claim's 835 answer where the day's patient match misses it (the 837's bill,
+  member id and NPI find it); a procedure of the day the payer denied or took back ranks nothing.
+- 98b55a6: a claim with no remittance (EMA's C5 sizing through `_rate`) is sized by the code's typical amount across
+  settings when no one setting has enough lines (the run-3 EMA_DENIED with no size).
+- (this commit) `_every_procedure_cut`: a split day on which the payer paid no procedure as the first (the Mohs and the
+  surgery center's repair both at half) is owed one missing half, listed on the Mohs line at the least of the two halves.
+  The world showed 7 such days with no item (5 Mohs + 14041, 2 Mohs + 14301; about $2,000), because the repair's
+  facility rate rests on 1 to 3 lines (not an item of its own). Tests: 2 new (both store kinds), each guard broken on
+  purpose and restored (the cut check, the item-of-its-own check, the whole rule).
+
 ## In progress
 - Measurement on the world (brief item 2): base = fc73dec, branch = this branch. Private folder
   `$S/tk/units/fix7c/` (mode 700): `base_tree/` (git archive of fc73dec), `audit/p2/world.sqlite` + `ema_ledger.sqlite`
@@ -56,5 +66,37 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   18 E/M lines, $109.97 - the hand-check's January lines). Moves on Work now: 52 on, 128 off. Three regressions found and
   fixed in 540dffb (see Done). Second branch run in progress.
 
+- Second and third branch runs: regressions found and fixed (1d16cda, 98b55a6).
+- Fourth branch run (98b55a6): detect 227.4 s, peak 1,064 MB (machine shared with other units; base 197.8 s, 1,054 MB;
+  runs vary 194 to 227 s with the load). 4,398 on Work now (base 4,478): 48 added, 128 removed.
+- A16 view W on run 4 (in scope): correct 1,351 (base 1,380); wrong amount 171 (151); undecided 51 (49); money left on
+  the table, short below the rate, 172 services $7,537 (190, $12,945). The changes A16 sees: 19 Humana MA Mohs units and
+  2 UHC units it called owed are now listed; 3 Anthem 99213 units at a plan's own rate leave the list. A16's 20 new
+  "wrong amount over 25%" are the Humana split days: A16's truth is the Mohs's gross half ($292.56 or $274.22) and does
+  not net what a correct ranking takes back from the repair paid in full; the branch's net is the money the payer owes
+  for the day (hand-traced, 12 of 12 right). A16 cannot judge OLD_FEE_SCHEDULE (no unit reference).
+- The bar. UHC MA January: all 18 January 2026 visit lines UHC MA paid on its 2025 schedule with a payment are in one
+  repricing item, 58e4941184a9954aa7ea58a1 ($109.97: 99203 x3, 99204 x1, 99213 x12, 99214 x2, physician and the
+  85 percent tier both checked against the 2025 and 2026 amounts); the base listed 6 of them as one-offs (absorbed) and
+  missed 12. The 6 other January lines at 2025 amounts paid $0 (deductible): the patient's share, rightly left out.
+  Humana MA split days with a surgery-center claim, 2026: 14 of 27 halved 17311s and 11 of 12 halved 17313s carry an
+  item; of the 14 without: 6 rightly second (the repair worth more at its facility rate: 14041, 14061, 14301, 15260 in
+  full), 1 nets under the threshold ($14.79), 7 both cut (now caught by `_every_procedure_cut`, run 5 to confirm).
+  The hand-check's own 4 finding ids are not on file in this container; they match the description of the listed days.
+- Hand-trace of a stratified 60 of the 176 moves (12 Humana MA added, 6 other added, 42 removed across Anthem, Wausau,
+  UHC, UHC MA, UMR, Humana, by signal): 57 right, 1 right with an amount question, 2 doubtful (below). Removed: the
+  surgery center's facility rate (Anthem repairs, 11402s, 99204-57, 12031; 5 MPPR_EXCESS, 5 SECOND_RATE, 1 downcode,
+  1 provider gap), plans with schedules of their own (Anthem employer plan and products, the UMR and Wausau plan, PAs at
+  85.7 percent), UHC's Indiana 85 percent, UHC MA's January lines absorbed into the repricing item, a 2024 contract item
+  whose office lines fell under its 50-line floor once the surgery center's were counted as facility.
+
 ## Open questions
-- (none yet)
+- UHC Kentucky PA/NP: paid in full from January 2025 to late October 2026, then 85 percent on some lines. The branch
+  lists the 99213s after the switch as one routine-rate review framed as a rate change (1add3df444791b0e54dc8909,
+  check the contract first), but two one-offs dated after the switch (ee002bd949c21d04ccba43bb 17110 $18.88,
+  f1ceae8b8ba61059469ba9e3 99214 $16.56) are listed as appeals: likely the same change. If UHC confirms it, the Kentucky
+  rule needs an end date.
+- UMR routine-rate review 22130d50949acee5d66aad47 (5 NP 99214 lines, $312.80): sized against the plan's full rate;
+  if the plan pays nurse practitioners 85.7 percent as elsewhere, the gap is about $217.
+- Repricing items list only lines short by the one-off threshold ($2 and 5 percent): UHC MA also paid 16 January
+  procedure lines at 2025 amounts with smaller increases (about $60 in all, mostly under $5 a line).

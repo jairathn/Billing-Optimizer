@@ -265,6 +265,38 @@ def test_the_higher_valued_procedure_halved_on_a_split_day_is_owed_its_half_net(
     w.store.close()
 
 
+def test_a_split_day_on_which_the_payer_cut_every_procedure_is_owed_the_least_missing_half(tmp_path, kind):
+    """Humana MA paid both procedures of a split day as second ones: the Mohs $292.56 of $585.12 at the office, and the
+    surgery center's 14041 $294.73 of $589.45 (a facility rate a few lines show, too few to stand as a rate of its own, so
+    the 14041 is no item of its own). The 14041 is the higher-valued, so the Mohs is rightly the second, but nothing that day
+    was paid as the first procedure: one of the two is owed its missing half, at the least the Mohs's $292.56. Guards:
+    where the 14041 was paid in full, or above a second procedure's share (75%), the half Mohs is right (no item)."""
+    w = World(tmp_path, kind)
+    _split_days(w, [("17311", "292.56", "14041", "294.73"), ("17311", "292.56", "14041", "589.45"),
+                    ("17311", "292.56", "14041", "442.09")])
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", 58512, 29256)}, got
+    f = w.one(f"patient_control_number='{pcn(800)}'")
+    assert f["ev"]["every_cut"] is True and "every procedure of the day" in f["title"]
+    day = {d["code"]: d for d in f["ev"]["same_day"]}
+    assert day["14041"]["allowed_cents"] == 29473 and day["14041"]["rate_cents"] == 58945 and day["14041"]["claim"] == pcn(801)
+    assert "$292.56" in f["ev"]["note"] and "$294.73" in f["ev"]["note"] and "$294.72" in f["ev"]["note"], f["ev"]["note"]
+    w.store.close()
+
+
+def test_a_split_day_whose_higher_valued_procedure_is_an_item_of_its_own_is_listed_once(tmp_path, kind):
+    """Where the payer's facility rate for the surgery center's 14041 is firm (20 lines and more), the 14041 halved beside a
+    halved Mohs is the day's item (its missing half, $294.72, on its own line), and the Mohs is not listed as well."""
+    w = World(tmp_path, kind)
+    w.remit(many(300, 20, "14041", "1800.00", "589.45", cfi="16", pos="24"), "20260302", payer="HUMANA", payer_id="HUMTEST")
+    _split_days(w, [("17311", "292.56", "14041", "294.73")])
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(801): ("UNDERPAID_VS_OWN_RATE", 58945, 29472)}, got
+    w.store.close()
+
+
 def _sent_837(w: World, rows: list[tuple[int, int, str, str, str]]) -> None:
     """837 claims of these split days whose answers are not on file: (claim number, patient, date of service, code, place of
     service), billed by the same clinician to the same member number as the patient's 835 claims."""
