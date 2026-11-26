@@ -169,6 +169,15 @@ class Tracer:
             " carc, claim_action, coverage_type, denial_date, bill_created from ema_rows where claim_id >= ? and claim_id < ?",
             (bill, bill + "~")).fetchall()
         ema = [e for e in ema if bill_of(e[19]) == bill]
+        # the day each weekly export was made (its rows tell the claim's state as of that day)
+        made = {}
+        if has_table(self.w, "ema_sources"):
+            made = {r[0]: iso(r[1]) for r in self.w.execute("select source_name, created_at from ema_sources")}
+        srcs = {r[0]: r[1] for r in self.w.execute("select rowid, source_name from ema_rows where claim_id >= ? and "
+                                                     "claim_id < ?", (bill, bill + "~"))} if made else {}
+        exp_days = sorted({made.get(v) for v in srcs.values() if made.get(v)})
+        if exp_days:
+            self.p(f" EMA weekly exports holding this bill, made: {', '.join(rel(d, anchor) for d in exp_days)}")
         allp = sorted({c[3] for c in claims} | {c[2] for c in c837} | {e[19] for e in ema})
         idx = {p: i + 1 for i, p in enumerate(allp)}
         self.p(f"== service {code}/{comp} units: claim ids of bill={len(allp)}; 835 processings={len(claims)}; "

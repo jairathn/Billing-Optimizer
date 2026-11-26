@@ -1201,6 +1201,7 @@ class Audit:
                 self.map837[key] = fam
         self.answer_days = defaultdict(list)
         self.sends_by_bill = defaultdict(list)
+        self.bill_payers = defaultdict(set)
         for (k, bht, pcn, total, freq, pname, pid, sdate, pos, sub) in R.c837:
             pcn = (pcn or "").strip().upper()
             bht = iso(bht)
@@ -1210,6 +1211,8 @@ class Audit:
             fam = self.map837.get((norm_name(pname), specific_payer_id(pid))) or self.fams.of(pname, pid)
             freq = (freq or "").strip()
             self.sends_by_bill[bill].append((bht, fam, freq, pcn, "837"))
+            # A17 rule 5: the payer a bill was sent to (family and name), for matching its EMA claim by content
+            self.bill_payers[bill] |= {fam, "N:" + norm_name(pname)}
             for p in answers_by_pcn.get(pcn, []):
                 if p.date >= bht:
                     self.answer_days[fam].append(days_between(bht, p.date))
@@ -2470,6 +2473,8 @@ class Audit:
                 continue
             c = by_dcc.get((s.dos, s.code, s.charge_pu * max(1, s.U)), []) or by_dcc.get((s.dos, s.code, s.charge_pu), [])
             c = [E for E in c if not E.svcs]
+            # A17 rule 5: an EMA line of another payer than the one the bill went to is not the bill's
+            c = [E for E in c if self.same_payer_keys(self.ema_payer_keys([E]), self.bill_payers.get(s.bill))]
             if len(c) == 1:
                 s.eml, s.ema_how = c, "unique"
                 c[0].svcs.append(s)
@@ -2536,9 +2541,10 @@ class Audit:
         pass dropped found most of them paid through EMA claims no link named). EMA posts a claim's charges and writes its
         837 the same day or the day after (TWIN_SLACK_DAYS). A bill whose EMA claim nothing names (no link, no line matched)
         is matched to the EMA claims whose charges were first posted that day or the day before its first send, with
-        exactly its billed lines (day, code, charge), and that no link ties to any bill (nor the surgery center's facility
-        claims): its send-day twins. They are used one to one only: when no more bills went out that day with those lines
-        (and no EMA claim of their own) than there are such EMA claims. One twin is the bill's EMA claim (its lines are
+        exactly its billed lines (day, code, charge), of the bill's payer (the same family, or the same payer name: EMA
+        writes the 837s, so its payer name is the 837's), and that no link ties to any bill (nor the surgery
+        center's facility claims): its send-day twins. They are used one to one only: when no more bills went out that
+        day with those lines to that payer (and no EMA claim of their own) than there are such EMA claims. One twin is the bill's EMA claim (its lines are
         the bill's services' EMA lines); several make the bill answered only when every one of them is (truth:
         twin_answer)."""
         R = self.R
@@ -2550,6 +2556,7 @@ class Audit:
         for E in lines.values():
             by_link[E.link].append(E)
         pool = defaultdict(list)
+        link_payer = {}
         for link in sorted(by_link):
             Es = by_link[link]
             if link in tied or any(E.bill or E.svcs for E in Es):
@@ -2558,6 +2565,7 @@ class Audit:
             fc = min((E.first_charge for E in Es if E.first_charge), default="")
             if not ls or not fc:
                 continue
+            link_payer[link] = self.ema_payer_keys(Es)
             for k in range(TWIN_SLACK_DAYS + 1):
                 pool[(add_days(fc, k), ls)].append(link)
         # each bill's first send and its lines (the 837s), for the bills whose EMA claim nothing names
@@ -2572,9 +2580,10 @@ class Audit:
             if bill in known:
                 continue
             if bill not in first or (bht, k) < first[bill][:2]:
-                first[bill] = (bht, k, sdate)
+                fam = self.map837.get((norm_name(pname), specific_payer_id(pid))) or self.fams.of(pname, pid)
+                first[bill] = (bht, k, sdate, {fam, "N:" + norm_name(pname)})
         consumers = defaultdict(list)
-        for bill, (bht, k, sdate) in first.items():
+        for bill, (bht, k, sdate, payer) in first.items():
             agg = defaultdict(int)
             for (_k, seq, code, mods, charge, units, ldate) in self.l837_raw.get(k, []):
                 code = (code or "").strip().upper()
@@ -2586,34 +2595,56 @@ class Audit:
         self.twin_of = {}
         n = Counter()
         for key in sorted(consumers):
-            bills = consumers[key]
-            links = pool.get(key, [])
-            if not links:
-                continue
-            if len(bills) > len(links):
-                n["twins_more_bills_than_twins"] += len(bills)
-                continue
-            for bill in bills:
-                self.twin_of[bill] = list(links)
-                for skey in self.bill_svcs.get(bill, ()):
-                    sv = self.svcs.get(skey)
-                    if sv is None or sv.eml or not sv.dos:
-                        continue
-                    tw = [[E for E in by_link[lk] if E.svc == sv.dos and E.cpt == sv.code] for lk in links]
-                    tw = [x for x in tw if x]
-                    if len(tw) != len(links):
-                        continue
-                    if len(links) == 1:
-                        sv.eml, sv.ema_how = tw[0], "send_day_twin"
-                        for E in tw[0]:
-                            E.svcs.append(sv)
-                        n["services_one_twin"] += 1
-                    else:
-                        sv.twins, sv.ema_how = tw, "send_day_twins"
-                        n["services_several_twins"] += 1
-                n["bills_with_twins"] += 1
+            groups = defaultdict(list)
+            for bill in consumers[key]:
+                payer = first[bill][3]
+                own = tuple(lk for lk in pool.get(key, []) if self.same_payer_keys(link_payer.get(lk), payer))
+                if own:
+                    groups[own].append(bill)
+            for links, bills in sorted(groups.items()):
+                if len(bills) > len(links):
+                    n["twins_more_bills_than_twins"] += len(bills)
+                    continue
+                self.assign_twins(bills, list(links), by_link, n)
         for k, v in n.items():
             self.stats["ema_" + k] = v
+
+    def ema_payer_keys(self, Es):
+        """A17 rule 5: the payer of EMA lines, as families and payer names (EMA's primary payer, else the payers that
+        posted on them). Empty when EMA names none."""
+        names = self.R.ema_names
+        pids = [E.primary for E in Es if E.primary is not None] or [p_ for E in Es for p_ in E.pnames]
+        return {self.efam(p_) for p_ in pids} | {"N:" + norm_name(names.get(p_, "")) for p_ in pids if names.get(p_)}
+
+    @staticmethod
+    def same_payer_keys(a, b):
+        """Two payers are the same when they share a family or a payer name; unknown on either side does not refuse."""
+        if not a or not b:
+            return True
+        return bool(set(a) & set(b))
+
+    def assign_twins(self, bills, links, by_link, n):
+        """A17 rule 5: each of these bills takes these send-day twins (one: its EMA claim; several: answered only when
+        every one is)."""
+        for bill in bills:
+            self.twin_of[bill] = list(links)
+            for skey in self.bill_svcs.get(bill, ()):
+                sv = self.svcs.get(skey)
+                if sv is None or sv.eml or not sv.dos:
+                    continue
+                tw = [[E for E in by_link[lk] if E.svc == sv.dos and E.cpt == sv.code] for lk in links]
+                tw = [x for x in tw if x]
+                if len(tw) != len(links):
+                    continue
+                if len(links) == 1:
+                    sv.eml, sv.ema_how = tw[0], "send_day_twin"
+                    for E in tw[0]:
+                        E.svcs.append(sv)
+                    n["services_one_twin"] += 1
+                else:
+                    sv.twins, sv.ema_how = tw, "send_day_twins"
+                    n["services_several_twins"] += 1
+            n["bills_with_twins"] += 1
 
     def twin_answer(self, s):
         """A17 rule 5: a service with several send-day twins is answered only when every twin is: paid when each twin
@@ -5934,6 +5965,11 @@ def build_selftest_store():
         F.ema_line(lk, "2026-06-23", "99212", [(1, "charge", 9000, T1, None), (30, "pay", 6000, T1, "CHK%d" % lk)],
                    person=per)
     F.exp("sub", ("ZZ76TWIN4", "99212", "G", "2026-06-23"), ("NEVER_ANSWERED", "no_answer"), guard=True)
+    # an EMA claim of the same lines first charged the send day, but of another payer, is not the claim's twin
+    F.send837("ZZ76TWIN7C017", "2026-06-30", oneline("99213", 15000, 0, "2026-06-29"))
+    F.ema_line(900631, "2026-06-29", "99213", [(1, "charge", 15000, "TESTPAY OTHER", None),
+                                               (30, "pay", 9000, "TESTPAY OTHER", "CHK900631")], person=7631)
+    F.exp("sub", ("ZZ76TWIN7", "99213", "G", "2026-06-29"), ("NEVER_ANSWERED", "no_answer"))
     F.fix = None
     F.con.commit()
     return F
