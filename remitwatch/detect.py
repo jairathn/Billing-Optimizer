@@ -2769,7 +2769,11 @@ class Detector:
             got = self.used_units.setdefault(detail["line_key"], [0, 0.0])
             free = (detail.get("units") or 1) - got[0]
             seen = free <= 0
-            f["recovered_cents"], f["recovered_date"] = (0 if seen or not counts else max(paid, 0)), paid_date
+            # what actually arrived after the item's answer, when the rule measured less than the payment (the payer took
+            # back an earlier payment of the service with it: the owner's decision 3)
+            cap = detail.get("arrived_cents")
+            got_now = max(paid if cap is None else min(paid, int(cap)), 0)
+            f["recovered_cents"], f["recovered_date"] = (0 if seen or not counts else got_now), paid_date
             if not seen:
                 got[0] += min(free, need)
                 got[1] += f["recovered_cents"]

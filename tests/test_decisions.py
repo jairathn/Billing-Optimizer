@@ -98,6 +98,59 @@ def test_d3_a_payment_as_secondary_the_same_day_as_the_denial_came_with_the_answ
     assert (a["action"], a["counts_as_recovery"]) == ("close_with_proof", False)
 
 
+def _readjudicated(store, pcn: str, again: float):
+    """ACME denied the visit as primary as a duplicate (OA-18) on March 20. Its remittance of April 10 takes back $9.43 it
+    had paid for the service before, a payment not on file (a reversal, claim status 22), and pays it again as secondary,
+    `again` dollars: it processed again a claim it had already paid."""
+    lk = remit(store, "2026-03-20", [cl(pcn, [ln("99213", 150.00, 0, None, [("OA", "18", 150.00)], lcn="1")])])[0]
+    rest = round(150.00 - 60.00 - again, 2)
+    remit(store, "2026-04-10", [cl(pcn, [ln("99213", -150.00, -9.43, None, [("OA", "23", -60.00), ("CO", "45", -80.57)], lcn="1")], status="22"),
+                                cl(pcn, [ln("99213", 150.00, again, round(150.00 - rest, 2), [("OA", "23", 60.00), ("CO", "45", rest)], lcn="1")],
+                                   status="2")])
+    return lk
+
+
+def test_d3_a_payment_that_came_with_a_takeback_of_an_earlier_one_recovers_only_what_arrived(store):
+    """ACME's payment as secondary ($9.26) came in the same remittance as its takeback of the $9.43 it had paid before (a
+    payment not on file): nothing new arrived after the denial (the two net to a $0.17 takeback). The item closes, paid on
+    its line, with no recovery, and the note says what was taken back. Paid again at $20.00 instead, $10.57 arrived: that
+    is the recovery, never the whole $20.00."""
+    lk = _readjudicated(store, "CB0000911C017", 9.26)
+    a = only(ar.units_split(store.conn, [item(store, lk, "DENIED_DUPLICATE_UNPAID", expected=9000)]))
+    assert (a["action"], a["paid_cents"], a["counts_as_recovery"]) == ("close_with_proof", 926, False), a
+    assert "took back $9.43" in a["note"] and "nothing new arrived" in a["note"], a["note"]
+    lk = _readjudicated(store, "CB0000912C017", 20.00)
+    a = only(ar.units_split(store.conn, [item(store, lk, "DENIED_DUPLICATE_UNPAID", expected=9000)]))
+    assert (a["action"], a["paid_cents"], a["counts_as_recovery"], a["arrived_cents"]) == ("close_with_proof", 2000, True, 1057), a
+    assert "took back $9.43" in a["note"] and "$10.57 arrived" in a["note"], a["note"]
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_d3_the_detection_run_records_only_what_arrived_after_a_takeback(tmp_path, kind):
+    """The same through a detection run, on both kinds of store: Anthem denies a visit as a duplicate (OA-18), then one
+    remittance takes back $9.43 it had paid before (not on file) and pays $20.00 as secondary. The item closes with
+    $10.57 recovered, what arrived; a twin whose new payment ($9.26) is less than the takeback recovers nothing."""
+    from remitwatch.detect import Detector
+    from tests.test_settled_elsewhere import _add, _clp, _line, _store, _usual
+    s = _store(tmp_path, kind)
+    dup = "CAS*OA*18*223.65~"
+    first = [_clp(f"CB0000R0{i}C017", "1", _line("0.00", dup)) for i in (1, 2)]
+    _add(s, tmp_path, _usual("12", "100.00") + first, "20261001")
+    Detector(s, run_id="t1").run()
+    second = []
+    for i, again in ((1, "20.00"), (2, "9.26")):
+        rest = f"{223.65 - 60.00 - float(again):.2f}"
+        second += [_clp(f"CB0000R0{i}C017", "22", _line("9.43", "CAS*OA*23*-60.00~CAS*CO*45*-154.22~", sign="-"), paid="9.43"),
+                   _clp(f"CB0000R0{i}C017", "2", _line(again, f"CAS*OA*23*60.00~CAS*CO*45*{rest}~", f"{60.00 + float(again):.2f}"), paid=again)]
+    _add(s, tmp_path, second, "20261110")
+    Detector(s, run_id="t2", today="2026-11-20").run()
+    rows = {r["patient_control_number"]: dict(r) for r in s.query(
+        "SELECT * FROM findings WHERE procedure_code='99214' AND category='denial' AND COALESCE(stale,0)=0")}
+    got = {k[:9]: (v["status"], v["recovered_cents"]) for k, v in rows.items()}
+    assert got == {"CB0000R01": ("resolved", 1057), "CB0000R02": ("resolved", 0)}, (got, {k: v["auto_note"] for k, v in rows.items()})
+    s.close()
+
+
 def test_d3_owed_in_second_role_sizes_from_the_answer(store):
     """The rule itself: the allowed amount (else the item's expected), never above the charge, less the other payers'
     payments on file (else the payer's own OA-23), less the patient's share; None when neither tells what they paid."""

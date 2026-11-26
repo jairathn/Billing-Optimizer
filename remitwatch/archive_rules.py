@@ -881,14 +881,18 @@ def _act(action: str, rule: str, f: Mapping | None, strength: str, proof: list[d
 
 
 def _close(rule: str, f: Mapping, pay: Ans, paid_cents: int, note: str, how: str, proof: list[dict], *, recovery: bool,
-           strength: str = "proven") -> dict:
+           strength: str = "proven", arrived_cents: int | None = None) -> dict:
     """A closure in the shape Detector._mark_paid takes: the payment's date, amount, a note and the paid_later detail. The
     detail names the paying line and its units: each unit of a payment counts as recovered on one item only (trace finding
-    T-C5: counted by date, trace and claim, a second line paid on the same claim recorded $0)."""
+    T-C5: counted by date, trace and claim, a second line paid on the same claim recorded $0). arrived_cents: what actually
+    arrived after the item's answer when less than the payment (the payer took back an earlier payment of the service
+    with it); the recovery is never more."""
     detail = {"payment_date": pay.paid_on or None, "claim": pay.pcn, "trace": pay.trace, "paid_cents": paid_cents,
               "claim_status": pay.status, "how": how, "rule": rule, "line_key": pay.line_key, "units": pay.unit_count}
+    if arrived_cents is not None:
+        detail["arrived_cents"] = arrived_cents
     return _act("close_with_proof", rule, f, strength, proof, paid_date=pay.paid_on or None, paid_cents=paid_cents, note=note,
-                detail=detail, counts_as_recovery=recovery)
+                detail=detail, counts_as_recovery=recovery, arrived_cents=arrived_cents)
 
 
 def _reclass(rule: str, f: Mapping, reclass: str, label: str, hint: str, shortfall: int | None, state: str, proof: list[dict],
@@ -1413,10 +1417,25 @@ def units_split(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: 
                     out.append(_reclass(R_UNITS, f, "second_role_short", f"Paid in part {role}", hint, due["left_cents"], "work_now",
                                         proof, "proven", second_role=dict(due, date=p.paid_on, role=role, text=hint)))
                     continue
+            # what actually arrived after the denial (decision 3): the payer's answers of the service after it, its takebacks
+            # (reversals) included. A payment that came with the payer's takeback of an earlier payment of the service (often
+            # one the archive does not hold: the payer processed again a claim it had paid before the denial) brought only
+            # the difference
+            arrived, taken = amt, 0
+            if switched and arrived_later:
+                after = [x for x in ans if x.line_key != a.line_key and _after(x, a) and _same_payer_loose(x, p)]
+                taken = -sum(x.paid or 0 for x in after if x.status == REVERSAL_STATUS and (x.paid or 0) < 0)
+                if taken > 0:
+                    net = sum(x.paid or 0 for x in after if x.status == REVERSAL_STATUS or (x.status in PAYMENT_STATUSES and (x.paid or 0) > 0))
+                    arrived = max(0, min(amt, net))
             note = (f"Paid on this line: {p.payer_name or 'the payer'} paid it {_usd(amt)}"
                     + (f" {role}" if role == "as secondary" else "") + f" on {p.paid_on}"
                     + ("; the unit it denied was another line of the claim." if others_unpaid else "."))
-            out.append(_close(R_UNITS, f, p, amt, note, "paid on the item's own line", proof, recovery=arrived_later))
+            if arrived < amt:
+                note += (f" It took back {_usd(taken)} it had paid for the service before, so "
+                         + ("nothing new arrived after the denial." if arrived <= 0 else f"{_usd(arrived)} arrived after the denial."))
+            out.append(_close(R_UNITS, f, p, amt, note, "paid on the item's own line", proof, recovery=arrived_later and arrived > 0,
+                              arrived_cents=arrived if arrived < amt else None))
             continue
         if any(tag[x.line_key] == "own" and _after(x, a) and x.to_patient_only() for x in same):
             continue                    # the payer answered this very line again, onto the patient's deductible: rule 5's
