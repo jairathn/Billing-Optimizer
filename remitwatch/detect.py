@@ -841,6 +841,14 @@ def item_part(x: tuple) -> str:
     return component_of(x[5] if len(x) > 5 else None)
 
 
+NO_CHARGE_CENTS = 100       # a line billed under $1 (a $0 line, or a penny EMA puts on a post-operative visit) is owed nothing
+
+
+def _no_charge(charge) -> bool:
+    """A line whose known charge is $0 or a token under $1: nothing is owed on it (a charge that is not known is not)."""
+    return charge is not None and charge < NO_CHARGE_CENTS
+
+
 _OWN = "own"        # an answer on the claim's own EMA claim: whatever part each of its lines bills, it is that line's
 
 
@@ -5176,22 +5184,33 @@ class Detector:
             rate, _basis, _r = self.usual_rate(line, cpt)
             priced.append([cpt, dos, charge, rate, max(1, int(abs(units))) if units else 1, line])
         # a second and later surgical procedure at this payer's usual share, as the payer would price them
-        surg = sorted((p for p in priced if p[3] and is_surgical(p[0])), key=lambda p: -p[3])
+        surg = sorted((p for p in priced if p[3] and is_surgical(p[0]) and not _no_charge(p[2])), key=lambda p: -p[3])
         for rank, p in enumerate(surg, 1):
             if rank >= 2:
                 p[3] = int(round(p[3] * self.mppr_pct({"payer_group": grp, "surg_rank": 2 if rank == 2 else 3})[0]))
-        return [[cpt, dos, charge, (min(rate * units, charge) if charge and charge > 0 else rate * units) if rate
+        # a line whose known charge is $0, or a token under $1 (a post-operative visit EMA bills at a penny so the line goes
+        # out), is worth nothing: the payer allows the lesser of its rate and the charge (answers-3). Only a line whose charge
+        # is not known keeps the payer's rate.
+        return [[cpt, dos, charge, 0 if _no_charge(charge) else
+                 (min(rate * units, charge) if charge is not None else rate * units) if rate
                  else self.no_rate_size(line, cpt, charge, units)[0]]
                 for cpt, dos, charge, rate, units, line in priced]
 
-    def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str) -> None:
+    def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str) -> bool:
         """One claim no payer answered (run_ema_open_claims): its payer group, size, filing date and item. A claim still in
         EMA's print batch (cd["unsent"]) was never sent: it is listed under Fix and resubmit, dated by the first-filing limit.
         A claim only another payer answered (cd["secondary"]: its answers, processed as secondary or otherwise) says so, and
-        is sized at what is left once that payer's payment is taken off."""
+        is sized at what is left once that payer's payment is taken off. Whether an item was made: a claim the patient paid
+        in full after EMA closed it, a claim billed at nothing (every line under $1) and one a second payer paid all of are
+        not listed."""
         k, pcn, sent, due, rejected, gave_up, status, ema_payer = (cd["k"], cd["pcn"], cd["sent"], cd["due"], cd["rejected"], cd["gave_up"],
                                                                    cd["status"], cd["ema_payer"])
         unsent = bool(cd.get("unsent"))
+        if cd.get("source") != "837" and not k.get("charges"):
+            # a claim EMA's weekly exports show only in the claim-status export has no charge on file: its lines' charge is
+            # not known (the exports' pass carries it as 0), so it is priced at the payer's rate, never as a line billed at
+            # nothing (answers-3)
+            items = [(x[0], x[1], x[2] or None) + tuple(x[3:]) for x in items]
         days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
         payer_id = k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None
         grp, kind = cd["group"]             # the VA's network by its payer id, though EMA names its administrator: the VA's limits apply
@@ -5199,10 +5218,10 @@ class Detector:
         file_by = window_end(days[0], rule)
         # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
         early_by = _add_days(days[0], rule["earliest"]) if rule.get("earliest") else None
-        billed = sum(x[2] for x in items)
+        billed = sum(x[2] or 0 for x in items)
         pat_paid = max(0, k["pat_paid"] + sum(v[2] for v in k["ins"].values()))
         if gave_up and billed and pat_paid >= billed:
-            return                          # closed in EMA because the patient paid it all
+            return False                    # closed in EMA because the patient paid it all
         year = days[0][:4]
         # one pricing for every never-answered pass (the weekly exports' and the 837s'): each line at the payer's own rate for
         # the part it bills (26, TC or the whole: T-N9), times its units, the multiple-procedure share, capped at its charge
@@ -5213,11 +5232,16 @@ class Detector:
             comp = component_of(src[4])
             if comp:
                 ln.append(comp)             # the part the line bills, for its story and the checks
+        if all(_no_charge(x[2]) for x in items):
+            # every line billed at $0 or a token under $1: nothing is owed on the claim, so it is not chased (answers-3);
+            # counted for the maintainers (meta ema:wiring)
+            self.ema_counts["open_claim_billed_nothing"] += 1
+            return False
         expected = sum(x[3] for x in lines if x[3]) if any(x[3] for x in lines) else None
         if expected and billed and expected > billed:
             expected = billed               # never valued above what was billed for it
         codes = sorted({x[0] for x in items})
-        top = max(items, key=lambda x: x[2])[0]
+        top = max(items, key=lambda x: x[2] or 0)[0]
         claim = {"patient_control_number": pcn, "payer_name": ema_payer, "payer_group": grp, "payer_kind": kind,
                  "payer_id": payer_id, "service_date": days[0],
                  "year": year, "procedure_code": top, "charge_cents": billed or None,
@@ -5246,8 +5270,16 @@ class Detector:
             ev["secondary_answer"] = {"payer": sec_payer, "date": sec_on, "paid_cents": sec_paid, "processed_as": "secondary" if as_second
                                       else "not as the primary payer (CLP02 " + ", ".join(sorted({s for _d, _g, _p, s in sec})) + ")"}
             other = f"; only {sec_payer} answered, " + ("as secondary" if as_second else "not as the primary payer")
-            if expected and 0 < sec_paid < expected:
-                short = expected - sec_paid
+            if expected and sec_paid > 0:
+                # what is left once that payer's payment is taken off (T-C2), never below nothing (answers-6)
+                short = max(0, expected - sec_paid)
+                if short == 0:
+                    # the second payer paid all the claim's payer would have allowed (its whole allowed amount went to the
+                    # patient's deductible, say): nothing of the visit is left to collect, so it is not listed as owed money.
+                    # The primary's remittance is still missing from the books: counted with its dollars (meta ema:wiring)
+                    self.ema_counts["open_claim_second_paid_all"] += 1
+                    self.ema_counts["open_claim_second_paid_all_cents"] += sec_paid
+                    return False
         cob = cd.get("cob")
         if cob and sec:
             # the payer it was sent to denied it as primary because another payer covers it first, then answered as secondary:
@@ -5353,6 +5385,7 @@ class Detector:
                          "before sending the claim again")
         if hints:
             f["hint"] = ". ".join(hints)
+        return True
 
     def run_837_open_claims(self) -> None:
         """Claims the 837s show sent that no payer answered and that EMA's weekly exports do not list (the catch-up trace's
@@ -5497,7 +5530,10 @@ class Detector:
             ans = rows835.get(b) or []
             cb = cob.get(b)                 # its payer denied it as primary for coordination, then answered as secondary
             mine = named(r)
-            if not cb and (any(a[4] and r[4] and a[4] == r[4] for a in ans) or any(payer_company(a[1]) in mine for a in ans)):
+            # an answer is this send's only when it came on or after the send, to this claim id or to a newer submission of
+            # the bill (answers-4: a payer's answer to an earlier submission, before the bill went out again, is not it)
+            after = [a for a in ans if a[0] >= r[0] and (a[5] == pcn or sub_no(a[5]) > sub_no(pcn))]
+            if not cb and (any(a[4] and r[4] and a[4] == r[4] for a in after) or any(payer_company(a[1]) in mine for a in after)):
                 self.ema_counts["837_answered_by_its_payer"] += 1
                 continue                    # the payer the 837 named answered it (as its secondary, say)
             # a line billed at $0, or at a token charge under $1 (a post-operative visit EMA bills at a penny so the line
@@ -5559,10 +5595,10 @@ class Detector:
         if self.ema_on and cds:
             cds = self._837_ema_answers(cds, newest, no_era)
         for cd in cds:
-            self._emit_open_claim(cd, cd["items"], newest)
-            self.ema_counts["837_no_answer"] += 1
-            if cd.get("no_era"):
-                no_era[cd["no_era"]]["listed"] += 1
+            if self._emit_open_claim(cd, cd["items"], newest):
+                self.ema_counts["837_no_answer"] += 1
+                if cd.get("no_era"):
+                    no_era[cd["no_era"]]["listed"] += 1
             # EMA claims that are this claim or another listed one (send-day twins): the Production check leaves them
             self._export_links.update(cd.get("ema_twins") or ())
             if cd.get("ema_link") is not None:
