@@ -362,7 +362,17 @@ def require_owner(request: Request = None, credentials: Optional[HTTPBasicCreden
                         else "These figures open with the owner's password.")
 
 
+# One archived bill's rows (remitwatch.archive.claim_db), held in memory while the claim view reads them: every helper the
+# view calls asks db() for its connection, so for that one request they read the archived bill and nothing else.
+_ARCHIVED_DB: ContextVar[str | None] = ContextVar("_ARCHIVED_DB", default=None)
+
+
 def db() -> sqlite3.Connection:
+    held = _ARCHIVED_DB.get()
+    if held is not None:
+        conn = sqlite3.connect(held, uri=True, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
     if runtime.serverless():
         from .cloud import SERVING_COPY, StorageUnavailable
         try:
@@ -1381,6 +1391,8 @@ def finding_explain(finding_id: str, _: str = Depends(require_auth)):
     f = one("SELECT finding_id, patient_control_number, ema_link FROM findings WHERE finding_id=?", (finding_id,)) \
         if "ema_link" in _columns() else one("SELECT finding_id, patient_control_number FROM findings WHERE finding_id=?", (finding_id,))
     if not f:
+        if api_ops.is_archived_finding(finding_id):     # its panel opens from the archive (ops.js) and needs no story
+            return {"finding_id": finding_id, "archived": True, "explain": None}
         raise HTTPException(404, "finding not found")
     return dict(_explained(f), finding_id=finding_id)
 
@@ -2040,11 +2052,49 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
     bill = bill_of(raw) if raw else ""
     if not _bill_ok(bill):
         raise HTTPException(400, "That is not a claim ID.")
+    out = _claim_view(bill)
+    if out is None:     # an older settled bill the archive took (remitwatch.archive): opened whole from its record
+        out = _archived_claim_view(bill)
+    if out is None:
+        raise HTTPException(404, "No remittance in the files and no EMA row has that claim ID.")
+    return out
+
+
+def _archived_claim_view(bill: str) -> dict | None:
+    """The claim view of an archived bill, or None: the archive's record of it is put in an in-memory database of its own
+    for this request (the store is not touched, and the copy is gone when the answer is), the same view is read from it,
+    and the answer says since when it is archived and how to bring it back."""
+    from . import api_ops
+    held = api_ops.archived_claim(bill)
+    if held is None:
+        return None
+    adb, where = held
+    name = f"file:rw-archived-{secrets.token_hex(8)}?mode=memory&cache=shared"
+    anchor = sqlite3.connect(name, uri=True, check_same_thread=False)      # keeps the request's copy alive
+    try:
+        try:
+            adb.backup(anchor)
+        finally:
+            adb.close()
+        token = _ARCHIVED_DB.set(name)
+        try:
+            out = _claim_view(where["bill"])
+        finally:
+            _ARCHIVED_DB.reset(token)
+    finally:
+        anchor.close()
+    if out is None:
+        return None
+    return dict(out, archived=True, archived_at=where.get("archived_at"), reopen=api_ops.REOPEN_TEXT)
+
+
+def _claim_view(bill: str) -> dict | None:
+    """claim_view's answer for one bill from the store at hand (db()), or None when nothing there names it."""
     pcns = _bill_ids(bill)
     rem = _bill_remits(pcns)
     ema_ids = _ema_ids(bill)
     if not rem and not ema_ids:
-        raise HTTPException(404, "No remittance in the files and no EMA row has that claim ID.")
+        return None
     keys = [r["claim_key"] for r in rem] or [""]
     qk = ",".join("?" * len(keys))
     lines = rows(f"""SELECT claim_key, line_key, line_seq, procedure_code, modifiers, original_procedure_code, original_modifiers, original_units,

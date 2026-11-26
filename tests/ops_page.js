@@ -2,7 +2,7 @@
 // phone's, on a local site over an invented store; and an item's "Why did this change?" (static/features.js).
 // Usage: node ops_page.js <port> <user> <password> [screenshot folder]. Prints one JSON line.
 const { chromium } = require('playwright');
-const [port, user, pass, shots] = process.argv.slice(2);
+const [port, user, pass, shots, bill, fid] = process.argv.slice(2);
 const base = `http://127.0.0.1:${port}`;
 
 (async () => {
@@ -24,6 +24,21 @@ const base = `http://127.0.0.1:${port}`;
                bundle: !!document.querySelector('#opLogs a[href^="/api/ops/diagnostic-bundle"]') };
     });
     if (shots) await page.screenshot({ path: `${shots}/ops-${width}.png`, fullPage: true });
+    if (bill) {       // an archived claim opens from the archive, and so does an archived item (static/ops.js)
+      const drawer = () => page.evaluate(() => (document.querySelector('#drawer') || {}).innerText || '').then(t => t.replace(/\s+/g, ' ').trim());
+      await page.evaluate(b => openClaim(b), bill);
+      await page.waitForSelector('#drawer [data-op-archived]', { timeout: 15000 }).catch(() => {});
+      got.claim = await drawer();
+      if (width === 1400) {
+        await page.click('#drawer [data-op-reopen]');
+        await page.waitForFunction(() => { const e = document.querySelector('#drawer [data-op-reopen-said]'); return e && e.textContent.trim(); }, null, { timeout: 15000 }).catch(() => {});
+        out.reopened = await page.evaluate(() => document.querySelector('#drawer [data-op-reopen-said]').textContent);
+      }
+      await page.evaluate(f => openDetail(f), fid);
+      await page.waitForSelector('#drawer [data-op-archived]', { timeout: 15000 }).catch(() => {});
+      got.item = await drawer();
+      if (shots) await page.screenshot({ path: `${shots}/archived-item-${width}.png` });
+    }
     out.widths[width] = got;
     await ctx.close();
   }

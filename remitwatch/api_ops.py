@@ -257,10 +257,42 @@ def archived_finding(finding_id: str) -> dict | None:
         return archive.lookup_finding(c, finding_id, sink=archive_sink())
 
 
+def is_archived_finding(finding_id: str) -> bool:
+    """Whether the archive took this item (its index, which the store and the dashboard's copy hold; no file is read)."""
+    with _Conn() as c:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE name='archive_findings'").fetchone():
+            return False
+        return c.execute("SELECT 1 FROM archive_findings WHERE finding_id = ?", (finding_id,)).fetchone() is not None
+
+
 def archived_search(text: str, have: set) -> list[dict]:
-    """Archived bills Find a claim names (by claim id, bill or payer claim number; never by name or member number)."""
+    """Archived bills Find a claim names (by claim id, bill or payer claim number; never by name or member number), with
+    the fields the page's table draws for any claim: the archive's index holds no payer, patient or payment date (those
+    are blank until the claim is opened), its 835 claims stand for the remittances, and an archived bill has no open item."""
     from . import archive
     with _Conn() as c:
         if not c.execute("SELECT 1 FROM sqlite_master WHERE name='archive_ids'").fetchone():
             return []
-        return [dict(x, archived=True) for x in archive.search(c, text) if x.get("bill") not in have]
+        return [dict(x, archived=True, payers=[], patient="", last_payment=None, remits=int(x.get("claims") or 0),
+                     open_findings=0) for x in archive.search(c, text) if x.get("bill") not in have]
+
+
+REOPEN_TEXT = ("This older, settled claim left the lists for the archive. Bringing it back puts it and its items in the "
+               "store again with the next analysis.")
+
+
+def archived_claim(bill: str) -> tuple[Any, dict] | None:
+    """One archived bill's rows in an in-memory database under the store's own table names (archive.claim_db; the caller
+    closes it) and {'bill', 'archived_at'}, or None when the archive does not hold it."""
+    from . import archive
+    with _Conn() as c:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE name='archive_bills'").fetchone():
+            return None
+        found = archive.resolve_bill(c, bill)
+        if not found:
+            return None
+        row = c.execute("SELECT archived_at FROM archive_bills WHERE bill = ?", (found,)).fetchone()
+        adb = archive.claim_db(c, found, sink=archive_sink())
+    if adb is None:
+        return None
+    return adb, {"bill": found, "archived_at": row[0] if row else None}

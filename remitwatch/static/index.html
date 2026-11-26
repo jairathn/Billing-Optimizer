@@ -694,6 +694,7 @@ async function openDetail(id, opts){
     if(e.code === 'changed' && e.body && e.body.heir && e.body.heir !== id) return openDetail(e.body.heir, opts);
     d.innerHTML = `<div class="dr-head"><div><h2>Item not found</h2><div class="small muted">${e.status === 404 ? 'This item is no longer on the lists.' : 'The site did not answer just now: try again in a moment.'}</div></div><button id="closeD" aria-label="Close">✕</button></div><div class="note">It may have been closed and removed by a newer run. Find a claim (top of the page) finds it by its claim ID.</div>`; const c = d.querySelector('#closeD'); if(c) c.onclick = closeDetail; return; }
   if(seq !== state.detailSeq) return;          // another item was opened meanwhile: the newest open wins
+  if(r.archived && typeof opArchivedItem === 'function') return opArchivedItem(d, r);       // an older settled item the archive took (ops.js)
   const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
   state.detailR = r; state.detailF = f; state.detailX = null;      // the panel's answers: a packet built here redraws its box
   if(!state.brief){ try { await (state.briefP || brief()); } catch(e){} }        // the plain labels and the kinds of work

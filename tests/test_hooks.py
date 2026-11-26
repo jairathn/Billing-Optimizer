@@ -946,6 +946,40 @@ def test_find_a_claim_and_an_items_panel_open_what_the_archive_took_and_a_reopen
     assert tc.get(f"/api/findings/{fid}", headers=auth).json().get("archived") is not True
 
 
+def test_an_archived_claim_found_by_find_a_claim_opens_whole_in_the_claim_view(tmp_path, monkeypatch):
+    """needs_E section 5: Find a claim finds an archived bill and the claim view opens it whole from the archive's record
+    (every remittance with its lines, the item the archive took), saying it is archived and since when. Found by the
+    wiring check: the search found the bill but the view answered 404 ("No remittance in the files"), and the search's
+    row lacked the fields the page's table draws (its payers, its remittances). A claim nothing holds is still a 404."""
+    from remitwatch import pipeline
+    from tests.test_archive import NEW, OLD, denial, ingest, visits
+    db = _db(tmp_path)
+    s = Store(db)
+    ingest(s, tmp_path, [(visits(1, 8, OLD) + [denial(50, OLD)], "20220415"), (visits(100, 8, NEW), "20260415")])
+    s.close()
+    pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: None)
+    s = Store(db)
+    fid, bill = s.conn.execute("SELECT finding_id, bill FROM archive_findings LIMIT 1").fetchone()
+    assert not s.conn.execute("SELECT 1 FROM findings WHERE finding_id=?", (fid,)).fetchone()        # it left the store
+    s.close()
+    tc, auth = _server_client(monkeypatch, db)
+    row = tc.get("/api/claims/search", headers=dict(auth, **{"X-Search": bill})).json()["items"][0]
+    assert row["archived"] is True and row["bill"] == bill
+    assert row["payers"] == [] and row["remits"] >= 1 and "last_payment" in row and row["open_findings"] == 0
+    r = tc.get("/api/claims/view", headers=dict(auth, **{"X-Claim": bill}))
+    assert r.status_code == 200, r.text
+    c = r.json()
+    assert c["archived"] is True and c["archived_at"] and c["bill"] == bill and c["reopen"]
+    assert c["remits"] and all(x["lines"] for x in c["remits"]) and c["remits"][0]["payer_name"]
+    assert fid in {f["finding_id"] for f in c["findings"]}
+    assert tc.get("/api/claims/view", headers=dict(auth, **{"X-Claim": "ZZQ999999"})).status_code == 404
+    # the store is untouched: the bill is still archived, and the request's own copy is gone
+    s = Store(db)
+    assert s.conn.execute("SELECT COUNT(*) FROM archive_bills WHERE bill=?", (bill,)).fetchone()[0] == 1
+    assert not s.conn.execute("SELECT 1 FROM claims WHERE patient_control_number LIKE ?", (bill + "%",)).fetchone()
+    s.close()
+
+
 def _browser_ready() -> bool:
     import shutil
     import subprocess
@@ -964,8 +998,16 @@ def test_the_data_tabs_three_panels_draw_in_plain_words_at_a_desk_and_on_a_phone
     import urllib.request
 
     from remitwatch import pipeline
+    from tests.test_archive import NEW, OLD, denial, ingest, visits
     db = _db(tmp_path)
+    (tmp_path / "arc").mkdir()
+    st = Store(db)          # older settled claims the cycle moves to the archive: they open from it on the page
+    ingest(st, tmp_path / "arc", [(visits(1, 8, OLD) + [denial(50, OLD)], "20220415"), (visits(100, 8, NEW), "20260415")])
+    st.close()
     pipeline.run_cycle(db, sync=False, local=_feed(tmp_path), email=False, report=False, log=lambda *a: None)
+    st = Store(db)
+    fid, bill = st.conn.execute("SELECT finding_id, bill FROM archive_findings LIMIT 1").fetchone()
+    st.close()
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -984,7 +1026,7 @@ def test_the_data_tabs_three_panels_draw_in_plain_words_at_a_desk_and_on_a_phone
                 break
             except OSError:
                 time.sleep(0.1)
-        got = subprocess.run(["node", os.path.join(repo, "tests", "ops_page.js"), str(port), "oda", PW, str(tmp_path)],
+        got = subprocess.run(["node", os.path.join(repo, "tests", "ops_page.js"), str(port), "oda", PW, str(tmp_path), bill, fid],
                              capture_output=True, text=True, timeout=240)
     finally:
         srv.terminate()
@@ -998,6 +1040,12 @@ def test_the_data_tabs_three_panels_draw_in_plain_words_at_a_desk_and_on_a_phone
         assert w["store"].startswith("Store size and memory") and w["bundle"], width
         assert "—" not in w["running"] + w["logs"] + w["store"]
     assert out["widths"]["390"]["overflow"] <= 1, out["widths"]["390"]["overflow"]
+    # an archived claim (Find a claim) and an archived item open from the archive, say so, and offer to bring them back
+    for width, w in out["widths"].items():
+        assert w["claim"].startswith("Claim ") and "In the archive since" in w["claim"] and "Bring it back to the lists" in w["claim"], (width, w["claim"][:400])
+        assert "In the archive since" in w["item"] and "See the whole claim" in w["item"], (width, w["item"][:400])
+        assert "—" not in w["claim"] + w["item"]
+    assert "next analysis" in out["reopened"] or "next run" in out["reopened"], out["reopened"]
 
 
 # ======================================================================================================================

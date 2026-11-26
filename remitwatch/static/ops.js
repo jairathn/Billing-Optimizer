@@ -137,6 +137,41 @@ function opBindOpen(box){
   box.querySelectorAll('[data-op-open]').forEach(b => b.addEventListener('click', () => { if(typeof openDetail === 'function') openDetail(b.getAttribute('data-op-open')); }));
 }
 
+// ---------------------------------------------------------------- what the archive took (remitwatch.archive)
+// An older, settled claim or item moved to the archive opens from it (Find a claim, an item's link): it says so, since
+// when, and offers to bring it back to the lists with the next analysis (POST /api/archive/reopen).
+function opArchivedHtml(text, at){
+  return `<div class="note" data-op-archived="1"><b>In the archive${at ? ' since ' + esc(String(at).slice(0, 10)) : ''}.</b> ${esc(text || '')}
+    <div style="margin-top:6px"><button class="btn" data-op-reopen="1">Bring it back to the lists</button> <span class="small muted" data-op-reopen-said></span></div></div>`;
+}
+
+function opBindReopen(root, body){
+  const b = root.querySelector('[data-op-reopen]');
+  if(!b) return;
+  b.addEventListener('click', async () => {
+    const said = root.querySelector('[data-op-reopen-said]');
+    b.disabled = true;
+    try { const r = await api('/api/archive/reopen', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(Object.assign({reason: 'brought back from the page'}, body))});
+      if(said) said.textContent = r.text || 'Asked: it comes back with the next analysis.'; }
+    catch(e){ if(said) said.textContent = 'Not asked: ' + (e.message || 'no answer'); b.disabled = false; }
+  });
+}
+
+// An item the archive took, opened by its id (the item's panel): its own facts, its history ending in why it left, the
+// whole claim, and the button that brings it back. Its status cannot be changed while it is in the archive.
+function opArchivedItem(d, r){
+  const f = r.finding || {}, events = r.events || [], last = events[events.length - 1] || {};
+  const plain = (typeof labelOf === 'function' && state.brief && state.brief.labels) ? (labelOf(state.brief, f.signal).label || f.signal) : (f.title || f.signal || 'An item');
+  d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc([f.payer_group, f.procedure_code, f.service_date].filter(Boolean).join(' · '))}${f.shortfall_cents ? ' · ' + money(f.shortfall_cents) : ''}</div></div><button id="closeD" aria-label="Close">✕</button></div>
+    ${opArchivedHtml(last.kind === 'archived' ? last.note : '', r.archived_at)}
+    ${r.bill ? '<div class="small" style="margin:6px 0"><a href="#" id="opArchivedClaim">See the whole claim: every remittance, line and adjustment</a></div>' : ''}
+    <details class="dfold"><summary>Its history</summary>${events.map(e => `<div class="small">${opWhen(e.at)} ${esc(String(e.kind || '').replace(/_/g, ' '))}${e.to_status ? ' · ' + esc(e.to_status) : ''}</div>`).join('') || '<div class="small muted">Nothing recorded.</div>'}</details>`;
+  const c = d.querySelector('#closeD'); if(c && typeof closeDetail === 'function') c.onclick = closeDetail;
+  const go = d.querySelector('#opArchivedClaim'); if(go) go.onclick = e => { e.preventDefault(); if(typeof openClaim === 'function') openClaim(r.bill, f.finding_id); };
+  opBindReopen(d, {finding_id: f.finding_id});
+}
+
 // data.js draws the Data tab and leaves <section id="ops-panels"> empty: fill it each time it appears
 (function opWatch(){
   if(typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
