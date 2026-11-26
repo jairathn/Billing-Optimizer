@@ -66,6 +66,14 @@ the release gates (section 0 below, "Then, in order").
   analysis on when it must). With the Production summaries in the image (893 MB) no run fits (240 s, peak 2,317 MB with
   a 900 s budget). Billers work on the server site, which reads everything; Vercel's pages say they show the A/R only.
   The integrator checks the hook's 'ar' mode keeps Production out of the serverless image entirely.
+- **Checked on wip/hook 8d172ae (21:30 UTC), before its reviews end.** privacy-3: `selfcheck.has_proof` now accepts
+  `settled_by` (date, claim, how); `_close_by_answer` is the only writer of that key, so the clause opens nothing else.
+  The proof rows CLAUDE.md asks for come in the fix wave (F2). Decision 6: `ema_reports.switch()` is 'ar' on a
+  serverless host, so a Production file waits and is never applied; no Production rows reach the Vercel image
+  (tests/test_ema_intake.py::test_a_serverless_run_reads_the_ar_and_keeps_production_waiting_until_its_switch_allows).
+  At the merge: CLAUDE.md's daily-cycle paragraph still says Vercel's cron calls /api/cron/cycle at 10:17 UTC; the
+  hook removed that cron (vercel.json keeps the fax cron only), so the integrator rewrites the paragraph for the press.
+  Safe mode listed the 33 new items ($2,279) of a run whose ledger check failed: sent to the fix wave (F6).
 - **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
   world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
   SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
