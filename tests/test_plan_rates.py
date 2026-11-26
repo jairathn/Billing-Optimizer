@@ -960,6 +960,22 @@ def test_a_family_members_procedure_on_the_same_subscriber_number_does_not_rank_
     w.store.close()
 
 
+def test_a_dependants_day_is_not_ranked_by_the_subscribers_unanswered_837(tmp_path, kind):
+    """fix7c-r2-8, the other half: the dependant (member number of their own on the 835's NM1*QC, the subscriber's on
+    NM1*IL) had a Mohs at the office, paid $292.56 of $585.12. The subscriber's 837 for a 14301 at the surgery center that
+    day, same doctor, is not answered on file. It is matched by the subscriber's number only, which the family shares, so it
+    is no part of the dependant's day: the Mohs is owed its half."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 25, "17311", "900.00", "585.12") + many(220, 6, "14301", "2500.00", "943.80", pos="24"), "20260301")
+    w.remit([visit(800, "17311", "900.00", "292.56", pat=900, insured=800, dos="20260302")], "20260410")
+    _sent_837(w, [(801, 800, "20260302", "14301", "24")])
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", 29256)}, got
+    w.store.close()
+
+
 def test_a_cut_day_with_two_lower_valued_procedures_is_owed_one_missing_half_once(tmp_path, kind):
     """fix7c-r2-6. A split day on three claims: the surgery center's 14041 ($589.45 facility rate, a few lines: no item of
     its own) paid $294.73, the office Mohs 17311 ($585.12) paid $292.56, and an office biopsy 11102 ($112.74) on a third
@@ -1007,6 +1023,25 @@ def test_a_cut_day_the_payer_fixes_as_asked_is_counted_recovered(tmp_path, kind,
                                (f["finding_id"],)).fetchone()
     assert row is not None and (row["recovered_cents"] or 0) > 0, dict(row) if row else None
     assert row["status"] == "resolved" and not row["stale"], dict(row)
+    w.store.close()
+
+
+def test_a_split_day_the_payer_fixes_by_paying_the_mohs_again_is_counted_recovered(tmp_path, kind):
+    """fix7c-r2-7, the other way round: a Mohs halved ($292.56) beside the surgery center's 14040 paid in full ($491.64) is
+    owed $46.74 net. The payer then reverses the Mohs and pays it $585.12 (the same claim id answered again): that is the
+    Mohs's own later answer, never another procedure of its day (which would make the Mohs look rightly second), and the
+    item closes with the payment as its recovery."""
+    w = World(tmp_path, kind)
+    _split_days(w, [("17311", "292.56", "14040", "491.64")])
+    w.run(today="2026-06-15")
+    f = w.one("category='underpayment'")
+    assert f["patient_control_number"] == pcn(800) and f["shortfall_cents"] == 4674, (f["patient_control_number"], f["shortfall_cents"])
+    w.remit([reversal(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(800, "17311", "900.00", "585.12", cfi="16", pat=800, dos="20260302")], "20260701", payer="HUMANA", payer_id="HUMTEST")
+    w.run(today="2026-07-15")
+    row = w.store.conn.execute("SELECT status, recovered_cents FROM findings WHERE finding_id=?", (f["finding_id"],)).fetchone()
+    assert row is not None and row["status"] == "resolved" and (row["recovered_cents"] or 0) >= 4674, dict(row) if row else None
+    assert not w.rows("category='underpayment' AND status='open'"), [(r["signal"], r["title"]) for r in w.rows("category='underpayment' AND status='open'")]
     w.store.close()
 
 
