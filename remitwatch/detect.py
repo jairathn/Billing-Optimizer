@@ -5257,7 +5257,9 @@ class Detector:
         newer = f"{cd['b']}C{n:03d}"
         try:
             ev = json.loads(f.get("evidence") or "{}")
-        except ValueError:
+        except ValueError as exc:
+            from . import runlog
+            runlog.caught(exc, "export_resent_bill", level="warning")
             ev = {}
         ev["bill_sent_again_837"] = {"day": day, "claim_id": newer}
         f["evidence"] = json.dumps(ev, default=str)
@@ -6646,7 +6648,9 @@ class Detector:
                 continue
             try:
                 ev = json.loads(f.get("evidence") or "{}")
-            except ValueError:
+            except ValueError as exc:
+                from . import runlog
+                runlog.caught(exc, "exports_yield_to_newer_bills", level="warning")
                 continue
             svcs = {(ln[1], ln[0], (ln[4] if len(ln) > 4 else "") or "") for ln in ev.get("lines") or []
                     if isinstance(ln, list) and len(ln) > 1 and ln[0] and ln[1]}
