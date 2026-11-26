@@ -39,6 +39,8 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
+from .runtime import practice_date
+
 STATES = ("work_now", "waiting", "done", "accepted", "expired", "cant_check")
 LABELS = {"work_now": "Work now", "waiting": "Waiting", "done": "Done", "accepted": "Accepted", "expired": "Expired",
           "cant_check": "Can't be checked"}
@@ -109,12 +111,63 @@ PENDING_ACTIONS = ("appeal", "corrected", "records", "reprocess")
 
 # ------------------------------------------------------------------------------------------------------------ helpers
 def _today(today: Any) -> str:
-    return str(today or date.today().isoformat())[:10]
+    """The day an item's state is decided on: the caller's (the run's day), else the practice's (runtime.practice_today),
+    never the machine's (UTC on both hosts, a day ahead of a US practice each evening)."""
+    if today:
+        return str(today)[:10]
+    from .runtime import practice_today
+    return practice_today()
+
+
+def _pday(v: Any) -> str:
+    """YYYY-MM-DD of a stored day as written, or of a stored moment (an ISO time with its zone, as every record is
+    written) on the practice's calendar (runtime.practice_date): a person's mark or a fax at 9:30 PM Eastern is that
+    day's, never UTC's next day. '' when there is none. (A plain day, by far the most read, skips the parsing.)"""
+    if not v:
+        return ""
+    s = str(v)
+    return s if len(s) == 10 else practice_date(s)
+
+
+def _moment(v: Any) -> datetime | None:
+    """A stored moment (an ISO time with its zone, as every record is written) as a time that compares across zones;
+    None for a plain day, a time with no zone or anything that is not a time."""
+    s = str(v or "").strip()
+    if len(s) <= 10:
+        return None
+    try:
+        t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def fax_day(sent_at: Any, created_at: Any) -> str:
+    """The practice's day a fax went: its sent time as the fax line gave it, never before the day it was queued (a fax
+    cannot go before it was queued: a service's placeholder time or a time in another zone's words gives way to the
+    queueing day). '' when neither is a day."""
+    sent, made = _pday(sent_at), _pday(created_at)
+    sent = sent if _d(sent) else ""
+    made = made if _d(made) else ""
+    return max(sent, made) if sent and made else (sent or made)
+
+
+def _came_after(read: Any, day: Any, moment: datetime | None, reopen_day: str) -> bool:
+    """Whether a payment reached RemitWatch after a person's change at `moment`: by when its remittance was read, when
+    the store knows it (an 835 often comes days before the payment date it carries, so a payment dated after the change
+    may have been on file when the person decided, and rejected by them); else by its date against the practice's day of
+    the change."""
+    got = _moment(read)
+    if got is not None and moment is not None:
+        return got > moment
+    return str(day or "") > reopen_day
 
 
 def _d(iso: Any) -> date | None:
+    """A stored day, or the practice's date of a stored moment (_pday): every day the states count with, compare or say
+    is the practice's, as today is."""
     try:
-        return date.fromisoformat(str(iso)[:10])
+        return date.fromisoformat(_pday(iso))
     except (TypeError, ValueError):
         return None
 
@@ -281,7 +334,7 @@ def classify_note(text: str | None, as_of: str | None = None) -> dict:
     kinds = [k for k, rx in _NOTE_KINDS if rx.search(t)]
     if _NO_APPEAL.search(t):
         kinds = [k for k in kinds if k not in ("appeal", "resubmitted")] + ["no_appeal"]
-    ref = _d(as_of) or date.today()
+    ref = _d(as_of) or _d(_today(None))         # the practice's day, where the note was written
     dates = []
     for m in _NOTE_DATE.finditer(t):
         mo, dy, yr = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -580,6 +633,12 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     mods = "l.modifiers" if "modifiers" in lcols else "NULL"
     allowed = "l.allowed_cents" if "allowed_cents" in lcols else "NULL"
     sup = "COALESCE(t.superseded, 0)" if "superseded" in tcols else "0"
+    # when RemitWatch read the remittance (its file's ingested_at): an 835 often comes days before the payment date it
+    # carries (the EFT's), so only this says whether a payment was on file when a person decided (_decide, a reopen). The
+    # dashboard's copy keeps no file of a payment: there it is unknown
+    has_read = "file_sha256" in tcols and _table(conn, "files") and "ingested_at" in _cols(conn, "files")
+    read = "fl.ingested_at" if has_read else "NULL"
+    read_join = "LEFT JOIN files fl ON fl.sha256 = t.file_sha256" if has_read else ""
     bills = sorted(want)
     rows_by_bill: dict[str, list] = {}
     for part in _chunks(bills):
@@ -587,9 +646,11 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
         cur = conn.execute(f"""SELECT b.bill, c.claim_key, c.patient_control_number, c.claim_status_code, c.payer_name,
                     t.payment_date, {trace}, {method}, {recv}, {freq}, {pccn}, {xover}, c.charge_cents, c.paid_cents, {cpat},
                     l.line_key, COALESCE(l.service_date, c.statement_from), l.procedure_code, l.original_procedure_code, {mods},
-                    l.charge_cents, l.paid_cents, {allowed}, {units}, {ounits}, {lcn}, c.transaction_key, c.claim_filing_indicator
+                    l.charge_cents, l.paid_cents, {allowed}, {units}, {ounits}, {lcn}, c.transaction_key, c.claim_filing_indicator,
+                    {read}
                 FROM temp.st_b b JOIN claims c ON c.patient_control_number >= b.bill AND c.patient_control_number < b.hi
                 JOIN transactions t ON t.transaction_key = c.transaction_key
+                {read_join}
                 LEFT JOIN lines l ON l.claim_key = c.claim_key
                 WHERE {sup} = 0""")
         for r in cur.fetchall():
@@ -642,7 +703,7 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
                          "method": r[7], "received": r[8], "freq": r[9], "pccn": r[10], "crossover": r[11], "claim_charge": r[12],
                          "claim_paid": r[13], "claim_pr": r[14], "line_key": r[15], "svc": r[16], "code": r[17], "ocode": r[18],
                          "modifiers": r[19], "charge": r[20], "paid": r[21], "allowed": r[22], "units": r[23], "ounits": r[24],
-                         "lcn": r[25], "tk": r[26], "cfi": r[27],
+                         "lcn": r[25], "tk": r[26], "cfi": r[27], "read": r[28],
                          "adj": adj_l.get(r[15], []) if r[15] else [], "rmk": rmk_l.get(r[15], []) if r[15] else [],
                          "cadj": adj_c.get(r[1], []), "crmk": rmk_c.get(r[1], [])})
         _pair_reversals(recs)
@@ -1160,22 +1221,22 @@ def _evidence(fx: dict) -> list[dict]:
             note = str(e.get("note") or "")
             if kind == "sent" and note.startswith("Billed:"):
                 # the page's Mark billed: the claim went to the next payer (or the patient), not an appeal to this one
-                out.append({"date": str(e["at"])[:10], "kind": "billed", "source": "remitwatch", "dated_by": "event", "confirmed": True,
+                out.append({"date": _pday(e["at"]), "kind": "billed", "source": "remitwatch", "dated_by": "event", "confirmed": True,
                             "text": f"Marked billed by {who} on {day(e['at'])}" + (f": {note[len('Billed:'):].strip()}" if note[7:].strip() else "")})
                 continue
             text = f"Marked {'Sent' if kind == 'sent' else 'Started'} by {who} on {day(e['at'])}" + (f": {e['note']}" if e.get("note") else "")
-            out.append({"date": str(e["at"])[:10], "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
+            out.append({"date": _pday(e["at"]), "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
                         "confirmed": kind == "sent"})
         elif e["kind"] == "packet":
-            out.append({"date": str(e["at"])[:10], "kind": "packet", "source": "remitwatch", "dated_by": "event", "confirmed": False,
+            out.append({"date": _pday(e["at"]), "kind": "packet", "source": "remitwatch", "dated_by": "event", "confirmed": False,
                         "text": f"Appeal packet built on {day(e['at'])}" + (f" by {e['actor']}" if e.get("actor") else "")})
     if f.get("status") == "appealed" and f.get("appealed_at") and not any(x["kind"] == "sent" for x in out):
-        out.append({"date": str(f["appealed_at"])[:10], "kind": "sent", "source": "remitwatch", "dated_by": "event", "confirmed": True,
+        out.append({"date": _pday(f["appealed_at"]), "kind": "sent", "source": "remitwatch", "dated_by": "event", "confirmed": True,
                     "text": f"Marked Sent on {day(f['appealed_at'])}"})
     for x in fx["rw"]["faxes"]:
         if (x.get("direction") or "out") != "out" or x.get("status") == "failed":
             continue
-        when = str(x.get("sent_at") or x.get("created_at") or "")[:10]
+        when = fax_day(x.get("sent_at"), x.get("created_at"))
         if not when:
             continue
         purpose = (x.get("purpose") or "appeal").replace("_", " ")
@@ -2487,7 +2548,7 @@ def _decide(fx: dict, today: str) -> dict:
     if st == "appealed":
         res["person"] = True
         sent = [e for e in ev if e["kind"] in ("sent", "fax", "billed") and e["source"] == "remitwatch"]
-        anchor = max((e["date"] for e in sent if e.get("date")), default=None) or str(f.get("appealed_at") or f.get("status_changed_at") or "")[:10]
+        anchor = max((e["date"] for e in sent if e.get("date")), default=None) or _pday(f.get("appealed_at") or f.get("status_changed_at"))
         if sig == "SECONDARY_NOT_BILLED":
             return _billed_second(res, fx, ev, anchor, who, today, put)
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
@@ -2499,12 +2560,16 @@ def _decide(fx: dict, today: str) -> dict:
     # paid. A payment that came after the reopen closes it as usual.
     o_ = fx.get("outcome") or {}
     rejected = o_.get("rejected_payment") if o_.get("person_reopened") else None
-    reopen_at = str((last_manual or {}).get("at") or "")[:10]
+    reopen_at = _pday((last_manual or {}).get("at"))           # the practice's day: a payment dated the next day is newer
+    reopen_moment = _moment((last_manual or {}).get("at"))
     auto_reopened = (st == "open" and last_manual is not None and last_manual.get("to") == "open"
                      and last_manual.get("from") in ("resolved", "dismissed", "lost"))
-    # a payment that came after the person's reopen is new money: the usual rules decide
-    newer = bool(reopen_at) and (any((x["paid"] or 0) > 0 and (x["date"] or "") > reopen_at for x in standing_rows(fx["r835"]["rows"])
-                                     if x.get("line_key") and x.get("code") == f.get("procedure_code"))
+    # a payment that came after the person's reopen is new money: the usual rules decide. An 835 counts by when its file
+    # was read, never by the payment date it carries: a remittance read on Nov 24 for an EFT dated Nov 25 was on file when
+    # the person reopened that evening, and is the payment they rejected. EMA dates a posting the day it is made, so a
+    # posting dated after the reopen's day was made after it.
+    newer = bool(reopen_at) and (any((x["paid"] or 0) > 0 and _came_after(x.get("read"), x["date"], reopen_moment, reopen_at)
+                                     for x in standing_rows(fx["r835"]["rows"]) if x.get("line_key") and x.get("code") == f.get("procedure_code"))
                                  or any((p["cents"] or 0) > 0 and (p["posted"] or "") > reopen_at for p in fx["ema"]["pays"]))
     if (rejected or (auto_reopened and proof)) and not newer:
         res["person"] = True
@@ -2667,7 +2732,7 @@ def _decide(fx: dict, today: str) -> dict:
         return put("work_now", "settled_in_ema", f"EMA shows this line settled: insurance paid {usd(se['ins'])}, the patient paid "
                    f"{usd(se['pat'])}, {usd(se['open'])} open: find which payer paid and whether it settles this service")
     # the work seen on the item (RemitWatch's own marks only when no person set the item back to To do since)
-    reopened = max((str(e["at"])[:10] for e in manual if e["to"] == "open"), default="")
+    reopened = max((_pday(e["at"]) for e in manual if e["to"] == "open"), default="")
     pay_day = f.get("payment_date") or ""
     # work on or after the item's remittance; EMA's work already on the first report counts whatever its date (its own
     # date is unknown), but a billing note or follow-up date first seen before the remittance is about something earlier

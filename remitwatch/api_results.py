@@ -17,8 +17,8 @@ The Results tab: what RemitWatch brings back (remitwatch.results does the work; 
 Every route needs the sign-in (api.require_auth); the ones that change something also need api.require_xhr. On a server
 the page works the figures out itself before the first run that does (once, in the request) and, after a newer analysis,
 in the background while it shows the stored figures with "updating"; on a serverless host it only reads what the run
-stored (the dashboard copy holds part of the store), and says so until the first run has. day= (the page's own date,
-YYYY-MM-DD) keys the spot checks by the practice's day rather than the server's UTC day.
+stored (the dashboard copy holds part of the store), and says so until the first run has. The spot checks are keyed by
+the practice's day (results._today, REMITWATCH_TZ); a page's day= is read only to show an earlier day's picks.
 """
 from __future__ import annotations
 
@@ -128,13 +128,10 @@ def _today() -> str:
 
 
 def _day(day: Optional[str]) -> str:
-    """The practice's day for the spot checks: the page's own date when it sends one within a day of the server's (a
-    browser in the practice's time zone), else the server's day."""
-    t = _today()
-    d = str(day or "")[:10]
-    if results._d(d) and abs(results._days(t, d) or 0) <= 1:
-        return d
-    return t
+    """The day the spot checks are for: the practice's (results._today, REMITWATCH_TZ), the day every page counts from.
+    The page's own date (day=) no longer decides it: a browser in another zone, or a page left open since yesterday, would
+    pick a second set for a day that is not the practice's."""
+    return _today()
 
 
 def _spot(conn, st, day: str, files=None) -> list[dict]:

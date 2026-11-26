@@ -42,7 +42,7 @@ import statistics
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 
-from . import activity
+from . import activity, runtime
 from .ascfs import ASC, WAGE_INDEX, asc_amount
 from .codes import payer_group_kind
 from .mpfs import MPFS, MPFS_YEARS, WORK_RVU
@@ -168,7 +168,7 @@ class Rates:
             n_year[year] += 1
         # the current year is the newest with a fair number of rates (early in January a year has only a few)
         years = sorted(y for y, n in n_year.items() if n >= 100) or sorted(n_year)
-        self.year = years[-1] if years else str(date.today().year)
+        self.year = years[-1] if years else runtime.practice_today()[:4]
         self._pct: dict[tuple, float | None] = {}
         by_kind: dict[tuple, list] = defaultdict(list)
         for (t, g, code, year), v in self.r.items():
@@ -403,7 +403,8 @@ def _schedule(conn, ids: list[str], d0: str, d1: str, full_days: int = 60, pace_
     # the later of the pace window's start and the archive's first covered day, of those that are real dates (a window
     # with nothing to bound it starts at '0000-01'): else the clinicians' first clinic day in the window
     starts = [x for x in (_real_date(pace_from or d0), _real_date(data_from)) if x]
-    p0 = max(starts) if starts else min((x for x in (_real_date(d) for _, d in days) if x), default=None) or min(end, date.today())
+    p0 = max(starts) if starts else min((x for x in (_real_date(d) for _, d in days) if x), default=None) or \
+        min(end, date.fromisoformat(runtime.practice_today()))
     gap = timedelta(days=PACE_GAP_DAYS)
     per: dict[str, list] = defaultdict(list)
     before: set[str] = set()
@@ -827,7 +828,7 @@ def _strategy_inputs(conn, ids: list[str], d0: str, d1: str, months: int = 0) ->
     if not ids:
         return out
     try:
-        today = date.today().isoformat()
+        today = runtime.practice_today()       # still recoverable until midnight where the practice is, as the lists count
         for cat, n, cents in conn.execute(
                 f"""SELECT category, COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings
                     WHERE rendering_provider_npi IN ({_in(ids)}) AND status IN ('open', 'in_progress') AND COALESCE(stale, 0) = 0

@@ -1664,7 +1664,7 @@ class deadline_guard:
 def _image_alert(prev: dict, out: dict, email: bool, log=print) -> None:
     """Mail a stop over the store image to the report address, at most once a day (the day is kept in status.json): the
     dashboard keeps showing the last good copy, so without this nobody may notice the daily runs stopped."""
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = runtime.practice_today()        # once a day where the practice is: an evening's second stop is the same day
     if prev.get("image_alerted") == today:
         out["image_alerted"] = today
         return

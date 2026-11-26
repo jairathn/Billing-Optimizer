@@ -560,15 +560,18 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
              f"The new password goes by phone or in person, never by email, to {enters}; it is tried at once. If the feed uses "
              "the Site ID's own login (shared with ModMed), reset nothing: get the current password from whoever changed it, "
              "with ModMed.")
+    # the day of the refusal where the practice is (the hold keeps a UTC time): one at 9 PM Eastern is that day's
+    from .runtime import practice_date
+    day = practice_date(str((held or {}).get("at") or ""))
     if held and held.get("at") and held.get("unclear"):
-        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
-                    "title": f"TriZetto's sign-in did not finish twice in a row on {held['at'][:10]}",
+        out.append({"key": "trizetto_signin", "ok": False, "at": day,
+                    "title": f"TriZetto's sign-in did not finish twice in a row on {day}",
                     "detail": "The feed waits 6 hours before it tries again, so the login is never locked. TriZetto may have "
                               "been down. If it keeps happening, the password may be refused without a clear answer.",
                     "who": f"{test_once} If it says TriZetto refused the sign-in, {reset}"})
     elif held and held.get("at") and held.get("kind") == "method":
-        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
-                    "title": f"TriZetto would not take a password for the feed's login on {held['at'][:10]}",
+        out.append({"key": "trizetto_signin", "ok": False, "at": day,
+                    "title": f"TriZetto would not take a password for the feed's login on {day}",
                     "detail": "TriZetto's server asked for another way to sign in, so no remittances come straight from TriZetto. "
                               "The feed tries again once a day.",
                     "who": "TriZetto administrator: ask TriZetto in writing (the portal's Contact Us) for the RemitWatch login to "
@@ -576,8 +579,8 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
     elif held and held.get("at"):
         # "the password" only when TriZetto refused a password sent by the password method (trizetto.SignInRefused.kind)
         what = "password" if held.get("kind") == "password" else "sign-in"
-        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
-                    "title": f"TriZetto refused the feed's {what} on {held['at'][:10]}",
+        out.append({"key": "trizetto_signin", "ok": False, "at": day,
+                    "title": f"TriZetto refused the feed's {what} on {day}",
                     "detail": "No remittances come straight from TriZetto until it is fixed. The feed tries the same password only "
                               "once a day, so the login is never locked.",
                     "who": f"{test_once} If TriZetto still refuses it, {reset}"})
@@ -668,7 +671,10 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
             got = conn.execute("SELECT MAX(ingested_at) FROM files WHERE kind IN ('835','remit','rmt')").fetchone()[0]
         except sqlite3.Error:
             pass
-        recent = bool(got) and (date.fromisoformat(today) - date.fromisoformat(got[:10])).days <= 10
+        # the day the last file came where the practice is (a file read at 8:30 PM Eastern came that day), as today is
+        from .runtime import practice_date
+        got = practice_date(str(got)) if got else None
+        recent = bool(got) and (date.fromisoformat(today) - date.fromisoformat(got)).days <= 10
         later = (newest or "")[:10] > reach         # newer payments are in, from a few payers or after weeks that are missing
         # weeks with no remittance from any payer, then newer ones (misuse check CH-6): named, with what to do. Only the hole
         # this day stops at (it starts the day after it)
@@ -964,7 +970,10 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
         return {"ready": False}
     newest = newest_payment(conn)
     feed = feed_day(conn, today)        # how far the remittances reach for most payers: the feed check and the warning line
-    return {"ready": True, "today": today, "newest_payment": newest, "feed_date": feed, "work": work(conn, today), "recovered": recovered(conn, today),
+    from . import runtime
+    # tz: the practice's zone, which the pages date a stored moment in (today.js practiceDate), as the server does
+    return {"ready": True, "today": today, "tz": runtime.practice_zone_name(), "newest_payment": newest, "feed_date": feed,
+            "work": work(conn, today), "recovered": recovered(conn, today),
             "batches": batches(conn, today), "decide": to_decide(conn, newest, today=today), "missed": missed(conn, today), "done": done(conn, today),
             "follow_ups": follow_ups(conn, newest, today=today), "contracts": contract_levers(conn, feed or newest), "fees": fee_levers(conn, feed or newest),
             "causes": denial_causes(conn, feed or newest), "health": data_health(conn, newest, today, feed), "work_types": WORK_TYPES,

@@ -161,16 +161,20 @@ def ema_section(store: Store) -> list[str]:
     if unworked:
         out.append(f"- Untouched work inside its window: {unworked.get('n', 0):,} items, {money(unworked.get('cents'))} "
                    f"(EMA's postings through {unworked.get('data_through') or 'the newest data'})")
+    from . import runtime
+    # this week: closed since the start of the practice's day a week ago (a stored time, compared as the store writes them;
+    # never SQL's datetime('now'), which is UTC and written with a space that a stored time passes all its day)
     week = q("""SELECT COUNT(*) n, COALESCE(SUM(recovered_cents),0) cents FROM findings WHERE status='resolved' AND COALESCE(stale,0)=0
                 AND auto_note IS NOT NULL AND (auto_note LIKE 'EMA shows%' OR auto_note LIKE 'Rebilled to%')
-                AND status_changed_at >= datetime('now','-7 days')""")[0]
+                AND status_changed_at >= ?""", (runtime.practice_day_start(runtime.practice_today(-7)),))[0]
     out.append(f"- Closed this week because EMA shows them paid: {week['n']:,} items, {money(week['cents'])}")
     for sig, words in (("NOT_SENT", "Claims that never left EMA"), ("REMIT_NOT_POSTED", "Payments on an 835 that EMA never posted")):
         r = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE signal=? AND COALESCE(stale,0)=0
                  AND status IN ('open','in_progress')""", (sig,))[0]
         out.append(f"- {words}: {r['n']:,}, {money(r['cents'])}")
     auto = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE ema_outcome='auto_written_off'
-                AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') AND appeal_deadline >= date('now')""")[0]
+                AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') AND appeal_deadline >= ?""",
+             (runtime.practice_today(),))[0]           # the practice's day, never SQL's date('now') (UTC)
     out.append(f"- Written off automatically by EMA and still appealable: {auto['n']:,} items, {money(auto['cents'])}")
     acc = _meta(store, "ema:ar_accounted") or {}
     if acc.get("buckets"):

@@ -457,11 +457,13 @@ class AlertEngine:
         have = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if not {"detection_runs", "progress_snapshots"} <= have:
             return
+        from .runtime import practice_date
         today = date.fromisoformat(self.today)
 
         def recent(iso) -> bool:
+            # the run's day where the practice is (a run at 9 PM Eastern ran that day, not UTC's next), as today is
             try:
-                return (today - date.fromisoformat(str(iso)[:10])).days < SWING_DAYS
+                return (today - date.fromisoformat(practice_date(str(iso or "")))).days < SWING_DAYS
             except ValueError:
                 return False
         runs = [dict(r) for r in self.conn.execute("""SELECT run_id, started_at, version FROM detection_runs WHERE started_at IS NOT NULL
@@ -625,8 +627,10 @@ class AlertEngine:
                         None, "deadline", None, None, None, n, cents, key=("deadline", week[0], week[1]))
 
     def stale_rule(self) -> None:
+        from .runtime import practice_date
         r = self.conn.execute("SELECT MAX(ingested_at) last FROM files WHERE kind='835'").fetchone()
-        last_ingest = (r["last"] or "")[:10] if r else ""
+        # the day the last file came where the practice is, as today is: a file read at 8:30 PM Eastern came that day
+        last_ingest = practice_date(r["last"] or "") if r else ""
         behind = (date.fromisoformat(self.today) - date.fromisoformat(self.asof)).days
         since_ingest = (date.fromisoformat(self.today) - date.fromisoformat(last_ingest)).days if last_ingest else None
         if behind > max(STALE_DAYS, 14) or (since_ingest is not None and since_ingest > STALE_DAYS):

@@ -916,9 +916,10 @@ def parse_date(v: Any, order: str = "mdy") -> str | None:
 
 
 def today_iso() -> str:
-    """Today's date (UTC) as YYYY-MM-DD: the day a report is read, which bounds the dates it may hold, and the latest day
-    the ledger's retention may count from. The tests set it."""
-    return datetime.now(timezone.utc).date().isoformat()
+    """Today's date where the practice is (runtime.practice_today) as YYYY-MM-DD: the day a report is read, which bounds
+    the dates it may hold and caps its as_of, and the latest day the ledger's retention may count from. EMA dates its
+    rows in the practice's days, and the Data tab counts a report's age to that day. The tests set it."""
+    return runtime.practice_today()
 
 
 def date_bounds(today: str | None = None) -> tuple[str, str, str]:

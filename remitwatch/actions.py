@@ -399,11 +399,13 @@ def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: 
         return True
     recovered =(recovered_cents if recovered_cents is not None else r["shortfall_cents"]) if status == "resolved" else None
     # A person's status replaces whatever the automatic resolution recorded: its note no longer describes the finding, and
-    # the next analysis does not close it again on the same grounds (remitwatch.detect save()).
+    # the next analysis does not close it again on the same grounds (remitwatch.detect save()). A Paid pressed at 8 PM
+    # Eastern was recovered that day where the practice is (its week and year on the scoreboard), not UTC's next day.
+    from .runtime import practice_date
     conn.execute("""UPDATE findings SET status=?, notes=COALESCE(?, notes), status_changed_at=?, recovered_cents=?, recovered_date=?,
                     appealed_at=CASE WHEN ?='appealed' AND appealed_at IS NULL THEN ? ELSE appealed_at END, auto_note=NULL, prev_status=NULL
                     WHERE finding_id=?""",
-                 (status, notes, now, recovered, now[:10] if status == "resolved" else None, status, now, finding_id))
+                 (status, notes, now, recovered, practice_date(now) if status == "resolved" else None, status, now, finding_id))
     conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note, run_id) VALUES (?,?,?,?,?,?,?,?,?)",
                  (finding_id, now, "manual", seen or r["status"], status, recovered if status == "resolved" else r["shortfall_cents"], actor, notes,
                   JOURNAL_RUN + entry if entry else None))

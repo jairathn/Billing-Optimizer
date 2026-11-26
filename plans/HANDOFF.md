@@ -23,7 +23,7 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-26 19:50 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
+### Running now (updated 2026-11-26 22:20 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
 
 Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
 branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
@@ -31,13 +31,16 @@ a unit from its branch and progress file (the brief says what done means), or st
 
 | Unit | Branch | Brief | State |
 |---|---|---|---|
-| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | built (fd50642; full suite python3 2,839 passed under three zones, 3.11.1 only serialize failures); two reviews then one fix round running (run wf_b849b3af-38e) |
+| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | **merged** at 993f440 (22:15 UTC): build, two reviews (10 findings), fix round all done; its code equals the merge's; python3 green, under GMT-14 and GMT+12 too, 3.11.1 only the serialize class |
 | fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | running (run wf_82efb0cc-738); at 18:40: tip merged, cached-array change whole, base vs branch measurement started (b6592c8) |
 | hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
 | the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
 | review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b): areas answers and money first, then hosts, people, privacy. The orchestrator's own read of the whole diff is in `plans/review_notes_orchestrator_2026-11-26.md` (merge it into the review file) |
 | a17, the independent every-claim auditor (started early: it touches no product code) | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | running (run wf_8fc9da8c-468, started 18:55 UTC): payer-window research beside the build, then integration, two reviews, one fix round. Score again with the merged code before the final trace |
 | deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | running (run wf_b5842331-6d1, started 19:20 UTC); touches codes.py, docs and tests only, so it merges after the others |
+| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | running (run wf_ea1ab0ef-037, started 22:18 UTC): build, two reviews, one fix round |
+| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | running (run wf_91b074e9-48a, started 22:18 UTC) |
+| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | running (run wf_fc5edc8c-c0f, started 22:18 UTC) |
 
 Merge order when they finish: fix7d, fix7c, decisions, hook, deadlines, then a17's tool (each: merge into the integration
 commit, the full suite in the four environments from a frozen worktree of the merge commit, push to both branch names).
@@ -74,6 +77,15 @@ the release gates (section 0 below, "Then, in order").
   At the merge: CLAUDE.md's daily-cycle paragraph still says Vercel's cron calls /api/cron/cycle at 10:17 UTC; the
   hook removed that cron (vercel.json keeps the fax cron only), so the integrator rewrites the paragraph for the press.
   Safe mode listed the 33 new items ($2,279) of a run whose ledger check failed: sent to the fix wave (F6).
+- **Private word lists (22:05 UTC).** The repository scan uses `$S/docs_private/all_words.txt` (it holds every entry of
+  words.txt, practice_names.txt, tin_candidates.txt and removed_tokens.txt): the tip passes it. Two other files there
+  "fail" by design and are not leaks: ema_hosts.txt holds ModMed's public sign-in host (in test_docs's MODMED_PUBLIC)
+  and removed_words.txt holds two generic words taken off the list. A17's report of hits in OPERATIONS.md,
+  TRIZETTO_REQUEST.md and audit_pass1 came from its checkout before it merged 7ff4387; its branch has no such hit.
+- **At the deadlines merge (22:10 UTC).** A17's table has 34 rows that disagree with codes.py; the 28 items the deadlines
+  unit fixes cover all 34. One more point from A17 reached no unit: codes.py marks Humana Medicare Advantage's
+  corrected-claim rule verified, but the research could not find the tip sheet it cites. After the deadlines merge the
+  integrator marks it unverified (or finds the source), with a test, unless the deadlines fix round already did.
 - **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
   world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
   SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
