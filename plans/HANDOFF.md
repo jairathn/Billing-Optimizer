@@ -10,6 +10,10 @@ Last updated: 2026-11-25, 13:50 UTC.
 
 ## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
 
+**2026-11-26 12:10 UTC: taken over by the session working on `claude/ecstatic-fermi-orfcgo`.** That branch was
+fast-forwarded to this branch's tip (4a4ea05) and is the integration branch from now on. The owner answered the four
+decisions (section 3b).
+
 The session that wrote this ran out of usage. Everything is pushed. Nothing is on `main` since the release (f601b6c,
 2026-11-24 04:22 UTC); both live sites run it.
 
@@ -378,15 +382,20 @@ with `build_world2.py`. Score runs with `plans/tools/claim_audit_a16.py` and `pl
    837-based never-answered pass. Push 2's plan for the rest is in `wip/plans:plans/wire/` (units E, R, C2, SWEEP fix
    stages, INT, HOOK, docs, verification).
 
-## 3b. Decisions waiting on the owner (with the recommendation)
+## 3b. The owner's decisions (answered 2026-11-26)
 
-1. **Which host runs the daily analysis.** Vercel keeps the store in memory, and the merged code is near the limit.
-   - The release's own run on the live image (2026-11-24 10:28 UTC: full 837 history, 712 MB in memory) peaked at 2,008 of
-     2,278 MB.
-   - The merged code adds EMA's report tables (779 MB with A/R and Production, 720 MB with A/R only) and heavier
-     detection.
-   - SQLite also caps a store loaded this way at 1,024 MB (measured): past that, the save fails. The hook-in unit removes
-     that cap (`plans/brief_HOOK_2026-11-24.md`).
+1. **Which host analyses.** The owner: "The Vercel can run an analysis when the user hits 'run' or something, not
+   automated. The AWS can run automated." So:
+   - The server (AWS) runs the whole daily cycle on its schedule, as today, and is the site that sends faxes, pulls from
+     TriZetto and sends mail.
+   - Vercel runs no analysis on a schedule. Its daily cron is removed. A signed-in person can press "Run the analysis
+     now" on the Data tab; the press starts the same serverless run chain (lock, journal fold, intake, Dropbox delta,
+     detection, saves). Every page on Vercel says when this site last analysed and that it analyses only when someone
+     presses Run.
+   - The memory limit does not go away on a press: the hook-in unit's regulation (shed work by level, the 1 GiB fix,
+     NEAR_CEILING) must keep a pressed run from dying, and the page must say in dollars and items what was shed.
+   - Each site keeps its own store. Work recorded on Vercel is not on the server, so the billers work on the server's
+     site (OPERATIONS.md says so).
    - Measured 2026-11-24 15:00 UTC on Vercel's real image, loaded the way Vercel loads it (load and detection only, no save):
 
      | code | image | load peak | detection peak | detection time |
@@ -399,20 +408,22 @@ with `build_world2.py`. Score runs with `plans/tools/claim_audit_a16.py` and `pl
      before detection and 176 MB at the save. So the merged code there would peak at about 2,110 MB with A/R only and
      2,230 MB with Production, against 2,278 MB. Detection alone would take about 185 to 225 s of the run's 240 s budget,
      so it would need its own invocation every day.
-   - Options: (a) the server is the one host that analyses; Vercel keeps the dashboard copy and people's actions
-     (recommended: no memory ceiling); (b) Vercel analyses too, reading the A/R only, with the archive trimming old
-     settled claims (unit E: 24 months at most); (c) a larger Vercel function, if the plan allows it.
-2. **Rule 8, patient-group denials** that are not deductible, coinsurance or copay (PR-204 plan exclusion, PR-288
-   referral, PR-27 coverage ended). The choices are to work them (bill the patient, or find the right plan) or to count
-   them done. About 66 items on Work now ($4,157) wait on this.
-3. **The recovered amount when a payer denies as primary and pays later as secondary.** Today two rules record it two
-   ways. Recommended: the amount that arrived.
-4. **Owner rules 4.1 and 4.2 in the product** (the auditor already applies the recommended versions):
-   - 4.1: a provider's own rate counts only as a recognised tier (100% or 85% of the payer's full rate). An unexplained
-     discount is listed once per payer and provider.
-   - 4.2: codes a payer never pays, for example G2211 beside an E/M with -25 at Medicare, and 99024. Twenty code-change
-     items ($7,150) on Work now are for codes the payer almost never pays. Today the product pursues them until the owner
-     accepts them (decisions 14 and 16).
+2. **Rule 8, patient-group denials that are not deductible, coinsurance or copay** (PR-204 plan exclusion, PR-288
+   referral, PR-27 coverage ended; about 58 to 66 items, $4.2k on Work now). The owner: "Needs to bill the patient. But
+   can be marked done too if user desires." So the item stays listed with the next step "Bill the patient $X" (the
+   patient's share as the payer set it). For PR-27 the statement asks for current insurance; for PR-288 the panel also
+   offers getting a retro referral and resubmitting. A person can mark it done ("Billed the patient" or "Done") and that
+   choice is never overwritten by a run.
+3. **The recovery when a payer denies as primary and later pays as secondary.** The owner: "whatever you think is best
+   for getting our money." Decided: the recovery is the amount that actually arrived, in both rules (archive rule 3 and
+   the settled-as-secondary closure); the Results tab attributes it. If what arrived is less than the service is owed
+   (the payer's allowed amount less the other payers' payments and the patient's share), the remainder stays listed.
+4. **Codes a payer almost never pays** (rule 4.2; 20 items, $7.2k on Work now). The owner: "Keep pursuing them and find
+   the reason they aren't paying, so that we can adapt our notes to get them paid if possible." So no item is accepted
+   by default. For each payer and code: the denial reasons on file, the modifiers, place of service and diagnoses of the
+   paid and the unpaid lines, and the payer's published rule with its source. Each item then says why this payer does not
+   pay this code and what the note or the claim must show (or that no documentation can change it, with the rule).
+   Rule 4.1 (a provider's own rate counts only as a recognised tier) was not asked; the recommended version stands.
 
 ## 4. Open findings
 
