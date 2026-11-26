@@ -120,7 +120,7 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
 Every finding was confirmed on the code (each reviewer test failed on d79c172 as reported, 42 cases), ported to
 tests/test_plan_rates.py with invented data, both store kinds, fixed, broken on purpose (the test then fails) and
 restored exactly (the break harness is in the unit folder: breaks.py with cases_*.json). tests/test_plan_rates.py:
-103 tests (51 cases x 2 store kinds, 1 deadline-view test), all pass.
+103 tests (49 test functions, each on both store kinds or its own cases), all pass.
 
 Outcomes, finding by finding (all 18 real, all fixed):
 - r2-1 (high) a repriced or taken-back claim leaves the repricing request: repriced, its one-off closes as recovered
