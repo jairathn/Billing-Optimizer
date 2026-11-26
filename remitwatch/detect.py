@@ -5168,7 +5168,7 @@ class Detector:
             if not rejected and not unsent and last and due > known and not cob.get(b):
                 held = behind.setdefault(grp, {"payer": grp, "since": last, "claims": 0, "billed_cents": 0})
                 held["claims"] += 1
-                held["billed_cents"] += sum(x[2] for x in items)
+                held["billed_cents"] += sum(x[2] or 0 for x in items)
                 continue
             cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
                           "again_after": again_after, "rejected": rejected, "unsent": unsent, "gave_up": gave_up, "status": status,
@@ -5811,6 +5811,8 @@ class Detector:
         for cd in cds:
             out[cd["pcn"]] = [(x[0], x[1], int(x[2] or 0)) for x in cd["items"]]
             r8 = cd.get("s837")
+            if any(0 < (x[2] or 0) < 100 for x in cd["items"]):
+                continue                    # the pass kept its token lines among the claim's lines: they are its content
             if cd.get("token_lines") is not None:
                 out[cd["pcn"]] += [(x[0], x[1], int(x[2] or 0)) for x in cd["token_lines"]]
             elif r8 is not None and len(r8) > 7 and r8[7]:

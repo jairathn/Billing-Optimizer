@@ -342,6 +342,27 @@ def test_a_line_billed_at_a_token_charge_still_tells_which_ema_claim_is_the_clai
     assert sorted(ln[0] for ln in json.loads(open_[0]["evidence"])["lines"]) == ["96372", "99214"], open_[0]["evidence"]
 
 
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claims_content_counts_each_token_line_once(tmp_path, kind):
+    """The content a claim is matched by: its listed lines and its token lines, each once. The 837 pass's lines leave the
+    token line out (it is read from the claim's 837 send); a pass that keeps it among the claim's lines is not given it a
+    second time (EMA keeps one line per date and code, so a doubled $0.01 would match no EMA claim); EMA's weekly exports
+    give their own token lines."""
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000T01C017", [("99214", "200.00", "20260302"), ("J3590", "0.01", "20260302")])], "20260320")
+    key = s.query("SELECT claim_837_key FROM claims_837 WHERE patient_control_number='CB0000T01C017'")[0][0]
+    det = Detector(s, run_id="t1")
+    r8 = ["2026-03-20", "2026-03-20", "1", None, "00660", "ANTHEM", 20001, key, "M1", 1]
+    visit = ("99214", "2026-03-02", 20000, 1, None, "")
+    token = ("J3590", "2026-03-02", 1, 1, None, "")
+    got = det._claim_content([{"pcn": "CB0000T01C017", "items": [visit], "s837": r8},
+                              {"pcn": "CB0000T02C017", "items": [visit, token], "s837": r8},
+                              {"pcn": "CB0000T03C017", "items": [visit], "s837": None, "token_lines": [token[:3]]}])
+    for cid in ("CB0000T01C017", "CB0000T02C017", "CB0000T03C017"):
+        assert sorted(got[cid]) == [("99214", "2026-03-02", 20000), ("J3590", "2026-03-02", 1)], (cid, got[cid])
+    s.close()
+
+
 # ----------------------------------------------------------------------------------------------- answers-5
 @pytest.mark.parametrize("kind", KINDS)
 def test_an_export_claim_whose_bill_went_out_again_stays_listed_when_nothing_else_chases_it(tmp_path, kind):
