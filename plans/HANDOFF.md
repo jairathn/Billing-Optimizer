@@ -23,7 +23,7 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-26 19:50 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
+### Running now (updated 2026-11-26 22:20 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
 
 Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
 branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
@@ -31,13 +31,16 @@ a unit from its branch and progress file (the brief says what done means), or st
 
 | Unit | Branch | Brief | State |
 |---|---|---|---|
-| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | built (fd50642; full suite python3 2,839 passed under three zones, 3.11.1 only serialize failures); two reviews then one fix round running (run wf_b849b3af-38e) |
+| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | **merged** at 993f440 (22:15 UTC): build, two reviews (10 findings), fix round all done; its code equals the merge's; python3 green, under GMT-14 and GMT+12 too, 3.11.1 only the serialize class |
 | fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | running (run wf_82efb0cc-738); at 18:40: tip merged, cached-array change whole, base vs branch measurement started (b6592c8) |
 | hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
 | the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
 | review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b): areas answers and money first, then hosts, people, privacy. The orchestrator's own read of the whole diff is in `plans/review_notes_orchestrator_2026-11-26.md` (merge it into the review file) |
 | a17, the independent every-claim auditor (started early: it touches no product code) | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | running (run wf_8fc9da8c-468, started 18:55 UTC): payer-window research beside the build, then integration, two reviews, one fix round. Score again with the merged code before the final trace |
 | deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | running (run wf_b5842331-6d1, started 19:20 UTC); touches codes.py, docs and tests only, so it merges after the others |
+| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | running (run wf_ea1ab0ef-037, started 22:18 UTC): build, two reviews, one fix round |
+| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | running (run wf_91b074e9-48a, started 22:18 UTC) |
+| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | running (run wf_fc5edc8c-c0f, started 22:18 UTC) |
 
 Merge order when they finish: fix7d, fix7c, decisions, hook, deadlines, then a17's tool (each: merge into the integration
 commit, the full suite in the four environments from a frozen worktree of the merge commit, push to both branch names).
