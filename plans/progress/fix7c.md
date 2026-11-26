@@ -32,23 +32,21 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   facility rate rests on 1 to 3 lines (not an item of its own). Tests: 2 new (both store kinds), each guard broken on
   purpose and restored (the cut check, the item-of-its-own check, the whole rule).
 
+- c3bbb1f: a cut day's note names the year of a repair rate taken from another year (run 5 showed a 2026 14301 measured
+  by its 2025 facility rate; the amount, the Mohs's own half, was right). README names the every-procedure-cut rule.
+- 2ac1667: merged the integration tip cb3ffef (plans only).
+
 ## In progress
-- Measurement on the world (brief item 2): base = fc73dec, branch = this branch. Private folder
-  `$S/tk/units/fix7c/` (mode 700): `base_tree/` (git archive of fc73dec), `audit/p2/world.sqlite` + `ema_ledger.sqlite`
-  (one world copy at a time), `cycle_run.py` (the world tool, unchanged), `extract_findings.py`, `compare_runs.py`,
-  `a16tools/` (A16 with `p2_analyze16w.py` patched to run without a pass-1 output).
+- Brief items 1 to 4 done (see Measured). The full suite ran on 2ac1667 + the README line (python3 and
+  `$S/fix/venv_sqlite340/bin/python`, three shards each, while other units' real-data runs loaded the machine); the
+  note fix c3bbb1f after it touches only the new rule's note and its test (tests/test_plan_rates.py: 38 passed on both).
 
 ## Left, in order
-1. Base run on a fresh world copy: `F5_SRC=$U/base_tree P2_DIR=$U/audit/p2 P2_DB=world.sqlite python3 -I -B $U/cycle_run.py 2026-11-24`,
-   then `python3 -I -B $U/extract_findings.py $U/audit/p2/world.sqlite $U/base_findings.sqlite`, then A16:
-   `AUDIT_DIR=$U/audit python3 -I -B $U/a16tools/a16/p2_analyze16w.py $U/audit/p2/world.sqlite base`.
-2. Delete the copy, copy the world again, the same with `F5_SRC=<git archive of the branch tip>`, tag `fix7c`.
-3. `compare_runs.py base_findings.sqlite fix7c_findings.sqlite moves.tsv`; A16 `moves_w.py`, `headline.py`.
-4. The bar: the 7 real underpayments (4 Humana MA Mohs + surgery-center repair pairs, 3 UHC MA January lines) by
-   finding id; the 23 plan-rate cases (UMR plans, UHC commercial PA/NP by state, Anthem products and the surgical site)
-   stay off. Hand-trace every item added or removed on Work now (or a stratified 60).
-5. Memory and time of detection, base and branch (cycle_run's STEP lines).
-6. Suites: tests of touched files, then the full suite in python3 and `$S/fix/venv_sqlite340/bin/python`; node checks.
+1. The open questions below are for the owner or a fixer; none blocks the merge.
+2. A serverless image run of detection (base and branch) was not repeated here: the server's detect peak moved
+   1,054 to 1,061-1,064 MB, which a pressed Vercel run (2 GB) absorbs; the hook unit's real-data runs measure the image.
+3. A17 needs the same plan keys, the facility setting and the cross-claim ranking (both kinds of split day) to judge
+   these items; A16's verdicts on them are not meaningful.
 
 ## How to run
 - `S=/tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad; U=$S/tk/units/fix7c`
@@ -83,12 +81,37 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   item; of the 14 without: 6 rightly second (the repair worth more at its facility rate: 14041, 14061, 14301, 15260 in
   full), 1 nets under the threshold ($14.79), 7 both cut (now caught by `_every_procedure_cut`, run 5 to confirm).
   The hand-check's own 4 finding ids are not on file in this container; they match the description of the listed days.
+- Fifth branch run (29b8083, the every-procedure-cut rule): detect 572.3 s wall on a machine at load 15 to 19 on 4 CPUs
+  (other units' real-data runs and two suites), peak 1,061 MB (run 4: 1,064; base: 1,054). 4,411 on Work now. Against
+  run 4: 13 items added, all `every_cut` Humana MA days (7 of 2026 with 17311 or 17313 and 14041 or 14301 at the surgery
+  center, 6 of 2025), $3,736.71; 4 more of 2024 and 2025 are past their window (expired, off the list). All 7 both-cut
+  days of 2026 found in run 4 now carry an item: 0d490784c7d27b66d5ff9294, 6f6d2f82df236794aa85b286,
+  d023e038ee00df6f6638a7f2, e67edfe84ccb626653fbf2a0, 37ea4e053416254344eb3828, bd232d007c25774f8f54f87d,
+  850871c5f0ef7f32eb1bd2ea ($2,029.58). Hand-traced 4 of the 13 (2 of 2026, 2 of 2025): right; one note cited a 2025
+  rate as this year's (fixed in c3bbb1f).
+- Base against run 5: 61 added (55 Humana MA split days: 42 where the Mohs was the higher-valued, 13 where every
+  procedure was cut; 1 UHC MA split day; 1 UHC MA repricing item; 2 UHC Kentucky PA/NP one-offs; 2 routine-rate
+  reviews), $11,793; 128 removed (Anthem 80, Wausau 15, UHC 14, UHC MA 11, UMR 5, Humana MA 3), $35,166.
+- The bar: UHC MA January, 58e4941184a9954aa7ea58a1 (all 18 lines). Humana MA Mohs and surgery-center repair days: on
+  Work now for every 2026 day where Humana cut a higher-valued Mohs (42 items) or every procedure of the day (7), none
+  for the days where the repair is rightly first. The 23 plan-rate cases stay off: no item comes back on the UMR and
+  Wausau employer plan at its own schedule, Anthem's products and employer plan, the surgery center's facility rate or
+  UHC's Indiana PA/NP lines (see the removed 42 of the sample). What the branch adds for those payers is not a plan rate:
+  UMR's 5 NP lines at 53 percent of the plan's own rate, and UHC Kentucky PA/NP lines at 85 percent after late October
+  2026 (open questions).
+- A16 cannot judge the new items' amounts: its truth for a Mohs on a split day is the gross half (it does not net the
+  repair paid in full, nor see the repair cut too), and its rates have no plan keys (A17's job).
 - Hand-trace of a stratified 60 of the 176 moves (12 Humana MA added, 6 other added, 42 removed across Anthem, Wausau,
   UHC, UHC MA, UMR, Humana, by signal): 57 right, 1 right with an amount question, 2 doubtful (below). Removed: the
   surgery center's facility rate (Anthem repairs, 11402s, 99204-57, 12031; 5 MPPR_EXCESS, 5 SECOND_RATE, 1 downcode,
   1 provider gap), plans with schedules of their own (Anthem employer plan and products, the UMR and Wausau plan, PAs at
   85.7 percent), UHC's Indiana 85 percent, UHC MA's January lines absorbed into the repricing item, a 2024 contract item
   whose office lines fell under its 50-line floor once the surgery center's were counted as facility.
+
+- Suites (2ac1667 + the README line): Python 3.13 / SQLite 3.53: 2,732 passed, 55 failed, 66 skipped. The 55 (test_fax 34,
+  test_hotfix2 9, test_no_fax_route 5, test_notes_bodies_cli 4, test_hotfix2c 2, test_bulk_pause 1) fail the same, test
+  for test, on the base fc73dec. Python 3.11.1 / SQLite 3.40: 2,616 passed, 163 failed, 24 errors (the same fax and notes
+  tests plus the store-image tests that build has no serialize for); compared with the base below. Node checks: both pass.
 
 ## Open questions
 - UHC Kentucky PA/NP: paid in full from January 2025 to late October 2026, then 85 percent on some lines. The branch
