@@ -1,7 +1,7 @@
 # Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
 
 Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
-Branch: wip/hook. Last updated: 2026-11-26 19:45 UTC.
+Branch: wip/hook. Last updated: 2026-11-26 20:50 UTC.
 
 ## Done
 - 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
@@ -19,32 +19,33 @@ Branch: wip/hook. Last updated: 2026-11-26 19:45 UTC.
 - 8f38502: /api/cron/faxes wraps the fax line's reads in repair.resilient as cli._fax_run does (needs_H L2); test
   test_the_daily_fax_runs_reads_are_tried_again_and_a_send_never_is on both entries.
 
-## Half done: the owner's decision 1 (Vercel analyses only on a press), the design being built
-- vercel.json: the /api/cron/cycle cron goes; /api/cron/faxes stays (no analysis; it sends nothing unless
-  REMITWATCH_FAX_SENDER=serverless, and the server sends by default). No cron "only keeps the site healthy".
-- Vercel never starts a run by itself: /api/sync/freshen (page open), the Dropbox webhook, an upload's finish
-  (api_uploads._wake) and a held report's "apply" start nothing there; their answers say "press Run the analysis now".
-- The press: POST /api/ops/run (signed in, XHR). Vercel: preview 409, no storage 503, no CRON_SECRET 400; a run holding
-  lock.json, or a press in the last 90 s (state file press.json), answers {started: false, running: true, text: "A run is
-  already going ..."}; else press.json is written and cloud.trigger_cycle(base, "press", force=1) starts the same chain.
-  Server: 404 (the server keeps its schedule). /api/sync/run on Vercel goes through the same press function.
-- cloud.run_cloud_cycle: a forced run (a press) hands detection to a fresh invocation when the time left is short (as
-  after a large read) and counts that as progress, so the chain continues; status.json carries "analysed" {at, run_id,
-  findings} from the last run that ran detection (carried by runs that did not), and "unchecked" {n, cents, text} when a
-  run shed work or left detection pending: what it could not check, in items and dollars.
-- Pages: header chip on Vercel ("analysed <when> · only when someone presses Run the analysis now, Data tab"); Data tab
-  ops panel section "Analysis on this site" with the button, the running state and the unchecked box; Feed panel on Vercel
-  points to it; Upload and Setup pages say the same line.
-- Docs: OPERATIONS.md, VERCEL_SETUP.md (crons list, test_docs checks each cron path and time), README (vercel.json line:
-  "one daily schedule"), the release note line. CLAUDE.md line 87 still says the daily cron: NOT edited by this unit
-  (agents may not change CLAUDE.md); flagged for the owner/integrator.
+- f719f28, dd53d57, 59e7990: the owner's decision 1 is built (server side, pages, docs), with tests on both hosts:
+  - vercel.json: only /api/cron/faxes (15:43 UTC) stays; it runs no analysis and sends nothing unless
+    REMITWATCH_FAX_SENDER=serverless. No cron "only keeps the site healthy", so none other is kept.
+  - POST /api/ops/run (api_ops.ops_run, press_run; cloud.press, run_going, _answer_press, press.json): Vercel only; 404
+    on a server. /api/sync/run on Vercel is the same press (the Feed, Upload and /setup buttons).
+  - Nothing else starts a run on Vercel: freshen, the Dropbox webhook (api._webhook_work removed), an upload's finish
+    (api_uploads._wake), a held report's apply.
+  - cloud.run_cloud_cycle: forced analysis handed on when short of time (counts as progress); status.json "analysed"
+    and "unchecked" (cloud.unchecked_note, _last_detection).
+  - Pages: ops.js opAnalysisHtml/opBindRun ("Analysis on this site"), features.js header line and Feed, upload.js and
+    setup.html (#pressLine). Docs: VERCEL_SETUP.md, OPERATIONS.md, README.md, ARCHITECTURE.md.
+  - Tests: test_hooks.py section 7 (7 API tests, 1 browser test on a serverless site via tests/press_page.js); existing
+    tests updated for the decision (test_cloud webhook and sync/run, test_upload_chunks x3, test_ema_pages held report,
+    test_uploads Vercel answer, test_results note). Each part broken on purpose failed its test; restored.
+  - NOT changed: CLAUDE.md line 87 still says "the daily cron calls /api/cron/cycle (10:17 UTC; vercel.json)". Agents
+    may not edit CLAUDE.md: the owner or integrator should change that line to the press.
+  - Release note line (for the integrator's release message): "The Vercel site no longer analyses on a schedule: a
+    signed-in person presses Run the analysis now on its Data tab. The server analyses every day as before. Billers work
+    on the server's site: what is recorded on the Vercel site is not on the server."
 
 ## Next
-1. Check items 2-6 of the brief against needs_E/G/H (saved privately in $S/tk/units/hook/needs_*.md from
-   `git show origin/wip/plans:plans/wire/needs/needs_<X>.md`) and fill any gap with a failing test first.
-2. The owner's decision 1 (Vercel analyses only on a press).
-3. Real-data runs on a private world copy ($S/tk/units/hook/).
-4. Suites in 3.13, 3.12, 3.11.1 and the node checks.
+1. Real-data runs on a private world copy ($S/tk/units/hook/, mode 700, one copy at a time, df -h / first): server
+   cycles twice (plans/tools/world/cycle_run.py with F5_SRC=this tree), the serverless image chain from
+   $S/tk/world/store_live_1124.sqlite (or $S/tk/data/store.sqlite.gz) until more is false plus an idle run, a pressed
+   run (force_detect) on it, the image with EMA tables (plans/tools/world/build_img_ema.py), the five faults, forced
+   memory, the PHI scan of every log, manifest and bundle written.
+2. Suites in 3.13, 3.12, 3.11.1 and the node checks.
 
 ## Numbers measured so far
 - (from the earlier runs, see plans/HANDOFF.md section 0 item 2): three server cycles converge; five faults detected,
