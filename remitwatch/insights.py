@@ -670,7 +670,10 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
             got = conn.execute("SELECT MAX(ingested_at) FROM files WHERE kind IN ('835','remit','rmt')").fetchone()[0]
         except sqlite3.Error:
             pass
-        recent = bool(got) and (date.fromisoformat(today) - date.fromisoformat(got[:10])).days <= 10
+        # the day the last file came where the practice is (a file read at 8:30 PM Eastern came that day), as today is
+        from .runtime import practice_date
+        got = practice_date(str(got)) if got else None
+        recent = bool(got) and (date.fromisoformat(today) - date.fromisoformat(got)).days <= 10
         later = (newest or "")[:10] > reach         # newer payments are in, from a few payers or after weeks that are missing
         # weeks with no remittance from any payer, then newer ones (misuse check CH-6): named, with what to do. Only the hole
         # this day stops at (it starts the day after it)

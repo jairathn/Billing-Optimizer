@@ -24,7 +24,7 @@ function rsSetName(v){ try { localStorage.setItem(RS_NAME_KEY, v || ''); } catch
 // day only before the brief has loaded (the server keeps the practice's day whatever the page sends)
 function rsDay(){ if(typeof siteDay === 'function' && typeof state !== 'undefined' && state.brief && state.brief.today) return siteDay(); const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 function rsWhen(iso){ if(!iso) return ''; const d = new Date(iso); return isNaN(d) ? String(iso).slice(0, 16).replace('T', ' ') : d.toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'}); }
-function rsDate(iso){ if(!iso) return ''; const d = new Date(String(iso).slice(0, 10) + 'T12:00:00'); return isNaN(d) ? String(iso) : d.toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'}); }
+function rsDate(iso){ if(!iso) return ''; const d = new Date((typeof practiceDate === 'function' ? practiceDate(iso) : String(iso).slice(0, 10)) + 'T12:00:00'); return isNaN(d) ? String(iso) : d.toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'}); }
 function rsMonth(m){ const d = new Date(String(m).slice(0, 7) + '-15T12:00:00'); return isNaN(d) ? String(m) : d.toLocaleDateString(undefined, {month: 'long', year: 'numeric'}); }
 function rsLink(key, text, title, note){ return `<a href="#" class="rs-open" data-key="${esc(key)}"${note ? ` data-note="${esc(note)}"` : ''}${title ? ` title="${esc(title)}"` : ''}>${text}</a>`; }
 // the owner's password the page holds (typed in the Providers tab or here) rides along on this page's own loads and saves

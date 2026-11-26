@@ -45,8 +45,15 @@ def test_srfax_speaks_its_web_service():
     assert q["action"] == "Queue_Fax" and q["sToFaxNumber"] == "18005550142" and q["sCallerID"] == "2705550100" and q["sFaxType"] == "SINGLE"
     assert q["_url"] == fax.SRFAX_URL and svc.queued[fid]["pdf"].startswith(b"%PDF-")
     assert line.status(fid)["state"] == "queued"
+    # when it went: a time with its zone from EpochTime ("a unix time stamp of the DateSent field"); DateSent itself is in the
+    # account's own zone, unnamed, and is kept beside it as SRFax's words. With no EpochTime there is no time ('').
+    svc.statuses[fid] = {"SentStatus": "Sent", "Pages": "3", "DateSent": "Nov/20/2026 10:02:00", "EpochTime": "1795186920"}
+    assert line.status(fid) == {"state": "sent", "pages": 3, "error": "", "at": "2026-11-20T15:02:00+00:00", "at_text": "Nov/20/2026 10:02:00"}
     svc.statuses[fid] = {"SentStatus": "Sent", "Pages": "3", "DateSent": "Nov/20/2026 10:02:00"}
-    assert line.status(fid) == {"state": "sent", "pages": 3, "error": "", "at": "Nov/20/2026 10:02:00"}
+    assert line.status(fid)["at"] == "" and line.status(fid)["at_text"] == "Nov/20/2026 10:02:00"
+    for odd in ("0", "-5", "soon", None, "99999999999999"):          # a placeholder or a value that is no time
+        svc.statuses[fid] = {"SentStatus": "Sent", "DateSent": "", "EpochTime": odd}
+        assert line.status(fid)["at"] == "", odd
     svc.statuses[fid] = {"SentStatus": "Failed", "ErrorCode": "Busy"}
     assert line.status(fid)["state"] == "failed" and line.status(fid)["error"] == "Busy"
     # both spellings of the status call's ID go along: SRFax's documentation uses both
@@ -199,6 +206,12 @@ def test_select_all_then_appeal(site):
     assert got["checked"] == 2 and got["sent"] == 2 and got["received"] == 0
     f = c.get("/api/faxes").json()
     assert f["configured"] is True and [s["status"] for s in f["sent"]] == ["sent", "sent"] and f["due"] == []
+    # when each went is kept as every record is (a time with its zone), never before it was queued: the line's own words
+    # for a time ('2026-11-20 10:00:00' here, no zone) are no such time, so the moment the status was read stands in
+    from datetime import datetime
+    for s in f["sent"]:
+        sent, made = datetime.fromisoformat(s["sent_at"]), datetime.fromisoformat(s["created_at"])
+        assert sent.tzinfo is not None and sent >= made, (s["sent_at"], s["created_at"])
 
 
 def test_the_payers_answer_is_read_matched_and_answered(site):

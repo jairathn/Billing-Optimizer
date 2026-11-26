@@ -29,6 +29,9 @@ function siteDay(){ return (state.brief && state.brief.today) || localDay(); }
 // is that day's, as the server dates it (runtime.practice_date), in the zone the brief names. A plain day, a time with no
 // zone, or a page with no brief yet (or a zone this browser does not know) say the day as written.
 function practiceDate(iso){ const s = String(iso || ''), tz = state.brief && state.brief.tz, t = /T\d\d:\d\d.*([zZ]|[+-]\d\d:?\d\d)$/.test(s) ? new Date(s) : null; if(!t || isNaN(t) || !tz) return s.slice(0, 10); try { const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(t).map(x => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}`; } catch(e){ return s.slice(0, 10); } }
+// a stored moment's date and time where the practice is ('2026-11-24 21:30'), in the zone the brief names, as the server
+// dates it; with no brief yet (or a zone this browser does not know) UTC's, said as UTC. A time with no zone, as written.
+function practiceTime(iso){ const s = String(iso || ''), tz = state.brief && state.brief.tz, t = /T\d\d:\d\d.*([zZ]|[+-]\d\d:?\d\d)$/.test(s) ? new Date(s) : null; if(!t || isNaN(t)) return s.replace('T', ' ').slice(0, 16); if(tz){ try { const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}).formatToParts(t).map(x => [x.type, x.value])); return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`; } catch(e){} } const u = t.toISOString(); return `${u.slice(0, 10)} ${u.slice(11, 16)} UTC`; }
 function daysUntil(d){ if(!d) return null; const t = new Date(d+'T00:00:00Z'), n = new Date(siteDay()+'T00:00:00Z'); return Math.round((t-n)/86400000); }
 function closesText(d){
   const n = daysUntil(d);

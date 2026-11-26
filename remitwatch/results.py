@@ -183,8 +183,16 @@ def _now() -> str:
 
 
 def _d(iso: Any) -> date | None:
+    """A stored day as written, or the practice's date of a stored moment (an item first flagged, a packet built, a fax at
+    9:30 PM Eastern: that day, as the states and work_of date them, never UTC's next): every day count and week here."""
+    if iso is None:
+        return None
+    s = str(iso)
     try:
-        return date.fromisoformat(str(iso)[:10])
+        if len(s) > 10:
+            from .runtime import practice_date
+            s = practice_date(s)
+        return date.fromisoformat(s[:10])
     except (TypeError, ValueError):
         return None
 
@@ -444,6 +452,7 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
     written with its first-flag date (the item's own first_seen); a listed one keeps the earliest first-flag date ever
     seen; one no longer listed is marked gone (it stays, so money that comes on it later still counts); an item that went
     from Work now to Expired is recorded as lost to its deadline, with its dollars. Returns the counts."""
+    from .runtime import practice_date
     ensure_schema(conn)
     t = _today(today)
     have: dict[str, tuple] = {}
@@ -461,7 +470,10 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
         f = dict(zip(sel, r))
         fid = f["finding_id"]
         seen.add(fid)
-        first = str(f.get("first_seen") or "")[:10] or t
+        # the first-flag day on the practice's calendar, as a person's Paid (recovered_date) and the payers' dates it is
+        # compared with: an item raised by a run at 9 PM Eastern was flagged that day, not UTC's next (a row stored on
+        # UTC's day is lowered to it by the min() below)
+        first = practice_date(str(f.get("first_seen") or "")) or t
         ws = f.get("work_state")
         prev = have.get(fid)
         if prev is None:
@@ -554,6 +566,7 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
     sent through RemitWatch (a fax counts once it went out: status 'sent'); the status line that only repeats a fax or a
     'billed' line is folded into it."""
     from .runtime import practice_date
+    from .states import _moment, fax_day
     ids = sorted(set(fids))
     out: dict[str, list[dict]] = {fid: [] for fid in ids}
     if not ids:
@@ -578,11 +591,13 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
             for fid, status, sent_at, created_at, pages, doc in conn.execute(
                     """SELECT x.finding_id, x.status, x.sent_at, x.created_at, x.pages, x.doc FROM faxes x
                        WHERE x.direction='out' AND x.finding_id IN (SELECT id FROM temp.rs_fx)"""):
-                when = str(sent_at or created_at or "")
-                if status != "sent" or not when:
+                # the day it went, as the states date it (never before it was queued; a fax line's own words are no day)
+                day = fax_day(sent_at, created_at)
+                if status != "sent" or not day:
                     continue
+                when = str(sent_at if _moment(sent_at) else created_at or sent_at or "")
                 who = str(_json(doc).get("actor") or "").strip()[:80] or "RemitWatch"
-                out[fid].append({"date": practice_date(when), "at": when, "kind": "fax", "who": who, "pages": int(pages or 0), "src": "fax"})
+                out[fid].append({"date": day, "at": when, "kind": "fax", "who": who, "pages": int(pages or 0), "src": "fax"})
         _drop(conn, "rs_fx")
     for fid, v in out.items():
         v.sort(key=lambda w: (w["at"], w["kind"]))

@@ -7,6 +7,8 @@
 const FAX_KINDS = new Set(['note','rule','rate']);
 // a stored moment's day where the practice is (today.js practiceDate), as the server says it; as written without it
 const faxDay = s => typeof practiceDate === 'function' ? practiceDate(s) : String(s || '').slice(0, 10);
+// a stored moment's date and time where the practice is (today.js practiceTime); UTC's, said so, without it
+const faxTime = s => typeof practiceTime === 'function' ? practiceTime(s) : String(s || '').replace('T', ' ').slice(0, 16) + (/T\d\d:\d\d/.test(String(s || '')) ? ' UTC' : '');
 const FAX_PURPOSE = {appeal:'Appeal', second_request:'Request again', next_level:'Next level', records:'Records sent', payment:'Payment request'};
 const FAX_DOC = {appeal_decision:'Decision', records_request:'Records request', payment_notice:'Payment notice', denial:'Denial',
   acknowledgement:'Received notice', other:'Other', unread:'Not read'};
@@ -228,7 +230,7 @@ function faxDrawerHtml(f, r){
   const again = FAX_KINDS.has(kind) && f.status === 'appealed' && !!f.claim_key && outs.length > 0 && outs.every(x => x.status === 'failed');
   const can = (FAX_KINDS.has(kind) && ['open','in_progress'].includes(f.status) && !!f.claim_key) || again;
   if(!can && !list.length && !(line && f.claim_key)) return '';
-  const row = x => `<tr><td>${esc(String(x.created_at||'').replace('T',' ').slice(0,16))}</td><td>${x.direction==='in' ? 'From the payer' : 'To ' + esc(fax10(x.number))}</td>
+  const row = x => `<tr><td>${esc(faxTime(x.created_at))}</td><td>${x.direction==='in' ? 'From the payer' : 'To ' + esc(fax10(x.number))}</td>
     <td>${x.direction==='in' ? esc(FAX_DOC[x.purpose]||x.purpose||'') + (x.decision && FAX_DECISION[x.decision] ? ` · <span class="${FAX_DECISION[x.decision][1]}">${FAX_DECISION[x.decision][0]}</span>` : '')
       : esc(FAX_PURPOSE[x.purpose]||x.purpose||'') + (x.level > 1 ? ' (level ' + esc(x.level) + ')' : '')}</td>
     <td>${x.direction==='in' ? '' : `<span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status||'')}</span>`}</td>
@@ -297,7 +299,7 @@ async function faxesTab(v){
   const unmatched = (fx.received||[]).filter(x => !x.finding_id);
   const sends = fx.sends !== false;
   const numInput = (p, purpose) => { const n = (p.numbers||{})[purpose] || {}, cur = n.number || '';
-    const when = s => esc(String(s||'').replace('T',' ').slice(0,16));
+    const when = s => esc(faxTime(s));
     return `<input data-pfax="${esc(p.payer_group)}" data-purpose="${purpose}" value="${esc(cur)}" placeholder="${purpose==='appeal'?'(800) 555-0100':'if different'}" inputmode="tel" style="width:140px"><button data-psave="${esc(p.payer_group)}" data-purpose="${purpose}">Save</button>`
       + (cur ? `<div class="muted" title="${esc((n.history||[]).map(h => `${h.number} by ${h.by||'?'} on ${faxDay(h.at)}${h.confirmed ? ' (confirmed)' : ''}`).join('\n'))}">Saved by ${esc(n.by||'?')} on ${esc(faxDay(n.at))}</div>` : '')
       + (cur && n.confirmed === false ? `<div class="sev-medium">Changed${n.changed_at ? ' on ' + esc(faxDay(n.changed_at)) : ''}${n.previous ? ` (was ${esc(n.previous)})` : ''}. Retries and follow-ups wait until someone confirms it.
@@ -338,13 +340,13 @@ async function faxesTab(v){
     <div class="panel"><h2>Came in <span class="muted small">${num((fx.received||[]).length)}</span></h2>
       ${fx.review ? '' : '<div class="note sev-medium">Claude\'s reading of incoming faxes is off (ANTHROPIC_API_KEY): they are listed, not read or matched.</div>'}
       ${unmatched.length ? `<div class="note">${pl(unmatched.length, 'fax')} need a person to match. A fax is tied by itself only when a claim number on it, or the member ID with the patient's name and the date of service, names the item and it came from a number known for that payer. A member ID a family shares ties nothing by itself. Open the PDF, then tie it to the item it answers (or open the item and use "Tie a fax that came in").</div>` : ''}
-      ${(fx.received||[]).length ? `<div class="scroll"><table class="small"><thead><tr><th>Received</th><th>From</th><th>What</th><th>Says</th><th>Item</th><th></th></tr></thead><tbody>${fx.received.map(x=>`<tr><td>${esc(String(x.created_at||'').replace('T',' ').slice(0,16))}</td><td>${esc(fax10(x.number))}${x.payer?`<div class="muted">${esc(x.payer)}</div>`:''}</td>
+      ${(fx.received||[]).length ? `<div class="scroll"><table class="small"><thead><tr><th>Received</th><th>From</th><th>What</th><th>Says</th><th>Item</th><th></th></tr></thead><tbody>${fx.received.map(x=>`<tr><td>${esc(faxTime(x.created_at))}</td><td>${esc(fax10(x.number))}${x.payer?`<div class="muted">${esc(x.payer)}</div>`:''}</td>
         <td>${esc(FAX_DOC[x.purpose]||x.purpose||'')}${x.decision && FAX_DECISION[x.decision] ? `<div class="${FAX_DECISION[x.decision][1]}">${FAX_DECISION[x.decision][0]}</div>` : ''}</td>
         <td>${esc(x.summary||x.error||'')}${x.deadline?`<div class="sev-medium">Deadline ${esc(x.deadline)}</div>`:''}${x.patient?`<div class="muted">${esc(x.patient)}</div>`:''}</td>
         <td>${itemCell(x)}</td>
         <td><a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">PDF</a></td></tr>`).join('')}</tbody></table></div><div id="fxTieMsg" class="small"></div>` : '<div class="muted small">Nothing yet.</div>'}</div>
     <div class="panel"><h2>Sent <span class="muted small">${num((fx.sent||[]).length)}</span></h2>
-      ${(fx.sent||[]).length ? `<div class="scroll"><table class="small"><thead><tr><th>Sent</th><th>To</th><th>What</th><th>State</th><th class="num">Pages</th><th>Item</th><th></th></tr></thead><tbody>${fx.sent.map(x=>`<tr><td>${esc(String(x.created_at||'').replace('T',' ').slice(0,16))}</td><td>${esc(x.payer_group||'')}<div class="muted">${esc(x.number||'')}</div></td>
+      ${(fx.sent||[]).length ? `<div class="scroll"><table class="small"><thead><tr><th>Sent</th><th>To</th><th>What</th><th>State</th><th class="num">Pages</th><th>Item</th><th></th></tr></thead><tbody>${fx.sent.map(x=>`<tr><td>${esc(faxTime(x.created_at))}</td><td>${esc(x.payer_group||'')}<div class="muted">${esc(x.number||'')}</div></td>
         <td>${esc(FAX_PURPOSE[x.purpose]||x.purpose||'')}${x.level>1?` <span class="muted">(level ${esc(x.level)})</span>`:''}</td>
         <td><span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status==='queued'?'going out':x.status==='sending'?'not settled':x.status||'')}</span>${x.error?`<div class="muted">${esc(x.error)}</div>`:''}
           ${x.unsettled ? `<div class="small">Look in SRFax's sent faxes: <button data-settle="${esc(x.fax_key)}" data-went="1">It went out</button> <button data-settle="${esc(x.fax_key)}" data-went="0">It did not go out</button></div>` : ''}</td>

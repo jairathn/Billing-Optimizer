@@ -548,7 +548,7 @@ def _rows_remitwatch(fx: dict) -> list[dict]:
             text = e.get("note") or k.replace("_", " ")
         out.append(_row(e["at"], "remitwatch", k, text + ".", tags=["rw:" + k], amount=e.get("cents") if k == "manual" else None))
     for x in fx["rw"]["faxes"]:
-        when = x.get("sent_at") or x.get("created_at")
+        when = S.fax_day(x.get("sent_at"), x.get("created_at")) or None       # the day it went, as the states date it
         if (x.get("direction") or "out") == "in":
             out.append(_row(when, "remitwatch", "fax_in", f"Fax received from {x.get('payer_group') or 'the payer'}.", tags=["fax_in"]))
             continue

@@ -388,7 +388,7 @@ function initNav(){
 async function loadMeta(){
   state.meta = await api('/api/meta');
   const m = state.meta, r = m.remits||{}, runs = (m.runs||[])[0];
-  $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?runs.finished_at.replace('T',' ').slice(0,16):'never'} · files ${m.files?m.files.n:0}`;
+  $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?(typeof practiceTime === 'function' ? practiceTime(runs.finished_at) : String(runs.finished_at).replace('T',' ').slice(0,16) + ' UTC'):'never'} · files ${m.files?m.files.n:0}`;
   $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
   $('#uploadLink').hidden = !(m.uploads || m.report_uploads);     // visit notes by hand on a server; EMA's reports on both hosts
 }

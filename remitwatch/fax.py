@@ -117,6 +117,43 @@ class Provider:
         raise FaxError("This fax service cannot list what it sent.")
 
 
+def _epoch_moment(v: Any) -> str:
+    """A unix time stamp as a UTC time with its zone; '' for none, or for one outside 2000 to 2100 (a placeholder)."""
+    try:
+        sec = float(str(v).strip())
+    except (TypeError, ValueError):
+        return ""
+    if not 946684800 <= sec < 4102444800:
+        return ""
+    return datetime.fromtimestamp(sec, timezone.utc).isoformat(timespec="seconds")
+
+
+def _moment(v: Any) -> datetime | None:
+    s = str(v or "").strip()
+    if len(s) <= 10:
+        return None
+    try:
+        t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def sent_moment(reported: Any, queued: Any, now: str) -> str:
+    """The moment a fax went, as every record is written (UTC, with its zone): what the fax line reported when that is a
+    time with its zone, else `now` (the moment its status was read); never before the fax was queued, never after now.
+    A line's own words for a time ('Nov/24/2026 21:31:00', in its account's zone) are no such time: cut to a day they
+    sorted after every real day, and a fax's follow-up was lost."""
+    hi = _moment(now) or datetime.now(timezone.utc)
+    t = _moment(reported) or hi
+    lo = _moment(queued)
+    if lo is not None and t < lo:
+        t = lo
+    if t > hi:
+        t = hi
+    return t.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
 def _range_days() -> tuple[date, date]:
     """The days a date range asked of the fax service must hold, earliest first: the practice's today and UTC's. SRFax
     dates a fax in its account's zone, which may be either; a range that stopped at the earlier day would leave the
@@ -170,8 +207,12 @@ class SRFax(Provider):
         word = str(r.get("SentStatus") or r.get("Status") or "").lower()
         state = "failed" if "fail" in word else "sent" if word.startswith("sent") or word == "success" else "queued"
         pages = r.get("Pages") or r.get("PagesSent")
+        # 'at': when it went, as a time with its zone. SRFax words DateSent in the account's own zone ('Nov/20/2026 10:02:00',
+        # no zone named), so the time comes from EpochTime, "a unix time stamp of the DateSent field"; SRFax's words are kept
+        # beside it ('at_text'). With no EpochTime the caller takes the moment it read the status (sent_moment).
         return {"state": state, "pages": int(pages) if str(pages or "").isdigit() else None,
-                "error": str(r.get("ErrorCode") or "")[:200] if state == "failed" else "", "at": r.get("DateSent") or ""}
+                "error": str(r.get("ErrorCode") or "")[:200] if state == "failed" else "",
+                "at": _epoch_moment(r.get("EpochTime")) if state == "sent" else "", "at_text": str(r.get("DateSent") or "")}
 
     def inbox(self, days: int) -> list[dict]:
         first, end = _range_days()
