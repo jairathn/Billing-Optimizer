@@ -1851,10 +1851,11 @@ class Detector:
                       for (y, c, p), v in self.comp_split.items() if c == code and p == comp)
         return (near[0][2], near[0][1]) if near else None
 
-    def _own_yard(self, grp: str, year: str, code: str, pos: str, comp: str) -> tuple[dict | None, str]:
-        """The payer's own rate record for the year, else the year before or after (the payer's own, one year apart)."""
+    def _own_yard(self, grp: str, year: str, code: str, pos: str, comp: str, exact: bool = False) -> tuple[dict | None, str]:
+        """The payer's own rate record for the year, else the year before or after (the payer's own, one year apart); with
+        `exact`, the year's own record only."""
         r = self.yard.get((grp, year, code, pos, comp))
-        if r or not year.isdigit():
+        if r or exact or not year.isdigit():
             return r, year
         for y in (str(int(year) - 1), str(int(year) + 1)):
             r = self.yard.get((grp, y, code, pos, comp))
@@ -1993,10 +1994,14 @@ class Detector:
 
     def _own_rate(self, rg: str, year: str, code: str, pos: str, comp: str) -> tuple[dict | None, str, str]:
         """The rate record of a rate group (a payer group, or one of its plans) for the code, the year it is of and, for a
-        component it has no rate of its own for, how its global rate was split ('' otherwise)."""
-        r, y = self._own_yard(rg, year, code, pos, comp)
+        component it has no rate of its own for, how its global rate was split ('' otherwise). A plan's own schedule is read
+        for the line's own year only: a plan has far fewer lines than its payer, its rates change from year to year, and a
+        year it shows no rate for is not the year before's or after's (measured on the world: a plan's 2026 rate held its 2025
+        visits short)."""
+        exact = PLAN_SEP in (rg or "")
+        r, y = self._own_yard(rg, year, code, pos, comp, exact)
         if r is None and comp:
-            g, gy = self._own_yard(rg, year, code, pos, "")
+            g, gy = self._own_yard(rg, year, code, pos, "", exact)
             share = self._comp_share(gy, code, comp) if g else None
             if g and share:
                 return (dict(g, mode=int(round(g["mode"] * share[0])), np=None, np_full=g.get("np_full")), gy,
@@ -4268,10 +4273,16 @@ class Detector:
         - this one is the highest-valued and was paid at that share (the payer ranked the day by processing order): it was
           owed in full, less what a correct ranking takes back from the others the payer paid above their share (the
           cheaper repair it paid in full). Listed with that net amount and the day's payments as its evidence.
-        A procedure of the day with no rate of the payer's own is worth at least what it was allowed."""
+        A procedure of the day with no rate of the payer's own is worth at least what it was allowed. The day also holds the
+        reducible procedures the 837s show billed for the patient by the clinician that day on another bill whose answer is
+        not on file (_billed_same_day): each is worth the payer's rate in the 837's place of service, and, its payment being
+        unknown, is counted as paid in full (what a correct ranking takes back from it is then the most it can be, so the
+        amount listed is the least owed). Without them a Mohs cut beside a surgery center's claim the feed lacks would be
+        listed whole, though the 837 shows a larger repair made it the second procedure (fix7c, measured on the world)."""
         cands = self.__dict__.pop("_mppr_cands", None) or []
         if not cands:
             return
+        billed = self._billed_same_day(cands)
         want = {(l.get("service_date"), l.get("rendering_provider_npi")) for l, *_x in cands}
         same_day: dict[tuple, list] = defaultdict(list)
         for x in self.lines:
@@ -4295,6 +4306,7 @@ class Detector:
             day = [x for x in same_day.get((l.get("service_date"), l.get("rendering_provider_npi")), [])
                    if x["line_key"] != l["line_key"] and x["claim_key"] != l["claim_key"] and me and who.get(x["claim_key"]) == me
                    and x.get("payer_group") == l.get("payer_group")]
+            day += self._billed_lines(l, billed.get(l["line_key"]) or [], day)
             if not day:
                 self._emit_underpaid(l, allowed, r, one_off)
                 continue
@@ -4331,29 +4343,100 @@ class Detector:
                 w, known = worth[x["line_key"]]
                 pct, _l = self.mppr_pct({"payer_group": l["payer_group"], "surg_rank": 2 if i == 0 else 3})
                 due = int(w * pct + 0.5)
-                got = x.get("allowed_cents") or 0
+                unknown = x.get("allowed_cents") is None       # billed (837), its answer not on file: counted as paid in full
+                got = w if unknown else (x.get("allowed_cents") or 0)
                 back += max(0, got - due)
                 rows.append({"code": x.get("procedure_code"), "claim": x.get("patient_control_number"), "setting": x.get("pos_class") or "office",
-                             "allowed_cents": got, "rate_cents": w if known else None, "share": pct, "due_cents": due})
+                             "allowed_cents": None if unknown else got, "rate_cents": w if known else None, "share": pct, "due_cents": due,
+                             **({"answer": "not on file"} if unknown else {})})
             net = (rate - allowed) - back
             if net < 200 or net / rate < 0.05:
                 self.ema_counts["mppr_day_nets_out"] += 1
                 continue
             code = l["procedure_code"]
             grp = l.get("payer_group") or "The payer"
-            others = ", ".join(f"{d['code']} ({'paid in full' if d['allowed_cents'] > d['due_cents'] else 'also cut'}, allowed {_usd(d['allowed_cents'])})"
+            others = ", ".join(f"{d['code']} (its answer is not on file: counted as paid in full, {_usd(d['rate_cents'] or d['due_cents'])})"
+                               if d["allowed_cents"] is None else
+                               f"{d['code']} ({'paid in full' if d['allowed_cents'] > d['due_cents'] else 'also cut'}, allowed {_usd(d['allowed_cents'])})"
                                for d in rows)
+            unseen = any(d["allowed_cents"] is None for d in rows)
             note = (f"{grp} paid {code} at its share for a second procedure ({_usd(allowed)} of {_usd(rate)}), although it was the "
                     f"highest-valued procedure of the day: the patient's other procedures that day were billed on another claim "
                     f"({others}), each worth less at {grp}'s own rate for its setting. The {code} is owed in full: {_usd(rate - allowed)} more"
                     + (f", less {_usd(back)} a correct ranking takes back from the others it paid above their share: {_usd(net)} for the day"
-                       if back else ""))
+                       if back else "")
+                    + (". That is the least owed: if the payer cut the other claim too, the whole difference is owed" if unseen else ""))
             ev = dict(one_off[10], highest_valued=True, same_day=rows, net_cents=net, back_cents=back, note=note,
                       ranked_with="the patient's other claims of the day, by the payer's own rate in each setting")
             title = (f"{code} allowed {_usd(allowed)} vs usual {_usd(rate)} ({grp}): cut as a second procedure although it is the "
                      f"highest-valued one that day" + (f"; {_usd(net)} net with the other claim" if back else ""))
             self.ema_counts["mppr_highest_cut_other_claim"] += 1
             self._emit("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal", title, l, rate, net, one_off[8], one_off[9], ev)
+
+    def _billed_same_day(self, cands: list) -> dict[str, list[tuple]]:
+        """The reducible procedures the 837s show billed by each candidate's clinician, on its date of service, for its
+        patient (the 835 claim's member number, NM1*QC or NM1*IL, as the 837's subscriber id), on another bill none of whose
+        answers is on file (any payer's: a bill another payer answered is that payer's business, and a bill this payer
+        answered is in the day already): {candidate line key: [(claim id, code, modifiers, place of service)]}, one per bill
+        and code (an 837 sent again repeats its lines). Empty where the 837 tables are absent."""
+        c = self.conn
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "claims_837" not in tables or "lines_837" not in tables:
+            return {}
+        keys = sorted({l["claim_key"] for l, *_x in cands})
+        ids: dict[str, set] = {}
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            for ck, pid, iid in c.execute(f"SELECT claim_key, patient_id, insured_id FROM claims WHERE claim_key IN ({','.join('?' * len(part))})",
+                                          part):
+                ids[ck] = {v.strip() for v in (pid, iid) if v and v.strip()}
+        want: dict[tuple, list] = defaultdict(list)
+        for l, *_x in cands:
+            if l.get("service_date") and l.get("rendering_provider_npi"):
+                for m in ids.get(l["claim_key"], ()):
+                    want[(m, l["service_date"], l["rendering_provider_npi"])].append(l)
+        if not want:
+            return {}
+        found: dict[str, dict] = defaultdict(dict)
+        for pcn, sub, pos, cnpi, code, mods, lnpi, ldate, cdate in c.execute(
+                """SELECT c.patient_control_number, TRIM(c.subscriber_id), TRIM(c.place_of_service), c.rendering_npi, l.procedure_code,
+                          l.modifiers, l.rendering_npi, l.service_date, c.service_date
+                   FROM lines_837 l JOIN claims_837 c ON c.claim_837_key = l.claim_837_key
+                   WHERE c.subscriber_id IS NOT NULL AND l.procedure_code IS NOT NULL"""):
+            for l in want.get((sub, ldate or cdate, lnpi or cnpi), ()):
+                b = bill_of(pcn)
+                if is_surgical(code) and code not in ADD_ON_CODES and b != bill_of(l.get("patient_control_number")):
+                    found[l["line_key"]].setdefault((b, code), (pcn, code, mods, pos))
+        if not found:
+            return {}
+        bills = sorted({b for v in found.values() for b, _code in v})
+        answered: set[str] = set()
+        for b in bills:
+            for (pcn,) in c.execute("SELECT patient_control_number FROM claims WHERE patient_control_number >= ? AND patient_control_number < ?",
+                                    (b, b + "~")):
+                if bill_of(pcn) == b:
+                    answered.add(b)
+                    break
+        out = {lk: [x for (b, _code), x in sorted(v.items()) if b not in answered] for lk, v in found.items()}
+        self.ema_counts["mppr_billed_837_unanswered"] = sum(len(v) for v in out.values())
+        return {lk: v for lk, v in out.items() if v}
+
+    def _billed_lines(self, l, billed: list[tuple], day: list) -> list[dict]:
+        """The procedures _billed_same_day found for line `l`, as lines the day's ranking can price: the claim's payer, plan,
+        clinician and date with the 837's code, modifiers and place of service, and no allowed amount (its answer is not on
+        file). A code the day already holds from that claim's 835 lines is left out."""
+        have = {(bill_of(x.get("patient_control_number")), x.get("procedure_code")) for x in day}
+        out = []
+        for i, (pcn, code, mods, pos) in enumerate(billed):
+            if (bill_of(pcn), code) in have:
+                continue
+            ml = [m.strip() for m in (mods or "").split(",") if m.strip()]
+            out.append({"line_key": f"837:{pcn}:{code}:{i}", "claim_key": None, "patient_control_number": pcn, "procedure_code": code,
+                        "modifiers_list": ml, "pos": pos or None, "pos_class": pos_class(pos), "allowed_cents": None,
+                        "payer_group": l.get("payer_group"), "payer_kind": l.get("payer_kind"), "year": l.get("year"),
+                        "plan": l.get("plan"), "group_number": l.get("group_number"), "provider_tier": l.get("provider_tier"),
+                        "rendering_provider_npi": l.get("rendering_provider_npi"), "service_date": l.get("service_date")})
+        return out
 
     def _procedure_worth(self, x) -> tuple[int, bool]:
         """What a procedure is worth when the day's procedures are ranked: the payer's own rate for it in its own setting
@@ -6516,12 +6599,17 @@ class Detector:
 
     # the Detector's rules, as ema_checks takes them
     def _rate(self, payer_group: str | None, code: str | None, year: str | None) -> int | None:
-        """The payer's usual allowed amount for a code in a year (the office setting, any provider type)."""
+        """The payer's usual allowed amount for a code in a year (the office setting, any provider type); for a code it has
+        paid only at a facility (a surgery center's claims, known as such from the 837 or the claim's location since fix7c),
+        its facility amount, so a claim with no remittance is never sized at nothing for want of office lines."""
         if not code:
             return None
-        rate, _b, _r = self.usual_rate({"payer_group": payer_group, "year": str(year or ""), "provider_tier": "unknown",
-                                        "pos_class": "office"}, code)
-        return rate
+        for pos in ("office", "facility"):
+            rate, _b, _r = self.usual_rate({"payer_group": payer_group, "year": str(year or ""), "provider_tier": "unknown",
+                                            "pos_class": pos}, code)
+            if rate is not None:
+                return rate
+        return None
 
     def _ratio(self, payer_group: str | None, code: str | None) -> float | None:
         """What a payer group paid of the charge for a code over the newest 12 months of remittances (10 paid lines at least)."""

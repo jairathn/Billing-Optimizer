@@ -29,6 +29,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from remitwatch import story  # noqa: E402
+from remitwatch.detect import Detector  # noqa: E402
 from remitwatch.x12_837 import DDL as DDL_837  # noqa: E402
 from tests.test_sizes_and_rates import DOC, NP, World, sv  # noqa: E402
 
@@ -113,6 +114,29 @@ def test_an_employer_plan_with_a_schedule_of_its_own_is_measured_by_its_own_rate
     got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
     assert got == {pcn(900): ("UNDERPAID_VS_OWN_RATE", 9172, 1172), pcn(901): ("UNDERPAID_VS_OWN_RATE", 11274, 1274)}, got
     assert "plan" in w.one(f"patient_control_number='{pcn(900)}'")["ev"]["basis"]
+    w.store.close()
+
+
+def test_a_plans_rate_of_another_year_is_never_the_yardstick(tmp_path, kind):
+    """A plan's own schedule is read for the line's own year only: the large plan's 2026 biopsy rate ($91.72) says nothing
+    about what it paid in 2025, a year with too few of its lines to read a rate (its amounts change from year to year). Its
+    2025 biopsy paid $80.00 is sized by the payer's other plans but not called short; a 2026 one paid $80.00 is."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1), (NP, "108.63", NR, 40))
+    net = []
+    for k in range(6):
+        g = f"NET{k:03d}"
+        net += many(100 + 10 * k, 4, "11102", "150.00", "112.74", group=g) + many(1000 + 10 * k, 5, "99213", "156.66", "76.15", group=g)
+    big = (many(300, 8, "11102", "150.00", "91.72", group="BIG001")
+           + many(310, 14, "11102", "150.00", "78.62", group="BIG001", npi=NP, prov=NR)
+           + many(330, 8, "99213", "156.66", "94.00", group="BIG001")
+           + many(340, 14, "99213", "156.66", "80.57", group="BIG001", npi=NP, prov=NR))
+    w.remit(net + big, "20260415", payer="UMR", payer_id="UMRTEST")
+    w.remit([visit(900, "11102", "150.00", "80.00", group="BIG001", dos="20250610"),
+             visit(901, "11102", "150.00", "80.00", group="BIG001")], "20260520", payer="UMR", payer_id="UMRTEST")
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(901): ("UNDERPAID_VS_OWN_RATE", 9172, 1172)}, got
     w.store.close()
 
 
@@ -238,6 +262,61 @@ def test_the_higher_valued_procedure_halved_on_a_split_day_is_owed_its_half_net(
     day = {d["code"]: d for d in f["ev"]["same_day"]}
     assert day["13132"]["allowed_cents"] == 22896 and day["13132"]["rate_cents"] == 22896 and day["13132"]["claim"] == pcn(805)
     assert "$178.08" in f["ev"]["note"] and "$114.48" in f["ev"]["note"]
+    w.store.close()
+
+
+def _sent_837(w: World, rows: list[tuple[int, int, str, str, str]]) -> None:
+    """837 claims of these split days whose answers are not on file: (claim number, patient, date of service, code, place of
+    service), billed by the same clinician to the same member number as the patient's 835 claims."""
+    w.store.conn.executescript(DDL_837)
+    for i, pat, dos, code, pos in rows:
+        d = f"{dos[:4]}-{dos[4:6]}-{dos[6:]}"
+        w.store.conn.execute("INSERT INTO claims_837 (claim_837_key, patient_control_number, place_of_service, service_date, "
+                             "subscriber_id, rendering_npi, payer_name) VALUES (?, ?, ?, ?, ?, ?, 'HUMANA')",
+                             (f"k837-{i}", pcn(i), pos, d, f"M{pat:08d}", DOC))
+        w.store.conn.execute("INSERT INTO lines_837 (line_837_key, claim_837_key, patient_control_number, line_seq, procedure_code, "
+                             "charge_cents, units, service_date, rendering_npi) VALUES (?, ?, ?, 1, ?, 180000, 1, ?, ?)",
+                             (f"l837-{i}", f"k837-{i}", pcn(i), code, d, DOC))
+    w.store.conn.commit()
+
+
+def test_a_split_day_whose_other_claim_has_no_answer_on_file_is_ranked_by_the_837(tmp_path, kind):
+    """The Mohs claims are answered, the surgery center's are not on file (the 837s show them sent). A Mohs halved beside a
+    14040 the 837 shows billed at the surgery center was the highest-valued procedure of the day: owed its half, less what a
+    correct ranking takes back from the 14040, counted as paid in full since its answer is not on file ($292.56 - $245.82 =
+    $46.74, the least owed). A Mohs halved beside a 14301 (worth more at the surgery center than the Mohs at the office) was
+    rightly the second procedure: no item."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16") + many(200, 6, "14040", "1500.00", "491.64", cfi="16", pos="24")
+            + many(220, 6, "14301", "2500.00", "943.80", cfi="16", pos="24"), "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(802, "17311", "900.00", "292.56", cfi="16", pat=801, dos="20260303")], "20260410", **hum)
+    _sent_837(w, [(801, 800, "20260302", "14040", "24"), (803, 801, "20260303", "14301", "24")])
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", 58512, 4674)}, got
+    f = w.one(f"patient_control_number='{pcn(800)}'")
+    assert f["ev"]["highest_valued"] is True
+    day = {d["code"]: d for d in f["ev"]["same_day"]}
+    assert day["14040"]["claim"] == pcn(801) and day["14040"]["rate_cents"] == 49164 and day["14040"]["allowed_cents"] is None
+    assert "not on file" in f["ev"]["note"] and "$46.74" in f["ev"]["note"], f["ev"]["note"]
+    w.store.close()
+
+
+def test_the_payers_rate_for_a_code_paid_only_at_a_facility_is_its_facility_rate(tmp_path, kind):
+    """The rate a claim with no remittance is sized by (an EMA-only denial, Detector._rate) is the office setting's; for a
+    code the payer has paid only at the surgery center it is the facility rate, never none (a 14040 paid $491.64 there)."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(200, 6, "14040", "1500.00", "491.64", cfi="16", pos="24") + many(100, 6, "17311", "900.00", "585.12", cfi="16"),
+            "20260301", payer="HUMANA", payer_id="HUMTEST")
+    det = Detector(w.store, run_id="r", today="2026-06-15")
+    det.load()
+    det.build_baselines()
+    assert det._rate("Humana Medicare Advantage", "17311", "2026") == 58512
+    assert det._rate("Humana Medicare Advantage", "14040", "2026") == 49164
     w.store.close()
 
 
