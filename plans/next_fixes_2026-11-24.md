@@ -79,3 +79,21 @@ The probes are `plans/tools/a16/residual_probe.py` and `offfeed_probe.py`. Run t
 - The recovered amount when a payer denies as primary and pays later as secondary. The two auditors count it
   differently (about 400 recoveries); fix5's choice, the secondary's share counted, matches A16.
 - Owner rules 4.1 and 4.2 (codes a payer never pays: 20 code-change items, $7,150).
+
+## 7. Left by fix7b (merged 0efcb74)
+- A bare $0 row followed by the patient's money: the store has no date for patient money, so it cannot tell a later
+  deductible payment from a copay at the visit. Such a claim stays listed with a note of the amount (2 Anthem items).
+  Needs a ledger field, or the owner's rule.
+- The send-day twin rule cannot tell which twin is which claim's; it could use the patient's name key.
+- G8 lists each EMA claim of a service on its own (the whole service plus 26 plus TC makes three items) and prices a
+  part at the whole service's rate.
+- The exports' one-visit-under-two-bills rule matches patients by one EMA patient id, so two bills of one 26 stay two
+  items.
+- Outside the never-answered rule, a bare $0 row still counts as an answer in:
+  - selfcheck's blind-charge count and self-audit;
+  - the turnaround;
+  - the ledger's own status_class;
+  - SECONDARY_NOT_BILLED, which reads any $0 row from the second payer as its answer.
+
+  C5's patient, day and code check against the 835s ignores the part.
+
