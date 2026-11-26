@@ -101,7 +101,10 @@ a failing test first (invented data, both store kinds where the code runs on bot
   so the figures are worked out again). The integrator may bump it once after the merges.
 
 ## Left
-- Nothing of the review round once the suites below are green. Then merge (order: fix7d first, per HANDOFF section 00).
+- Nothing of the review round: every finding fixed with its test, every suite green (see Measured). Ready to merge
+  (order: fix7d first, per HANDOFF section 00).
+- For the integrator: results.VERSION is still "1" on every unit's branch; bump it once after the merges if the
+  figures should record that the attribution's calendar changed.
 - Follow-ups noticed, not in this round: the 3.12 and newest-library environments were not run by this unit (the common
   brief asks for python3 and 3.11.1).
 
@@ -137,7 +140,11 @@ a failing test first (invented data, both store kinds where the code runs on bot
   1 xfailed, 0 failed (21:22 to 21:31 UTC). 3.11.1 with SQLite 3.40.0: 2,773 passed, 13 skipped, 1 xfailed, 109 failed
   and 24 errors, every one of the 133 with "AttributeError: 'sqlite3.Connection' object has no attribute 'serialize'"
   (classified from each traceback: 0 other); the same count as before the round. Node checks: calc 79, lab 143, none
-  false. The two zone runs (Etc/GMT-14, Etc/GMT+12) of the round: see below when done.
+  false. Zone runs of the round (python3): REMITWATCH_TZ=Etc/GMT-14 on ea8cceb: 2,889 passed, 29 skipped, 1 xfailed,
+  1 failed: a test of this round that dated its moment for an Eastern practice without pinning it
+  (test_a_fax_is_stored_as_sent_at_a_time_with_its_zone_never_before_it_was_queued); pinned in 299d858 and passing
+  under Etc/GMT-14, Etc/GMT+12 and no zone. REMITWATCH_TZ=Etc/GMT+12 on 299d858: 2,890 passed, 29 skipped, 1 xfailed,
+  0 failed (21:54 to 22:03 UTC).
 
 ## Open questions
 - (none)
