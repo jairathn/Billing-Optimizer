@@ -188,8 +188,8 @@ def results_page(request: Request, day: Optional[str] = Query(None, max_length=1
             "errors": d.get("errors") or [],
         }
         if runtime.serverless() and not d:
-            out["note"] = ("These figures are worked out by the daily run on the whole store. The first run after this "
-                           "update fills them; the counts below are live.")
+            out["note"] = ("These figures are worked out by each analysis on the whole store (on this site, when someone "
+                           "presses Run the analysis now). The first one after this update fills them; the counts below are live.")
         return JSONResponse(out, headers={"Cache-Control": "no-store"})
     finally:
         conn.close()

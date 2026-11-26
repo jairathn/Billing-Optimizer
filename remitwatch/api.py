@@ -2428,7 +2428,8 @@ def _activity(fn, *args):
         state = activity.status(conn) if has_table("meta") else {"ready": False, "built_at": None, "error": None}
         if not state["ready"] or not has_table("provider_days"):
             return {"ready": False, "error": state.get("error"),
-                    "message": "The provider figures are built by the next analysis run. Press Sync and analyse now on the Data tab."}
+                    "message": "The provider figures are built by the next analysis run. Press "
+                               + ("Run the analysis now" if runtime.serverless() else "Sync and analyse now") + " on the Data tab."}
         with _ACTIVITY_LOCK:
             out = fn(conn, *args)
         if out is None:
@@ -3165,7 +3166,7 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
     out = cloud.run_cloud_cycle(st, client, budget_s=max(60, runtime.max_seconds() - delay), trigger=trigger[:24], full=bool(full),
                                 force_detect=bool(force), delay_s=delay)
     # A run starts the next one only while it is getting somewhere, and only so many times in a row. Whatever goes
-    # wrong, the chain ends; the daily run or a person starts a new one.
+    # wrong, the chain ends; a person's press starts a new one (the owner's decision 1: nothing on a schedule).
     hop = max(int(hop), 0)
     if hop >= cloud.MAX_HOPS:
         if out.get("more"):
@@ -3175,19 +3176,19 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
         out["continued"] = cloud.trigger_cycle(base_url(request), "continue", hop=hop + 1)
     elif (out.get("ingest") or {}).get("download_errors"):
         # a file could not be fetched (a timeout, a busy server): try twice more, a minute and a half apart, then leave
-        # it to the daily run. Notifications start nothing in the meantime, so without this the file would wait a day.
+        # it to the next press. Notifications start nothing on this host, so without this the file would wait for a press.
         if hop < 2:
             out["continued"] = cloud.trigger_cycle(base_url(request), "retry", delay=90, hop=hop + 1)
     elif not out.get("skipped") and not out.get("more"):
         # files that landed while this cycle ran: new in the Dropbox folder, or an upload finished into the state folder's
-        # intake/ (its own cron call was skipped while this run held the lock), so it is read now, not by tomorrow's run
+        # intake/ (its own call was skipped while this run held the lock), so it is read now, by the chain the press started
         try:
             from .intake import state_pending
             late = "uploads" if state_pending(st) else ("files" if client is not None and cloud.has_new_files(st, client) else None)
             if late:
                 out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)
                 out["continued_for"] = late
-        except Exception as exc:        # noqa: BLE001  (the daily run reads them; the answer says why none was started)
+        except Exception as exc:        # noqa: BLE001  (the next press reads them; the answer says why none was started)
             out["continue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     return out
 
