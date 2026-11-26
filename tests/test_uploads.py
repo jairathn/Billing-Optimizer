@@ -1192,7 +1192,9 @@ def test_vercel_keeps_working_and_says_uploads_belong_to_the_server(tmp_path, mo
     monkeypatch.setattr(api, "rows", lambda sql, params=(): [])
     c = TestClient(api.app)
     assert c.get("/upload").status_code == 200                         # the page loads, and says where uploads go
-    assert c.get("/api/uploads").json() == {"server": False, "message": uploads.SERVER_ONLY}
+    got = c.get("/api/uploads").json()
+    assert got["server"] is False and got["message"] == uploads.SERVER_ONLY
+    assert got["cycle"]["press_only"] is True           # the owner's decision 1: the page says this site analyses on a press
     for path in ("/api/uploads/needed",):
         assert c.get(path).status_code == 409
     r = c.post("/api/uploads", params={"name": "x.xlsx"}, content=b"PK", headers=XHR)

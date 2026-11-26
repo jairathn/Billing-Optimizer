@@ -15,6 +15,8 @@ also need api.require_xhr, and accepting the self-check's findings is the owner'
     GET  /api/ops/archive                       "Store size and memory"
     POST /api/archive/reopen                    {claim_id | finding_id, reason}: an archived bill comes back with the next run
     GET  /api/findings/{finding_id}/decisions   "Why did this change?": every automatic change to the item, with its rule
+    POST /api/ops/run                           "Run the analysis now" (the owner's decision 1): on Vercel the one way an
+                                                analysis starts; not there on a server, which analyses on its own schedule
 
 On a serverless host every route reads what the runs stored (the dashboard's copy and the state folder); nothing is
 worked out again on the copy, and a request is journaled for the next run.
@@ -87,12 +89,59 @@ def archive_sink():
     return archive.sink_for(db_path=_api().DB_PATH)
 
 
+# ----------------------------------------------------------------------- the owner's decision 1: analysis on a press
+def analysis_status() -> dict:
+    """What every page of the Vercel site says about its analysis: that it analyses only when someone presses Run the
+    analysis now, when it last did ({at, run_id, trigger, findings} from the runs' status), a run going now, and what the
+    last run could not check (items and dollars). On a server: {'press_only': False} (it analyses on its own schedule)."""
+    if not runtime.serverless():
+        return {"press_only": False}
+    from . import cloud
+    st = cloud.SERVING_COPY.state(fast=True)
+    last = (cloud.SERVING_COPY.status() or {}).get("last_cycle") or {}
+    going = None
+    if st is not None:
+        try:
+            going = cloud.run_going(st)
+        except Exception as exc:        # noqa: BLE001  (storage did not answer: the page says what it knows)
+            runlog.caught(exc, "ops:run_going", level="warning")
+    return {"press_only": True, "text": cloud.PRESS_ONLY_TEXT, "analysed": last.get("analysed"), "running": going,
+            "unchecked": last.get("unchecked"), "last_run": {k: last.get(k) for k in ("started", "finished", "trigger", "error",
+                                                                                        "more", "halted", "deferred")}}
+
+
+@router.post("/api/ops/run")
+def ops_run(request: Request, user: str = Depends(_user)):
+    """"Run the analysis now" (the owner's decision 1). Vercel analyses only on this press: it starts the serverless run
+    chain (cloud.press), or says a run is already going. A server analyses on its own schedule: the route is not there."""
+    if not runtime.serverless():
+        raise HTTPException(404, "Not Found")
+    _xhr(request)
+    return press_run(request, user, "press")
+
+
+def press_run(request: Request, user: str, trigger: str) -> dict:
+    """A signed-in person's press on Vercel (this route, the Feed's button, the Upload page's Read them now): the same
+    chain, the same answer when a run is already going."""
+    from . import cloud
+    if runtime.preview():
+        raise HTTPException(409, "This is a preview deployment. Only the production site reads and writes the practice's data.")
+    st = cloud.SERVING_COPY.state(fast=True)
+    if st is None:
+        raise HTTPException(503, "Storage is not connected yet. Open /setup.")
+    got = cloud.press(st, _api().base_url(request), who=runlog.fingerprint(user), trigger=trigger)
+    if got["started"] is None:
+        raise HTTPException(400, got["text"])
+    cloud.SERVING_COPY._status = (0.0, None)        # the next status read sees the run
+    return got
+
+
 # ------------------------------------------------------------------------------------------------------------- panels
 @router.get("/api/ops/panels")
 def ops_panels(_: str = Depends(_user)):
     from . import archive, selfcheck
     with _Conn() as c:
-        out: dict = {"selfcheck": selfcheck.panel(c), "archive": archive.panel(c)}
+        out: dict = {"selfcheck": selfcheck.panel(c), "archive": archive.panel(c), "analysis": analysis_status()}
         try:
             out["logs"] = dict(runlog.panel(c, _logs()), bundle={"what": BUNDLE_WHAT})
         except Exception as exc:        # noqa: BLE001  (the logs folder could not be read: the other panels stand)
@@ -131,7 +180,7 @@ def ops_audit_now(request: Request, user: str = Depends(_user)):
     if runtime.serverless():
         from .cloud import record_action
         record_action(_state(), {"kind": "selfcheck_request", "what": "audit", "user": user})
-        return {"asked": True, "text": "The next run checks the worklist against the money (within a day, or press Run now)."}
+        return {"asked": True, "text": "The next run checks the worklist against the money: press Run the analysis now."}
     from . import selfcheck
     conn = _api().db()
     try:
@@ -154,7 +203,7 @@ def ops_accept(request: Request, body: dict = Body(...), user: str = Depends(_ow
     if runtime.serverless():
         from .cloud import record_action
         record_action(_state(), {"kind": "selfcheck_request", "what": "accept", "checks": checks, "run_id": run_id, "user": user})
-        return {"asked": True, "text": "Accepted: the next run takes it (within a day, or press Run now)."}
+        return {"asked": True, "text": "Accepted: the next run takes it (press Run the analysis now)."}
     from . import selfcheck
     conn = _api().db()
     try:
@@ -245,7 +294,9 @@ def archive_reopen(request: Request, body: dict = Body(...), user: str = Depends
             archive.request_restore(conn, bill, actor=user, reason=reason, finding_id=fid or None, status="open")
         finally:
             conn.close()
-    return {"queued": True, "text": "It comes back with the next run (within a day, or press Run now)."}
+    return {"queued": True, "text": ("It comes back with the next analysis: press Run the analysis now on the Data tab."
+                                     if runtime.serverless() else
+                                     "It comes back with the next run on the server's schedule, or press Sync and analyse now on the Data tab.")}
 
 
 def archived_finding(finding_id: str) -> dict | None:

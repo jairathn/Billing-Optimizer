@@ -60,6 +60,13 @@ SERVING_BUILD = "10"                # bump when SERVING_TABLES changes: a copy m
                                     # 835 claims of whole bills; 9: both together; 10: the runs' logs, the decision log, the
                                     # self-check's lists and the archive's index)
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
+PRESS = "press.json"                # the owner's decision 1: when someone last pressed "Run the analysis now" (and who, as a
+                                    # fingerprint), so a second press before the run has taken its lock starts nothing
+PRESS_HOLD_SECONDS = 90             # a press this recent counts as a run going, until the run's own lock is there
+PRESS_TRIGGERS = ("press", "button")    # the runs a person's press starts (the Data tab's, the Feed's and the Upload page's)
+PRESS_ONLY_TEXT = ("This site analyses only when someone presses Run the analysis now (the Data tab). The practice's "
+                   "server analyses on its own every day and is where the billers work: what is recorded on this site is "
+                   "not on the server.")
 ACTIONS = "actions"
 PACKETS = "packets"
 _PROCESS_START = time.time()
@@ -194,6 +201,61 @@ def lock_state(state) -> tuple[dict | None, dict | None]:
 
 def running(state) -> dict | None:
     return lock_state(state)[0]
+
+
+def _hhmm(iso: str | None) -> str:
+    """'2026-11-26T19:05:41+00:00' as people read it: '2026-11-26 19:05 UTC'."""
+    return f"{str(iso)[:10]} {str(iso)[11:16]} UTC" if iso and len(str(iso)) >= 16 else "a moment ago"
+
+
+def run_going(state) -> dict | None:
+    """A run going now, as a press sees it: the lock a run holds, or a press made so recently that the run it asked for
+    has not taken the lock yet (a run that started after the press, whether or not it has ended, has answered it)."""
+    going = running(state)
+    if going:
+        return going
+    p = _read_json(state, PRESS)
+    at = p.get("at")
+    if at and not p.get("answered") and _age_seconds(at) < PRESS_HOLD_SECONDS:
+        return {"since": at, "pressed": True}
+    return None
+
+
+def _answer_press(state, run_id: str) -> None:
+    """A run that has taken the lock answers the press made before it (it reads everything new and, for a press, analyses):
+    a press after this moment asks for a run of its own once this one has ended."""
+    try:
+        p = _read_json(state, PRESS)
+        if p.get("at") and not p.get("answered"):
+            _write_json(state, PRESS, dict(p, answered=run_id))
+    except Exception as exc:        # noqa: BLE001  (the press's hold ends by itself after PRESS_HOLD_SECONDS)
+        from . import runlog
+        runlog.caught(exc, "answer_press", level="warning")
+
+
+def press(state, base_url: str | None, *, who: str | None = None, trigger: str = "press") -> dict:
+    """The owner's decision 1: on this host an analysis runs only when a signed-in person presses for it. The press starts
+    the same chain the daily scheduler started (/api/cron/cycle with the scheduler's secret: the lock, the journal folded,
+    the uploads, the Dropbox delta, the analysis, the saves, and the chain's own next runs), with the analysis forced, so
+    the lists move with the day even when no file has arrived. A run already going (its lock, or a press a moment ago that
+    has not reached it yet) is said, and nothing more is started. `who` is a fingerprint of the sign-in, never a name.
+    Answers {'started': True | False | None, 'running': {...} | None, 'text'}; None: the run could not be asked for."""
+    going = run_going(state)
+    if going:
+        return {"started": False, "running": going,
+                "text": (f"A run is already going (asked for or started {_hhmm(going.get('since'))}). It finishes by "
+                         "itself, and the lists change when it has. Nothing more was started.")}
+    if not trigger_cycle(base_url, trigger, force=1):
+        return {"started": None, "running": None,
+                "text": "The site cannot start a run: CRON_SECRET is not set. Add it in Vercel and redeploy."}
+    try:
+        _write_json(state, PRESS, {"at": _now(), "by": who, "trigger": trigger})
+    except Exception as exc:        # noqa: BLE001  (the run was asked for; a second press is then turned away by its lock)
+        from . import runlog
+        runlog.caught(exc, "press_mark", level="warning")
+    return {"started": True, "running": None,
+            "text": ("Started: the run reads what is new in Dropbox and the uploads, then analyses everything again. On this "
+                     "site that takes a few minutes; the lists change when it has finished.")}
 
 
 # --------------------------------------------------------------------------- the store, in memory
@@ -1743,6 +1805,52 @@ def write_status(state, out: dict) -> None:
         runlog.caught(exc, "write_status", level="warning")
 
 
+def _last_detection(conn) -> dict | None:
+    """The newest analysis the store records (detection_runs), for a status written before runs kept 'analysed'."""
+    try:
+        r = conn.execute("SELECT run_id, finished_at, findings FROM detection_runs ORDER BY finished_at DESC, rowid DESC LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    return {"at": r[1], "run_id": r[0], "trigger": None, "findings": r[2]} if r and r[1] else None
+
+
+def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | None, analysed: dict | None) -> dict | None:
+    """What a run could not check (the owner's decision 1: a pressed run that sheds work says so in items and dollars):
+    when it ends with the analysis still to come (handed to the next run of the chain, or files left to read), the open
+    items on the lists, and their dollars, were not checked against what was read since the last analysis; when the
+    self-regulation left the weekly self-audit for a calmer run, its last figures are named. None when nothing was left."""
+    from . import selfcheck as sc
+    skipped_audit = "audit" in ((plan or {}).get("skip") or [])
+    if not (pending or waiting_files or skipped_audit):
+        return None
+    n = cents = 0
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+        where = ("work_state IN ('work_now', 'waiting')" if "work_state" in cols
+                 else "status IN ('open', 'in_progress', 'appealed')")
+        n, cents = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE COALESCE(stale, 0) = 0 "
+                                f"AND {where}").fetchone()
+    except sqlite3.Error as exc:        # a store with no items yet: said as such
+        from . import runlog
+        runlog.caught(exc, "unchecked_note", level="warning")
+    parts = []
+    if pending or waiting_files:
+        since = f" (the last analysis: {_hhmm(analysed.get('at'))})" if (analysed or {}).get("at") else ""
+        why = (" The self-regulation handed the analysis on to keep within memory." if (plan or {}).get("level", 0) >= 1
+               else "")
+        parts.append(f"The analysis has not run on what this run read: {sc._n(int(n), 'open item')} ({sc.usd0(cents)}) on the "
+                     f"lists were not checked against the files read since the last analysis{since}.{why} The next run of "
+                     "the chain analyses them; if none follows, press Run the analysis now.")
+    if skipped_audit:
+        au = (sc.meta_get(conn, sc.K_AUDIT, {}) or {}).get("latest") or {}
+        last = (f" The last one found {sc._n(int(au.get('gaps_n') or 0), 'line')} with money to recover and no item "
+                f"({sc.usd0(au.get('gaps_cents') or 0)})." if au.get("today") else "")
+        parts.append("The weekly self-audit (money on lines no item is working) was not checked in this run, to keep within "
+                     f"memory: a calmer run does it, within a week.{last}")
+    return {"n": int(n), "cents": int(cents), "pending": bool(pending or waiting_files), "audit_skipped": skipped_audit,
+            "text": " ".join(parts)}
+
+
 def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger: str = "manual", full: bool = False,
                     force_detect: bool = False, email: bool = True, delay_s: int = 0, log=print) -> dict:
     """One cycle against the state folder. Returns a summary; `more` is true when a fresh invocation should continue.
@@ -1762,6 +1870,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
     # Vercel's function log gets the one line printed at the end
     rl = runlog.start_run("cycle", trigger=trigger, state=state, host="serverless")
     log = rl.log
+    if trigger in PRESS_TRIGGERS:
+        _answer_press(state, rl.run_id)     # the run a press asked for has the lock: a later press asks for its own
     reg = None
     store = None
     t0 = time.time()
@@ -1974,8 +2084,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             left_s = budget - (time.time() - t0)
             # Hand detection to a fresh invocation when this one may not have the time left for it, or has just read a
             # large batch: a fresh process starts with clean memory, and detection is the step that needs the most. Under
-            # pressure (the self-regulation's level 1 and up) any run that read something hands it over.
-            if ingested and (plan["spread"] or left_s < estimate * 1.5 + 45 or n_ingested >= DEFER_DETECT_AFTER_FILES):
+            # pressure (the self-regulation's level 1 and up) any run that read something hands it over. A press forces the
+            # analysis with nothing new read (the owner's decision 1): it is handed on the same way, so a pressed run never
+            # starts an analysis it has no time or memory left for.
+            if (ingested or force_detect) and (plan["spread"] or left_s < estimate * 1.5 + 45 or n_ingested >= DEFER_DETECT_AFTER_FILES):
                 conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
                 out["deferred"] = "detection"
             else:
@@ -2188,7 +2300,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 marks["last_report"] = _now()
                 _write_json(state, MARKS, marks)
         out["more"] = bool(remaining or "deferred" in out or left_pairs)
-        out["progress"] = bool(progressed or ran_detect or ran_activity)
+        # a forced analysis handed to the next run is progress: the chain goes on to it (else a press would end there)
+        out["progress"] = bool(progressed or ran_detect or ran_activity or (force_detect and out.get("deferred") == "detection"))
         out["changed"] = bool(shown_changed or progressed)
         try:
             one = lambda sql: conn.execute(sql).fetchone()[0]       # noqa: E731
@@ -2199,6 +2312,18 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             runlog.caught(exc, "totals", level="warning")
         out["finished"] = _now()
         out["seconds"] = round(time.time() - t0, 1)
+        # (the owner's decision 1) when this site last analysed, for every page: this run, or the one before it
+        if ran_detect:
+            out["analysed"] = {"at": out["finished"], "run_id": rl.run_id, "trigger": trigger,
+                               "findings": (out.get("totals") or {}).get("findings")}
+        else:
+            out["analysed"] = prev_status.get("analysed") or _last_detection(conn)
+        # what this run could not check, in items and dollars (the analysis still to come, an optional check shed)
+        still_pending = conn.execute("SELECT 1 FROM meta WHERE key='cloud:detect_pending'").fetchone() is not None
+        note = unchecked_note(conn, pending=still_pending and not ran_detect, waiting_files=bool(remaining),
+                              plan=plan, analysed=out.get("analysed"))
+        if note:
+            out["unchecked"] = note
         mem["peak"] = peak_mb()
         mem["limit"] = runtime.memory_mb()
         return out
@@ -2221,6 +2346,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 prev = json.loads(state.get(STATUS) or b"{}")
                 out["last_change"] = prev.get("last_change")
                 out.setdefault("totals", prev.get("totals"))
+            if "analysed" not in out:       # a run that stopped early: when this site last analysed stays said
+                out["analysed"] = (json.loads(state.get(STATUS) or b"{}") or {}).get("analysed")
         except Exception as exc:
             runlog.caught(exc, "last_change", level="warning")
         write_status(state, out)        # before the lock goes, so nobody reads "not running" beside the previous run's status

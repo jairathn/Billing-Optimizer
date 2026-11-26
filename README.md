@@ -110,6 +110,8 @@ controls the server, so protect main (`docs/SERVER_RUNBOOK.md`, "Who controls th
 
 A push to `main` deploys the site on Vercel. Vercel keeps no files and no running process, so there the store lives in a private folder of the practice's Dropbox and each update is one time-boxed run (`remitwatch/cloud.py`). Add the settings in Vercel, open `/setup` on the site, and follow its checklist: it checks every setting live, gets the Dropbox token, and starts the first load. While the practice's server runs, the server alone faxes and reads TriZetto: the Vercel site does neither unless told to (`REMITWATCH_FAX_SENDER`, `TRIZETTO_SFTP_SERVERLESS`). The settings, the limits (memory above all) and how it works are in `docs/VERCEL_SETUP.md`.
 
+The Vercel site analyses only when a signed-in person presses "Run the analysis now" on the Data tab; the server analyses on its own schedule (the owner's decision of 2026-11-26). Each site keeps its own store, so the billers work on the server's site: what is recorded on the Vercel site is not on the server. Every page on Vercel says when that site last analysed.
+
 ## Layout
 
 ```
@@ -164,7 +166,7 @@ remitwatch/
   static/         dashboard (index.html, today.js, desk.js, features.js, claim.js, faxes.js, providers.js, results.js for the Results tab, data.js for the Data tab, ops.js for its panels of what runs by itself, policy.js for the owner's write-off policy page, calc*.js, lab*.js, asc*.js), the setup checklist (setup.html), the Upload page (upload.html, upload.js) and the big-change banner all three show (swing.js); no build step
   cli.py          cycle | weekly | sync | ingest-835 | ingest-ema | link | detect | activity | alerts | ema-reports | stats | serve | oauth | modmed-key | modmed-check | prepare-appeals | send-appeals | fax-cycle | import-cloud | compare-cloud | accept-store | backup | diagnose | self-audit | archive | archive-restore
 api/index.py      Vercel entry point
-vercel.json       one function behind every address, two daily schedules (the cycle at 10:17 UTC, the fax line at 15:43 UTC)
+vercel.json       one function behind every address, one daily schedule (the fax line at 15:43 UTC); no analysis runs there on a schedule
 public/           robots.txt only: Vercel serves nothing else from the repository
 Dockerfile, docker-compose.yml  the server's image (it keeps the commit it was built from) and its two services (the app, Caddy)
 scripts/          build_mpfs.py and build_ascfs.py (CMS tables), leak_report.py (docs/DATA_FINDINGS.md), cloud_bench.py

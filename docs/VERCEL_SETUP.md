@@ -4,6 +4,12 @@ Pushing to `main` deploys the site on Vercel. Vercel keeps no files between requ
 on Vercel the app runs in its serverless mode: the store lives in a private folder of the practice's own Dropbox and each
 update is one time-boxed run. Nothing else has to be hosted.
 
+**This site analyses only when someone presses for it** (the owner's decision of 2026-11-26). Nothing on a schedule, no
+Dropbox notification, no upload and no page that opens starts an analysis here: a signed-in person presses "Run the
+analysis now" on the Data tab. The practice's server analyses on its own every day, sends the faxes, reads TriZetto and
+sends the mail, and it is where the billers work: what is recorded on this site (a status, a note, an upload) stays on
+this site and is not on the server. Every page here says when this site last analysed and that it analyses only on a press.
+
 The other way to run it (a small VM with a disk, `docker compose up`) is in [OPERATIONS.md](OPERATIONS.md). The dashboard,
 the detection rules and the numbers are the same in both.
 
@@ -16,7 +22,7 @@ redeploy after every change.
 | --- | --- | --- |
 | `REMITWATCH_PASSWORD` | Made up, 12 or more plain letters and digits. The dashboard password. The site stays locked until it is set and long enough. | Yes |
 | `REMITWATCH_USER` | The dashboard's user name. Left out, the default that `/setup` names is used. | No |
-| `CRON_SECRET` | Made up, 16 characters or more, no spaces. Vercel's scheduler and the site's own follow-up runs present it. | Yes |
+| `CRON_SECRET` | Made up, 16 characters or more, no spaces. The run a press starts, the site's own follow-up runs and the fax line's daily call present it. | Yes |
 | `DROPBOX_APP_KEY` | Dropbox Developer Console, the app's Settings tab | Yes |
 | `DROPBOX_APP_SECRET` | Same tab | Yes |
 | `DROPBOX_REFRESH_TOKEN` | The Connect Dropbox step on the site's `/setup` page | Yes |
@@ -83,8 +89,9 @@ Vercel itself: never add them by hand.
 4. **First load.** When every required line on `/setup` has a tick, press Run the first load now. It reads the whole
    folder in several short runs that follow one another. On almost three years of remittances this was two runs and about two minutes
    of computing.
-5. **Instant updates.** `/setup` shows the webhook address. Add it in the Dropbox Developer Console: the app, Settings
-   tab, Webhooks, Add webhook. Without it the site still checks Dropbox once a day.
+5. **No instant updates here.** This site reads Dropbox only when someone presses Run the analysis now (Data tab). The
+   webhook address `/setup` shows is still answered (and checked against the app secret), but a notification starts
+   nothing on this site; the practice's server reads new files on its own.
 
 `/setup` checks every setting live and says what to fix. `/api/health` needs no login and shows the version, the commit
 and what the runtime offers. The practice's server shows the commit it runs at the same address, so the two sites can
@@ -92,11 +99,23 @@ be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
 
 ## How it works
 
-- `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules
-  `/api/cron/cycle` once a day (10:17 UTC; on the Hobby plan Vercel fires it some time in that hour) and
-  `/api/cron/faxes` once a day (15:43 UTC: the faxes going out, the payers' faxes in, the follow-ups due; it does
-  nothing unless this site is the one that sends, `REMITWATCH_FAX_SENDER=serverless`, and never while another fax run is
-  going). `public/` exists so that Vercel serves nothing else from the repository.
+- `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules one
+  call a day: `/api/cron/faxes` (15:43 UTC: the faxes going out, the payers' faxes in, the follow-ups due; it runs no
+  analysis, it does nothing unless this site is the one that sends, `REMITWATCH_FAX_SENDER=serverless`, and never while
+  another fax run is going). The daily analysis (`/api/cron/cycle` at 10:17 UTC) was removed on 2026-11-26: an analysis
+  starts only from a press. No call in `vercel.json` only keeps the site healthy, so none other is kept.
+  `public/` exists so that Vercel serves nothing else from the repository.
+- **The press.** "Run the analysis now" (the Data tab, panel "Analysis on this site"; the Feed's button, the Upload page's
+  Read them now and the first load on `/setup` are the same press) calls `POST /api/ops/run`, which starts the same chain
+  the daily call started: `/api/cron/cycle` with `CRON_SECRET`, the analysis forced so the lists move with the day even
+  when no file arrived. A second press while a run holds `lock.json`, or in the 90 seconds before the asked-for run has
+  taken it (`press.json`), says a run is already going and starts nothing. The route is not there on the server, which
+  keeps its own schedule.
+- **What a run could not check.** The memory regulation still applies to a pressed run (it hands the analysis to a fresh
+  run, sheds optional steps, archives older claims sooner). When a run ends with the analysis still to come, its status
+  (`status.json`, `unchecked`) says how many open items and how many dollars were not checked against the files read since
+  the last analysis, and every page shows it until a run has analysed. `status.json` also keeps `analysed`: when this site
+  last analysed, by which run.
 - Keep `"framework": null` in `vercel.json`. Under Vercel's FastAPI preset the function is given the rewritten path, so
   every request would arrive as `/api/index`.
 - Vercel refuses to build when `CRON_SECRET` has a space or a line break at either end.
@@ -109,21 +128,21 @@ be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
 - The store is saved first because it is the record. If a run dies between the two saves, the next run sees that the
   dashboard's copy is behind, or was made by a different build of the app (`serving.json`), and rebuilds it. Mail goes out after both saves, and what was sent is kept
   in its own small file (`notified.json`), so a failed save or an idle run cannot send the same alert or report twice.
-- A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns.
+- A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns
+  (the chain a press started goes on by itself: that is not a new analysis started on a schedule).
   That relies on Vercel finishing a request's work after the caller hangs up. It does: checked on the live site on
   2026-11-12 (six seconds of work completed after a caller that left at 1.2 seconds).
   Detection is left to a fresh run after a large batch, because a new process starts with clean memory.
 - Runs follow one another only while they are getting somewhere, and at most 30 times in a row. A file that cannot be
   read (a damaged spreadsheet, a file over 60 MB, one Dropbox will not release) is noted on the Data tab, remembered and
   passed over until it changes. A download that merely timed out is tried twice more, a minute and a half apart, and
-  then left to the next daily run.
+  then left to the next press.
 - The dashboard never waits for a run. Each instance downloads the dashboard's copy, looks for a newer one every 45
   seconds, and lays the journal of recent status changes over it. A status change is one small file in `actions/`.
 - Appeal packets are stored as two files each under `packets/`.
-- A Dropbox webhook is verified by its signature, then answered. It starts a run only when no run is going, the last
-  one did not fail in the past six hours, die, or leave work unfinished in the past hour, and the data folder has new
-  files of a kind the app reads. The site's
-  own writes to its state folder never start one. The daily scheduled run is not subject to these conditions.
+- A Dropbox webhook is verified by its signature, then answered. It starts no run on this site (the owner's decision 1);
+  an upload finished in the app waits in `intake/` for the next press, which reads it first, and so does a held EMA
+  report a person applies.
 - A status change recorded for a finding the store does not hold yet is kept in the journal and tried again after
   each detection, for a week.
 - `/api/health` runs a self-test once per process: an empty store held in memory, grown, saved, reopened, and the

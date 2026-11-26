@@ -425,9 +425,11 @@ def test_scheduler_address_runs_one_cycle_and_needs_the_secret(site, monkeypatch
     out = tc.get("/api/cron/cycle", headers={"Authorization": "Bearer s3cret-value-for-the-scheduler"}).json()
     assert out["trigger"] == "cron" and out["actions_folded"] == 1 and out["more"] is False and calls == []
     assert out["ingest"] == {"skipped": "Dropbox credentials are not configured"}
-    # the button starts a run through the same address, on the site's own public name
+    # the button starts a run through the same address, on the site's own public name (a press: the owner's decision 1;
+    # each press below stands for another day, so the hold a press keeps until its run starts is left out)
+    monkeypatch.setattr(cloud, "PRESS_HOLD_SECONDS", 0)
     xhr = dict(auth, **{"X-Requested-With": "remitwatch"})
-    assert tc.post("/api/sync/run", headers=xhr).json() == {"started": True}
+    assert tc.post("/api/sync/run", headers=xhr).json()["started"] is True
     assert calls == [("http://testserver", "button", 0)]
     monkeypatch.setenv("VERCEL_ENV", "production")
     monkeypatch.setenv("VERCEL_PROJECT_PRODUCTION_URL", "remitwatch.example.com")
@@ -441,21 +443,21 @@ def test_scheduler_address_runs_one_cycle_and_needs_the_secret(site, monkeypatch
     assert tc.post("/api/cron/cycle", headers=xhr).status_code == 200
 
 
-def test_webhook_is_verified_and_only_starts_a_run_for_new_files(site, monkeypatch):
+def test_webhook_is_verified_and_starts_no_run_on_vercel(site, monkeypatch):
+    """The notification is still verified (a bad signature is a 403), but on Vercel it starts nothing: the site analyses
+    only when someone presses Run the analysis now (the owner's decision 1, 2026-11-26; until then a notification with
+    new files started a run)."""
     tc, _auth, api, _state = site
     monkeypatch.setenv("DROPBOX_APP_SECRET", "appsecret")
     assert tc.get("/api/dropbox/webhook?challenge=abc123").text == "abc123"
     body = b'{"list_folder": {"accounts": ["dbid:x"]}}'
     seen = []
-    monkeypatch.setattr(api, "_webhook_work", lambda origin: seen.append(origin))
+    monkeypatch.setattr(cloud, "trigger_cycle", lambda *a, **k: seen.append(a) or True)
     assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": "bad"}).status_code == 403
     assert seen == []
     sig = hmac.new(b"appsecret", body, hashlib.sha256).hexdigest()
     assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": sig}).text == "ok"
-    assert seen == ["http://testserver"]
-    # a check that hangs must not hold the reply back past Dropbox's limit, and an error in it is not Dropbox's problem
-    monkeypatch.setattr(api, "_webhook_work", lambda origin: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": sig}).status_code == 200
+    assert seen == []
 
 
 def test_setup_checklist_reports_what_is_missing(site, monkeypatch):

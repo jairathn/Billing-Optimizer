@@ -659,7 +659,9 @@ def test_on_vercel_a_decision_goes_through_the_journal_and_clears_the_ledgers_tr
         monkeypatch.setattr(el.LedgerHandle, "clear_attempt", lambda self, f: cleared.append(f))
         monkeypatch.setattr(cloud, "trigger_cycle", lambda base, trigger="x", **k: runs.append(trigger) or True)
         r = site.c.post(f"/api/ema/reports/{fid}/decision", json={"decision": "apply"}, headers=XHR)
-        assert r.status_code == 200 and cleared == [fid] and runs == ["decision"]
+        # the next press reads it: Vercel starts no run by itself (the owner's decision 1)
+        assert r.status_code == 200 and cleared == [fid] and runs == [] and r.json()["run_started"] is False
+        assert "Run the analysis now" in r.json()["text"]
         entries = cloud.read_actions(cloud.SERVING_COPY.state())
         assert [a for _n, a in entries if a["kind"] == "ema_report_decision"][0]["file_id"] == fid
         # the journal entry replayed on the store makes the same decision

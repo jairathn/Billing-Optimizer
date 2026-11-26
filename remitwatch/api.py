@@ -3061,7 +3061,9 @@ def _cloud_sync_status() -> dict:
             "last_sync": lc.get("finished"), "newest_payment_date": newest, "feed_date": feed, "days_behind": behind, "has_data": st.get("has_data"),
             "last_file_ingested": files.get("last"), "last_remit_ingested": files.get("last835"), "storage_error": st.get("error"),
             "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
-            "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+            "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            # the owner's decision 1: this site analyses only on a press; every page says when it last did
+            "press_only": True, "analysed": lc.get("analysed"), "unchecked": lc.get("unchecked")}
 
 
 @app.get("/api/sync/status")
@@ -3104,30 +3106,20 @@ def sync_freshen(request: Request, _: str = Depends(require_auth)):
     if hours is not None and hours < FRESHEN_HOURS:
         return {"started": False, "hours": round(hours, 1)}
     if runtime.serverless():
-        from . import cloud
-        if runtime.preview():
-            return {"started": False, "reason": "preview"}
-        st = cloud.SERVING_COPY.status()
-        if st.get("running"):
-            return {"started": False, "running": True}
-        ok = cloud.trigger_cycle(base_url(request), "freshen")
-        cloud.SERVING_COPY._status = (0.0, None)
-        return {"started": bool(ok), "hours": None if hours is None else round(hours, 1)}
+        # the owner's decision 1: this site analyses only when someone presses Run the analysis now; opening a page on
+        # old data starts nothing (every page says when the site last analysed)
+        return {"started": False, "reason": "press", "hours": None if hours is None else round(hours, 1)}
     from .pipeline import run_once_in_background
     run_once_in_background(DB_PATH, "freshen")
     return {"started": True, "hours": None if hours is None else round(hours, 1)}
 
 
 @app.post("/api/sync/run", dependencies=[Depends(require_xhr)])
-def sync_run(request: Request, _: str = Depends(require_auth)):
+def sync_run(request: Request, user: str = Depends(require_auth)):
     if runtime.serverless():
-        from . import cloud
-        if runtime.preview():
-            raise HTTPException(409, "This is a preview deployment. Only the production site reads and writes the practice's data.")
-        if not cloud.trigger_cycle(base_url(request), "button"):
-            raise HTTPException(400, "The site cannot start a run: CRON_SECRET is not set. Add it in Vercel and redeploy.")
-        cloud.SERVING_COPY._status = (0.0, None)
-        return {"started": True}
+        # a signed-in person's press (the Feed's button, the Upload page's Read them now, the first load on /setup): the
+        # same press as the Data tab's Run the analysis now (the owner's decision 1), a run going said rather than doubled
+        return api_ops.press_run(request, user, "button")
     from .pipeline import run_once_in_background
     run_once_in_background(DB_PATH, "button")
     return {"started": True}
@@ -3206,23 +3198,6 @@ def dropbox_webhook_verify(challenge: str = ""):
     return PlainTextResponse(challenge, headers={"X-Content-Type-Options": "nosniff"})
 
 
-def _webhook_work(origin: str) -> None:
-    """After a signed notification on a serverless host: start a cycle only when the data folder really has something
-    new. The app's own writes to its state folder raise notifications too, and those must not start one."""
-    try:
-        from . import cloud
-        from .dropbox_sync import DropboxClient
-        from .state import state_from_env
-        st = state_from_env(fast=True)
-        if st is None or runtime.preview():
-            return
-        # a run in progress looks for late arrivals itself when it ends; a run that failed is not retried from here
-        if cloud.webhook_should_start(st, getattr(st, "client", None) or DropboxClient(attempts=1, timeout=8)):
-            cloud.trigger_cycle(origin, "webhook", delay=45)
-    except Exception:
-        pass        # the daily scheduled run picks up anything a failed notification missed
-
-
 @app.post("/api/dropbox/webhook", include_in_schema=False)
 async def dropbox_webhook(request: Request):
     """Dropbox calls this when a file changes. The body is signed with the app secret; Dropbox expects an answer within
@@ -3234,12 +3209,8 @@ async def dropbox_webhook(request: Request):
     if not secret or not hmac.compare_digest(sig.encode("utf-8", "replace"), expected.encode()):
         raise HTTPException(status_code=403, detail="bad signature")
     if runtime.serverless():
-        # A serverless host may freeze the process once the reply is sent, so the check runs before it: three short
-        # calls, well inside Dropbox's ten seconds. If it ever runs long the reply goes out anyway.
-        try:
-            await asyncio.wait_for(asyncio.to_thread(_webhook_work, base_url(request)), timeout=8)
-        except Exception:
-            pass
+        # the owner's decision 1: this site analyses only when someone presses Run the analysis now, so a new file in
+        # Dropbox starts nothing here (the server's own cycle reads it; the next press here reads it too)
         return PlainTextResponse("ok")
     from .pipeline import SCHEDULER, run_once_in_background
     if SCHEDULER.is_alive():
@@ -3650,7 +3621,11 @@ def uploads_list(_: str = Depends(require_auth)):
     """The Upload page: what was uploaded and what became of each file, what waits for the cycle, and the visit notes."""
     from . import uploads
     if runtime.serverless():
-        return {"server": False, "message": uploads.SERVER_ONLY}
+        # the owner's decision 1: this site analyses only on a press; the page says when it last did
+        a = api_ops.analysis_status()
+        return {"server": False, "message": uploads.SERVER_ONLY,
+                "cycle": {"press_only": True, "text": a.get("text"), "analysed": a.get("analysed"), "running": a.get("running"),
+                          "unchecked": a.get("unchecked")}}
     from .pipeline import LAST_KEY, LOCK_KEY, SCHEDULER
     conn = db()
     try:
@@ -5685,10 +5660,10 @@ def ema_report_decision(file_id: str, request: Request, body: dict = Body(defaul
         cloud.SERVING_COPY.record({"kind": "ema_report_decision", "file_id": file_id, "decision": decision, "actor": user})
         if decision == "apply":
             ema_ledger.LedgerHandle(st).clear_attempt(file_id)
-            started = cloud.trigger_cycle(base_url(request), trigger="decision")
-        else:
-            started = False
-        return {"ok": True, "file_id": file_id, "decision": decision, "run_started": bool(started)}
+        # the owner's decision 1: nothing starts a run on this site but a press; the next press reads the report again
+        return {"ok": True, "file_id": file_id, "decision": decision, "run_started": False,
+                **({"text": "Applied: the next analysis reads it again. Press Run the analysis now on the Data tab."}
+                   if decision == "apply" else {})}
     from . import ema_reports
     conn = db()
     try:

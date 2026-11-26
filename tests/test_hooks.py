@@ -1146,3 +1146,183 @@ def test_the_command_line_writes_the_bundle_runs_the_self_audit_and_moves_old_cl
     capsys.readouterr()
     assert cli.main(["--db", db, "self-audit"]) == 0
     assert set(json.loads(capsys.readouterr().out.strip().splitlines()[-1])) >= {"gaps_n", "wasted_n"}
+
+
+# ======================================================================================================================
+# 7. The owner's decision 1 (2026-11-26): the server analyses on its schedule; the Vercel site analyses only when a
+#    signed-in person presses "Run the analysis now" (the Data tab), and says so on every page
+# ======================================================================================================================
+def test_vercel_schedules_no_analysis_and_keeps_only_the_fax_lines_daily_call():
+    """vercel.json: the daily analysis cron is gone. The fax line's daily call stays (it runs no analysis, and it sends
+    nothing unless this site is the one that sends faxes, REMITWATCH_FAX_SENDER=serverless; the server sends them)."""
+    import json
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(repo, "vercel.json")) as fh:
+        crons = json.load(fh).get("crons") or []
+    paths = [c["path"] for c in crons]
+    assert "/api/cron/cycle" not in paths and paths == ["/api/cron/faxes"], paths
+
+
+def _press(tc, auth, **headers):
+    return tc.post("/api/ops/run", headers=dict(auth, **XHR, **headers))
+
+
+def test_on_vercel_a_press_starts_the_run_chain_and_a_second_press_says_one_is_going(site, monkeypatch):
+    """The press (POST /api/ops/run, signed in, from the site's own page) starts the same chain the scheduler started:
+    /api/cron/cycle with the secret, a forced analysis. A second press while that run holds the lock, or before it has
+    taken it, says a run is already going and starts nothing. A preview deployment never runs."""
+    from remitwatch import cloud
+    tc, auth, _api, state = site
+    calls = []
+    monkeypatch.setattr(cloud, "trigger_cycle", lambda base, trigger="webhook", delay=0, **kw: calls.append((trigger, kw)) or True)
+    assert tc.post("/api/ops/run").status_code == 401
+    assert tc.post("/api/ops/run", headers=auth).status_code in (400, 403)        # a page of another site cannot press it
+    r = _press(tc, auth)
+    assert r.status_code == 200 and r.json()["started"] is True and calls == [("press", {"force": 1})], (r.text, calls)
+    assert "analys" in r.json()["text"]
+    again = _press(tc, auth).json()                       # the run has not taken the lock yet: the press is remembered
+    assert again["started"] is False and again["running"]["since"] and "already going" in again["text"] and len(calls) == 1
+    # a run that holds the lock: a press long after the first one still starts nothing
+    monkeypatch.setattr(cloud, "PRESS_HOLD_SECONDS", 0)
+    token = cloud.acquire(state)
+    held = _press(tc, auth).json()
+    assert held["started"] is False and held["running"]["since"] and len(calls) == 1
+    cloud.release(state, token)
+    assert _press(tc, auth).json()["started"] is True and len(calls) == 2
+    # the scheduler's own secret is still what the chain uses; without it nothing can start
+    monkeypatch.setattr(cloud, "trigger_cycle", lambda *a, **k: False)
+    assert _press(tc, auth).status_code == 400
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    assert _press(tc, auth).status_code == 409
+
+
+def test_on_vercel_nothing_starts_a_run_by_itself(site, monkeypatch):
+    """Opening a page on old data, and a signed Dropbox notification of a new file, start nothing on Vercel: only a press
+    analyses there. The Feed's own button and the Upload page's "Read them now" are presses, so they go through the
+    same press (a run already going is said, not doubled)."""
+    import hashlib as _h
+    import hmac as _hm
+
+    from remitwatch import cloud
+    tc, auth, api, state = site
+    calls = []
+    monkeypatch.setattr(cloud, "trigger_cycle", lambda base, trigger="webhook", delay=0, **kw: calls.append(trigger) or True)
+    from remitwatch import pipeline
+    monkeypatch.setattr(pipeline, "dropbox_configured", lambda: True)    # a feed is set up (nothing is fetched here)
+    monkeypatch.setattr(api, "_last_pull_hours", lambda: 72.0)            # three days old: a server would start a run
+    fr = tc.post("/api/sync/freshen", headers=dict(auth, **XHR)).json()
+    assert fr["started"] is False and fr["reason"] == "press" and calls == []
+    monkeypatch.setenv("DROPBOX_APP_SECRET", "appsecret")
+    body = b'{"list_folder": {"accounts": ["dbid:x"]}}'
+    sig = _h and _hm.new(b"appsecret", body, _h.sha256).hexdigest()
+    assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": sig}).text == "ok"
+    assert calls == []
+    assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": "bad"}).status_code == 403
+    # the Feed's button (/api/sync/run) is a press: the same chain, and a second press says a run is going
+    first = tc.post("/api/sync/run", headers=dict(auth, **XHR)).json()
+    assert first["started"] is True and calls == ["button"]
+    second = tc.post("/api/sync/run", headers=dict(auth, **XHR)).json()
+    assert second["started"] is False and second["running"]["since"] and calls == ["button"]
+
+
+def test_on_a_server_there_is_nothing_to_press_and_the_schedule_stays(tmp_path, monkeypatch):
+    """The server analyses on its own schedule: the press route is not there (404), the Data tab's panels carry no press,
+    and opening a page on old data still starts a run in the background as before."""
+    import remitwatch.pipeline as P
+    db = _db(tmp_path)
+    Store(db).close()
+    tc, auth = _server_client(monkeypatch, db)
+    assert tc.post("/api/ops/run", headers=dict(auth, **XHR)).status_code == 404
+    panels = tc.get("/api/ops/panels", headers=auth).json()
+    assert not (panels.get("analysis") or {}).get("press_only")
+    started = []
+    monkeypatch.setattr(P, "run_once_in_background", lambda db, trigger="button": started.append(trigger))
+    monkeypatch.setenv("TRIZETTO_SFTP_USER", "SITE123")
+    monkeypatch.setenv("TRIZETTO_SFTP_PASSWORD", "pw")
+    assert tc.post("/api/sync/freshen", headers=dict(auth, **XHR)).json()["started"] is True and started == ["freshen"]
+
+
+def test_every_vercel_page_says_when_the_site_last_analysed_and_that_it_analyses_only_on_a_press(site):
+    """The header's line (/api/sync/status), the Data tab's panel (/api/ops/panels: the press, the last analysis, a run
+    going) and the Upload page (/api/uploads: its cycle line) all carry when this site last analysed and that it
+    analyses only on a press."""
+    tc, auth, _api, _state = site
+    st = tc.get("/api/sync/status", headers=auth).json()
+    assert st["press_only"] is True and st["analysed"]["at"] and st["analysed"]["findings"] >= 1, st.get("analysed")
+    an = tc.get("/api/ops/panels", headers=auth).json()["analysis"]
+    assert an["press_only"] is True and an["analysed"]["at"] == st["analysed"]["at"] and an["running"] is None
+    assert "only when someone presses" in an["text"] and "server" in an["text"]
+    up = tc.get("/api/uploads", headers=auth).json()
+    assert (up.get("cycle") or {}).get("press_only") is True and up["cycle"]["analysed"]["at"] == st["analysed"]["at"]
+
+
+def test_a_pressed_run_analyses_with_nothing_new_and_an_idle_run_keeps_when(box):
+    """A press forces the analysis (the lists move with the day even when no file arrived): its status says when the
+    site last analysed, and a run that does not analyse carries that time on."""
+    from remitwatch import cloud
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    first = _cloud(state, client, trigger="cron")
+    assert "detect" in first and first["analysed"]["at"] == first["finished"]
+    idle = _cloud(state, client, trigger="continue")
+    assert "detect" not in idle and idle["analysed"] == first["analysed"]
+    pressed = _cloud(state, client, trigger="press", force_detect=True)
+    assert "detect" in pressed and pressed["analysed"]["at"] == pressed["finished"] and pressed["analysed"]["trigger"] == "press"
+    import json
+    assert json.loads(state.get(cloud.STATUS))["analysed"] == pressed["analysed"]
+
+
+def test_a_pressed_run_short_of_time_hands_the_analysis_on_and_the_chain_continues(box):
+    """A pressed run whose time left cannot hold the analysis (the last one took long) hands it to a fresh invocation,
+    as after a large read, and counts that as progress, so /api/cron/cycle starts the next run; that run analyses."""
+    from remitwatch import cloud
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    _cloud(state, client)
+    conn = raw_conn(state)
+    conn.close()
+    store, _ = cloud.load_raw(state)
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_seconds', '900')")
+    store.conn.commit()
+    cloud.save_raw(state, store, lambda *a: None)
+    store.close()
+    pressed = _cloud(state, client, trigger="press", force_detect=True)
+    assert "detect" not in pressed and pressed.get("deferred") == "detection" and pressed["more"] is True and pressed["progress"] is True
+    nxt = _cloud(state, client, trigger="continue")
+    assert "detect" in nxt and nxt["analysed"]["at"] == nxt["finished"]
+
+
+def test_a_run_that_sheds_work_says_what_it_could_not_check_in_items_and_dollars(box):
+    """A run under the memory regulation that leaves the analysis waiting (the chain stopped) says in its status, and so on
+    the page, how many open items and how many dollars were not checked against the files read since the last analysis;
+    a run that analysed clears it."""
+    import json
+    from datetime import date, timedelta
+
+    from remitwatch import cloud
+    from tests.test_features import claim, svc
+    from tests.test_remitwatch import remit
+    root, client, state = box
+    recent = (date.today() - timedelta(days=20)).strftime("%Y%m%d")      # items whose windows are open: work to do
+    folder = root / DATA
+    folder.mkdir(parents=True, exist_ok=True)
+    claims = visits_with_downcodes()
+    for n, i in enumerate(range(0, len(claims), 10)):
+        (folder / f"r{n:03d}.RMT").write_bytes(remit("".join(claims[i:i + 10]), "100.00", seg_count=99, isa_ctrl=f"{n + 1:09d}",
+                                                     pay_date=recent))
+    first = _cloud(state, client)
+    assert "detect" in first and not first.get("unchecked")
+    later = [claim(300 + i, svc("99214", "223.65", "76.09", "76.09", "CAS*CO*186*51.71~CAS*CO*45*95.85~"), cfi="16")
+             for i in range(5)]
+    (folder / "later.RMT").write_bytes(remit("".join(later), "100.00", seg_count=99, isa_ctrl="000000050", pay_date=recent))
+    # the last run came close to its memory: this one reads the new files and hands the analysis on (spread)
+    st = json.loads(state.get(cloud.STATUS))
+    st["memory_mb"] = {"peak": 2100, "limit": 2278}
+    state.put(cloud.STATUS, json.dumps(st).encode())
+    read = _cloud(state, client)
+    assert read.get("deferred") == "detection" and read["plan"]["level"] >= 1
+    un = read["unchecked"]
+    assert un["n"] >= 1 and un["cents"] > 0 and "not checked" in un["text"] and "$" in un["text"], un
+    assert json.loads(state.get(cloud.STATUS))["unchecked"] == un
+    done = _cloud(state, client, trigger="continue")
+    assert "detect" in done and not done.get("unchecked")
