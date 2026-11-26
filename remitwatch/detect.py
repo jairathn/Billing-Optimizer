@@ -5176,18 +5176,22 @@ class Detector:
                           "bill_resent_837": again_837,
                           "bill_answered": bill_answered.get(b) if (bill_answered.get(b) or "") >= sent else None})
         # one visit chased under two bills (a bill made again): only the newest carries it. The two parts of a service, the
-        # reading (26) and the technical part (TC), billed on two bills are two services, each chased on its own
+        # reading (26) and the technical part (TC), billed on two bills are two services, each chased on its own. The patient
+        # is EMA's patient id, and one person under two of EMA's patient ids (a second chart) is one patient by the keyed
+        # name (_export_patients: the residual of fix7b)
+        same = self._ema_step("export_patients", self._export_patients, cands) or {}
         newest_for: dict[int, tuple] = {}
         for cd in cands:
+            who = same.get(cd["pcn"], cd["patient"])
             for x in cd["items"]:
-                if cd["patient"] and x[1]:
-                    h = hash((cd["patient"], x[1], x[0], item_part(x)))
+                if who and x[1]:
+                    h = hash((who, x[1], x[0], item_part(x)))
                     mark = (cd["sent"], cd["pcn"])
                     if h not in newest_for or mark > newest_for[h][0]:
                         newest_for[h] = (mark, cd["b"])
         final = []
         for cd in cands:
-            b, patient = cd["b"], cd["patient"]
+            b, patient = cd["b"], same.get(cd["pcn"], cd["patient"])
             items = [x for x in cd["items"]
                      if not (patient and x[1] and newest_for.get(hash((patient, x[1], x[0], item_part(x))), (None, b))[1] != b)]
             if not items:
@@ -5204,6 +5208,40 @@ class Detector:
         # (_exports_yield_to_newer_bills, answers-1)
         self._export_final = (final, newest)
         self.payers_behind = sorted(behind.values(), key=lambda h: (-h["billed_cents"], h["payer"]))
+
+    def _export_patients(self, cands: list[dict]) -> dict[str, str]:
+        """One person under two of EMA's patient ids: for the weekly exports' claims that share a visit (date, code and part)
+        under different patient ids, the keyed names that name each claim's patient (_patient_keys: the remittances' names
+        for its bill, a member id its 837s name that the remittances give one name only, EMA's patient through the claims
+        the A/R or the bill map ties to an EMA claim). Patient ids whose claims share a name are one patient. {claim id: the
+        patient they share} for the claims so joined; every other claim keeps its own patient id. Two people with nothing
+        naming them stay apart."""
+        visits: dict[tuple, set] = defaultdict(set)
+        by = {cd["pcn"]: cd for cd in cands}
+        for cd in cands:
+            for x in cd["items"]:
+                if cd["patient"] and x[1]:
+                    visits[(x[1], x[0], item_part(x))].add(cd["pcn"])
+        want = sorted({p for ps in visits.values() if len({by[q]["patient"] for q in ps}) > 1 for p in ps})
+        if not want:
+            return {}
+        from . import ema_reports as er
+        er.register_functions(self.conn, create=False)     # the keyed name (rw_name_key) the patient keys are read with
+        keys_of = self._patient_keys([dict(by[p], ema_patients={by[p]["patient"]}) for p in want], {}) or {}
+        parent: dict[str, str] = {}
+
+        def find(x: str) -> str:
+            while parent.get(x, x) != x:
+                x = parent[x]
+            return x
+        for ps in visits.values():
+            named = sorted(p for p in ps if keys_of.get(p))
+            for i, a in enumerate(named):
+                for b in named[i + 1:]:
+                    pa, pb = find(by[a]["patient"]), find(by[b]["patient"])
+                    if pa != pb and keys_of[a] & keys_of[b]:
+                        parent[max(pa, pb)] = min(pa, pb)
+        return {p: find(by[p]["patient"]) for p in want}
 
     def _note_resent_bill(self, cd: dict) -> None:
         """An export claim kept because its bill went out again as a newer submission that nothing else chases (answers-5):
@@ -5728,7 +5766,8 @@ class Detector:
         if sent is None:
             return answers                  # the count failed (recorded): no twin serves
         twins = {cid: f[0] for cid, f in found.items()
-                 if shared[tuple(f[0])] <= len(f[0]) and sent.get((f[1], f[2], frozenset(groups.get(cid) or ())), 0) <= len(f[0])}
+                 if (len(f) > 3 and f[3])           # the patient's name chose it among several twins
+                 or (shared[tuple(f[0])] <= len(f[0]) and sent.get((f[1], f[2], frozenset(groups.get(cid) or ())), 0) <= len(f[0]))}
         if twins:
             sent_of = {cd["pcn"]: cd["sent"] for cd in cds}
             done = self._ema_step(step + "_twins_answered", self._links_answered,
@@ -5971,7 +6010,27 @@ class Detector:
             if (bill and bill not in mine) or (claim and bill_of(claim) not in mine) or (paired.get(lk, set()) - mine):
                 continue                    # the link map or the A/R ties it to another bill
             out[cid].append(lk)
-        return {k: (sorted(v), info[k]["_first"], info[k]["_rows"]) for k, v in out.items()}
+        # twins of several patients (two people's claims of the same content sent the same day): the patient's keyed name
+        # tells which twin is the claim's own, when it names exactly one of them (the residual of fix7b). Such a twin is the
+        # claim's EMA claim whatever else went out that day (named: the fourth element)
+        named: set[str] = set()
+        multi = sorted(cid for cid, v in out.items() if len(v) > 1)
+        if multi:
+            keys_of = self._patient_keys([info[cid] for cid in multi], answers) or {}
+            lks = sorted({lk for cid in multi for lk in out[cid]})
+            nk_of: dict[int, set] = defaultdict(set)
+            for i in range(0, len(lks), 500):
+                part = lks[i:i + 500]
+                for lk, nk in c.execute(f"""SELECT DISTINCT link, name_key FROM ema_lines WHERE link IN ({','.join('?' * len(part))})
+                                            AND name_key IS NOT NULL""", part):
+                    nk_of[lk].add(nk)
+            for cid in multi:
+                keys = keys_of.get(cid) or set()
+                own = [lk for lk in out[cid] if nk_of.get(lk, set()) & keys] if keys else []
+                if len(own) == 1:
+                    out[cid] = own
+                    named.add(cid)
+        return {k: (sorted(v), info[k]["_first"], info[k]["_rows"], k in named) for k, v in out.items()}
 
     def _sent_that_day(self, keys: set) -> dict:
         """How many bills went out on a day with these lines to a payer of these groups: the 837s' claims on the day each
@@ -6377,8 +6436,9 @@ class Detector:
         never sent: ema_checks.not_sent lists it), and the one answered rule every never-answered claim meets
         (_answered_rule: EMA's postings on its own EMA claim after its send, found by its claim id, its bill, its content
         under the group EMA gives its payer's name, or its send day; the patient's other EMA claims and remittances, by its
-        own payer). A claim that never reached its payer (rejected, or still in EMA's print batch) is answered only by a
-        posting after its send or its bill's making; a status alone never answers one."""
+        own payer). A claim rejected before reaching its payer is answered only by a posting after its send; one still in
+        EMA's print batch, never sent, by a payment that still stands on its visit whatever its day (a duplicate of a paid
+        visit); a status alone never answers one."""
         from . import ema_checks as ec
         pcns = [cd["pcn"] for cd, _items in final]
         statuses = self._ema_step("claim_statuses", ec.claim_statuses, self.conn, claim_ids=pcns) or {}
@@ -6389,7 +6449,10 @@ class Detector:
             # the day EMA made the bill (its charges are posted then); none from the date of service alone
             first = ((cd.get("s837") or [None, None])[1] or str(k.get("sent") or "")[:10] or str(k.get("created") or "")[:10]
                      or None)
-            cds.append(dict(cd, items=items, first_sent=first, after=cd["sent"] if (cd["rejected"] or cd["unsent"]) else None,
+            # a claim that reached its payer and came back rejected is answered only after that send (an earlier payment
+            # answered an earlier send); one still in EMA's print batch never went out, so a payment that still stands on
+            # its visit, whatever its day, is that visit's: the claim is a duplicate of a paid visit (the residual of fix7b)
+            cds.append(dict(cd, items=items, first_sent=first, after=cd["sent"] if cd["rejected"] else None,
                             ema_patients=set(k.get("patients") or ())))
         answers = self._ema_claims_found("claim_answers", cds)
         rule = self._answered_rule("answered_export", cds, answers)

@@ -476,3 +476,103 @@ def test_production_lists_one_service_once_and_prices_its_parts_at_their_own_rat
     sizes = {k: v["shortfall_cents"] for k, v in got.items()}
     assert sizes == {F.claim_id(82): 3000, F.claim_id(83): 5000}, sizes
     s.close()
+
+
+# ----------------------------------------------------------------------------------------------- send-day twins (fix7b)
+@pytest.mark.parametrize("kind", KINDS)
+def test_send_day_twins_of_two_patients_are_told_apart_by_the_patients_name(tmp_path, kind, ema_env):
+    """(fix7b residual: the send-day twins) Two patients' claims of the same content (a 99214 at $200, visit March 2) went
+    to Blue Cross the same day (March 20), and only the 837s know them. EMA charged each the send day: Annie's EMA claim
+    61 was paid April 10, Bert's EMA claim 62 was not. Each member's earlier remittance names its patient. The twin rule
+    alone cannot tell which twin is whose (both claims stayed listed, Annie's paid claim with them); the patient's name
+    tells it: Annie's claim is answered by EMA claim 61, and Bert's alone is listed, with EMA claim 62."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
+    s, lg = _ema_store(tmp_path, kind)
+    rows = [charge(F.link_no(61), cpt="99214", amount=200, patient="Twintest, Annie", posted=D(2026, 3, 20)),
+            charge(F.link_no(62), cpt="99214", amount=200, patient="Twintest, Bert", posted=D(2026, 3, 20)),
+            pay(F.link_no(61), "PAPER-61", 110, cpt="99214", patient="Twintest, Annie", posted=D(2026, 4, 10))]
+    denial_world(s, lg, tmp_path, rows)
+    for n in range(25):
+        raw_remit(s, trace=f"BC{n:05d}", paid_on="2026-05-01", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(200 + n), "status": "1", "member": f"MB{n:08d}", "last": "VOLUME", "first": f"B{n}",
+                           "lines": [("2026-04-20", "99214", 200, 110, [("CO", "45", 90)])]}])
+    for n, first in ((61, "ANNIE"), (62, "BERT")):
+        raw_remit(s, trace=f"BCM{n}", paid_on="2026-02-20", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(160 + n), "status": "1", "member": f"MEMBER0000{n}", "last": "TWINTEST", "first": first,
+                           "lines": [("2026-02-02", "99213", 150, 80, [("CO", "45", 70)])]}])
+    bc = ("BLUE CROSS TEST", "BCT01")
+    send(s, tmp_path, [clm837(F.claim_id(n), [("99214", "200.00", "20260302")], payer=bc, member=f"MEMBER0000{n}") for n in (61, 62)],
+         "20260320")
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = {r["patient_control_number"] or f"link:{r['ema_link']}": r["ema_link"] for r in s.query(
+        "SELECT patient_control_number, ema_link FROM findings WHERE signal='NO_ANSWER' AND COALESCE(stale,0)=0 "
+        "AND (patient_control_number IN (?, ?) OR ema_link IN (?, ?))", (F.claim_id(61), F.claim_id(62), F.link_no(61), F.link_no(62)))}
+    assert got == {F.claim_id(62): F.link_no(62)}, got
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_print_batch_duplicate_made_after_the_visit_was_paid_is_not_listed(tmp_path, kind, ema_env):
+    """(fix7b residual: the print-batch duplicate) Carla's visit of March 2 (a 99214 at $200) was billed, sent and paid by
+    Blue Cross on March 28 (EMA claim 70). On April 20 EMA made the bill again (claim F.claim_id(71), EMA claim 71) and left
+    it in its print batch, never sent. The duplicate is no money owed: the visit's payment still stands, whatever day it
+    came (before: a claim still in the print batch was answered only by a posting after the day its bill was made, so the
+    duplicate stayed listed as 'never sent'). The A/R does not list the duplicate; EMA's claim for it is its send-day twin
+    (charged the day the bill was made), whose patient's other EMA claim shows the visit paid."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay
+    from tests.test_workable import ema
+    s, lg = _ema_store(tmp_path, kind)
+    who = "Dupe, Carla"
+    rows = [charge(F.link_no(70), cpt="99214", amount=200, patient=who, posted=D(2026, 3, 3)),
+            pay(F.link_no(70), "PAPER-70", 110, cpt="99214", patient=who, posted=D(2026, 3, 28)),
+            charge(F.link_no(71), cpt="99214", amount=200, patient=who, posted=D(2026, 4, 20), status="Batched for Printing")]
+    denial_world(s, lg, tmp_path, rows)
+    ema(s.conn, F.claim_id(71), service_date="2026-03-02", bill_created="2026-04-20", charges_cents=20000,
+        payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA071")
+    ema(s.conn, F.claim_id(71), family="claim_status", claim_status="Batched for Printing", service_date="2026-03-02",
+        payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA071")
+    # the weekly exports reach May 24 (another patient's claim made that day): the print batch has waited 34 days
+    ema(s.conn, F.claim_id(75), service_date="2026-05-22", bill_created="2026-05-24", payer=F.PAYERS["bcbs"], payer_id="BCT01",
+        patient_id="EMA075")
+    s.conn.commit()
+    det = Detector(s, run_id="r1", today="2026-05-25")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [(r["signal"], r["patient_control_number"] or f"link:{r['ema_link']}") for r in s.query(
+        "SELECT signal, patient_control_number, ema_link FROM findings WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') "
+        "AND COALESCE(stale,0)=0 AND (patient_control_number=? OR ema_link IN (?, ?))", (F.claim_id(71), F.link_no(70), F.link_no(71)))]
+    assert got == [], f"the duplicate of a paid visit is listed: {got}"
+    s.close()
+
+
+# ----------------------------------------------------------------------------------------------- one visit, two charts (fix7b)
+@pytest.mark.parametrize("kind", KINDS)
+def test_one_person_under_two_ema_patient_ids_is_one_patient_for_the_one_visit_rule(tmp_path, kind):
+    """(fix7b residual) The reading of a biopsy (88305-26, visit September 14) was billed on CB0000V71 (sent September 15)
+    and again on CB0000V72 (sent September 25) under a second chart EMA opened for the same person: the two bills carry two
+    EMA patient ids. Neither is answered. The remittances name the member's patient (one name), and both bills' 837s name
+    that member: one person, one visit, chased once under the newer bill (before: matched by the EMA patient id alone,
+    the two bills stayed two items). Control: a second pair (V73, V74) whose members' remittances name two different
+    people stays two items."""
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    _salted(s)
+    _remits(s, tmp_path, _visits() + [_member_visit("CB0000V70C017", "WCHART0001"),
+                                      _member_visit("CB0000V75C017", "WCHART0003", first="OTHER"),
+                                      _member_visit("CB0000V76C017", "WCHART0004", first="ANOTHER")], "20261110")
+    v26 = [("88305", "90.00", "20260914", "26")]
+    for bill, pid, sent, member in (("CB0000V71", "EMA071A", "2026-09-15", "WCHART0001"), ("CB0000V72", "EMA071B", "2026-09-25", "WCHART0001"),
+                                    ("CB0000V73", "EMA073A", "2026-09-15", "WCHART0003"), ("CB0000V74", "EMA073B", "2026-09-25", "WCHART0004")):
+        ema(s.conn, bill + "C017", cpt="88305", modifiers='["26"]', charges_cents=9000, patient_id=pid)
+        ema(s.conn, bill + "C017", family="claim_status", claim_status="Submitted", claim_submission_date=sent, patient_id=pid)
+        s.conn.commit()
+        send(s, tmp_path, [clm837(bill + "C017", v26, member=member)], sent.replace("-", ""))
+    found = _chased(s, "t1")
+    assert {k for k in found if k.startswith("CB0000V7")} == {"CB0000V72C017", "CB0000V73C017", "CB0000V74C017"}, sorted(found)
+    s.close()
