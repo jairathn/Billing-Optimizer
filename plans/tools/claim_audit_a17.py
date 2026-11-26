@@ -770,12 +770,17 @@ def load(con, ledger=None):
 
 # ------------------------------------------------------------------------------------------------------- the audit
 class Audit:
-    def __init__(self, raw, as_of, log=print, windows=None):
+    def __init__(self, raw, as_of, log=print, windows=None, disable=()):
         self.R = raw
         self.as_of = as_of
         self.log = log
+        # A17 diagnostics: rules switched off to attribute a change to its rule (plan, state, setting, xclaim, windows,
+        # bare, twins); never used for a score of record
+        self.disable = set(disable or ())
         # A17 rule 4: the payer window table (a path, a parsed table, or a PayerWindows); None keeps A16's windows
         self.windows = windows if isinstance(windows, PayerWindows) else PayerWindows(windows)
+        if "windows" in self.disable:
+            self.windows = PayerWindows(None)
         self.day_state, self.loc_state, self.loc_of = {}, {}, {}
         self.xrank = {}
         self.stats = Counter()
@@ -1529,6 +1534,8 @@ class Audit:
         of the answers (the claim stays sent and unanswered). A denial status (CLP02 4), a reversal (22) or any reason
         makes it an answer."""
         n = 0
+        if "bare" in self.disable:
+            return
         for p in self.procs.values():
             if p.st not in ("1", "2", "3", "19", "20", "21") or p.paid != 0 or p.prr:
                 continue
@@ -1549,6 +1556,8 @@ class Audit:
         leaves CLP08 empty makes a surgical site's claims read as office claims and its facility schedule a cut of the
         office rate."""
         R = self.R
+        if "setting" in self.disable:
+            return
         pos_pcn = defaultdict(Counter)
         for (k, bht, pcn, total, freq, pname, pid, sdate, pos, sub) in R.c837:
             pos = (pos or "").strip()
@@ -1777,7 +1786,7 @@ class Audit:
         on the answers no employer plan read apart holds. Sets p.rprod (the product and the plan's digest) for every
         processing of such a plan; its rates are read and looked up under that key."""
         self.own_plans = {}
-        for dim in ("g", "c"):
+        for dim in (("g", "c") if "plan" not in self.disable else ()):
             size = Counter()
             for A, apu, yr, pc in clean:
                 v = self._plan_of(A.p, dim)
@@ -1881,7 +1890,7 @@ class Audit:
 
     def tier_in_state(self, fam, prod, npi, state):
         """The tier ('100' or '85') a payer pays this clinician at in this office's state, or None (A17 rule 1)."""
-        if not npi or not state:
+        if not npi or not state or "state" in self.disable:
             return None
         cls = self.pclass(prod)
         t = getattr(self, "state_tier", {}).get((fam, cls, npi, state))
@@ -2038,6 +2047,9 @@ class Audit:
         Procedures on one claim only are left to A16's rules (the payer ranked them itself). Sets self.xrank:
         {id(answer): (role, owed cents per unit)}."""
         groups = defaultdict(list)
+        self.xrank = {}
+        if "xclaim" in self.disable:
+            return
         for A in self.answers:
             p, s = A.p, A.svc
             if A.virtual or not A.standing or p.st not in ("1", "19") or p.bare or not p.pk or not s.dos:
@@ -2530,6 +2542,9 @@ class Audit:
         the bill's services' EMA lines); several make the bill answered only when every one of them is (truth:
         twin_answer)."""
         R = self.R
+        self.twin_of = {}
+        if "twins" in self.disable:
+            return
         tied = getattr(R, "ema_tied_links", set()) | getattr(R, "ema_facility_links", set())
         by_link = defaultdict(list)
         for E in lines.values():
@@ -2639,7 +2654,7 @@ class Audit:
                 ef["paid"] += amt
             for (d, pay, g, c, ca, nc) in E.adjs:
                 ef["adjs"].append((d, self.efam(pay), g, c, ca + nc, nc))
-            for (d, pay, chk) in E.answers:
+            for (d, pay, chk) in E.answers + (E.bare if "bare" in self.disable else []):
                 ef["answers"].append((d, self.efam(pay)))
             for pay, st in E.status.items():
                 ef["status"][self.efam(pay)] = st
@@ -2723,7 +2738,8 @@ class Audit:
         # weekly claim-status export recorded; a $0 row under a check with none of these is no answer
         wk0 = [x[6] for x in s.emast if len(x) > 6 and x[6]]
         proof = {f for d, f in ans} | {f for d, f, g, c, a, n in ef["adjs"] if g or c}
-        denied = [f for f in denied if f in proof or wk0]
+        if "bare" not in self.disable:
+            denied = [f for f in denied if f in proof or wk0]
         if not denied and not (ans and resolved):
             return None
         fams = set(denied) | {f for d, f in ans if f in resolved}
@@ -6020,6 +6036,10 @@ def main(argv=None):
                                      "world_ema_ledger.sqlite beside the store, when there)")
     ap.add_argument("--out")
     ap.add_argument("--as-of", default="2026-11-23")
+    ap.add_argument("--windows", default=os.environ.get("A17_WINDOWS"),
+                    help="the payer window table (JSON, schema a17-payer-windows/1); default: A16's flat windows")
+    ap.add_argument("--disable", default=os.environ.get("A17_DISABLE", ""),
+                    help="diagnostics only: A17 rules to switch off (plan,state,setting,xclaim,windows,bare,twins)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
     if args.selftest:
@@ -6036,7 +6056,8 @@ def main(argv=None):
                 break
     lcon = open_ro(led) if led else None
     raw = load(con, lcon)
-    a = Audit(raw, args.as_of).run()
+    a = Audit(raw, args.as_of, windows=args.windows or None,
+              disable={x.strip() for x in args.disable.split(",") if x.strip()}).run()
     path, spath, summary = write_outputs(a, args.out)
     print(json.dumps({"verdicts": summary["verdicts"], "left_on_table": summary["left_on_table"],
                       "feed_date": summary["feed_date"]}, indent=1))

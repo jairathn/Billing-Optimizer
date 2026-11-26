@@ -214,7 +214,14 @@ def main():
     raw = ca.load(con, lcon)
     con.close()
     lcon.close()
-    a = ca.Audit(raw, AS_OF, log=lambda *x: None).run()
+    kw = {}
+    if ca.RULES_VERSION >= "A17":
+        # the payer window table (A17_WINDOWS: a path) and, for diagnostics only, rules switched off (A17_DISABLE)
+        kw = {"windows": os.environ.get("A17_WINDOWS") or None,
+              "disable": {x.strip() for x in (os.environ.get("A17_DISABLE") or "").split(",") if x.strip()}}
+        print("A17 windows table:", "on" if kw["windows"] else "off (A16 windows)", "| rules off:",
+              sorted(kw["disable"]) or "none", flush=True)
+    a = ca.Audit(raw, AS_OF, log=lambda *x: None, **kw).run()
     print("auditor seconds", round(time.time() - t0, 1), flush=True)
     if True:
         path, spath, summary = ca.write_outputs(a, OUT)
