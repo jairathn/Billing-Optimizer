@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""claim_audit_a16.py: the independent claim auditor (rules version A16).
+"""claim_audit_a17.py: the independent claim auditor (rules version A17; A16's rules, below, plus the five A17 rules).
+
+A17 adds (search "A17 rule"): (1) plan-level rate keys (an 835 group number or contract class read apart) and the NP/PA
+tier by the office's state; (2) the separate surgical site's own schedule; (3) cross-claim multiple-procedure ranking
+of a patient's same-day claims; (4) the payer window table: the researched table in a17/payer_windows.json (every
+window with its source), read by the auditor's own payer-group rules; a window the table could not verify, or a payer
+or kind it has no row for, falls back to A16's days and is unverified: a unit past it is 'window unverified', never
+expired; (5) never answered: a bare $0 row is no answer, a status alone is no answer, send-day twins, a payer whose
+835s stopped answers through EMA.
 
 What it does
   1. Reads a copy of the RemitWatch store READ-ONLY (sqlite URI, mode=ro): the raw 835 tables (transactions, claims,
@@ -28,8 +36,9 @@ in the check). It prints counts, dollars, codes, payer families, the store's key
 files (truth table, verdicts) hold claim ids and dates: they are written only to the private folder given with --out.
 
 Usage
-  python3 -I claim_audit_a16.py --selftest
-  python3 -I claim_audit_a16.py --db STORE.sqlite [--ledger LEDGER.sqlite] --out PRIVATE_DIR [--as-of YYYY-MM-DD]
+  python3 -I claim_audit_a17.py --selftest
+  python3 -I claim_audit_a17.py --db STORE.sqlite [--ledger LEDGER.sqlite] --out PRIVATE_DIR [--as-of YYYY-MM-DD]
+        [--windows PATH|none] [--disable RULES]
 """
 import argparse
 import datetime as dt
@@ -199,7 +208,7 @@ class Families:
     def __init__(self):
         self.name_to_fam = {}
         self.labels = {}
-        self.all_names = defaultdict(set)    # A17 rule 4: every payer name of a family (the window table matches them)
+        self.all_names = defaultdict(set)    # every payer name of a family (its payer id may carry several)
 
     @staticmethod
     def id_fam(sid):
@@ -4794,7 +4803,7 @@ def write_outputs(a, out_dir):
         unit_to INTEGER, state TEXT, sub TEXT, carc TEXT, fam TEXT, gov_line_key TEXT, gov_date TEXT, owed_cents_per_unit
         INTEGER, amount_basis TEXT, window_end TEXT, inside_window INTEGER, in_scope INTEGER, scope_basis TEXT,
         open_items TEXT, closed_items TEXT, left_on_table INTEGER, primary_fam TEXT, ema_how TEXT, ema_links TEXT,
-        ema_ins_paid INTEGER, ema_status TEXT, review INTEGER, window_basis TEXT)""")
+        ema_ins_paid INTEGER, ema_status TEXT, review INTEGER, window_basis TEXT, window_verified INTEGER)""")
     con.execute("""create table verdicts (finding_id TEXT PRIMARY KEY, signal TEXT, category TEXT, status TEXT, kind TEXT,
         verdict TEXT, sub TEXT, item_cents INTEGER, truth_cents INTEGER, recovered_cents INTEGER, units_claimed INTEGER,
         units_allocated INTEGER, unit_states TEXT, keeper TEXT, in_scope INTEGER, line_key TEXT, claim_key TEXT,
@@ -4822,9 +4831,10 @@ def write_outputs(a, out_dir):
                          ",".join(open_on.get(key, [])), ",".join(closed_on.get(key, [])), 1 if lot_i else 0,
                          a._pfam.get(sv.bill) or "", sv.ema_how, ",".join(str(E.link) for E in sv.eml),
                          ef["paid"] if ef else None, ",".join(sorted(set(ef["status"].values()))) if ef else "",
-                         1 if (key, i) in rev_set else 0, getattr(u[8], "basis", "")))
+                         1 if (key, i) in rev_set else 0, getattr(u[8], "basis", ""),
+                         1 if getattr(u[8], "verified", True) else 0))
             i = j + 1
-    con.executemany("insert into units values (" + ",".join("?" * 29) + ")", rows)
+    con.executemany("insert into units values (" + ",".join("?" * 30) + ")", rows)
     # owner rule 4.1: unexplained provider-level discounts, one row per payer and provider (NPI's last 3 digits only)
     con.execute("""create table provider_reviews (fam TEXT, npi_tail TEXT, lines INTEGER, units INTEGER, gap_cents INTEGER,
         units_in_scope_inside INTEGER, gap_cents_in_scope_inside INTEGER)""")
@@ -6762,7 +6772,8 @@ def main(argv=None):
     ap.add_argument("--out")
     ap.add_argument("--as-of", default="2026-11-23")
     ap.add_argument("--windows", default=os.environ.get("A17_WINDOWS"),
-                    help="the payer window table (JSON, schema a17-payer-windows/1); default: A16's flat windows")
+                    help="the payer window table (the researched table's JSON, or schema a17-payer-windows/1); "
+                         "default: a17/payer_windows.json beside this file; 'none' keeps A16's flat windows")
     ap.add_argument("--disable", default=os.environ.get("A17_DISABLE", ""),
                     help="diagnostics only: A17 rules to switch off (plan,state,setting,xclaim,windows,bare,twins,feedstop)")
     ap.add_argument("--selftest", action="store_true")

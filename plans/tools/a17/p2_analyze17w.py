@@ -216,12 +216,15 @@ def main():
     lcon.close()
     kw = {}
     if ca.RULES_VERSION >= "A17":
-        # the payer window table (A17_WINDOWS: a path) and, for diagnostics only, rules switched off (A17_DISABLE)
+        # the payer window table (A17_WINDOWS: a path, or "none" for A16's windows; unset: the researched table) and,
+        # for diagnostics only, rules switched off (A17_DISABLE)
         kw = {"windows": os.environ.get("A17_WINDOWS") or None,
               "disable": {x.strip() for x in (os.environ.get("A17_DISABLE") or "").split(",") if x.strip()}}
-        print("A17 windows table:", "on" if kw["windows"] else "off (A16 windows)", "| rules off:",
+    a = ca.Audit(raw, AS_OF, log=lambda *x: None, **kw)
+    if ca.RULES_VERSION >= "A17":
+        print("A17 windows table:", a.windows.version or "none (A16 windows)", "| rules off:",
               sorted(kw["disable"]) or "none", flush=True)
-    a = ca.Audit(raw, AS_OF, log=lambda *x: None, **kw).run()
+    a.run()
     print("auditor seconds", round(time.time() - t0, 1), flush=True)
     if True:
         path, spath, summary = ca.write_outputs(a, OUT)
@@ -236,6 +239,7 @@ def main():
     # 2. view S
     VS = copy.deepcopy(a.verdicts)
     LOT_S = list(a.lot)
+    LOTU_S = list(getattr(a, "lot_unverified", []))
     S_open = {it["fid"]: it["is_open"] for it in a.items}
     S_parts = {it["fid"]: [(sv.key, k) for sv, k in it["parts"]] for it in a.items}
     S_scope = {it["fid"]: any(sv.in_scope for sv, k in it["parts"]) for it in a.items}
@@ -255,6 +259,7 @@ def main():
     a.left_on_table()
     VW = copy.deepcopy(a.verdicts)
     LOT_W = list(a.lot)
+    LOTU_W = list(getattr(a, "lot_unverified", []))
     if True:
         oc = sqlite3.connect(os.path.join(OUT, "audit_result.sqlite"))
         oc.execute("drop table if exists verdicts_w")
@@ -379,6 +384,8 @@ def main():
     # 6. aggregates
     agg = {"same_truth_as_pass1": same_truth, "units_compared": len(mine), "verdicts_S": vS, "subs_S": subS,
            "verdicts_W": vW, "subs_W": subW, "lot_S": lotS, "lot_W": lotW,
+           "lot_unverified_S": lot_table(LOTU_S), "lot_unverified_W": lot_table(LOTU_W),
+           "windows": summary.get("windows"),
            "state_by_verdict_S": {"|".join(k): [state_by_verdict[k], state_by_verdict_c[k], state_by_verdict_s[k],
                                                 state_by_verdict_sc[k]] for k in sorted(state_by_verdict)},
            "summary_S": {k: summary[k] for k in ("verdicts", "verdict_subs", "verdicts_by_scope", "left_on_table",
@@ -426,7 +433,8 @@ def main():
         json.dump(agg, fh, indent=1, sort_keys=True, default=str)
     os.chmod(os.path.join(OUTDIR, TAG + "_eval.json"), 0o600)
     print("done in", round(time.time() - t0, 1), "s")
-    for name in ("verdicts_S", "verdicts_W", "lot_S", "lot_W", "pass1_lot_in_scope_now", "new_lot_W_in_scope"):
+    for name in ("verdicts_S", "verdicts_W", "lot_S", "lot_W", "lot_unverified_W", "pass1_lot_in_scope_now",
+                 "new_lot_W_in_scope"):
         print("\n==", name)
         for k, v in agg[name].items():
             print("  ", k, v)
