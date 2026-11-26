@@ -103,29 +103,40 @@ def test_wellcare_medicare_advantage_first_filing_is_180_days():
 
 
 # =========================================================================================== 6, 24. federal employee plans
-def test_federal_employee_plans_take_a_claim_until_december_31_of_the_next_year():
-    """FEP brochure RI 71-005 and GEHA brochure RI 71-006, Section 7: the claim by 'December 31 of the following year' (of
-    the year after the year) of the service. Before: FEP got the commercial 90 days (filing_rule took no plan), GEHA the
-    unknown-payer 12 months."""
+def test_federal_employee_plans_follow_the_provider_agreement_and_name_the_members_deadline():
+    """The FEP brochure RI 71-005 and the GEHA brochure RI 71-006, Section 7, give the MEMBER until 'December 31 of the
+    following year' (of the year after the year) of the service. A participating provider's FEP claims follow Anthem's
+    provider manual, Submission of Claims under the FEHBP and PSHBP: 'within the timeframe listed in the Provider or
+    Facility Agreement' (deadlines reviews r1-1 and r2-3): the FEP is dated as Anthem's other plans are (the common 90 days,
+    not confirmed), and its December 31 is named as the member's. No GEHA provider source was read: its December 31, the
+    latest the plan takes any claim, still dates the item so a guess never expires it, not confirmed, with 90 days named
+    as the date to send by where possible."""
     fep = filing_rule("Anthem / BCBS", "commercial", plan="FEDERAL EMPLOYEE PROGRAM")
-    assert fep["verified"] and dates("2026-01-05", fep) == ("2027-12-31", None) and dates("2026-12-31", fep) == ("2027-12-31", None)
-    assert window_end("2026-01-05", filing_rule("Anthem / BCBS", "commercial", plan="PPO")) == "2026-04-05"   # not the FEP: 90 days
+    ppo = filing_rule("Anthem / BCBS", "commercial", plan="PPO")
+    assert not fep["verified"] and dates("2026-01-05", fep) == ("2026-04-05", None) == dates("2026-01-05", ppo)
+    assert "Provider or Facility Agreement" in fep["label"] and "member's own deadline" in fep["label"]
     for grp in ("Geha", "Government Employees Health Association", "Government Employees Hospital Association (Geha)"):
         g = filing_rule(grp, "other")
-        assert g["verified"] and g["earliest"] is None and window_end("2025-02-11", g) == "2026-12-31", grp
-    # a returned FEP claim: 'within 90 days, or before the timely filing period expires, whichever is later'
+        assert not g["verified"] and g["earliest"] == 90 and window_end("2025-02-11", g) == "2026-12-31", grp
+        assert "member's own deadline" in g["label"], grp
+    # a corrected FEP claim: inside the agreement's limit from the date of service, never the member's December 31
     c = corrected_rule("Anthem / BCBS", "commercial", plan="FEDERAL EMPLOYEE PROGRAM")
-    assert c["clock"] == "dos" and window_end("2026-03-10", c) == "2027-12-31"
-    # the FEP reconsideration: 180 days as the safe date, 6 months the member's limit (5 CFR 890.105(b)(1))
-    assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM")) == ("2026-08-28", "2026-09-01")
+    assert c["clock"] == "dos" and not c["verified"] and window_end("2026-03-10", c) == "2026-06-08"
+    assert "participation agreement" in c["label"] and "December 31" not in c["label"]
+    # the FEP dispute: 180 days as the safe date; Anthem's Claim Payment Dispute minimum of two years is the last day
+    # (deadlines review r2-4); a clinical denial keeps the FEP's 6 months (the dispute process does not take it)
+    assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM")) == ("2026-08-28", "2028-03-01")
+    assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM", carc="50")) == \
+        ("2026-08-28", "2026-09-01")
 
 
 def test_geha_reconsideration_has_six_months():
     """GEHA brochure Section 8, step 1: 'Write to us within 6 months from the date of our decision' (5 CFR 890.105(b)(1)).
-    Before: the unknown-payer 180 days, with no last day of the payer's own."""
+    Before: the unknown-payer 180 days, with no last day of the payer's own. The brochure speaks to the member (a provider
+    files for the member with written consent, 890.105(a)(2)): the window is not confirmed for a network provider."""
     for grp in ("Geha", "Government Employees Health Association", "Government Employees Hospital Association (Geha)"):
         r = appeal_rule(grp, "other")
-        assert r["verified"] and dates("2026-06-01", r) == ("2026-11-28", "2026-12-01"), grp
+        assert not r["verified"] and dates("2026-06-01", r) == ("2026-11-28", "2026-12-01"), grp
 
 
 # =========================================================================================== 7. Aetna
@@ -155,7 +166,7 @@ def test_anthem_medicaid_plans_are_told_apart_by_the_plan_name():
     14, 2026 at least 120 days from receipt (KRS 205.534(1)(d)1). A plan that names neither gets the shorter window."""
     g, k = "Anthem / BCBS Medicaid", "medicaid"
     for plan, state in (("KENTUCKY SAMPLE MEDICAID", "KY"), ("INDIANA SAMPLE PLAN", "IN"), ("IN SAMPLE PLAN LTSS", "IN"),
-                        ("VIRGINIA SAMPLE MEDICAID", None), (None, None)):
+                        ("VIRGINIA SAMPLE MEDICAID", "VA"), (None, None)):
         assert codes.plan_state(plan, "ANTHEM") == state, plan
     ky, ind, unk = {"plan": "KENTUCKY SAMPLE MEDICAID"}, {"plan": "INDIANA SAMPLE PLAN"}, {"plan": None}
     assert window_end("2026-05-20", filing_rule(g, k, **ky)) == "2027-05-20"

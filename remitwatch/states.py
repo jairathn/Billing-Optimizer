@@ -1427,10 +1427,10 @@ def _deadline(f: dict) -> tuple[str | None, str | None]:
     remittance (an item with no deadline of its own, such as a non-covered denial), else the first-filing limit."""
     if f.get("appeal_deadline"):
         return f["appeal_deadline"], f.get("deadline_basis") or "the item's deadline"
-    from .codes import appeal_rule, filing_rule, rule_facts, window_end
+    from .codes import appeal_rule, filing_rule, rule_at, rule_facts, window_end
     grp, kind = f.get("payer_group"), f.get("payer_kind")
     if f.get("payment_date") and f.get("signal") not in CLAIM_SIGNALS:
-        r = appeal_rule(grp, kind, **rule_facts(f))
+        r = rule_at(f["payment_date"], appeal_rule(grp, kind, **rule_facts(f)))      # the window before an effective date, if earlier
         return _add(f["payment_date"], r["days"]), r["label"] + ("" if r["verified"] else " (not confirmed against the payer's manual)")
     if f.get("service_date"):
         r = filing_rule(grp, kind, **rule_facts(f))
@@ -1487,14 +1487,22 @@ def windows(f: dict, deadline: str | None = None, dbasis: str | None = None, fx:
         start = start if start and start < str(pay)[:10] else pay
         d = None if no_appeal else _later(codes.window_end(start, r), codes.legal_deadline(start, r))
         if d:
-            out.append({"what": "the payer's dispute window", "date": d, "basis": r["label"], "process": "appeal", "own": False})
+            # the label of the rule the window was counted by (before an effective date, the one before it)
+            out.append({"what": "the payer's dispute window", "date": d, "basis": codes.rule_at(start, r)["label"], "process": "appeal",
+                        "own": False})
+        cr = None
         if kind != "medicare" and (no_appeal or f.get("actionable") == "correct_and_resubmit" or sig in CORRECTABLE_SIGNALS or carc in AUTH_CARCS):
             cr = codes.corrected_rule(grp, kind, f.get("rarc"), sig, carc, **facts)
-            if cr:
-                start = f.get("service_date") if cr["clock"] == "dos" else pay
-                d = _later(codes.window_end(start, cr), codes.legal_deadline(start, cr))
-                if d:
-                    out.append({"what": "the corrected-claim limit", "date": d, "basis": cr["label"], "process": "corrected", "own": False})
+        elif kind != "medicare" and (cat == "denial" or sig == "EMA_DENIED" or int(f.get("paid_cents") or 0) <= 0):
+            # a payer that wants a denial its claim information caused corrected and sent again as a new claim before any review
+            # (Indiana Medicaid, IHCP 'For Claim Denials'): that window is open whatever the item's route (deadlines review r2-6).
+            # A whole-claim denial is a denial whatever its claim's paid amount reads
+            cr = codes.corrected_rule(grp, kind, f.get("rarc"), sig, carc, **dict(facts, paid=False))
+            cr = cr if cr and cr.get("resubmit_denials") else None
+        if cr:
+            d = _later(*codes.corrected_window(cr, f.get("service_date"), pay))
+            if d:
+                out.append({"what": "the corrected-claim limit", "date": d, "basis": cr["label"], "process": "corrected", "own": False})
         if kind == "medicare" and (sig in codes.MEDICARE_CLERICAL_SIGNALS or sig == "DENIED_MEDICAL_NECESSITY"
                                    or carc in codes.MEDICARE_CLERICAL_CARCS or rarcs & CLERICAL_RARCS):
             out.append({"what": "a Medicare reopening", "date": _add(pay, REOPENING_DAYS), "process": "reopening", "own": False,
@@ -2329,8 +2337,20 @@ def timely_proof(f: dict, fx: dict) -> dict:
 def no_appeal(f: dict) -> bool:
     """The item's payer takes no appeal of an ordinary claim denial (Kentucky Medicaid, 907 KAR 1:671): it is worked by a
     corrected or new claim inside the filing limit, never an appeal. A takeback is a determination the payer does hear."""
+    return bool(no_appeal_step(f))
+
+
+def no_appeal_step(f: dict) -> str | None:
+    """For an item whose payer takes no appeal of an ordinary claim denial, the words of the work it takes instead ('send a
+    corrected or new claim within 12 months of the date of service (907 KAR 1:673); Kentucky Medicaid takes no appeal ...'),
+    from the payer's rule; None for every other item. The next step says this wherever it would say 'appeal' (deadlines
+    review r2-2)."""
     from .codes import appeal_rule, rule_facts
-    return f.get("signal") != "TAKEBACK" and bool(appeal_rule(f.get("payer_group"), f.get("payer_kind"), **rule_facts(f)).get("no_appeal"))
+    if f.get("signal") == "TAKEBACK":
+        return None
+    r = appeal_rule(f.get("payer_group"), f.get("payer_kind"), **rule_facts(f))
+    return (r.get("no_appeal_step") or "send a corrected or new claim inside the filing limit; this payer takes no appeal of an "
+            "ordinary claim denial") if r.get("no_appeal") else None
 
 
 def route_of(fx: dict, st: dict, conn: sqlite3.Connection | None = None) -> str:
@@ -2852,12 +2872,12 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
         if a.get("status") != "22":
             ag = a.get("group") or (_grp_kind(a["payer"])[0] if a.get("payer") else None) or grp
             ak = a.get("kind") or (_grp_kind(a["payer"])[1] if a.get("payer") else None) or kind
-            from .codes import appeal_rule, corrected_rule, legal_deadline, rule_facts, window_end
+            from .codes import appeal_rule, corrected_rule, corrected_window, legal_deadline, rule_at, rule_facts, window_end
             facts = rule_facts(f) if _same_payer(ag, grp) else {}
             ar_ = appeal_rule(ag, ak, **facts)
             no_appeal = bool(ar_.get("no_appeal"))
             closes = None if no_appeal else _later(window_end(a["date"], ar_), legal_deadline(a["date"], ar_))
-            label, what_w = ar_["label"], f"the window to dispute {ag or 'the payer'}'s answer"
+            label, what_w = rule_at(a["date"], ar_)["label"], f"the window to dispute {ag or 'the payer'}'s answer"
             # an answer a corrected claim can fix (an authorization or referral, missing information) keeps the corrected
             # claim's own clock (C14: a referral-absent answer, a Medicaid plan's 365 days from the date of service); a payer
             # that takes no appeal of a denial (Kentucky Medicaid) is answered by a corrected or new claim only
@@ -2865,8 +2885,7 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
             cr = (corrected_rule(ag, ak, f.get("rarc"), None, fixable[0] if fixable else None, **facts)
                   if (fixable or no_appeal) and ak != "medicare" else None)
             if cr:
-                start = f.get("service_date") if cr["clock"] == "dos" else a["date"]
-                cl = _later(window_end(start, cr), legal_deadline(start, cr))
+                cl = _later(*corrected_window(cr, f.get("service_date"), a["date"]))
                 if cl and cl > (closes or ""):
                     closes, label, what_w = cl, cr["label"], f"the window to send {ag or 'the payer'} a corrected claim"
             ar_ = dict(ar_, label=label)

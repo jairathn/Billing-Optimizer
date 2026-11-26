@@ -51,7 +51,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from . import ema_ledger as el
 from . import ema_reports as er
-from .codes import EM_CODES, UNKNOWN_PART, appeal_rule, component_of, corrected_rule, filing_rule, part_fits, window_end
+from .codes import EM_CODES, UNKNOWN_PART, appeal_rule, component_of, corrected_rule, filing_rule, part_fits, rule_at, window_end
 from .codes import legal_deadline as _legal_deadline
 from .ema_reports import status_class  # noqa: F401  (re-exported: the spec's ema_checks.status_class)
 
@@ -1342,6 +1342,20 @@ def _status_claims(conn: sqlite3.Connection, cls: str) -> dict[str, dict]:
         k["kind"] = k["kind"] or kind
         k["payer"] = k["payer"] or payer
     return claims
+
+
+def _still_recoverable(grp: str | None, kind: str | None, first: str | None, svc: str | None, lags: dict, t: str) -> bool:
+    """Whether money written off on a denial is still inside a window that can recover it: the payer's appeal window from
+    EMA's posting less the payer's usual delay, or, for a payer that takes no appeal of an ordinary claim denial (Kentucky
+    Medicaid, 907 KAR 1:671), its corrected or new claim's limit from the date of service (907 KAR 1:673: twelve months).
+    The owner's rule 2 counts written-off money with what is still recoverable (deadlines review r1-4)."""
+    rule = appeal_rule(grp, kind)
+    if rule.get("no_appeal"):
+        fix = corrected_rule(grp, kind)
+        end = window_end(svc, fix) if fix and svc else None
+        return bool(end) and end >= t
+    start = _add(first, -_lag(lags, grp, "p95"))
+    return bool(start) and (_add(start, rule["days"]) or "") >= t
 
 
 def _filing(grp: str | None, kind: str | None, svc: str | None, payer: str | None = None) -> tuple[str | None, str]:
@@ -3228,9 +3242,10 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         lag = _lag(lags, grp, "p95")
         start = _add(it["first"], -lag) if it["first"] else None
         rule = appeal_rule(grp, kind)
-        deadline = _add(start, rule["days"]) if start else None
-        unconfirmed = "" if rule["verified"] else " (not confirmed against the payer's current manual)"
-        dbasis = (f"{rule['label']}{unconfirmed}. Counted from EMA's posting ({it['first']}) less its usual delay of {lag} days; "
+        used = rule_at(start, rule) or rule         # the rule the date is counted by: the one before an effective date if earlier
+        deadline = _add(start, used["days"]) if start else None
+        unconfirmed = "" if used["verified"] else " (not confirmed against the payer's current manual)"
+        dbasis = (f"{used['label']}{unconfirmed}. Counted from EMA's posting ({it['first']}) less its usual delay of {lag} days; "
                   "the EOB's date can be earlier")
         fix = corrected_rule(grp, kind) if rule.get("no_appeal") else None
         if fix and ls and ls[0][1]:
@@ -3310,8 +3325,7 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
             part = "other_835"
         it["split"][part] += contr
         totals[part] += contr
-        start = _add(first, -_lag(lags, grp, "p95"))
-        if start and (_add(start, appeal_rule(grp, kind)["days"]) or "") >= t:
+        if _still_recoverable(grp, kind, first, svc, lags, t):
             it["inside"] += contr
     out = []
     for (grp, reason, year), it in sorted(groups.items()):
@@ -3413,8 +3427,7 @@ def timely_writeoffs(conn: sqlite3.Connection, *, today: str | None = None) -> d
         out["by_group"][grp] = out["by_group"].get(grp, 0) + cents
         if (bill and (bill, svc, cpt) in fkeys) or lk in ekeys:
             out["covered_cents"] += cents
-        start = _add(first, -_lag(lags, grp, "p95"))
-        if start and (_add(start, appeal_rule(grp, kind)["days"]) or "") >= t:
+        if _still_recoverable(grp, kind, first, svc, lags, t):
             out["inside_cents"] += cents
     return out
 

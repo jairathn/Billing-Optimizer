@@ -85,8 +85,9 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, DRUG_RE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, MPPR_CODES,
-                    SKIN_SUBSTITUTE_RE, appeal_rule, carc_text, code_category, corrected_rule, filing_rule, is_unlisted, legal_deadline,
-                    normalize_payer, payer_group_kind, pos_class, rarc_text, rule_facts, window_end)
+                    SKIN_SUBSTITUTE_RE, appeal_rule, carc_text, code_category, corrected_rule, corrected_window, filing_rule, is_unlisted,
+                    legal_deadline, normalize_payer, payer_group_kind, pos_class, rarc_text, rule_at, rule_facts, second_claim_window,
+                    window_end)
 from . import codes as _codes
 from .codes import part_fits
 from .fees import FeeTable, family_of, is_downcode
@@ -3116,12 +3117,21 @@ class Detector:
             fix = corrected_rule(grp, kind, rems, signal, carc, **facts)
         if fix:
             # a corrected claim (a reopening for Medicare Part B) runs on its own clock, from the remittance or the date of service
-            start = pay_date if fix["clock"] == "remit" else (self._first_service_day(base) or pay_date)
-            deadline = window_end(start, fix)
-            legal = legal_deadline(start, fix)
+            # (codes.corrected_window: the earlier of two where the remittance does not say which applies)
+            deadline, legal = corrected_window(fix, self._first_service_day(base), pay_date)
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
             if no_appeal:
                 deadline_basis += ". It takes no appeal of an ordinary claim denial (907 KAR 1:671 Sections 8 and 9)"
+            cross = fix.get("crossover")
+            if cross and pay_date:
+                # a claim billed to Medicare first may also go within 6 months of Medicare's adjudication where that is later
+                # (907 KAR 3:005): dated from Medicare's remittance for the same bill and day where it is on file (review r1-5)
+                xday = self._first_answer_of(base, cross["kinds"], grp)
+                xend = _codes.add_months(date.fromisoformat(xday[:10]), int(cross["months"])).isoformat() if xday else None
+                if xend and deadline and xend > (legal or deadline):
+                    legal = xend
+                    deadline_basis += (f". Medicare answered it first on {xday}: a claim billed to Medicare may also go 'Within six (6) "
+                                       f"months of the Medicare adjudication date' (907 KAR 3:005), until {xend}")
             elif kind != "medicare" and pay_date:
                 # the payer's own dispute of the determination stays open beside the corrected claim (Humana's 18 months from
                 # the determination outlast its corrected-claim year): the later of the two routes is the payer's limit. Medicare
@@ -3129,14 +3139,16 @@ class Detector:
                 disp = legal_deadline(pay_date, rule) or window_end(pay_date, rule)
                 if disp and deadline and disp > (legal or deadline):
                     legal = disp
-                    deadline_basis += f". After that, a dispute of the payer's answer stays open until {disp}: {rule['label']}"
+                    deadline_basis += f". After that, a dispute of the payer's answer stays open until {disp}: {rule_at(pay_date, rule)['label']}"
         elif actionable in ("appeal", "correct_and_resubmit") or signal == "TAKEBACK" or (category in END_DATED_CATEGORIES and pay_date):
             # a takeback is disputed inside the payer's appeal window from the remittance that took the money back; any other
             # money item from a remittance (a non-covered or timely-filing denial to review, a claim sent on to another
             # carrier) ends with the payer's window to dispute that answer, so that it can expire
             deadline = window_end(pay_date, rule)
             legal = legal_deadline(pay_date, rule)
-            deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
+            # the rule the date was counted by: before an effective date, the window before it (deadlines review r2-5)
+            used = rule_at(pay_date, rule)
+            deadline_basis = used["label"] + ("" if used["verified"] else " (not confirmed against the payer's current manual)")
             if signal == "TAKEBACK":
                 deadline_basis += (". Counted from the remittance that took the money back; the payer's overpayment letter, which the "
                                    "remittance does not carry, may start the clock earlier")
@@ -3154,8 +3166,8 @@ class Detector:
                 rems = ",".join(x for x in [rarc or ""] + list(self.claim_rem.get(base.get("claim_key"), [])) if x)
                 alt = corrected_rule(grp, kind, rems, signal, carc, **facts)
                 if alt:
-                    start2 = pay_date if alt["clock"] == "remit" else (self._first_service_day(base) or pay_date)
-                    cdate = legal_deadline(start2, alt) or window_end(start2, alt)
+                    c_safe, c_legal = corrected_window(alt, self._first_service_day(base), pay_date)
+                    cdate = c_legal or c_safe
                     if cdate and deadline and cdate > (legal or deadline):
                         legal = cdate
                         deadline_basis += (f". A corrected claim with what was missing (such as the authorization number) can still go "
@@ -6596,7 +6608,7 @@ class Detector:
         EMA, and the second payer never answered: no remittance from it as second payer (at any amount, $0 included), no
         posting or reason of its own on EMA's line after the first payer's payment, no payment by another payer in EMA,
         the patient has not paid the share, and EMA still shows a balance. One item per line, sized at the share left (at
-        most EMA's balance), dated by the second payer's filing limit counted from the first payer's remittance. A claim
+        most EMA's balance), dated by the second payer's filing limit as it counts a second claim (codes.second_claim_window). A claim
         the first payer forwarded itself (claim status 19, or a carrier named) is listed only once that second payer's
         usual time has passed, to be chased rather than billed; one whose EMA line the store does not hold is listed from
         the remittance alone (the carrier it names). Medicaid as the second payer is never listed: it pays the share only
@@ -6703,12 +6715,13 @@ class Detector:
                     owed = min(owed, bal)
             if crossed and (_days_between(paid_on, self.today) or 0) < 45:
                 continue                    # forwarded by the first payer: its usual time has not passed yet
-            rule = filing_rule(sgrp, skind)
-            deadline = _add_days(paid_on, rule["days"])
-            # the payer's own last day where its rule names a later one than the safe date (Ambetter's 180 days for a
-            # participating provider beside its 90): the item is a loss only once that has passed
-            last = legal_deadline(paid_on, rule)
-            last = last if last and deadline and last > deadline else None
+            rule = filing_rule(sgrp, skind, payer_name=sec)
+            # the second payer's own clock for a claim it gets second (codes.second_claim_window): from the date of service
+            # where its source says so (Medicare, CHAMPVA, TRICARE, GEHA), from the first payer's remittance where it says
+            # that (Ambetter, the FEP); a source that is silent gives the safe date from the service and the last day from the
+            # remittance. The item is a loss only once its last day has passed (deadlines review r1-2)
+            deadline, last, counted = second_claim_window(rule, l.get("service_date"), paid_on[:10] or None,
+                                                          first_payer=l["payer_group"])
             if (last or deadline) and (last or deadline) < (_add_days(self.today, -30) or ""):
                 # past the second payer's limit (and a month's grace): a loss, not work; counted with its dollars, so a
                 # window that closed is never dropped without a trace
@@ -6731,7 +6744,7 @@ class Detector:
             if f is None:
                 continue
             f["appeal_deadline"], f["legal_deadline"] = deadline, last
-            f["deadline_basis"] = (f"{sgrp}'s filing limit, counted from {l['payer_group']}'s remittance ({paid_on}): {rule['label']}"
+            f["deadline_basis"] = (f"{sgrp}'s filing limit, {counted}: {rule['label']}"
                                    + ("" if rule["verified"] else ", not confirmed against the payer's current manual"))
             if link is not None:
                 f["ema_link"] = link
@@ -7203,6 +7216,28 @@ class Detector:
                 seen[(l["payer_group"], code, l.get("provider_tier") or "unknown", l.get("pos_class") or "office")][l["charge_cents"]] += 1
                 seen[(code,)][l["charge_cents"]] += 1
         return since, {k: cnt.most_common(1)[0][0] for k, cnt in seen.items()}
+
+    def _first_answer_of(self, base: dict, kinds: tuple, group: str | None) -> str | None:
+        """The day a payer of these kinds (Medicare) first answered the item's bill for its service day: its remittance date,
+        from the 835s on file; None when there is none. Built once per run, for the bills the item's payer group answered
+        (a Kentucky Medicaid crossover's Medicare adjudication, 907 KAR 3:005), so it costs one pass over the lines."""
+        from .ema_reports import bill_of_claim
+        cache = self.__dict__.setdefault("_first_answers", {})
+        idx = cache.get((tuple(kinds), group))
+        if idx is None:
+            bills = {bill_of_claim(l.get("patient_control_number")) for l in self.lines if l.get("payer_group") == group}
+            idx = {}
+            for l in self.lines:
+                if l.get("payer_kind") not in kinds or l.get("payer_group") == group:
+                    continue
+                b = bill_of_claim(l.get("patient_control_number"))
+                day = l.get("payment_date") or l.get("txn_payment_date")
+                if b in bills and day and l.get("service_date"):
+                    k = (b, l["service_date"])
+                    if k not in idx or day < idx[k]:
+                        idx[k] = day
+            cache[(tuple(kinds), group)] = idx
+        return idx.get((bill_of_claim(base.get("patient_control_number")), self._first_service_day(base)))
 
     def _first_service_day(self, base: dict) -> str | None:
         """The first date of service a finding covers, for clocks that count from it: the line's own date or its claim's
