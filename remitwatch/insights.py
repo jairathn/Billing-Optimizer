@@ -612,12 +612,103 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
     return out
 
 
+# A send week stands out (a batch that may never have reached the payers, the rest of trace finding T-N13) when at least
+# LOST_BATCH_MIN of its claims are never answered, LOST_BATCH_SHARE of the week's claims at least, and LOST_BATCH_TIMES the
+# usual share of the other weeks.
+LOST_BATCH_MIN = 5
+LOST_BATCH_SHARE = 0.25
+LOST_BATCH_TIMES = 3
+
+
+def unanswered_weeks(conn: sqlite3.Connection) -> dict:
+    """The claims listed as never answered (NO_ANSWER items still to work), by the week they were sent (the item's evidence
+    'sent'), against the claims the 837s show sent that week (detect.WAITING_837_META's sent_by_week): {"weeks": [{"week",
+    "unanswered", "cents", "sent", "share", "payers": [[group, n]]}], "usual_share", "stand_out": [the weeks that stand out]}.
+    Reads only the findings and the meta, so the dashboard's copy shows it too."""
+    from .detect import WAITING_837_META, week_of
+    meta = _meta(conn, WAITING_837_META) or {}
+    sent = meta.get("sent_by_week") if isinstance(meta, dict) else None
+    sent = sent if isinstance(sent, dict) else {}
+    weeks: dict[str, dict] = {}
+    try:
+        rows = conn.execute("""SELECT evidence, shortfall_cents, payer_group FROM findings WHERE signal = 'NO_ANSWER'
+                               AND COALESCE(stale, 0) = 0 AND status NOT IN ('resolved', 'lost', 'dismissed')""").fetchall()
+    except sqlite3.Error:
+        rows = []
+    for ev, cents, grp in rows:
+        try:
+            day = (json.loads(ev or "{}") or {}).get("sent")
+        except (ValueError, TypeError):
+            day = None
+        wk = week_of(day)
+        if not wk:
+            continue
+        w = weeks.setdefault(wk, {"week": wk, "unanswered": 0, "cents": 0, "payers": defaultdict(int)})
+        w["unanswered"] += 1
+        w["cents"] += int(cents or 0)
+        w["payers"][grp or "Unknown"] += 1
+    out = []
+    for wk in sorted(weeks):
+        w = weeks[wk]
+        n_sent = int(sent.get(wk) or 0)
+        out.append({"week": wk, "unanswered": w["unanswered"], "cents": w["cents"], "sent": n_sent or None,
+                    "share": round(w["unanswered"] / n_sent, 3) if n_sent else None,
+                    "payers": sorted(([g, n] for g, n in w["payers"].items()), key=lambda x: (-x[1], x[0]))[:3]})
+    shares = sorted(w["share"] for w in out if w["share"] is not None)
+    usual = shares[len(shares) // 2] if shares else None
+    stand = [w for w in out if w["share"] is not None and w["unanswered"] >= LOST_BATCH_MIN and w["share"] >= LOST_BATCH_SHARE
+             and (usual is None or w["share"] >= LOST_BATCH_TIMES * usual)]
+    return {"weeks": out, "usual_share": usual, "stand_out": stand}
+
+
+def _waiting_837(conn: sqlite3.Connection) -> list[dict]:
+    """The claims sent that no payer has answered yet and that are not due yet (detect.WAITING_837_META): on no list until
+    their due day, so the Data tab says how many, their dollars and when they come due (blindness is loud)."""
+    from .detect import WAITING_837_META
+    w = _meta(conn, WAITING_837_META) or {}
+    if not isinstance(w, dict) or not w.get("n"):
+        return []
+    n, cents = int(w.get("n") or 0), int(w.get("billed_cents") or 0)
+    groups = sorted(((g, v) for g, v in (w.get("by_group") or {}).items() if isinstance(v, dict)),
+                    key=lambda gv: (-int(gv[1].get("billed_cents") or 0), gv[0]))
+    by = "; ".join(f"{g}: {int(v.get('n') or 0)} (${int(v.get('billed_cents') or 0) / 100:,.2f}, the first due {v.get('first_due')})"
+                   for g, v in groups[:5]) + ("; and more" if len(groups) > 5 else "")
+    return [{"key": "waiting_837", "ok": True, "n": n, "cents": cents, "first_due": w.get("first_due"), "last_due": w.get("last_due"),
+             "by_group": dict(groups), "by_due_week": w.get("by_due_week") or {},
+             "title": f"{n} {'claim' if n == 1 else 'claims'} sent {'is' if n == 1 else 'are'} waiting for the payer's answer "
+                      f"(${cents / 100:,.2f} billed)",
+             "detail": (f"{'It is' if n == 1 else 'They are'} not on any list until {'it comes' if n == 1 else 'they come'} due, "
+                        f"from {w.get('first_due')} to {w.get('last_due')}" + (f". By payer: {by}" if by else "") + "."),
+             "who": "Nobody yet: a claim still unanswered on its due day is listed under Chase the payer that day."}]
+
+
+def _unanswered_weeks_item(conn: sqlite3.Connection) -> list[dict]:
+    """The send weeks whose claims went unanswered far more often than usual (unanswered_weeks): a batch that may never
+    have reached the payers."""
+    got = unanswered_weeks(conn)
+    stand = got["stand_out"]
+    if not stand:
+        return []
+    n = len(stand)
+    words = "; ".join(f"the week of {w['week']}: {w['unanswered']} of {w['sent']} claims sent got no answer (${w['cents'] / 100:,.2f}, "
+                      + ", ".join(f"{g} {k}" for g, k in w["payers"]) + ")" for w in stand[:5]) + ("; and more" if n > 5 else "")
+    usual = got.get("usual_share")
+    return [{"key": "unanswered_weeks", "ok": False, "n": n, "weeks": stand, "usual_share": usual,
+             "title": f"{n} {'week' if n == 1 else 'weeks'} of claims sent went mostly unanswered",
+             "detail": (words[:1].upper() + words[1:] + "."
+                        + (f" In a usual week {usual:.0%} of the claims sent get no answer." if usual is not None else "")
+                        + " A batch that never reached the payers looks like this."),
+             "who": "Billing lead: open the clearinghouse's acceptance report for those weeks, and send again the claims the "
+                    "payers never received."}]
+
+
 def _feeds_837(conn: sqlite3.Connection) -> list[dict]:
     """What the 837 claim files show that the other feeds do not, as the last analysis saved it (detect.NO_ERA_META and
     detect.SEND_WEEKS_META, which the dashboard's copy carries): a payer whose claims never get an ERA, so that only EMA's
-    postings can show its answers; and weeks one feed shows claims sent and the other none (trace finding T-N13)."""
+    postings can show its answers; weeks one feed shows claims sent and the other none (trace finding T-N13); the send
+    weeks whose claims went mostly unanswered (a lost batch); and the claims sent that are not due yet (waiting)."""
     from .detect import NO_ERA_META, SEND_WEEKS_META
-    out: list[dict] = []
+    out: list[dict] = _unanswered_weeks_item(conn) + _waiting_837(conn)
     for p in [p for p in _meta(conn, NO_ERA_META) or [] if isinstance(p, dict) and p.get("payer") and p.get("claims")][:10]:
         n, cents = int(p.get("claims") or 0), int(p.get("billed_cents") or 0)
         listed, ema_ans, blind = int(p.get("listed") or 0), int(p.get("answered_in_ema") or 0), int(p.get("unchecked") or 0)

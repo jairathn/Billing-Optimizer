@@ -214,6 +214,14 @@ NO_ERA_META = "feed:no_era_837"
 # exports), inside the weeks both reach, with at least SEND_WEEK_MIN claims on the side that has them
 SEND_WEEKS_META = "feed:send_weeks"
 SEND_WEEK_MIN = 5
+# Claims sent that no payer has answered yet and that are not due yet (the 837 pass lists them only at their due day): on no
+# list meanwhile, so the Data tab shows them with their due days (blindness is loud). {"n", "billed_cents", "first_due",
+# "last_due", "by_group": {group: {"n", "billed_cents", "first_due"}}, "by_due_week": {week: {"n", "billed_cents"}},
+# "claims": [[claim id, group, sent, due, billed cents]] (the first WAITING_LIST_MAX by due day), "sent_by_week": {week:
+# claims sent}, "at"}. sent_by_week is every claim the 837s show sent in the window, what the never-answered claims of a
+# week are measured against (insights.unanswered_weeks: a batch that never reached the payers stands out).
+WAITING_837_META = "feed:waiting_837"
+WAITING_LIST_MAX = 2000
 # Each payer group's usual answer time after a send, from the 837s: days from a claim's send to the first remittance that
 # answered it, 95th percentile over the two years before the newest remittance (20 answers at least, never under
 # NO_ANSWER_DAYS). A bill sent again waits that long for its answer (states: the resend's follow-up day).
@@ -5445,7 +5453,15 @@ class Detector:
         (counted on the Data tab when they cannot show it). A claim only another payer answered stays listed and says the
         primary's remittance is missing (T-C2). One NO_ANSWER item per claim, id signal 837_OPEN_CLAIM, sized and dated
         as the exports' items are (_emit_open_claim)."""
+        try:
+            self._run_837()
+        finally:
+            self._finish_waiting(self.__dict__.get("_wait_since") or "")
+
+    def _run_837(self) -> None:
+        """The body of run_837_open_claims (its docstring says what it does)."""
         self.no_era = []
+        self.waiting_837 = {}
         s8 = self._load_837()
         if not s8["on"]:
             return
@@ -5465,6 +5481,7 @@ class Detector:
             return
         newest = feed_date(c) or newest
         recent = _add_days(newest, -400) or ""
+        self._wait_since = recent
         # the newest submission of each bill no payer answered as primary, that EMA's weekly exports do not list
         cand: dict[str, list] = {}
         for pcn, r in sends.items():
@@ -5625,8 +5642,10 @@ class Detector:
                     due = usual
             through = self._answers_through(grp, newest) if self.ema_on else newest
             if not cb and (not due or due > (through or newest)):
-                continue                    # not due yet, or the answers on file do not reach the day it was due (a payer
-                                            # that answered as secondary after a coordination denial applied the primary's)
+                # not due yet, or the answers on file do not reach the day it was due (a payer that answered as secondary
+                # after a coordination denial applied the primary's): on no list until then, so shown waiting with its due day
+                self._note_waiting(pcn, grp, sent, due, sum(x[2] or 0 for x in items))
+                continue
             billed = sum(x[2] or 0 for x in items)
             pid = (r[4] or "").strip()
             last = None
@@ -5685,6 +5704,43 @@ class Detector:
                 self.__dict__.setdefault("_heirs", {}).setdefault(fid, []).append((OPEN_837_ID, old))
         self.payers_behind = sorted(behind.values(), key=lambda h: (-h["billed_cents"], h["payer"]))
         self.no_era = sorted(no_era.values(), key=lambda h: (-h["billed_cents"], h["payer"]))
+
+    def _note_waiting(self, pcn: str, grp: str | None, sent: str, due: str | None, billed: int) -> None:
+        """A claim sent that no payer answered yet and that is not due yet (WAITING_837_META): any never-answered pass may
+        note one."""
+        w = self.__dict__.setdefault("_waiting", {})
+        w[pcn] = [pcn, grp or "Unknown", sent, due, int(billed or 0)]
+
+    def _finish_waiting(self, since: str) -> None:
+        """WAITING_837_META from the claims noted waiting, with every claim the 837s show sent since `since` by week (the
+        never-answered claims of a send week are measured against it: insights.unanswered_weeks)."""
+        rows = sorted((self.__dict__.get("_waiting") or {}).values(), key=lambda r: (r[3] or "9999", r[0]))
+        out: dict = {"n": len(rows), "billed_cents": sum(r[4] for r in rows), "first_due": min((r[3] for r in rows if r[3]), default=None),
+                     "last_due": max((r[3] for r in rows if r[3]), default=None), "by_group": {}, "by_due_week": {},
+                     "claims": rows[:WAITING_LIST_MAX], "at": self.now}
+        for pcn, grp, sent, due, billed in rows:
+            g = out["by_group"].setdefault(grp, {"n": 0, "billed_cents": 0, "first_due": due})
+            g["n"] += 1
+            g["billed_cents"] += billed
+            if due and (not g["first_due"] or due < g["first_due"]):
+                g["first_due"] = due
+            wk = week_of(due)
+            if wk:
+                d = out["by_due_week"].setdefault(wk, {"n": 0, "billed_cents": 0})
+                d["n"] += 1
+                d["billed_cents"] += billed
+        weeks: Counter = Counter()
+        try:
+            for bht, n in self.conn.execute("""SELECT bht_created, COUNT(DISTINCT patient_control_number) FROM claims_837
+                                               WHERE bht_created >= ? AND patient_control_number IS NOT NULL
+                                                 AND TRIM(COALESCE(frequency_code, '')) <> '8' GROUP BY bht_created""", (since or "",)):
+                wk = week_of(real_day(bht))
+                if wk:
+                    weeks[wk] += n
+        except sqlite3.Error:
+            weeks = Counter()
+        out["sent_by_week"] = dict(sorted(weeks.items()))
+        self.waiting_837 = out
 
     def _837_send_info(self, keys) -> dict[str, dict]:
         """What the 837 reader keeps since READ_VERSION 2 for these sends ({claim_837_key: {...}}): the patient's keyed name
@@ -7983,6 +8039,8 @@ class Detector:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (PAYERS_BEHIND_META, json.dumps(self.payers_behind)))
             # the payers whose 837 claims never get an ERA, and the weeks one feed shows sends the other does not (T-N13)
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (NO_ERA_META, json.dumps(self.no_era)))
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                              (WAITING_837_META, json.dumps(getattr(self, "waiting_837", None) or {}, sort_keys=True)))
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (SEND_WEEKS_META, json.dumps(self._send_weeks())))
             # and the reversals of a payment that is not on file (T-I5): a remittance that is missing
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",

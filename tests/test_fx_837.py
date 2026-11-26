@@ -515,3 +515,52 @@ def test_a_claim_sent_to_a_payer_as_its_secondary_is_sized_by_what_the_primary_l
     assert ev["sent_837"]["payer_resp"] == "S" and ev["sent_as"]["left_cents"] == 2352
     assert "as its secondary payer after ANTHEM answered" in found["CB0000Y01C017"]["hint"]
     s.close()
+
+
+# ================================================================================================ waiting, and send weeks
+@pytest.mark.parametrize("kind", KINDS)
+def test_claims_not_due_yet_are_shown_waiting_with_their_due_day(tmp_path, kind):
+    """(Residual: claims the 837 pass lists only at their due day were on no list meanwhile.) Two claims went to Anthem on
+    November 1 and November 3 (due December 1 and 3); the remittances reach November 10. Neither is listed yet; the Data
+    tab says two claims ($447.30 billed) wait for the payer's answer, the first due December 1, by payer."""
+    from remitwatch import insights
+    from remitwatch.detect import WAITING_837_META
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000W01C017", V)], "20261101")
+    send(s, tmp_path, [clm837("CB0000W02C017", V)], "20261103")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    assert not any(k.startswith("CB0000W0") for k in found)
+    w = json.loads(s.conn.execute("SELECT value FROM meta WHERE key=?", (WAITING_837_META,)).fetchone()[0])
+    assert (w["n"], w["billed_cents"], w["first_due"], w["last_due"]) == (2, 44730, "2026-12-01", "2026-12-03")
+    assert w["by_group"]["Anthem / BCBS"]["n"] == 2 and [c[0] for c in w["claims"]] == ["CB0000W01C017", "CB0000W02C017"]
+    items = {h["key"]: h for h in insights.data_health(s.conn, "2026-11-10", "2026-11-12")}
+    h = items["waiting_837"]
+    assert h["ok"] and h["n"] == 2 and h["cents"] == 44730 and "2026-12-01" in h["detail"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_send_week_whose_claims_went_mostly_unanswered_stands_out(tmp_path, kind):
+    """(Residual: unanswered claims grouped by send week, so a lost batch stands out; the rest of T-N13.) Ten claims went to
+    Anthem in each of three weeks (September 1, 8 and 15). Anthem answered nine of each of the first two weeks and two of
+    the third. The never-answered claims by send week: one, one and eight; the week of September 14 stands out (80%
+    against a usual 10%) and the Data tab says so, with the claims and dollars."""
+    from remitwatch import insights
+    s = _store(tmp_path, kind)
+    answered = []
+    for w, day in enumerate(("20260901", "20260908", "20260915")):
+        ids = [f"CB00{w}0K{n:02d}C017" for n in range(10)]
+        send(s, tmp_path, [clm837(i, V) for i in ids], day)
+        answered += ids[:9] if w < 2 else ids[:2]
+    _remits(s, tmp_path, [answer(i) for i in answered], "20261001")
+    _remits(s, tmp_path, _visits(), "20261110")
+    _chased(s, "t1")
+    got = insights.unanswered_weeks(s.conn)
+    print(got)
+    assert [(w["week"], w["unanswered"], w["sent"]) for w in got["weeks"]] == [("2026-08-31", 1, 10), ("2026-09-07", 1, 10), ("2026-09-14", 8, 10)]
+    assert [w["week"] for w in got["stand_out"]] == ["2026-09-14"]
+    items = {h["key"]: h for h in insights.data_health(s.conn, "2026-11-10", "2026-11-12")}
+    h = items["unanswered_weeks"]
+    assert not h["ok"] and "The week of 2026-09-14: 8 of 10 claims sent got no answer ($940.80, Anthem / BCBS 8)" in h["detail"]
+    s.close()
