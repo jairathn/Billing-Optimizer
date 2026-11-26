@@ -15,6 +15,13 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   components, read by `_plan_schedules` and `_build_yardsticks`) is whole: both read the same arrays, the old inline
   filter is gone, the line filter is unchanged (checked against the base's loop condition by condition).
 
+- 540dffb: three regressions the first branch run showed on the world, each with a failing test first (both store
+  kinds), broken on purpose and restored: (1) `_settle_mppr_candidates` + `_billed_same_day` + `_billed_lines`: a split day
+  is ranked with the reducible procedures the 837s show billed on another bill with no answer on file (a larger repair
+  makes the Mohs rightly second; a smaller one counts as paid in full, the least owed); (2) `_own_rate`/`_own_yard(exact)`:
+  a plan's own rate is read for the line's own year only; (3) `_rate` falls back to the facility setting (EMA-only claims
+  of codes paid only at the surgery center had no size once the 837 named the setting).
+
 ## In progress
 - Measurement on the world (brief item 2): base = fc73dec, branch = this branch. Private folder
   `$S/tk/units/fix7c/` (mode 700): `base_tree/` (git archive of fc73dec), `audit/p2/world.sqlite` + `ema_ledger.sqlite`
@@ -39,7 +46,15 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   (unset SRFAX_, DROPBOX_, TRIZETTO_, SMTP_, MODMED_, ANTHROPIC_BASE_URL first).
 
 ## Measured
-- (running)
+- Base fc73dec on the world (today 2026-11-24): detect 197.8 s, peak 1,054 MB; 16,632 items, 4,478 on Work now.
+  A16 view W (in scope): correct 1,380; already done 160; already worked 27; duplicate 5; wrong amount 151; undecided 49;
+  closed wrongly 1; money left on the table $117,240 (SHORT below_rate 190 services $12,945, to_patient 91 $3,205).
+- First branch run (b6592c8 = 237951e + merge): detect 194.5 s, peak 1,063 MB; 16,564 items, 4,403 on Work now; 6 plans
+  read apart (Aetna product, Anthem product and employer plan, Humana commercial product, one employer plan at both UMR and
+  Wausau); UHC commercial PA/NP by state (KY 100%, IN 85%, 2024-2026); 109,942 lines took a setting from the 837 or EMA
+  location (1,620 of them a facility); 62 split days where the Mohs was the highest-valued; 1 OLD_FEE_SCHEDULE (UHC MA 2026,
+  18 E/M lines, $109.97 - the hand-check's January lines). Moves on Work now: 52 on, 128 off. Three regressions found and
+  fixed in 540dffb (see Done). Second branch run in progress.
 
 ## Open questions
 - (none yet)

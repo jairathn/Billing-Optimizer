@@ -305,6 +305,51 @@ def test_a_split_day_whose_other_claim_has_no_answer_on_file_is_ranked_by_the_83
     w.store.close()
 
 
+def test_a_split_day_reads_the_other_claims_answer_where_the_patient_match_misses_it(tmp_path, kind):
+    """The surgery center's claims are answered, but under the patient's name spelled another way (the same member number),
+    so the day's patient match misses them; the 837s tie them to the day. A Mohs halved beside a 14301 the payer allowed
+    $943.80 was rightly the second procedure: no item. A Mohs halved beside a 14040 it allowed $491.64 in full was the
+    highest-valued: $292.56 less the $245.82 a correct ranking takes back from that payment, $46.74."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16") + many(200, 6, "14040", "1500.00", "491.64", cfi="16", pos="24")
+            + many(220, 6, "14301", "2500.00", "943.80", cfi="16", pos="24"), "20260301", **hum)
+
+    def other_name(c: str) -> str:
+        return c.replace("NM1*QC*1*PATIENT*", "NM1*QC*1*PATIENTE*")
+    w.remit([visit(810, "17311", "900.00", "292.56", cfi="16", pat=810, dos="20260302"),
+             other_name(visit(811, "14301", "2500.00", "943.80", cfi="16", pat=810, dos="20260302", pos="24")),
+             visit(812, "17311", "900.00", "292.56", cfi="16", pat=812, dos="20260303"),
+             other_name(visit(813, "14040", "1500.00", "491.64", cfi="16", pat=812, dos="20260303", pos="24"))], "20260410", **hum)
+    _sent_837(w, [(811, 810, "20260302", "14301", "24"), (813, 812, "20260303", "14040", "24")])
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(812): ("UNDERPAID_VS_OWN_RATE", 58512, 4674)}, got
+    f = w.one(f"patient_control_number='{pcn(812)}'")
+    day = {d["code"]: d for d in f["ev"]["same_day"]}
+    assert day["14040"]["allowed_cents"] == 49164 and "answer" not in day["14040"], day
+    w.store.close()
+
+
+def test_a_procedure_of_the_day_the_payer_denied_does_not_make_the_mohs_the_second(tmp_path, kind):
+    """A guard: the surgery center's 14301 (the 837 shows it billed that day) was denied, so nothing of it was paid and it
+    ranks nothing; the Mohs halved beside it is owed its whole half, as for a denied procedure on an answered claim."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16") + many(220, 6, "14301", "2500.00", "943.80", cfi="16", pos="24"),
+            "20260301", **hum)
+    denied = claim(821, sv("14301", "2500.00", "0", None, "1", "CAS*CO*197*2500.00~", "20260302"), "2500.00", "0", pat=820, cfi="16",
+                   dos="20260302", pos="24")
+    w.remit([visit(820, "17311", "900.00", "292.56", cfi="16", pat=820, dos="20260302"), denied], "20260410", **hum)
+    _sent_837(w, [(821, 820, "20260302", "14301", "24")])
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "signal='UNDERPAID_VS_OWN_RATE'").items()}
+    assert got == {pcn(820): ("UNDERPAID_VS_OWN_RATE", 58512, 29256)}, got
+    w.store.close()
+
+
 def test_the_payers_rate_for_a_code_paid_only_at_a_facility_is_its_facility_rate(tmp_path, kind):
     """The rate a claim with no remittance is sized by (an EMA-only denial, Detector._rate) is the office setting's; for a
     code the payer has paid only at the surgery center it is the facility rate, never none (a 14040 paid $491.64 there)."""

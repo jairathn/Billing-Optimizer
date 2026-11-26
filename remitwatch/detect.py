@@ -4375,10 +4375,11 @@ class Detector:
 
     def _billed_same_day(self, cands: list) -> dict[str, list[tuple]]:
         """The reducible procedures the 837s show billed by each candidate's clinician, on its date of service, for its
-        patient (the 835 claim's member number, NM1*QC or NM1*IL, as the 837's subscriber id), on another bill none of whose
-        answers is on file (any payer's: a bill another payer answered is that payer's business, and a bill this payer
-        answered is in the day already): {candidate line key: [(claim id, code, modifiers, place of service)]}, one per bill
-        and code (an 837 sent again repeats its lines). Empty where the 837 tables are absent."""
+        patient (the 835 claim's member number, NM1*QC or NM1*IL, as the 837's subscriber id), on another bill: {candidate
+        line key: [(claim id, code, modifiers, place of service, the 835 lines of that bill, code and date)]}, one per bill
+        and code (an 837 sent again repeats its lines). Their answers are read where the 835s hold them (_billed_lines): a
+        procedure the patient key the day is matched by misses (a name spelled another way under the same member number), a
+        payment taken back since, a denial. Empty where the 837 tables are absent."""
         c = self.conn
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "claims_837" not in tables or "lines_837" not in tables:
@@ -4409,30 +4410,46 @@ class Detector:
                     found[l["line_key"]].setdefault((b, code), (pcn, code, mods, pos))
         if not found:
             return {}
-        bills = sorted({b for v in found.values() for b, _code in v})
-        answered: set[str] = set()
-        for b in bills:
-            for (pcn,) in c.execute("SELECT patient_control_number FROM claims WHERE patient_control_number >= ? AND patient_control_number < ?",
-                                    (b, b + "~")):
+        # the 835 lines of those bills (any payer), by bill, code and date of service
+        answers: dict[tuple, list] = defaultdict(list)
+        for b in sorted({b for v in found.values() for b, _code in v}):
+            for ck, pcn in c.execute("SELECT claim_key, patient_control_number FROM claims WHERE patient_control_number >= ? "
+                                     "AND patient_control_number < ?", (b, b + "~")):
                 if bill_of(pcn) == b:
-                    answered.add(b)
-                    break
-        out = {lk: [x for (b, _code), x in sorted(v.items()) if b not in answered] for lk, v in found.items()}
-        self.ema_counts["mppr_billed_837_unanswered"] = sum(len(v) for v in out.values())
-        return {lk: v for lk, v in out.items() if v}
+                    for x in self.lines_by_claim.get(ck, ()):
+                        answers[(b, x.get("procedure_code"), x.get("service_date"))].append(x)
+        out = {}
+        for lk, v in found.items():
+            day = next(l.get("service_date") for l, *_x in cands if l["line_key"] == lk)
+            out[lk] = [x + (answers.get((b, code, day)) or [],) for (b, code), x in sorted(v.items())]
+        self.ema_counts["mppr_billed_837"] = sum(len(v) for v in out.values())
+        return out
 
     def _billed_lines(self, l, billed: list[tuple], day: list) -> list[dict]:
-        """The procedures _billed_same_day found for line `l`, as lines the day's ranking can price: the claim's payer, plan,
-        clinician and date with the 837's code, modifiers and place of service, and no allowed amount (its answer is not on
-        file). A code the day already holds from that claim's 835 lines is left out."""
+        """The procedures _billed_same_day found for line `l` that the day does not already hold (by bill and code), as lines
+        the ranking can price: the claim's payer, plan, clinician and date with the 837's code, modifiers and place of
+        service. What it was allowed: none when no 835 on file answers it ('not on file': the ranking counts it as paid in
+        full), else what the same payer's standing answer allows. A procedure the payer denied, or whose payment it took back
+        since, is no part of the day, as for the 835 lines (_settle_mppr_candidates); one another payer answered is that
+        payer's business: both left out."""
         have = {(bill_of(x.get("patient_control_number")), x.get("procedure_code")) for x in day}
         out = []
-        for i, (pcn, code, mods, pos) in enumerate(billed):
+        for i, (pcn, code, mods, pos, answers) in enumerate(billed):
             if (bill_of(pcn), code) in have:
                 continue
+            mine = [x for x in answers if x.get("payer_group") == l.get("payer_group")]
+            if answers and not mine:
+                continue
+            allowed = None
+            if mine:
+                allowed = max(((x.get("allowed_cents") or 0) for x in mine
+                               if x.get("claim_status_code") in ("1", "2", "3", "19", "20", "21") and (x.get("allowed_cents") or 0) > 0
+                               and not ((x.get("paid_cents") or 0) > 0 and x["line_key"] not in self.standing)), default=0)
+                if not allowed:
+                    continue
             ml = [m.strip() for m in (mods or "").split(",") if m.strip()]
             out.append({"line_key": f"837:{pcn}:{code}:{i}", "claim_key": None, "patient_control_number": pcn, "procedure_code": code,
-                        "modifiers_list": ml, "pos": pos or None, "pos_class": pos_class(pos), "allowed_cents": None,
+                        "modifiers_list": ml, "pos": pos or None, "pos_class": pos_class(pos), "allowed_cents": allowed,
                         "payer_group": l.get("payer_group"), "payer_kind": l.get("payer_kind"), "year": l.get("year"),
                         "plan": l.get("plan"), "group_number": l.get("group_number"), "provider_tier": l.get("provider_tier"),
                         "rendering_provider_npi": l.get("rendering_provider_npi"), "service_date": l.get("service_date")})
