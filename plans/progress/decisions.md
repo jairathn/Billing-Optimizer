@@ -275,5 +275,13 @@ lows r2-2 to r2-5 (this section's commit).
   the code runs on both; the panel in node (r2-1, r2-2); the API on the server (r2-1, r2-2, r2-4).
 - `tests/test_decisions.py`: the run test declares a Production box (r1-1); the write-off case expects Work now
   (r1-6). `tests/test_payer_code_rules.py`: G6001 to 2025 is `claim` (r2-5).
+- Related suites in python3 3.13: decisions, decisions_review, archive_rules, settled_elsewhere, states, story,
+  results, selfcheck: 800 passed (after r1-4 to r1-8); decisions, decisions_review, payer_code_rules, ema_pages,
+  ema_pages2, states, story, features, desk, review_rates, ema_wiring, bulk_pause, api_review, ema_checks: 711 passed,
+  1 skipped (after the lows); docs and runlog: 99 passed, 1 skipped.
+- The reviewers' own tests against the tree: r1 15 passed, 2 failed (test_r1_d3_partial_recovery.py, both store
+  kinds: they want `recovered_cents` on an item still open, which r1-8 answers differently, above); r2 13 passed,
+  2 skipped (the API cases on the in-memory store kind, by the reviewer's own skip).
+- Node checks: calc_model_check 79 of 79, lab_review_check 143 of 143; features.js parses.
 - Breaks: r1-1 2, r1-2 2, r1-3 and r2-1 6, r1-4 to r1-7 10, r2-2 to r2-5 10; each failed its tests and the restore
   left `git status` clean (`$S/tk/units/decisions/probe/breaks.py` with a plan of old and new text per fix).
