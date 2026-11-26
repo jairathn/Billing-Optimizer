@@ -116,6 +116,45 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   test_plan_rates, test_sizes_and_rates, test_review_rates, test_states, test_story, test_insights pass on 3.11.1 (287);
   test_docs, test_runlog, test_cycle_converges pass on 3.13 (103, 1 skipped).
 
+## Fix round (the two reviews, fix7c-r1 and fix7c-r2; started 2026-11-26 21:05 UTC)
+Every finding was confirmed on the code (each reviewer test failed on d79c172 as reported, 42 cases) and ported to
+tests/test_plan_rates.py with invented data, both store kinds. Each fix was broken on purpose (the test then fails) and
+restored exactly (plans/tools are not used; the break harness is in the unit folder: breaks.py with cases_*.json).
+- Repricing requests (OLD_FEE_SCHEDULE), `emit_old_schedules`, `_emit_old_schedule`, `_new_schedule_starts`, `_gone`,
+  `_note_gone`, `_emit_underpaid`, the worked-request capture in `run_line_rules`, `Detector.__init__` (worked_old,
+  line_to_old, claim_to_old, old_known): r2-1 a claim the payer took back leaves the request; repriced, it is closed as
+  recovered on its own line (a one-off the archive rules close, as the base did) and the request names it
+  (evidence `repriced`, `repriced_cents`); a request whose every claim was repriced is closed with
+  `recovery_counted_elsewhere`. r2-2 the amount is every claim's and `pattern_windows` (PATTERN_SIGNALS, PATTERN_SQL)
+  reads repricing requests: api.py (`_pattern_cents`, the due and range filters, the summary's buckets, the CSV claims,
+  the claim view, the work-kind counts), alerts.deadline_rule and report.py's due list and payer table never count the
+  row as well. r2-3 a worked request keeps its claims; claims found since go to a continuation request
+  ("not in the repricing request sent"). r2-4 a code whose old-amount visits after the payer's start all precede its own
+  first visit at the raised rate (OLD_RUN_LINES = 5 of each, a month or more after the payer's start) keeps its earlier
+  rate (raised since). r1-3 lines below the one-off threshold join the request (never a one-off). story.py's repricing
+  step speaks of the claims still inside their windows (`gap_live_cents`).
+- Rates, `_yardstick`, `_few_own`, `_halves_dropped`, `_own_floor`, `line_expected`, `_expected_allowed`,
+  `_np_ratio_of`, `_np_state_of`, `np_votes`, `_own_plan_amount`, `_office_state`: r1-2 the class's typical amount
+  across settings; r1-4 a payer's own few agreeing amounts in a setting (two or more, a majority, halves dropped) before
+  another payer's, and a denial size that is not the payer's own rate is never below the least it paid there; r1-5 a
+  plan read apart with fewer than 10 PA/NP lines takes its payer's PA/NP rule; r2-5 a clinician-day with Medicare claims
+  in both states is of no known state (its location, else the lower rate); r2-13 a line paid exactly an own-schedule
+  plan's rate under a group number not read apart is left unjudged.
+- Split days, `_settle_mppr_candidates`, `_rank_day`, `_every_procedure_cut`, `_emit_day`, `_close_fixed_day`,
+  `_billed_same_day`, `_same_person`, `_billed_lines`, `_procedure_worth`, `_day_units`, `_fill_setting`: r1-1 a repair is
+  worth its full amount where its usual payment is the half of an amount the payer also paid; r2-6 one missing half a
+  day, on the highest-valued candidate; r2-7 a service's own later payment closes its item (later_payment) and a day the
+  payer reprocessed is listed closed with the new money; r2-8 837s matched on NM1*QC only and an answer for another
+  person drops the 837; r2-9 ranking reads usual_rate (facility check); r2-10 the setting is the claim's latest 837;
+  r2-11 units one by one; r2-12 one fixed order breaks ties.
+- Commits: ce0e695 (tests red), 4564a0d (repricing and rates), c735ccf (split days).
+
+### Fix round: next
+1. World run of the branch (run6.sh br6) and of the base (run6.sh base6) on fresh private copies; compare
+   (compare_runs.py) and check the reviewers' cited items by finding id.
+2. Suites: tests/test_plan_rates.py and the related modules (done: 300 passed after the repricing set), then the full
+   suite in python3 and in $S/fix/venv_sqlite340/bin/python.
+
 ## Open questions
 - UHC Kentucky PA/NP: paid in full from January 2025 to late October 2026, then 85 percent on some lines. The branch
   lists the 99213s after the switch as one routine-rate review framed as a rate change (1add3df444791b0e54dc8909,
