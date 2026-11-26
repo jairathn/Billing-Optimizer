@@ -37,14 +37,14 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
 - 2ac1667: merged the integration tip cb3ffef (plans only); eb7e3b7: merged 5dd2957 (docs and a docs test).
 
 ## In progress
-- Brief items 1 to 4 done (see Measured). The full suite ran on 2ac1667 + the README line (python3 and
-  `$S/fix/venv_sqlite340/bin/python`, three shards each, while other units' real-data runs loaded the machine); the
-  note fix c3bbb1f after it touches only the new rule's note and its test (tests/test_plan_rates.py: 38 passed on both).
+- The fix round is done (see Fix round below): all 18 findings fixed, three regressions the world runs showed fixed, the
+  world measured on the final code (br9). The full suite runs in python3 and in `$S/fix/venv_sqlite340/bin/python` on
+  the final code (results in the final report and the next commit of this file).
 
 ## Left, in order
 1. The open questions below are for the owner or a fixer; none blocks the merge.
-2. A serverless image run of detection (base and branch) was not repeated here: the server's detect peak moved
-   1,054 to 1,061-1,064 MB, which a pressed Vercel run (2 GB) absorbs; the hook unit's real-data runs measure the image.
+2. A serverless image run of detection was not repeated: the server's detect peak is 1,060 to 1,064 MB on every branch
+   run (base 1,054), which a pressed Vercel run (2 GB) absorbs; the hook unit's real-data runs measure the image.
 3. A17 needs the same plan keys, the facility setting and the cross-claim ranking (both kinds of split day) to judge
    these items; A16's verdicts on them are not meaningful.
 
@@ -116,44 +116,95 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   test_plan_rates, test_sizes_and_rates, test_review_rates, test_states, test_story, test_insights pass on 3.11.1 (287);
   test_docs, test_runlog, test_cycle_converges pass on 3.13 (103, 1 skipped).
 
-## Fix round (the two reviews, fix7c-r1 and fix7c-r2; started 2026-11-26 21:05 UTC)
-Every finding was confirmed on the code (each reviewer test failed on d79c172 as reported, 42 cases) and ported to
-tests/test_plan_rates.py with invented data, both store kinds. Each fix was broken on purpose (the test then fails) and
-restored exactly (plans/tools are not used; the break harness is in the unit folder: breaks.py with cases_*.json).
-- Repricing requests (OLD_FEE_SCHEDULE), `emit_old_schedules`, `_emit_old_schedule`, `_new_schedule_starts`, `_gone`,
-  `_note_gone`, `_emit_underpaid`, the worked-request capture in `run_line_rules`, `Detector.__init__` (worked_old,
-  line_to_old, claim_to_old, old_known): r2-1 a claim the payer took back leaves the request; repriced, it is closed as
-  recovered on its own line (a one-off the archive rules close, as the base did) and the request names it
-  (evidence `repriced`, `repriced_cents`); a request whose every claim was repriced is closed with
-  `recovery_counted_elsewhere`. r2-2 the amount is every claim's and `pattern_windows` (PATTERN_SIGNALS, PATTERN_SQL)
-  reads repricing requests: api.py (`_pattern_cents`, the due and range filters, the summary's buckets, the CSV claims,
-  the claim view, the work-kind counts), alerts.deadline_rule and report.py's due list and payer table never count the
-  row as well. r2-3 a worked request keeps its claims; claims found since go to a continuation request
-  ("not in the repricing request sent"). r2-4 a code whose old-amount visits after the payer's start all precede its own
-  first visit at the raised rate (OLD_RUN_LINES = 5 of each, a month or more after the payer's start) keeps its earlier
-  rate (raised since). r1-3 lines below the one-off threshold join the request (never a one-off). story.py's repricing
-  step speaks of the claims still inside their windows (`gap_live_cents`).
-- Rates, `_yardstick`, `_few_own`, `_halves_dropped`, `_own_floor`, `line_expected`, `_expected_allowed`,
-  `_np_ratio_of`, `_np_state_of`, `np_votes`, `_own_plan_amount`, `_office_state`: r1-2 the class's typical amount
-  across settings; r1-4 a payer's own few agreeing amounts in a setting (two or more, a majority, halves dropped) before
-  another payer's, and a denial size that is not the payer's own rate is never below the least it paid there; r1-5 a
-  plan read apart with fewer than 10 PA/NP lines takes its payer's PA/NP rule; r2-5 a clinician-day with Medicare claims
-  in both states is of no known state (its location, else the lower rate); r2-13 a line paid exactly an own-schedule
-  plan's rate under a group number not read apart is left unjudged.
-- Split days, `_settle_mppr_candidates`, `_rank_day`, `_every_procedure_cut`, `_emit_day`, `_close_fixed_day`,
-  `_billed_same_day`, `_same_person`, `_billed_lines`, `_procedure_worth`, `_day_units`, `_fill_setting`: r1-1 a repair is
-  worth its full amount where its usual payment is the half of an amount the payer also paid; r2-6 one missing half a
-  day, on the highest-valued candidate; r2-7 a service's own later payment closes its item (later_payment) and a day the
-  payer reprocessed is listed closed with the new money; r2-8 837s matched on NM1*QC only and an answer for another
-  person drops the 837; r2-9 ranking reads usual_rate (facility check); r2-10 the setting is the claim's latest 837;
-  r2-11 units one by one; r2-12 one fixed order breaks ties.
-- Commits: ce0e695 (tests red), 4564a0d (repricing and rates), c735ccf (split days).
+## Fix round (the two reviews, fix7c-r1 and fix7c-r2; 2026-11-26 21:05 to 23:00 UTC)
+Every finding was confirmed on the code (each reviewer test failed on d79c172 as reported, 42 cases), ported to
+tests/test_plan_rates.py with invented data, both store kinds, fixed, broken on purpose (the test then fails) and
+restored exactly (the break harness is in the unit folder: breaks.py with cases_*.json). tests/test_plan_rates.py:
+103 tests (51 cases x 2 store kinds, 1 deadline-view test), all pass.
 
-### Fix round: next
-1. World run of the branch (run6.sh br6) and of the base (run6.sh base6) on fresh private copies; compare
-   (compare_runs.py) and check the reviewers' cited items by finding id.
-2. Suites: tests/test_plan_rates.py and the related modules (done: 300 passed after the repricing set), then the full
-   suite in python3 and in $S/fix/venv_sqlite340/bin/python.
+Outcomes, finding by finding (all 18 real, all fixed):
+- r2-1 (high) a repriced or taken-back claim leaves the repricing request: repriced, its one-off closes as recovered
+  on its own line (as the base closed it) and the request names it (`repriced`, `repriced_cents`); a request whose
+  every claim was repriced is closed with `recovery_counted_elsewhere` and proof rows. `_gone`, `_note_gone`,
+  `_emit_old_schedule`, `_emit_underpaid`.
+- r2-2 (high) a request's amount is every claim's, and every deadline view counts its claims once by their own windows:
+  `pattern_windows` (PATTERN_SIGNALS, PATTERN_SQL), api.py (`_pattern_cents`, due and range filters, summary buckets,
+  CSV claims, claim view, work-kind counts), alerts.deadline_rule, report.py (due list, payer table).
+- r2-3 (medium) a worked request keeps the claims it was sent with; claims found since go to a continuation request.
+- r2-4 (medium) a code raised later in the year keeps its earlier rate until its own first visit at the raised rate
+  (OLD_RUN_LINES, `_new_schedule_starts`).
+- r1-3 (low) lines below the one-off threshold join the request (never a one-off).
+- r1-1 (medium) a repair is worth its full amount where its usual payment is the half of an amount the payer also paid
+  (`_procedure_worth`).
+- r1-2 (medium) a denial keeps a size once the 837 splits a class's lines across settings (`_yardstick`: the setting's own
+  few class lines, CLASS_FEW_MIN, then the class's lines of every setting together; see the world runs below).
+- r1-4 (medium) a payer's own few agreeing amounts in a setting before another payer's, and a denial never sized below the
+  least the payer paid there (`_few_own`, `_halves_dropped`, `_own_floor`, `line_expected`, `_expected_allowed`).
+- r1-5 (low) a plan read apart with under 10 PA/NP lines takes its payer's PA/NP rule (`_np_ratio_of`, `_np_state_of`).
+- r2-5 (medium) a clinician-day with Medicare claims in both states is of no known state (`_office_state`).
+- r2-13 (low) a line paid exactly an own-schedule plan's rate under a group number not read apart is left unjudged
+  (`_own_plan_amount`).
+- r2-6 (medium) one missing half a day, on the highest-valued candidate (`_every_procedure_cut`, ('covered',)).
+- r2-7 (medium) a service's own later payment closes its item; a day the payer reprocessed is listed closed with the new
+  money (`later_payment`, `_close_fixed_day`).
+- r2-8 (medium) 837s matched on the patient (NM1*QC) only; an answer for another person drops the 837 (`_billed_same_day`,
+  `_same_person`, `_billed_lines`). Residual below.
+- r2-9 (low) ranking reads usual_rate (facility check); r2-10 (low) the setting is the claim's latest 837
+  (`_fill_setting`); r2-11 (low) units one by one (`_day_units`); r2-12 (low) one fixed order breaks ties (`_rank_day`).
+
+Found after the reviews (each with a failing test first, broken and restored):
+- d807d5a: the new closures carry the proof rows selfcheck.has_proof asks for (closure_proof would hold them).
+- a5e26dd: a claim the payer answered in two parts still ranks its procedures together (its own earlier standing answer
+  is another procedure of the day).
+- dfbbe8a: a line priced off the clinician's contract (CO-147) is never read as the payer's rate (`_rate_line`). An
+  invented case shows it; it moved nothing on the world. Its commit message's account of the world's three items was
+  wrong: those were r1-2's pooled fallback (next item).
+- c65fa3b and e7cbacc: r1-2's first fix (the class's lines of every setting together) was wrong on the world: office lines
+  of a code were sized by a pool most of whose lines were the surgery center's lower amounts (the three Cigna
+  contract-rate items r1-2 cites were dropped, not sized), two Humana MA split days were ranked by a repair's pooled
+  worth (dropped), and Detector._rate's office pass took the pool before its facility pass reached the payer's own
+  facility amount. Now: the setting's own few class lines (3 to 9) then the pool, only where the class has a typical
+  amount across settings; a facility line keeps the payer's office figure at the fee schedule's facility share first;
+  _rate reads the pools only in its last pass. Four tests.
+
+Commits: ce0e695 (tests red), 4564a0d, c735ccf, 34a2987, d807d5a, a5e26dd, dfbbe8a, 844f66e (merge of fad05c4),
+c65fa3b, e7cbacc, and this progress commit.
+
+### Fix round: world runs (private copies of the world, today 2026-11-24; unit folder run6.sh, compare_runs.py,
+check_fix_round.py)
+| run | code | detect s | peak MB | items | Work now | Work now $ |
+|---|---|---|---|---|---|---|
+| base6 | 893dc57 (integration tip) | 237.5 | 1,054 | 16,632 | 4,478 | 1,840,206.13 |
+| pre7 | d79c172 (reviewed tip) | 204.6 | 1,063 | 16,574 | 4,411 | 1,809,264.87 |
+| br7 | dfbbe8a | 205.5 | 1,063 | 16,564 | 4,400 | 1,810,486.28 |
+| br7b | dfbbe8a again | 185.4 | 1,064 | 16,564 | 4,400 | identical, item for item |
+| br8 | c65fa3b | 199.9 | 1,063 | 16,570 | 4,405 | 1,811,147.65 |
+| br9 | e7cbacc (final code) | 264.3 | 1,060 | 16,569 | 4,405 | 1,811,088.69 |
+Load average 6 to 11 on 4 CPUs throughout (other units' runs and suites): the times move with the load, not the code.
+Detection is deterministic: two runs of the same code give the same items, field for field (br7, br7b).
+
+The fix round's whole effect (pre7 to br9), 73 items moved:
+- 6 off Work now, none on: 6 Anthem lines paid exactly an own-schedule plan's rate (14040 $714.09; 88305 $64.00 x4;
+  17000 $61.33, all plan g402c397) under group numbers not read apart (r2-13; checked on the world with
+  `_own_plan_amount`), $199.18.
+- 60 resized, 51 up, 7 down, net +$2,023: the 3 r1-1 days (every procedure cut, $115.40 to $269.68), 3 Cigna contract-rate
+  items (no size to $42.88: office 13132 by the 8 office lines of the commercial plans, $580.00, rank 2), the NO_ANSWER
+  e17c7ce0 (no size to $116.60), and denials resized by the payer's own few amounts or its floor (r1-4: 25), the class's
+  few lines (r1-2: 5) and claim-level items summing such lines (27, e.g. 10 Anthem surgery-center denials +$639.05).
+- 3 expired UHC PA/NP items gone (r2-5); 4 new off the list (2 UHC MA and 1 Anthem MA closed as fixed, 1 Humana MA
+  expired).
+Cited items on br9: r1-1 e68533b7, 3da4c410, b100dea4 (Work now), 7dae6ea2, 559caae4 (expired), $269.68 each;
+r1-2 477e7438, 512439bd, 7e0d2930 $42.88 each, e17c7ce0 $116.60; r1-4 c24e9ef0 $932.12, 939ee140 $1,742.53,
+a4f86954 $85.58, 836d268a and b4386b62 $75.03; r1-5 22130d50 $312.80 unchanged (latent, as the reviewer said); r2-5
+1bbc7854, 9aedb5d0, e4f25ff3 gone; r2-8 ae5e2597 and 1454def4 unchanged; UHC MA repricing 58e49411 31 lines (18 visit
+lines and 13 small ones, r1-3), $138.07 inside their windows.
+
+### Fix round: suites
+- tests/test_plan_rates.py, test_sizes_and_rates, test_review_rates, test_archive_rules, test_ema_checks,
+  test_ema_wiring: 513 passed (python3, final code). test_story, test_states, test_api_review, test_claims, test_desk,
+  test_insights, test_resolution passed on dfbbe8a.
+- Full suite: see the final report (python3 and `$S/fix/venv_sqlite340/bin/python`, plans/tools/shard.sh, RW_RUNS in the
+  unit folder).
 
 ## Open questions
 - UHC Kentucky PA/NP: paid in full from January 2025 to late October 2026, then 85 percent on some lines. The branch
@@ -163,5 +214,15 @@ restored exactly (plans/tools are not used; the break harness is in the unit fol
   rule needs an end date.
 - UMR routine-rate review 22130d50949acee5d66aad47 (5 NP 99214 lines, $312.80): sized against the plan's full rate;
   if the plan pays nurse practitioners 85.7 percent as elsewhere, the gap is about $217.
-- Repricing items list only lines short by the one-off threshold ($2 and 5 percent): UHC MA also paid 16 January
-  procedure lines at 2025 amounts with smaller increases (about $60 in all, mostly under $5 a line).
+- Repricing items listed only lines short by the one-off threshold ($2 and 5 percent): since r1-3 the smaller ones join the
+  request (UHC MA 2026: 13 more lines, $28.10). Two 17312 lines are still left out: UHC MA has no firm rate of its own
+  for them.
+- r2-8 residual: an 837 billed for a family member under the same subscriber number whose answer is not on file still
+  ranks the patient's day when the 837s carry no patient loop of their own (the store keeps the subscriber only). Needs
+  the 837's patient (NM1*QC in loop 2010CA) stored; for the fix wave or the 837 unit.
+- Not this unit's, found on the way (for F2): a routine-rate review keeps lines the payer reversed or repaid since;
+  results.py does not attribute a recovery to a pattern item's claims.
+- The class's few lines (3 to 9) size a denial only where the class has 10 lines across settings; a class smaller than
+  that leaves the payer's own level against the fee schedule (or no size) as before. The owner may want a size from
+  fewer lines elsewhere too: the broader rule of c65fa3b resized 24 such items on the world (5 of them from no size:
+  Medicaid plans, Humana MA 87101), and e7cbacc put them back as they were.
