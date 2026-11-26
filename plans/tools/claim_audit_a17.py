@@ -775,7 +775,7 @@ class Audit:
         self.as_of = as_of
         self.log = log
         # A17 diagnostics: rules switched off to attribute a change to its rule (plan, state, setting, xclaim, windows,
-        # bare, twins); never used for a score of record
+        # bare, twins, feedstop); never used for a score of record
         self.disable = set(disable or ())
         # A17 rule 4: the payer window table (a path, a parsed table, or a PayerWindows); None keeps A16's windows
         self.windows = windows if isinstance(windows, PayerWindows) else PayerWindows(windows)
@@ -3238,6 +3238,13 @@ class Audit:
                                  wend >= self.as_of)] * rest
             return units + [("NO_FEED", fs.lower(), "", fam, "", sd, owed, basis, wend, False)] * rest
         if fs == "FEED_STOPPED":
+            # A17 rule 5 (the blind trace of never-answered claims): a payer whose 835s stopped answers through EMA
+            # only, as a payer outside the feed does: with the claim's EMA lines matched and nothing posted past the
+            # payer's answer time, the claim is never answered
+            if ef is not None and days_between(sd, self.feed_date) > self.usual_days(fam) and \
+                    "feedstop" not in self.disable:
+                return units + [("NEVER_ANSWERED", "no_answer_in_ema_feed_stopped", "", fam, "", sd, owed, basis, wend,
+                                 wend >= self.as_of)] * rest
             return units + [("FEED_STOPPED", "", "", fam, "", sd, owed, basis, wend, False)] * rest
         if days_between(sd, self.feed_date) > self.usual_days(fam):
             if cancelled and not sends:
@@ -5965,6 +5972,17 @@ def build_selftest_store():
         F.ema_line(lk, "2026-06-23", "99212", [(1, "charge", 9000, T1, None), (30, "pay", 6000, T1, "CHK%d" % lk)],
                    person=per)
     F.exp("sub", ("ZZ76TWIN4", "99212", "G", "2026-06-23"), ("NEVER_ANSWERED", "no_answer"), guard=True)
+    # a payer whose 835s stopped long ago: the claim's EMA line (tied by the link map) holds the charge only, months
+    # after the send: never answered (A16: feed stopped, undecided)
+    TSP = dict(payer="TESTPAY STOP", pid="T0056")
+    for i in range(3):
+        F.claim(F.tx(add_days("2025-09-10", i), **TSP), "ZZ77OLD%02dC017" % i, "1", 15000, 8000,
+                oneline("99213", 15000, 8000, add_days("2025-08-20", i), allowed=10000,
+                        cas=[("CO", "45", 5000), ("PR", "2", 2000)]), **TSP)
+    F.send837("ZZ77STOP1C017", "2026-05-02", oneline("99213", 15000, 0, "2026-05-01"), **TSP)
+    F.ema_line(900641, "2026-05-01", "99213", [(1, "charge", 15000, "TESTPAY STOP", None)], bill="ZZ77STOP1",
+               status="Payment Pending")
+    F.exp("sub", ("ZZ77STOP1", "99213", "G", "2026-05-01"), ("NEVER_ANSWERED", "no_answer_in_ema_feed_stopped"))
     # an EMA claim of the same lines first charged the send day, but of another payer, is not the claim's twin
     F.send837("ZZ76TWIN7C017", "2026-06-30", oneline("99213", 15000, 0, "2026-06-29"))
     F.ema_line(900631, "2026-06-29", "99213", [(1, "charge", 15000, "TESTPAY OTHER", None),
@@ -6075,7 +6093,7 @@ def main(argv=None):
     ap.add_argument("--windows", default=os.environ.get("A17_WINDOWS"),
                     help="the payer window table (JSON, schema a17-payer-windows/1); default: A16's flat windows")
     ap.add_argument("--disable", default=os.environ.get("A17_DISABLE", ""),
-                    help="diagnostics only: A17 rules to switch off (plan,state,setting,xclaim,windows,bare,twins)")
+                    help="diagnostics only: A17 rules to switch off (plan,state,setting,xclaim,windows,bare,twins,feedstop)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
     if args.selftest:
