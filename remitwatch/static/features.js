@@ -613,16 +613,26 @@ function xpRuleSources(list){
   return by.map(g => `<div>${/^https:\/\//.test(String(g.url || '')) ? `<a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">${esc(g.title)}</a>` : esc(g.title)}${g.date ? ', ' + esc(g.date) : ''}${g.quotes.map(q => `<div class="muted"><i>“${esc(q)}”</i></div>`).join('')}</div>`).join('');
 }
 function xpPayerRuleHtml(blocks){
-  return (blocks || []).map(b => `<details class="dfold xp-rule"${b.verdict === 'never_payable' ? ' open' : ''}>
+  // a rule shown in full once: a later code under the same rule (one state's enrollment rule for several codes of a
+  // claim, say) points back to it instead of repeating it
+  const told = [];
+  const sameAs = b => told.find(t => t.payer_group === b.payer_group && t.verdict === b.verdict && t.rule === b.rule
+    && (t.what_to_show || '') === (b.what_to_show || '') && (t.condition || '') === (b.condition || ''));
+  return (blocks || []).map(b => {
+    const same = b.rule ? sameAs(b) : null;
+    if(b.rule && !same) told.push(b);
+    return `<details class="dfold xp-rule"${b.verdict === 'never_payable' ? ' open' : ''}>
     <summary>${esc(b.title || '')}${b.period ? ` <span class="muted small">(services ${esc(b.period)})</span>` : ''}</summary>
     <div class="small ${XP_RULE_CLS[b.verdict] || 'muted'}"><b>${esc(b.verdict_text || '')}</b></div>
     ${(b.evidence_text || []).length ? `<div class="small" style="margin-top:4px"><b>What the remittances show</b>${b.as_of ? ` <span class="muted">(the run of ${esc(longDate(String(b.as_of).slice(0,10)))})</span>` : ''}<ul>${b.evidence_text.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`
       : (b.evidence_note ? `<div class="small muted">${esc(b.evidence_note)}</div>` : '')}
+    ${same ? `<div class="small muted" style="margin-top:4px">The payer's rule and what the note or the claim must show: the same as for ${esc(same.code)} above.</div>` : `
     ${b.rule ? `<div class="small" style="margin-top:4px"><b>The payer's rule:</b> ${esc(b.rule)}</div>` : ''}
     ${b.what_to_show ? `<div class="small" style="margin-top:4px"><b>What the note or the claim must show:</b> ${esc(b.what_to_show)}</div>` : ''}
     ${b.condition ? `<div class="small sev-medium">${esc(b.condition)}</div>` : ''}
-    ${(b.sources || []).length ? `<div class="small" style="margin-top:4px"><b>Sources</b> <span class="muted">(each read twice${b.researched ? ', researched ' + esc(b.researched) : ''})</span>${xpRuleSources(b.sources)}</div>` : ''}
-  </details>`).join('');
+    ${(b.sources || []).length ? `<div class="small" style="margin-top:4px"><b>Sources</b> <span class="muted">(each read twice${b.researched ? ', researched ' + esc(b.researched) : ''})</span>${xpRuleSources(b.sources)}</div>` : ''}`}
+  </details>`;
+  }).join('');
 }
 // "Why did this change?": the run's decisions on this item (built later, GET /api/findings/{id}/decisions); hidden until it answers
 async function xpDecisions(id, el){

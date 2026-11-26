@@ -476,8 +476,19 @@ def evidence_words(ev: dict, payer: str) -> list[str]:
     n, p = int(ev.get("answered") or 0), int(ev.get("paid") or 0)
     when = period_words({"from": ev.get("from"), "to": ev.get("to")}) or f"from {SINCE}"
     who = payer if not ev.get("widened") else f"{payer} (with {', '.join(g for g in ev.get('groups') or [] if g != payer) or 'its other plans'})"
+    # EMA's own count, one row per billed service after every answer: a claim sent again and denied again is one row there
+    # but several remittance lines here, so the two can differ (a payer that denies until the claim is fixed, then pays).
+    # Both are shown, EMA's second, so a short list (the policy page's first four sentences) still has it.
+    ema = ev.get("ema") or {}
+    books = None
+    if ema.get("answered"):
+        m, q = int(ema["answered"]), int(ema.get("paid") or 0)
+        books = (f"EMA's books, one row per billed service: insurance paid {q} of the {m} it shows answered ({_pct(q, m)})"
+                 + (f"; the reasons on the unpaid ones: {_list(ema.get('reasons'), True)}" if ema.get("reasons") else "") + ".")
     if n:
         out.append(f"{who} answered {n} {code} line{'s' if n != 1 else ''} as the primary payer for services {when}, and paid {p} ({_pct(p, n)}).")
+        if books:
+            out.append(books)
         years = ev.get("by_year") or {}
         if len(years) > 1:
             out.append("By year of service: " + "; ".join(f"{y}: {v[0]} of {v[1]} paid" for y, v in years.items()) + ".")
@@ -503,10 +514,8 @@ def evidence_words(ev: dict, payer: str) -> list[str]:
                        "claim's other services and refused this code.")
     else:
         out.append(f"No remittance on file answers {code} for {payer} as the primary payer for services {when}.")
-    ema = ev.get("ema") or {}
-    if ema.get("answered") and (n < MIN_ANSWERED):
-        out.append(f"EMA's books: it paid {ema.get('paid') or 0} of {ema['answered']} answered lines"
-                   + (f"; the reasons on the unpaid ones: {_list(ema.get('reasons'), True)}" if ema.get("reasons") else "") + ".")
+        if books:
+            out.append(books)
     return out
 
 
@@ -640,11 +649,34 @@ def researched_blocks(f: dict, lines: list[dict] | None = None, blocks: list[dic
     return out
 
 
+def _and(words: list[str]) -> str:
+    words = [w for w in words if w]
+    return ", ".join(words[:-1]) + " and " + words[-1] if len(words) > 1 else (words[0] if words else "")
+
+
+def same_rule(blocks: list[dict]) -> list[dict]:
+    """The researched blocks with each rule told once: blocks of one payer group with the same verdict, rule, what to show
+    and condition (one state's enrollment rule for several codes of a claim, say) become one, naming its codes together
+    ('codes'; 'code' in words: "99213, 11102 and 11103"). The first block's order is kept."""
+    out: list[dict] = []
+    seen: dict[tuple, dict] = {}
+    for b in blocks:
+        k = (b.get("payer_group"), b.get("verdict"), b.get("rule"), b.get("what_to_show"), b.get("condition"))
+        g = seen.get(k)
+        if g is None:
+            g = seen[k] = dict(b, codes=[b.get("code")])
+            out.append(g)
+        elif b.get("code") not in g["codes"]:
+            g["codes"].append(b.get("code"))
+            g["code"] = _and(g["codes"])
+    return out
+
+
 def checklist(f: dict, lines: list[dict] | None = None, blocks: list[dict] | None = None) -> list[str]:
     """What the biller checks before the packet goes (never sent with it): the payer's rule for the code and what the note
-    or the claim must show, a never-payable verdict plainly."""
+    or the claim must show, a never-payable verdict plainly; one line per rule, naming every code of the item it covers."""
     out = []
-    for b in researched_blocks(f, lines, blocks):
+    for b in same_rule(researched_blocks(f, lines, blocks)):
         src = (b.get("sources") or [{}])[0]
         cite = f" ({src.get('title')}, {src.get('date')})" if src.get("title") else ""
         if b["verdict"] == "never_payable":
@@ -673,8 +705,9 @@ def enclosures(f: dict, lines: list[dict] | None = None, blocks: list[dict] | No
 
 
 def review_input(f: dict, lines: list[dict] | None = None, blocks: list[dict] | None = None) -> list[dict]:
-    """What the note review is told for each researched code of the item: the payer's rule, what the note or claim must
-    show, and the research's verdict. Public text only."""
-    return [{"code": b["code"], "payer": b["payer_group"], "verdict": b["verdict"], "verdict_words": VERDICT_WORDS.get(b["verdict"] or "", ""),
-             "rule": b.get("rule") or "", "what_to_show": b.get("what_to_show") or "", "condition": b.get("condition") or ""}
-            for b in researched_blocks(f, lines, blocks)]
+    """What the note review is told for each researched rule of the item (the codes it covers named together): the payer's
+    rule, what the note or claim must show, and the research's verdict. Public text only."""
+    return [{"code": b["code"], "codes": b["codes"], "payer": b["payer_group"], "verdict": b["verdict"],
+             "verdict_words": VERDICT_WORDS.get(b["verdict"] or "", ""), "rule": b.get("rule") or "",
+             "what_to_show": b.get("what_to_show") or "", "condition": b.get("condition") or ""}
+            for b in same_rule(researched_blocks(f, lines, blocks))]

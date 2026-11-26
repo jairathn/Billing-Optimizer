@@ -2986,9 +2986,8 @@ def _with_payer_rule(nxt: dict, blocks: list[dict], f: dict, st: dict) -> dict:
         out["pattern"] = lead["pattern"] if lead.get("in_table") else out.get("pattern")
         out["payer_rule"] = "never_payable"
     else:
-        for b in blocks:
-            if not b.get("researched_verdict") or not b.get("what_to_show"):
-                continue
+        from .rarely_paid import same_rule
+        for b in same_rule([b for b in blocks if b.get("researched_verdict") and b.get("what_to_show")]):
             src = (b.get("sources") or [{}])[0]
             cite = f" ({src.get('title')}, {src.get('date')})" if src.get("title") else ""
             if b.get("verdict") == "never_payable":

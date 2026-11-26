@@ -301,6 +301,90 @@ def test_the_packet_checklist_says_a_never_payable_rule_before_sending_and_enclo
     assert p["checklist"] == []
 
 
+def _whole_claim(group: str, codes_: list[str], day: str = "2026-03-02") -> dict:
+    """A whole-claim denial of one visit (invented): the payer paid none of its codes."""
+    return {"finding_id": "c" * 24, "claim_key": "CK1", "signal": "CLAIM_DENIED_UNPAID", "category": "denial", "payer_group": group,
+            "service_date": day, "evidence": json.dumps({"unpaid": [[c, day] for c in codes_]})}
+
+
+def test_one_rule_for_several_codes_of_a_claim_is_told_once():
+    """A state Medicaid plan denied a whole visit: the office visit, the biopsy and the pathology, each covered by the same
+    researched rule (the program's enrollment and claim rules). The checklist, the note review's input and the next step
+    tell that rule once, naming the three codes; a code under another rule keeps its own line."""
+    from remitwatch import story
+    f = _whole_claim("Medicaid (other)", ["99213", "11102", "88305"])
+    blocks = rp.researched_blocks(f)
+    assert [b["code"] for b in blocks] == ["99213", "11102", "88305"] and len({b["what_to_show"] for b in blocks}) == 1
+    got = rp.checklist(f)
+    assert len(got) == 1 and got[0].startswith("What the note or claim must show for Medicaid (other) to pay 99213, 11102 and 88305")
+    inp = rp.review_input(f)
+    assert [(r["code"], r["codes"]) for r in inp] == [("99213, 11102 and 88305", ["99213", "11102", "88305"])]
+    nxt = {"action": "Send a corrected claim.", "steps": ["Fix the claim."], "buttons": [], "route": "corrected"}
+    out = story._with_payer_rule(nxt, blocks, f, {"work_state": "work_now"})
+    rule_steps = [s for s in out["steps"] if "needs to pay" in s]
+    assert len(rule_steps) == 1 and rule_steps[0].startswith("What Medicaid (other) needs to pay 99213, 11102 and 88305")
+    assert out["steps"][-1] == "Fix the claim." and out["payer_rule"] == "claim"
+    # Optum's 77600 of 2025 (the VA referral) and its 2026 rule are two rules: two lines
+    two = rp.checklist(_whole_claim("Optum (UHC)", ["77600"], "2025-09-02")) + rp.checklist(_whole_claim("Optum (UHC)", ["77600"]))
+    assert len(two) == 2 and two[0] != two[1]
+    assert rp.same_rule([]) == [] and rp._and(["A"]) == "A" and rp._and(["A", "B"]) == "A and B"
+
+
+def test_the_evidence_says_what_emas_books_show_beside_the_remittances():
+    """EMA's books count one row per billed service after every answer; the remittances count every answer (a claim sent
+    again and denied again is several lines). Both are said, EMA's second, whether or not the remittances hold enough
+    lines; with no remittance at all, EMA's books are the evidence."""
+    ev = {"code": "99213", "answered": 117, "paid": 3, "unpaid": 114, "from": "2025-01-01", "reasons": [["CO-96", 68]],
+          "ema": {"answered": 18, "paid": 16, "reasons": [["CO-16", 2]]}}
+    got = rp.evidence_words(ev, "Medicaid KY")
+    assert got[0].startswith("Medicaid KY answered 117 99213 lines as the primary payer") and "paid 3 (3%)" in got[0]
+    assert got[1].startswith("EMA's books, one row per billed service: insurance paid 16 of the 18 it shows answered (89%)")
+    assert "CO-16 (2" in got[1]
+    only = rp.evidence_words({"code": "77600", "answered": 0, "paid": 0, "from": "2026-01-01", "ema": {"answered": 3, "paid": 0}}, "Optum (UHC)")
+    assert only[0].startswith("No remittance on file answers 77600 for Optum (UHC)")
+    assert only[1] == "EMA's books, one row per billed service: insurance paid 0 of the 3 it shows answered (0%)."
+    assert not [t for t in rp.evidence_words(dict(ev, ema={}), "Medicaid KY") if "EMA" in t]
+
+
+def test_the_drawer_tells_a_rule_shared_by_several_codes_once(tmp_path):
+    """The page's own renderer (features.js, run in node with index.html's esc and today.js's longDate): a second block
+    under the same rule points back to the first instead of repeating the rule, what to show and the sources; a block
+    under another rule shows its own."""
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    static = ROOT / "remitwatch" / "static"
+    src = """
+const fs = require('fs'), vm = require('vm');
+const S = process.argv[2] + '/';
+const html = fs.readFileSync(S + 'index.html', 'utf8'), feat = fs.readFileSync(S + 'features.js', 'utf8'), today = fs.readFileSync(S + 'today.js', 'utf8');
+const grab = (t, re) => { const m = t.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const start = feat.indexOf('const XP_RULE_CLS'), end = feat.indexOf('async function xpDecisions');
+if (start < 0 || end < start) throw new Error('renderer not found');
+const code = grab(html, /const esc = [^\\n]*\\n/) + grab(today, /function longDate[^\\n]*\\n/) + feat.slice(start, end);
+const ctx = { String, JSON, Date, Math, Array, Object, isNaN };
+vm.createContext(ctx);
+vm.runInContext(code.replace(/^const /gm, 'var ') + '\\nthis.render = xpPayerRuleHtml;', ctx);
+console.log(JSON.stringify(ctx.render(JSON.parse(process.argv[3]))));
+"""
+    script = tmp_path / "rule_eval.js"
+    script.write_text(src)
+    one = {"payer_group": "Medicaid (other)", "verdict": "claim", "rule": "RULE-ONE", "what_to_show": "SHOW-ONE", "condition": None,
+           "sources": [{"title": "SOURCE-ONE", "url": "https://example.org/a", "date": "2026-01-01"}], "evidence_text": ["E1"]}
+    blocks = [dict(one, code="99213", title="Why Medicaid (other) does not pay 99213"),
+              dict(one, code="11102", title="Why Medicaid (other) does not pay 11102", evidence_text=["E2"]),
+              dict(one, code="G0127", title="Why Medicaid (other) does not pay G0127", rule="RULE-TWO", what_to_show="SHOW-TWO")]
+    res = subprocess.run(["node", str(script), str(static), json.dumps(blocks)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    page = json.loads(res.stdout)
+    parts = page.split("</details>")[:3]
+    assert "RULE-ONE" in parts[0] and "SHOW-ONE" in parts[0] and "SOURCE-ONE" in parts[0]
+    assert "RULE-ONE" not in parts[1] and "SOURCE-ONE" not in parts[1] and "E2" in parts[1]
+    assert "the same as for 99213 above" in parts[1]
+    assert "RULE-TWO" in parts[2] and "SHOW-TWO" in parts[2] and "the same as" not in parts[2]
+
+
 def test_the_packet_pdf_never_carries_the_checklist():
     from remitwatch.appeals import build_packet
     from remitwatch.notes import render_pdf
@@ -494,6 +578,11 @@ def test_ema_only_denials_of_a_rule_that_changed_on_a_date_are_one_pattern_per_p
     assert (pats[k26]["n"], pats[k26]["researched"], pats[k26]["decision"]) == (3, "never_payable", "pursue")
     assert (pats[k25]["n"], pats[k25]["researched"], pats[k25]["decision"]) == (2, "claim", "pursue")
     assert pats[k26]["answered"] is None                     # the payer-policy count did not find it: the research did
+    # no remittance answers these: the evidence is EMA's books, each period its own
+    why = json.loads(estore.conn.execute("SELECT value FROM meta WHERE key=?", (rp.WHY_META,)).fetchone()[0])["pairs"]
+    assert [(why[k]["answered"], why[k]["ema"]["answered"], why[k]["ema"]["paid"]) for k in (k26, k25)] == [(0, 3, 0), (0, 2, 0)]
+    words = rp.evidence_words(why[k26], "Optum (UHC)")
+    assert words[1].startswith("EMA's books, one row per billed service: insurance paid 0 of the 3 it shows answered") and "CO-96" in words[1]
     assert len(items(estore, "signal='EMA_DENIED'")) == 5
     ec.set_policy(estore.conn, k26, "accept", "owner")
     run(estore)
