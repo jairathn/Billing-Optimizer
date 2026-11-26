@@ -1,5 +1,5 @@
 {
- "repository_copy": "Copied on 2026-11-26 from the research's public table (payer_windows.md beside it is the same table for reading). Line counts and dollars of a group under 20 lines are left out.",
+ "repository_copy": "Copied on 2026-11-26 from the research's public table (payer_windows.md beside it is the same table for reading). Line counts and dollars of a group under 20 lines are left out. Changed in the auditor's review round (2026-11-27): umr.appeal now follows the UMR supplement's reference to the main guide (review a17-r1-6); the small groups' line counts are out of the disagreement texts, and the two Oxford names are counted only together, with no count (review a17-r2-7).",
  "built": "2026-11-26",
  "purpose": "Payer filing and appeal windows for the A17 independent claim auditor (Kentucky and Indiana practice)",
  "product_tables_compared": "remitwatch/codes.py (APPEAL_RULES, APPEAL_DEFAULTS, APPEAL_LEGAL_DEFAULTS, CORRECTED_RULES, FILING_RULES, FILING_DEFAULTS, FEP_LEGAL) on the integration branch",
@@ -2078,22 +2078,22 @@
    ],
    "lines_since_2024": 7407,
    "charged_since_2024": 1277211.52,
-   "window": "appeal_1",
+   "window": "appeal_1 and appeal_2 (one combined window)",
    "days": null,
-   "months": null,
+   "months": 12,
    "length_text": null,
-   "counted_from": "unknown",
+   "counted_from": "date_of_original_EOB_or_PRA",
    "receipt_days": 0,
-   "verified": false,
+   "verified": true,
    "agreement_may_set_another_period": true,
-   "source_title": null,
-   "section": null,
-   "revision": null,
-   "url": null,
-   "quote": null,
-   "quote_words": 0,
-   "notes": "If the plan is an ERISA group health plan, its members' appeal window is at least 180 days from receipt of the adverse determination (29 CFR 2560.503-1(h)(3)(i)).",
-   "tried": "The UMR and UHSS supplement describes the reconsideration form but states no time limit; the plan document governs.",
+   "source_title": "2026 UnitedHealthcare Care Provider Administrative Guide for Commercial, Individual Exchange, and Medicare Advantage",
+   "section": "UMR and UHSS supplement: Applicability of this supplement (p. 417); Claim reconsideration and appeals process (pp. 421-422, no time frame stated); Chapter 10: Our claims process, 5. Claim reconsideration and appeals process (p. 134)",
+   "revision": "2026 edition; PDF revised 2026-05-13",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+   "quote": "For protocols, policies and procedures not referenced in this supplement, refer to the appropriate chapter in the main guide.",
+   "quote_words": 19,
+   "notes": "The supplement's own reconsideration section gives the form and addresses but no time frame, and it supersedes the main guide only where they conflict; the main guide's chapter 10 says 'You must submit your reconsideration and appeal to us within 12 months from the date of the original claim EOB or PRA (or as required by law or your Agreement)' and that the 2-step process allows a total of 12 months for both steps. If the plan is an ERISA group health plan, its members' appeal window is at least 180 days from receipt of the adverse determination (29 CFR 2560.503-1(h)(3)(i)).",
+   "tried": null,
    "product": {
     "rule": "appeal_rule",
     "value": "12 months from the remittance date; legal limit shown {\"months\": 12}",
@@ -2102,7 +2102,7 @@
     "days": 365,
     "months": 12
    },
-   "compare": "not_compared",
+   "compare": "agrees",
    "disagreement": null
   },
   {
@@ -3930,7 +3930,7 @@
     "months": 12
    },
    "compare": "disagrees",
-   "disagreement": "The product's CHAMPVA rule matches '^champva' and misses the name 'Champ Va - Hac' (8 lines), which falls to the unknown-payer default: the same 12 months but unverified and with a 90-day earliest date.",
+   "disagreement": "The product's CHAMPVA rule matches '^champva' and misses the name 'Champ Va - Hac', which falls to the unknown-payer default: the same 12 months but unverified and with a 90-day earliest date.",
    "volume": "under 20 lines since 2024: count and dollars left out of the repository copy"
   },
   {
@@ -4564,8 +4564,8 @@
    "kinds": [
     "medicare"
    ],
-   "lines_since_2024": 39,
-   "charged_since_2024": 4180.34,
+   "lines_since_2024": null,
+   "charged_since_2024": null,
    "window": "appeal_1 and appeal_2 (one combined window)",
    "days": null,
    "months": 12,
@@ -4591,7 +4591,7 @@
     "months": null
    },
    "compare": "disagrees",
-   "disagreement": "Oxford claims carry filing indicator MB, so payer_group_kind makes the group kind 'medicare' and the product applies Medicare's 125-day redetermination window and 12-month first filing, both marked verified; Oxford is a UnitedHealthcare plan with a 12-month combined window and the agreement's filing limit. Any payer the name rules do not know whose claims carry MA or MB gets the same verified Medicare windows (for example 4 lines of a supplement carrier)."
+   "disagreement": "Oxford claims carry filing indicator MB, so payer_group_kind makes the group kind 'medicare' and the product applies Medicare's 125-day redetermination window and 12-month first filing, both marked verified; Oxford is a UnitedHealthcare plan with a 12-month combined window and the agreement's filing limit. Any payer the name rules do not know whose claims carry MA or MB gets the same verified Medicare windows (for example a supplement carrier's lines)."
   },
   {
    "id": "oxford.first_filing",
@@ -4603,8 +4603,8 @@
    "kinds": [
     "medicare"
    ],
-   "lines_since_2024": 39,
-   "charged_since_2024": 4180.34,
+   "lines_since_2024": null,
+   "charged_since_2024": null,
    "window": "first_filing",
    "days": null,
    "months": null,
@@ -4668,7 +4668,7 @@
     "months": 12
    },
    "compare": "disagrees",
-   "disagreement": "Small (7 lines): the product treats a workers' compensation claim (filing indicator WC) as an unknown payer with 12 months; Kentucky requires bills within 45 days of treatment. Indiana's rule was not checked.",
+   "disagreement": "Small: the product treats a workers' compensation claim (filing indicator WC) as an unknown payer with 12 months; Kentucky requires bills within 45 days of treatment. Indiana's rule was not checked.",
    "volume": "under 20 lines since 2024: count and dollars left out of the repository copy"
   },
   {

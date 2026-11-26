@@ -61,7 +61,7 @@ REVERSAL = "22"
 DONE = {"PAID", "MOVED_TO_PATIENT", "SETTLED_SECONDARY", "VOIDED", "ZERO_CHARGE", "NOT_PAYABLE"}
 OWED = {"DENIED", "SHORT", "TAKEN_BACK", "NEVER_ANSWERED", "WORKED_WAITING"}
 UNKNOWN = {"SECONDARY_ONLY", "IN_PROCESS", "NO_FEED", "FEED_STOPPED", "EMA_PAID_NO_REMIT", "EMA_VOIDED",
-           "NOT_SENT_UNKNOWN", "TWIN_ANSWERED"}
+           "NOT_SENT_UNKNOWN", "TWIN_ANSWERED", "TWIN_UNPROVEN"}
 
 # Item kinds by RemitWatch signal. D: about an unpaid unit (denial, bundling, claim denial). U: about a paid unit
 # (underpayment, downcode, code change). N: claim sent, no answer. T: a PLB take-back. A: aggregate, not one unit.
@@ -284,7 +284,7 @@ class Ans:
 class Svc:
     """A service group: (bill, code, component, date of service). Its units are 1..U."""
     __slots__ = ("key", "bill", "code", "comp", "dos", "lines", "answers", "sends", "ema", "emast", "U", "units",
-                 "in_scope", "scope_basis", "charge_pu", "pks", "eml", "ema_how", "notes", "twins")
+                 "in_scope", "scope_basis", "charge_pu", "pks", "eml", "ema_how", "notes", "twins", "twin_unproven")
 
     def __init__(self, key):
         self.key = key
@@ -304,13 +304,14 @@ class Svc:
         self.ema_how = ""    # how they were matched: bill, person, unique
         self.notes = set()   # side facts for the truth table (written off in EMA, secondary balance...)
         self.twins = []      # A17 rule 5: several send-day twins (EMA claims of the same lines that day), each a list
+        self.twin_unproven = []  # A17 rule 5: send-day twins whose EMA patient is not proven the bill's (each a list)
 
 
 class EmaLine:
     """One EMA Production claim line: (claim link, date of service, code), its postings added up. Keys and money only."""
     __slots__ = ("link", "svc", "cpt", "bill", "person", "charges", "units", "pays", "adjs", "answers", "status",
                  "action", "pnames", "primary", "pat_paid", "pat_adj", "allowed", "ar", "svcs", "first_posted",
-                 "last_posted", "bare", "first_charge", "facility")
+                 "last_posted", "bare", "first_charge", "facility", "cc_answers")
 
     def __init__(self, link, svc, cpt):
         self.link, self.svc, self.cpt = link, svc, cpt
@@ -335,13 +336,14 @@ class EmaLine:
         self.bare = []       # A17 rule 5: $0 rows under a check with no proof of an answer (posted, payer id, check)
         self.first_charge = ""   # A17 rule 5: the day EMA first posted the line's charge (its send-day twins)
         self.facility = False
+        self.cc_answers = []     # A17 rule 5: $0 rows that answer by their claim's check (posted, payer id, check)
 
 
 # unit tuple: state, sub, carc, fam, gov_line_key, gov_date, owed_cents (per unit), basis, window_end, inside(bool)
 UNIT_FIELDS = ("state", "sub", "carc", "fam", "gov_line_key", "gov_date", "owed", "basis", "window_end", "inside")
 # states a payment of the same service on another bill (same patient, code, component and date) settles
 LINKABLE = {"DENIED", "NEVER_ANSWERED", "WORKED_WAITING", "SECONDARY_ONLY", "IN_PROCESS", "NO_FEED", "FEED_STOPPED",
-            "EMA_PAID_NO_REMIT", "NOT_SENT_UNKNOWN", "TAKEN_BACK"}
+            "EMA_PAID_NO_REMIT", "NOT_SENT_UNKNOWN", "TAKEN_BACK", "TWIN_UNPROVEN"}
 DUP_CARCS = {"18", "B13"}
 # a payer that (almost) never pays a code is "not payable" only when the denial itself says bundled / not paid
 # separately / zero contractual rate; authorization, coverage, eligibility or enrolment denials stay owed
@@ -446,6 +448,7 @@ WINDOW_UNBOUNDED = "9999-12-31"
 # from CLP06 FI or the contract class), never by RemitWatch's. Tried in order; the first rule that matches wins. A row
 # group the table names by a payer's exact name (its "other" rows) is tried before these rules.
 _UHC_NAMES = r"\bUNITED ?HEALTH ?CARE\b|^UHC\b|\bUNITEDHEALTHCARE\b"
+_SUPP_WORDS = r"\b(SUPPLEMENT|SUPPLEMENTAL|MEDIGAP)\b"
 _ANTHEM_NAMES = r"^ANTHEM\b|\bANTHEM BLUE\b|\bBLUE ?CROSS\b|\bBLUE ?SHIELD\b|^BCBS\b|\bBLUECARD\b|\bWELLPOINT\b|\bELEVANCE\b"
 _MEDSUPP_NAMES = (r"\bMUTUAL OF OMAHA\b|\bMEDICO\b|\bGREAT AMERICAN LIFE\b|\bAMERICAN ENTERPRISE\b|\bBANKERS FIDELITY\b|"
                   r"\bWELLABE\b|\bPHYSICIANS MUTUAL\b|\bCOMBINED INSURANCE\b|\bCOMPANION LIFE\b|\bFORETHOUGHT\b|"
@@ -464,11 +467,13 @@ WINDOW_GROUP_RULES = (
     ("oxford", {"names": r"\bOXFORD HEALTH\b"}),                   # a UnitedHealthcare company, not Medicare
     ("uhis", {"names": r"\bUNITEDHEALTH INTEGRATED\b|\bWAUSAU\b"}),
     ("umr", {"fams": {"UMR"}, "names": r"\bUNITED MEDICAL RESOURCES\b|^UMR\b"}),
-    ("aarp_medsupp", {"names": r"\bAARP\b.*\bSUPPLEMENT"}),
-    ("uhc_ma", {"names": _UHC_NAMES, "prods": {"16"}}),
+    ("aarp_medsupp", {"names": r"\bAARP\b.*\bSUPPLEMENT|(\bUNITED ?HEALTH ?CARE\b|^UHC\b|\bUNITEDHEALTHCARE\b).*"
+                               r"\b(SUPPLEMENT|SUPPLEMENTAL|MEDIGAP)\b"}),
+    # UnitedHealthcare's guide covers its commercial, exchange and Medicare Advantage plans, not its Medicare supplements
+    ("uhc_ma", {"names": _UHC_NAMES, "prods": {"16"}, "not_names": _SUPP_WORDS}),
     ("uhc_ma", {"names": r"(\bUNITED ?HEALTH ?CARE\b|^UHC\b|\bUNITEDHEALTHCARE\b|\bAARP\b).*\b(MEDICARE|ADVANTAGE|COMPLETE)\b",
-                "not_prods": {"MC"}}),
-    ("uhc", {"names": _UHC_NAMES, "not_prods": {"MC"}}),           # its Medicaid plans have no row
+                "not_prods": {"MC"}, "not_names": _SUPP_WORDS}),
+    ("uhc", {"names": _UHC_NAMES, "not_prods": {"MC"}, "not_names": _SUPP_WORDS}),   # its Medicaid plans have no row
     ("humana_caid", {"fams": {"HUMANA"}, "names": r"^HUMANA\b", "prods": {"MC"}}),
     ("humana_ma", {"fams": {"HUMANA"}, "names": r"^HUMANA\b", "prods": {"16"}}),
     ("humana_ma", {"names": r"^HUMANA\b.*\b(MEDICARE|ADVANTAGE|GOLD)\b|\bHUMANA CARE ?PLAN\b", "not_prods": {"MC"}}),
@@ -496,6 +501,10 @@ WINDOW_GROUP_RULES = (
                       r"\bBENEFITS? ADMIN|\bHEALTH BENEFIT\b|\bBENEFITS COMPANIES\b|\bBENEFIT SERVICES\b"}),
     ("workers_comp", {"names": r"\bGALLAGHER BASSETT\b"}),
 )
+# review a17-r1-3: groups a payer is by its payer id (public payer ids), tried before any name: the VA's community care
+# networks (Optum's VACCN, TriWest's TWVACCN) and UnitedHealthcare's AARP Medicare Supplement (36273), whose claims
+# carry UnitedHealthcare's names. A payer id named here never takes another group's rows, even with no rows of its own.
+WINDOW_GROUP_IDS = {"VACCN": "va_ccn", "TWVACCN": "va_ccn", "36273": "aarp_medsupp"}
 # row groups read as one (the same payer's plans the remittance does not tell apart)
 WINDOW_KEY_ALIAS = {"anthem_caid_in": "anthem_caid", "humana_caid_careplan": "humana_caid"}
 # How the auditor uses particular rows (by row id), each with its reason:
@@ -833,14 +842,23 @@ class PayerWindows:
         for key in sorted(set(by_key) - ruled):
             self.problems["rows_without_rule:" + key] += 1
 
-    def find(self, fam, prod, names):
-        """The table's entry for a payer family, product (CLP06; FI for the Federal Employee Program) and payer names;
-        None when none matches."""
+    def find(self, fam, prod, names, pids=()):
+        """The table's entry for a payer family, product (CLP06; FI for the Federal Employee Program), payer names and
+        payer ids (the family's own id, or the ids its name is sent under); None when none matches."""
         if not self.entries:
             return self.default
         fam_u = (fam or "").upper()
         pr = (prod or "").split("#")[0]
         if self.form == "research":
+            # review a17-r1-3: a payer id the auditor's id table names decides the group before any name (the VA's
+            # network and UHC's Medicare supplement are sent under UnitedHealthcare's names); with no rows, no group
+            ids = {str(x).strip().upper() for x in pids or () if x}
+            if fam_u.startswith("ID:"):
+                ids.add(fam_u[3:])
+            for pid in sorted(ids):
+                if pid in WINDOW_GROUP_IDS:
+                    key = WINDOW_GROUP_IDS[pid]
+                    return next((e for e in self.entries if e["id"] == key), None)
             # the payer's own name first (a plan named on the remittance, such as an FEHB plan a third party pays for,
             # is that plan's), then the payer family its id names
             nms = {norm_name(n) for n in names or () if n}
@@ -1040,15 +1058,28 @@ def load_ema_books(R, con, ledger=None):
         E.pat_adj += pat_adj or 0
         if allowed and allowed > E.allowed:
             E.allowed = allowed
-    n_bare = 0
+    n_bare = n_cc = 0
+    # A17 rule 5 (review a17-r1-2): a $0 row is judged with its claim and check, not alone. A check that paid, allowed
+    # or gave a reason to any line of the same EMA claim that day answered that claim: a $0 row of another of its lines
+    # on that check is that line's answer (a denial whose reason EMA may post days later, or never). A row stays bare
+    # only when no line of its EMA claim has money, an allowed amount or a reason on that check that day.
+    claim_check = set()
+    for key, posted, payer, chk, ins_paid, allowed in chk_rows:
+        if ins_paid or allowed or (key, posted) in reason_days:
+            claim_check.add((key[0], chk, posted))
     for key, posted, payer, chk, ins_paid, allowed in chk_rows:
         E = lines[key]
         if ins_paid or allowed or (key, posted) in reason_days:
             E.answers.append((posted, payer, chk))
+        elif (key[0], chk, posted) in claim_check:
+            E.answers.append((posted, payer, chk))
+            E.cc_answers.append((posted, payer, chk))
+            n_cc += 1
         else:
             E.bare.append((posted, payer, chk))
             n_bare += 1
     R.ema_bare_rows = n_bare
+    R.ema_claim_check_rows = n_cc
     del chk_rows, reason_days
     # patient money (posted with no claim link) joins a claim line when exactly one line has that person, day and code
     n_lines = Counter((E.person, E.svc, E.cpt) for E in lines.values() if E.person is not None)
@@ -2039,7 +2070,34 @@ class Audit:
             names = {self.fams.label(fam)} if fam else set()
             if fam and fam.startswith(("EMA:", "NM:")):
                 names.add(fam.split(":", 1)[1])
-        return self.windows.find(fam, prod, names)
+        # review a17-r1-3: a family with no payer id of its own (an EMA or name family) is read by the payer id its
+        # name is sent under, when one id holds 95% of that name's claims
+        pids = set()
+        if fam and not fam.startswith("ID:"):
+            pids = {self.name_pid()[norm_name(n)] for n in names if norm_name(n) in self.name_pid()}
+        return self.windows.find(fam, prod, names, pids)
+
+    def name_pid(self):
+        """review a17-r1-3: payer name -> the payer id that name is sent and answered under (837s and 835s; 3 claims or
+        more, 95% of them under one specific id)."""
+        m = getattr(self, "_name_pid", None)
+        if m is None:
+            c = defaultdict(Counter)
+            for row in self.R.c837:
+                sid = specific_payer_id(row[6])
+                if row[5] and sid:
+                    c[norm_name(row[5])][sid] += 1
+            for row in self.R.claims:
+                sid = specific_payer_id(row[14])
+                if row[13] and sid:
+                    c[norm_name(row[13])][sid] += 1
+            m = {}
+            for nm, ids in c.items():
+                sid, k = ids.most_common(1)[0]
+                if nm and k >= 3 and k >= 0.95 * sum(ids.values()):
+                    m[nm] = sid
+            self._name_pid = m
+        return m
 
     @staticmethod
     def wprod(p):
@@ -2112,9 +2170,17 @@ class Audit:
     def never_answered_end(self, fam, prod, dos, sent):
         """A claim sent and never answered (A17 rule 4): the payer's first-filing limit from the date of service (the
         table's, else A16's 365 days), and at least 180 days from the send (the practice holds the proof of timely filing
-        a resubmission needs: the auditor's own allowance, which only ever extends a window)."""
-        ends = [x for x in (self.filing_end(fam, prod, dos, sent, default_days=365) if dos else None,
-                            add_days(sent, 180) if sent else None) if x]
+        a resubmission needs: the auditor's own allowance, which only ever extends a window). The allowance has no source:
+        with a window table loaded a unit that rests on it alone is unverified, never counted as inside a verified window
+        (review a17-r1-7)."""
+        f = self.filing_end(fam, prod, dos, sent, default_days=365) if dos else None
+        allow = add_days(sent, 180) if sent else None
+        if allow and self.windows.strict:
+            if f and allow <= f:
+                allow = None          # the payer's limit ends later: the window rests on it alone
+            else:
+                allow = WEnd(allow, False, allow, "send_180_allowance")
+        ends = [x for x in (f, allow) if x]
         if not ends:
             return ""
         return wmax(*ends) if self.windows.strict else max(ends)
@@ -2291,7 +2357,11 @@ class Audit:
         answers there sit at the payer's full rate or at 85% of it, and 60% of all its clean answers there at one (a
         clinician the payer pays at another share, 89% say, has no tier: a few answers at the full rate on another code
         do not make one). For each payer, product class and state: the tier it pays NP/PA clinicians at there, when every
-        NP/PA clinician with a tier there has the same one (2 clinicians at least)."""
+        NP/PA clinician with a tier there has the same one (2 clinicians at least).
+        Each tier is learned per service year as well, as the full rate it is a share of is (review a17-r1-1: a payer
+        that paid an NP in full through 2025 and at 85% on every 2026 answer). The year's own tier wins; the tier read
+        over every year stands for a year without enough answers of its own only while that year's answers do not lean
+        the other way (tier_in_state)."""
         st_obs = defaultdict(Counter)
         st_all = Counter()
         for A, apu, yr, pc in getattr(self, "_clean_rate_answers", []):
@@ -2306,32 +2376,69 @@ class Audit:
                 continue
             r = apu / full
             key = (p.fam, self.tier_class(p.rprod), A.npi, state)
-            st_all[key] += 1
             b = "100" if abs(r - 1) <= 0.015 else "85" if abs(r - 0.85) <= 0.015 else None
-            if b:
-                st_obs[key][b] += 1
-        self.state_tier = {}
+            for k in (key, key + (yr,)):
+                st_all[k] += 1
+                if b:
+                    st_obs[k][b] += 1
+        tiers = {}
         for k, c in st_obs.items():
             n = sum(c.values())
             b, m = c.most_common(1)[0]
             if n >= 5 and m >= 0.6 * n and m >= 0.6 * st_all[k]:
-                self.state_tier[k] = b
+                tiers[k] = b
+        # (fam, class, npi, state) -> tier over every year; the same key with the service year -> that year's tier
+        self.state_tier = {k: b for k, b in tiers.items() if len(k) == 4}
+        self.state_tier_y = {k: b for k, b in tiers.items() if len(k) == 5}
+        self._st_obs, self._st_all = st_obs, st_all
         per = defaultdict(Counter)
-        for (fam, cls, npi, state), b in self.state_tier.items():
-            if self.np_type.get(npi):
-                per[(fam, cls, state)][b] += 1
-        self.state_np_tier = {k: next(iter(c)) for k, c in per.items() if len(c) == 1 and sum(c.values()) >= 2}
+        for k, b in tiers.items():
+            if self.np_type.get(k[2]):
+                per[(k[0], k[1], k[3]) + k[4:]][b] += 1
+        self.state_np_tier = {k: next(iter(c)) for k, c in per.items() if len(k) == 3 and len(c) == 1 and
+                              sum(c.values()) >= 2}
+        # per year: the NP/PA tiers of that year's clinicians (a state-wide tier, or the evidence against the pooled one)
+        self._state_np_year = {k: c for k, c in per.items() if len(k) == 4}
         self.stats["state_tiers"] = len(self.state_tier)
+        self.stats["state_tiers_by_year"] = len(self.state_tier_y)
         self.stats["state_np_tiers"] = len(self.state_np_tier)
 
-    def tier_in_state(self, fam, prod, npi, state):
-        """The tier ('100' or '85') a payer pays this clinician at in this office's state, or None (A17 rule 1)."""
+    def tier_in_state(self, fam, prod, npi, state, year=None):
+        """The tier ('100' or '85') a payer pays this clinician at in this office's state in this service year, or None
+        (A17 rule 1). In order: the clinician's own tier of that year; its tier over every year, unless fewer than half
+        of its answers of that year sit at it; for an NP/PA, the tier every NP/PA with a tier of that year has there (2
+        at least; none when they differ), else the state-wide NP/PA tier over every year, unless an NP/PA's tier of that
+        year or the clinician's own answers of that year say otherwise."""
         if not npi or not state or "state" in self.disable:
             return None
         cls = self.tier_class(prod)
-        t = getattr(self, "state_tier", {}).get((fam, cls, npi, state))
-        if t is None and self.np_type.get(npi):
-            t = getattr(self, "state_np_tier", {}).get((fam, cls, state))
+        k = (fam, cls, npi, state)
+        st_obs, st_all = getattr(self, "_st_obs", {}), getattr(self, "_st_all", {})
+
+        def leans_away(t):
+            # the clinician's own answers of the year: fewer than half of them at the pooled tier
+            n = st_all.get(k + (year,), 0) if year else 0
+            return n > 0 and st_obs.get(k + (year,), {}).get(t, 0) < 0.5 * n
+        if year:
+            t = getattr(self, "state_tier_y", {}).get(k + (year,))
+            if t is not None:
+                return t
+        t = getattr(self, "state_tier", {}).get(k)
+        if t is not None and not leans_away(t):
+            return t
+        if not self.np_type.get(npi):
+            return None
+        ks = (fam, cls, state)
+        t = getattr(self, "state_np_tier", {}).get(ks)
+        if year:
+            yc = getattr(self, "_state_np_year", {}).get(ks + (year,))
+            if yc:
+                if len(yc) == 1 and (sum(yc.values()) >= 2 or next(iter(yc)) == t):
+                    t = next(iter(yc))
+                else:
+                    return None        # that year's NP/PA tiers differ, or one contradicts the pooled tier
+        if t is not None and leans_away(t):
+            return None
         return t
 
     def build_rates(self):
@@ -2493,7 +2600,14 @@ class Audit:
                 continue
             if not self.is_surgical(s.code) or s.code in ADDON_CODES or self.is_unlisted(s.code):
                 continue
-            if A.paid_tb <= 0 or A.up != 1 or A.ub != 1 or A.allowed <= 0 or A.changed:
+            if A.ub != 1 or A.allowed <= 0 or A.changed:
+                continue
+            if A.paid_tb > 0:
+                if A.up != 1:
+                    continue
+            elif A.paid != 0 or abs(sum(a for g, r, a in A.cas if g == "PR") - A.allowed) > 1:
+                # review a17-r1-5: a procedure the payer allowed but put wholly on the patient (a deductible) is one of
+                # the day's procedures too, ranked by what it was allowed; a payment taken back or a denial is not
                 continue
             if set(A.mods) & REDUCING_MODS:
                 continue
@@ -2602,7 +2716,7 @@ class Audit:
         full = self.full_rate.get(key6, pm[0])
         exp, tier = full, "payer"
         pt = self.prov_tier.get(key6 + (npi or "",)) if npi else None
-        st_t = self.tier_in_state(fam, prod, npi, state)
+        st_t = self.tier_in_state(fam, prod, npi, state, year)
         if st_t is not None and (pt is None or pt[0] in ("same", "np85")):
             if st_t == "85":
                 exp, tier = int(round(0.85 * full)), "np85_state"
@@ -2628,7 +2742,7 @@ class Audit:
             return True
         if not npi:
             return True
-        st_t = self.tier_in_state(fam, prod, npi, state)
+        st_t = self.tier_in_state(fam, prod, npi, state, year)
         if st_t is not None:
             return st_t == "85"
         key6 = (fam, prod, code, comp, year, pc)
@@ -2917,7 +3031,9 @@ class Audit:
             else:
                 left.append(s)
         by_dcc = defaultdict(list)
+        lines_by_link0 = defaultdict(list)
         for E in lines.values():
+            lines_by_link0[E.link].append(E)
             if not E.svcs and not E.bill:
                 by_dcc[(E.svc, E.cpt, E.charges)].append(E)
         for s in left:
@@ -2927,6 +3043,10 @@ class Audit:
             c = [E for E in c if not E.svcs]
             # A17 rule 5: an EMA line of another payer than the one the bill went to is not the bill's
             c = [E for E in c if self.same_payer_keys(self.ema_payer_keys([E]), self.bill_payers.get(s.bill))]
+            if len(c) == 1 and self.ema_patient(s.bill, lines_by_link0.get(c[0].link, [c[0]])) == "other":
+                # A17 rule 5 (review a17-r1-4): an EMA line proven another patient's is not the bill's
+                n["unique_rejected_other_patient"] += 1
+                continue
             if len(c) == 1:
                 s.eml, s.ema_how = c, "unique"
                 c[0].svcs.append(s)
@@ -2998,7 +3118,13 @@ class Audit:
         center's facility claims): its send-day twins. They are used one to one only: when no more bills went out that
         day with those lines to that payer (and no EMA claim of their own) than there are such EMA claims. One twin is the bill's EMA claim (its lines are
         the bill's services' EMA lines); several make the bill answered only when every one of them is (truth:
-        twin_answer)."""
+        twin_answer).
+        A twin is the bill's only when its EMA patient is proven the bill's (review a17-r1-4: one day's lines of one
+        patient are often another patient's too): the EMA patient of the twin's lines, through the other claims of that
+        patient the link map ties to bills, holds the bill's patient (a patient key, or the bill's subscriber id at the
+        same payer). A twin proven another patient's (the payer's own member ids differ) is dropped. A bill whose
+        remaining twins are of a patient the auditor cannot prove is 'twin unproven' (its own state, neither paid nor
+        owed). One EMA claim is never the twin of two bills: a twin proven for two bills is used by neither."""
         R = self.R
         self.twin_of = {}
         if "twins" in self.disable:
@@ -3046,6 +3172,7 @@ class Audit:
                 consumers[(bht, ls)].append(bill)
         self.twin_of = {}
         n = Counter()
+        cand = {}
         for key in sorted(consumers):
             groups = defaultdict(list)
             for bill in consumers[key]:
@@ -3057,9 +3184,63 @@ class Audit:
                 if len(bills) > len(links):
                     n["twins_more_bills_than_twins"] += len(bills)
                     continue
-                self.assign_twins(bills, list(links), by_link, n)
+                for bill in bills:
+                    cand[bill] = list(links)
+        verdict = {(bill, lk): self.ema_patient(bill, by_link[lk]) for bill, links in cand.items() for lk in links}
+        proven_for = Counter(lk for (bill, lk), v in verdict.items() if v == "same")
+        for bill in sorted(cand):
+            proven = [lk for lk in cand[bill] if verdict[(bill, lk)] == "same" and proven_for[lk] == 1]
+            maybe = [lk for lk in cand[bill] if verdict[(bill, lk)] == "unknown" or
+                     (verdict[(bill, lk)] == "same" and proven_for[lk] > 1)]
+            n["twin_links_other_patient"] += sum(1 for lk in cand[bill] if verdict[(bill, lk)] == "other")
+            if proven:
+                self.assign_twins([bill], proven, by_link, n)
+            elif maybe:
+                n["bills_twin_unproven"] += 1
+                for skey in self.bill_svcs.get(bill, ()):
+                    sv = self.svcs.get(skey)
+                    if sv is None or sv.eml or not sv.dos:
+                        continue
+                    tw = [[E for E in by_link[lk] if E.svc == sv.dos and E.cpt == sv.code] for lk in maybe]
+                    sv.twin_unproven = [x for x in tw if x]
+            else:
+                n["bills_twins_all_other_patients"] += 1
         for k, v in n.items():
             self.stats["ema_" + k] = v
+
+    def ema_patient(self, bill, Es):
+        """A17 rule 5 (review a17-r1-4): whether EMA claim lines Es are the bill's patient's: 'same' (the EMA patient's
+        other claims, those the link map ties to bills, hold the bill's patient key or its subscriber id at the same
+        payer), 'other' (they hold subscriber ids at the bill's payer, none the bill's), else 'unknown'. A name key
+        alone never makes another patient (its spelling can differ between payers)."""
+        idx = getattr(self, "_patient_idx", None)
+        if idx is None:
+            bill_pk = defaultdict(set)
+            for sv in self.svcs.values():
+                if sv.pks:
+                    bill_pk[sv.bill] |= sv.pks
+            bill_sub = defaultdict(set)
+            for (k, bht, pcn, total, freq, pname, pid, sdate, pos, sub) in self.R.c837:
+                if sub and (freq or "").strip() != "8":
+                    fam = self.map837.get((norm_name(pname), specific_payer_id(pid))) or self.fams.of(pname, pid)
+                    bill_sub[split_claim_id((pcn or "").strip().upper())[0]].add((fam, sub))
+            person_bills = defaultdict(set)
+            for E in (getattr(self.R, "ema_lines", {}) or {}).values():
+                if E.person is not None and E.bill:
+                    person_bills[E.person].add(E.bill)
+            idx = self._patient_idx = (bill_pk, bill_sub, person_bills)
+        bill_pk, bill_sub, person_bills = idx
+        persons = {E.person for E in Es if E.person is not None}
+        other = set().union(*(person_bills.get(x, set()) for x in persons)) - {bill} if persons else set()
+        if not other:
+            return "unknown"
+        pk_b, sub_b = bill_pk.get(bill, set()), bill_sub.get(bill, set())
+        pk_o = set().union(*(bill_pk.get(b2, set()) for b2 in other))
+        fams_b = {f for f, x in sub_b}
+        sub_o = {(f, x) for b2 in other for f, x in bill_sub.get(b2, ()) if f in fams_b}
+        if (pk_b & pk_o) or (sub_b & sub_o):
+            return "same"
+        return "other" if sub_o else "unknown"
 
     def ema_payer_keys(self, Es):
         """A17 rule 5: the payer of EMA lines, as families and payer names (EMA's primary payer, else the payers that
@@ -3115,6 +3296,17 @@ class Audit:
             return ("PAID", "send_day_twins_all_paid", "", "", "", d, 0, "", "", False)
         return ("TWIN_ANSWERED", "send_day_twins_all_answered", "", "", "", d, 0, "", "", False)
 
+    @staticmethod
+    def twin_unproven_answer(s):
+        """A17 rule 5 (review a17-r1-4): a service whose send-day twins are of an EMA patient the auditor cannot prove
+        is the bill's: 'TWIN_UNPROVEN' when one of them holds an answer (a payment or a payer's answer row), with the
+        first such day; None when none does (the claim stays unanswered)."""
+        dates = [x[0] for Es in s.twin_unproven for E in Es for x in E.pays if x[2]] + \
+            [x[0] for Es in s.twin_unproven for E in Es for x in E.answers]
+        if not dates:
+            return None
+        return ("TWIN_UNPROVEN", "send_day_twin_patient_unproven", "", "", "", min(dates), 0, "", "", False)
+
     def efam(self, payer_id):
         f = self.ema_pfam.get(payer_id)
         if f:
@@ -3129,7 +3321,7 @@ class Audit:
         if ef is not None:
             return ef
         ef = {"pays": [], "adjs": [], "answers": [], "status": {}, "action": {}, "ar": [], "pat_paid": 0,
-              "charges": 0, "paid": 0, "allowed": 0, "shared": [], "voided": False, "primary": None}
+              "charges": 0, "paid": 0, "allowed": 0, "shared": [], "voided": False, "primary": None, "cc": []}
         st_all = []
         for E in s.eml:
             for (d, pay, amt, chk, on) in E.pays:
@@ -3139,6 +3331,8 @@ class Audit:
                 ef["adjs"].append((d, self.efam(pay), g, c, ca + nc, nc))
             for (d, pay, chk) in E.answers + (E.bare if "bare" in self.disable else []):
                 ef["answers"].append((d, self.efam(pay)))
+            for (d, pay, chk) in getattr(E, "cc_answers", ()):
+                ef["cc"].append((d, self.efam(pay)))
             for pay, st in E.status.items():
                 ef["status"][self.efam(pay)] = st
                 st_all.append(st)
@@ -3214,6 +3408,9 @@ class Audit:
             return None
         stat = {f: st for f, st in ef["status"].items() if f not in excl}
         ans = [(d, f) for d, f in ef["answers"] if f not in excl]
+        # A17 rule 5 (review a17-r1-2): the line's $0 row on a check that paid, allowed or gave a reason to its EMA
+        # claim's other lines that day is the payer's answer for the line, whatever EMA's status says
+        cc = [(d, f) for d, f in ef.get("cc", []) if f not in excl]
         denied = [f for f, st in stat.items() if st == "Denied"]
         resolved = [f for f, st in stat.items() if st.startswith("Resolved")]
         # A17 rule 5 (fix7b's rule): a status alone never answers. A Denied status stands with the payer's answer row
@@ -3223,12 +3420,18 @@ class Audit:
         proof = {f for d, f in ans} | {f for d, f, g, c, a, n in ef["adjs"] if g or c}
         if "bare" not in self.disable:
             denied = [f for f in denied if f in proof or wk0]
-        if not denied and not (ans and resolved):
+        if not denied and not (ans and resolved) and not cc:
             return None
-        fams = set(denied) | {f for d, f in ans if f in resolved}
+        fams = set(denied) | {f for d, f in ans if f in resolved} | {f for d, f in cc}
         last = max([d for d, f in ans if f in fams] + [d for d, f, g, c, a, n in ef["adjs"] if f in fams] + [""])
         fam = denied[0] if denied else [f for d, f in ans if f in fams and d == last][0] if \
             any(d == last for d, f in ans if f in fams) else sorted(fams)[0]
+
+        def answered_on(day):
+            # a reason posted after the payer's check belongs to that check's answer: the denial is dated by the
+            # payer's latest answer row on or before the reason's day (its remittance), else by the reason's day
+            ds = [d for d, f in ans if f == fam and d <= day]
+            return max(ds) if ds else day
         reasons = Counter()
         routine = 0
         for d, f, g, c, amt, nc in ef["adjs"]:
@@ -3245,11 +3448,23 @@ class Audit:
         if reasons:
             (g, c), amt = reasons.most_common(1)[0]
             dd = max((d for d, f2, g2, c2, a2, n2 in ef["adjs"] if f2 in fams and c2 == c), default=last)
-            return ("DENIED", f"{g}-{c}", fam, dd or last)
+            return ("DENIED", f"{g}-{c}", fam, answered_on(dd or last))
         if denied:
             return ("DENIED", wden[0] if wden else "EMA-denied", fam, last)
         if wden:
             return ("DENIED", wden[0], fam, last)
+        cc_days = [d for d, f in cc if f == fam]
+        own = Counter((d, f) for d, f in ans if f == fam) - Counter(cc)     # the line's own answer rows
+        if cc_days and not own:
+            # answered only by its claim's check and no reason a payer gave: the payer's share went to the patient
+            # (a PR row), the payer allowed nothing (CO-45 alone), else a denial whose reason EMA never posted
+            day = max(cc_days)
+            prs = sorted((d, c) for d, f, g, c, amt, nc in ef["adjs"] if f == fam and g == "PR" and amt > 0)
+            if prs or wpr:
+                return ("MOVED_TO_PATIENT", wpr[0] if wpr else "PR-" + prs[-1][1], fam, day)
+            if routine > 0:
+                return ("ZERO_RATE", "CO-45", fam, day)
+            return ("DENIED", "EMA-no-reason", fam, day)
         if wpr or ef["charges"] - routine > 100 or ef["pat_paid"] > 0:
             return ("MOVED_TO_PATIENT", wpr[0] if wpr else "", fam, last)
         return ("ZERO_RATE", "CO-45", fam, last)
@@ -3638,6 +3853,12 @@ class Audit:
             tw = self.twin_answer(s)
             if tw is not None:
                 return units + [tw] * rest
+        if s.twin_unproven:
+            # A17 rule 5 (review a17-r1-4): EMA claims of the bill's lines that day hold an answer, but their EMA patient
+            # is not proven the bill's: neither paid nor owed (undecided), listed apart
+            tu = self.twin_unproven_answer(s)
+            if tu is not None:
+                return units + [tu] * rest
         if sec:
             ls = max(sec, key=lambda A: A.p.ordk)
             return units + [("SECONDARY_ONLY", "primary_remittance_missing", "", ls.p.fam, ls.lk, ls.p.date, 0, "", "",
@@ -6506,18 +6727,37 @@ def build_selftest_store():
                                                (25, "adj", 5000, T1, ("CO", "45", False))],
                bill="ZZ75ZPAT1", status="Resolved/Paid")
     F.exp("unit", ("ZZ75ZPAT1", "99213", "G", "2026-06-05"), "MOVED_TO_PATIENT", guard=True)
-    F.send837("ZZ76TWIN1C017", "2026-06-10", oneline("99213", 15000, 0, "2026-06-08"))
+    # (review a17-r1-4: a twin is the bill's only when its EMA patient is proven the bill's: each twin's EMA patient has
+    # another EMA claim the link map ties to a bill sent under the same subscriber id at the same payer)
+    def proof(person, link, bill, sub, dos):
+        F.send837(bill + "C017", add_days(dos, 1), oneline("99212", 9000, 0, dos), sub=sub)
+        F.ema_line(link, dos, "99212", [(0, "charge", 9000, T1, None), (30, "pay", 6000, T1, "CHKP%d" % link)],
+                   bill=bill, person=person)
+    F.send837("ZZ76TWIN1C017", "2026-06-10", oneline("99213", 15000, 0, "2026-06-08"), sub="SUBTW1")
     F.ema_line(900601, "2026-06-08", "99213", [(2, "charge", 15000, T1, None), (30, "pay", 8000, T1, "CHKTW1")],
                person=7601)
     F.ema_line(900602, "2026-06-08", "99213", [(5, "charge", 15000, T1, None), (30, "pay", 8000, T1, "CHKTW2")],
                person=7602)
+    proof(7601, 900603, "ZZ76TWP01", "SUBTW1", "2026-05-01")
     F.exp("sub", ("ZZ76TWIN1", "99213", "G", "2026-06-08"), ("PAID", "ema_paid_off_feed"))
-    for tw in ("ZZ76TWIN2C017", "ZZ76TWIN3C017"):
-        F.send837(tw, "2026-06-17", oneline("99212", 9000, 0, "2026-06-16"))
+    for tw, sub_ in (("ZZ76TWIN2C017", "SUBTW2"), ("ZZ76TWIN3C017", "SUBTW3")):
+        F.send837(tw, "2026-06-17", oneline("99212", 9000, 0, "2026-06-16"), sub=sub_)
     for lk, per in ((900611, 7611), (900612, 7612)):
         F.ema_line(lk, "2026-06-16", "99212", [(1, "charge", 9000, T1, None), (30, "pay", 6000, T1, "CHK%d" % lk)],
                    person=per)
-    F.exp("sub", ("ZZ76TWIN2", "99212", "G", "2026-06-16"), ("PAID", "send_day_twins_all_paid"))
+    proof(7611, 900613, "ZZ76TWP02", "SUBTW2", "2026-05-04")
+    proof(7612, 900614, "ZZ76TWP03", "SUBTW3", "2026-05-05")
+    # two bills of the same lines that day, each twin proven one bill's patient: each bill takes its own
+    F.exp("sub", ("ZZ76TWIN2", "99212", "G", "2026-06-16"), ("PAID", "ema_paid_off_feed"))
+    F.exp("sub", ("ZZ76TWIN3", "99212", "G", "2026-06-16"), ("PAID", "ema_paid_off_feed"))
+    # one patient with two EMA claims of the bill's lines that day (a charge entered twice), both proven: answered only
+    # when both are, here both paid
+    F.send837("ZZ76TWIN8C017", "2026-07-07", oneline("99214", 21000, 0, "2026-07-06"), sub="SUBTW8")
+    for lk in (900615, 900616):
+        F.ema_line(lk, "2026-07-06", "99214", [(1, "charge", 21000, T1, None), (30, "pay", 9000, T1, "CHK%d" % lk)],
+                   person=7618)
+    proof(7618, 900617, "ZZ76TWP08", "SUBTW8", "2026-05-06")
+    F.exp("sub", ("ZZ76TWIN8", "99214", "G", "2026-07-06"), ("PAID", "send_day_twins_all_paid"))
     for tw in ("ZZ76TWIN4C017", "ZZ76TWIN5C017", "ZZ76TWIN6C017"):
         F.send837(tw, "2026-06-24", oneline("99212", 9000, 0, "2026-06-23"))
     for lk, per in ((900621, 7621), (900622, 7622)):
