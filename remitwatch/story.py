@@ -104,7 +104,8 @@ def _codes(adj: Sequence, rmk: Sequence = (), status: str | None = None) -> list
 
 def _row(date: Any, source: str, kind: str, text: str, *, payer: Any = None, amount: int | None = None, codes: list | None = None,
          tags: Sequence = (), line: str | None = None, **extra: Any) -> dict:
-    r = {"n": 0, "date": str(date)[:10] if date else None, "source": source, "kind": kind, "payer": payer or None,
+    # a stored day as written; a moment (a person's mark, a fax) on the practice's calendar, as the states date it
+    r = {"n": 0, "date": S._pday(date) or None, "source": source, "kind": kind, "payer": payer or None,
          "amount_cents": amount, "codes": codes or [], "text": text, "decisive": False, "line": line, "tags": list(tags)}
     r.update(extra)
     return r

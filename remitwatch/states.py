@@ -39,6 +39,8 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
+from .runtime import practice_date
+
 STATES = ("work_now", "waiting", "done", "accepted", "expired", "cant_check")
 LABELS = {"work_now": "Work now", "waiting": "Waiting", "done": "Done", "accepted": "Accepted", "expired": "Expired",
           "cant_check": "Can't be checked"}
@@ -114,9 +116,21 @@ def _today(today: Any) -> str:
     return practice_today()
 
 
+def _pday(v: Any) -> str:
+    """YYYY-MM-DD of a stored day as written, or of a stored moment (an ISO time with its zone, as every record is
+    written) on the practice's calendar (runtime.practice_date): a person's mark or a fax at 9:30 PM Eastern is that
+    day's, never UTC's next day. '' when there is none. (A plain day, by far the most read, skips the parsing.)"""
+    if not v:
+        return ""
+    s = str(v)
+    return s if len(s) == 10 else practice_date(s)
+
+
 def _d(iso: Any) -> date | None:
+    """A stored day, or the practice's date of a stored moment (_pday): every day the states count with, compare or say
+    is the practice's, as today is."""
     try:
-        return date.fromisoformat(str(iso)[:10])
+        return date.fromisoformat(_pday(iso))
     except (TypeError, ValueError):
         return None
 
@@ -1162,22 +1176,22 @@ def _evidence(fx: dict) -> list[dict]:
             note = str(e.get("note") or "")
             if kind == "sent" and note.startswith("Billed:"):
                 # the page's Mark billed: the claim went to the next payer (or the patient), not an appeal to this one
-                out.append({"date": str(e["at"])[:10], "kind": "billed", "source": "remitwatch", "dated_by": "event", "confirmed": True,
+                out.append({"date": _pday(e["at"]), "kind": "billed", "source": "remitwatch", "dated_by": "event", "confirmed": True,
                             "text": f"Marked billed by {who} on {day(e['at'])}" + (f": {note[len('Billed:'):].strip()}" if note[7:].strip() else "")})
                 continue
             text = f"Marked {'Sent' if kind == 'sent' else 'Started'} by {who} on {day(e['at'])}" + (f": {e['note']}" if e.get("note") else "")
-            out.append({"date": str(e["at"])[:10], "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
+            out.append({"date": _pday(e["at"]), "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
                         "confirmed": kind == "sent"})
         elif e["kind"] == "packet":
-            out.append({"date": str(e["at"])[:10], "kind": "packet", "source": "remitwatch", "dated_by": "event", "confirmed": False,
+            out.append({"date": _pday(e["at"]), "kind": "packet", "source": "remitwatch", "dated_by": "event", "confirmed": False,
                         "text": f"Appeal packet built on {day(e['at'])}" + (f" by {e['actor']}" if e.get("actor") else "")})
     if f.get("status") == "appealed" and f.get("appealed_at") and not any(x["kind"] == "sent" for x in out):
-        out.append({"date": str(f["appealed_at"])[:10], "kind": "sent", "source": "remitwatch", "dated_by": "event", "confirmed": True,
+        out.append({"date": _pday(f["appealed_at"]), "kind": "sent", "source": "remitwatch", "dated_by": "event", "confirmed": True,
                     "text": f"Marked Sent on {day(f['appealed_at'])}"})
     for x in fx["rw"]["faxes"]:
         if (x.get("direction") or "out") != "out" or x.get("status") == "failed":
             continue
-        when = str(x.get("sent_at") or x.get("created_at") or "")[:10]
+        when = _pday(x.get("sent_at") or x.get("created_at"))
         if not when:
             continue
         purpose = (x.get("purpose") or "appeal").replace("_", " ")
@@ -2487,7 +2501,7 @@ def _decide(fx: dict, today: str) -> dict:
     if st == "appealed":
         res["person"] = True
         sent = [e for e in ev if e["kind"] in ("sent", "fax", "billed") and e["source"] == "remitwatch"]
-        anchor = max((e["date"] for e in sent if e.get("date")), default=None) or str(f.get("appealed_at") or f.get("status_changed_at") or "")[:10]
+        anchor = max((e["date"] for e in sent if e.get("date")), default=None) or _pday(f.get("appealed_at") or f.get("status_changed_at"))
         if sig == "SECONDARY_NOT_BILLED":
             return _billed_second(res, fx, ev, anchor, who, today, put)
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
@@ -2499,7 +2513,7 @@ def _decide(fx: dict, today: str) -> dict:
     # paid. A payment that came after the reopen closes it as usual.
     o_ = fx.get("outcome") or {}
     rejected = o_.get("rejected_payment") if o_.get("person_reopened") else None
-    reopen_at = str((last_manual or {}).get("at") or "")[:10]
+    reopen_at = _pday((last_manual or {}).get("at"))           # the practice's day: a payment dated the next day is newer
     auto_reopened = (st == "open" and last_manual is not None and last_manual.get("to") == "open"
                      and last_manual.get("from") in ("resolved", "dismissed", "lost"))
     # a payment that came after the person's reopen is new money: the usual rules decide
@@ -2661,7 +2675,7 @@ def _decide(fx: dict, today: str) -> dict:
         return put("work_now", "settled_in_ema", f"EMA shows this line settled: insurance paid {usd(se['ins'])}, the patient paid "
                    f"{usd(se['pat'])}, {usd(se['open'])} open: find which payer paid and whether it settles this service")
     # the work seen on the item (RemitWatch's own marks only when no person set the item back to To do since)
-    reopened = max((str(e["at"])[:10] for e in manual if e["to"] == "open"), default="")
+    reopened = max((_pday(e["at"]) for e in manual if e["to"] == "open"), default="")
     pay_day = f.get("payment_date") or ""
     # work on or after the item's remittance; EMA's work already on the first report counts whatever its date (its own
     # date is unknown), but a billing note or follow-up date first seen before the remittance is about something earlier

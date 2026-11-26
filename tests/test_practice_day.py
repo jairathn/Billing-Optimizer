@@ -385,3 +385,100 @@ def test_a_paid_marked_in_the_evening_is_recovered_that_day_where_the_practice_i
     c.execute("UPDATE findings SET status='open', recovered_date=NULL, recovered_cents=NULL WHERE finding_id='F-paid'")
     assert sc._reapply_person_changes(c, since) == 1
     assert tuple(c.execute("SELECT status, recovered_date FROM findings WHERE finding_id='F-paid'").fetchone()) == ("resolved", "2026-11-24")
+
+
+# ------------------------------------------------------------------------------------------ a person's marks and a fax
+NIGHT = "2026-11-25T02:30:00+00:00"            # 9:30 PM Eastern on Tuesday November 24 (UTC's day is already the 25th)
+
+
+def _marked_world(store):
+    """Five invented denials of Blue Cross, each with its own claim: one marked Sent (with a packet), one whose only record
+    of the send is the item's appealed_at, one Started, one faxed, one marked Paid, all at 9:30 PM Eastern on Nov 24."""
+    from remitwatch import actions, ema_reports as er, states
+    from tests import ema_fixtures as F
+    from tests.test_states import denied, event, item, line_key
+    states._RESPONSE_CACHE.clear()
+    states._RECOVERY_CACHE.clear()
+    c = store.conn
+    er.ensure_schema(c)
+    actions.ensure_fax_tables(c)
+    rows = {}
+    for n, fid in enumerate(("F-sent", "F-appealed", "F-started", "F-fax", "F-paid"), 1):
+        tk = denied(store, trace=F.check_no(n), pcn=F.claim_id(n), paid_on="2026-11-02", received="2026-10-20")
+        rows[fid] = dict(finding_id=fid, patient_control_number=F.claim_id(n), line_key=line_key(store, tk), claim_key=f"{tk}-0",
+                         transaction_key=tk, payment_date="2026-11-02")
+    item(store, **rows["F-sent"], status="appealed", appealed_at=NIGHT, status_changed_at=NIGHT)
+    event(store, "F-sent", "packet", at=NIGHT, actor="Biller One")
+    event(store, "F-sent", "manual", at=NIGHT, frm="open", to="appealed", actor="Biller One")
+    item(store, **rows["F-appealed"], status="appealed", appealed_at=NIGHT, status_changed_at=NIGHT)
+    item(store, **rows["F-started"], status="in_progress", status_changed_at=NIGHT)
+    event(store, "F-started", "manual", at=NIGHT, frm="open", to="in_progress", actor="Biller One")
+    item(store, **rows["F-fax"])
+    c.execute("""INSERT INTO faxes (fax_key, direction, finding_id, payer_group, number, purpose, level, status, created_at, sent_at)
+                 VALUES ('X1', 'out', 'F-fax', 'Anthem / BCBS', '8005550142', 'appeal', 1, 'sent', ?, ?)""", (NIGHT, NIGHT))
+    item(store, **rows["F-paid"], status="resolved", recovered_cents=9000, status_changed_at=NIGHT)
+    event(store, "F-paid", "manual", at=NIGHT, frm="open", to="resolved", actor="Biller One", cents=9000)
+    c.commit()
+
+
+def test_a_persons_marks_and_a_fax_in_the_evening_are_dated_that_day_where_the_practice_is(store, monkeypatch):
+    """A person who marks an item Sent, Started or Paid, builds its packet, or faxes it at 9:30 PM Eastern did it that day
+    where the practice is, not UTC's next day: the dated work on the item, its state's words, the day its follow-up counts
+    from and the item's story all say Nov 24. Both store kinds."""
+    from remitwatch import states, story
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)          # the default: US Eastern
+    _marked_world(store)
+    c = store.conn
+    today = "2026-11-30"
+
+    def item_of(fid):
+        return dict(c.execute("SELECT * FROM findings WHERE finding_id=?", (fid,)).fetchone())
+
+    def work(fid):
+        return {e["kind"]: e for e in states.work_evidence(c, item_of(fid), today=today)}
+
+    ev = work("F-sent")
+    assert (ev["sent"]["date"], ev["packet"]["date"]) == ("2026-11-24", "2026-11-24"), ev
+    assert "Marked Sent by Biller One on Nov 24, 2026" in ev["sent"]["text"] and "built on Nov 24, 2026" in ev["packet"]["text"]
+    st = states.state_of(c, item_of("F-sent"), today=today)
+    # no answers on file to measure: the 45-day default, counted from the practice's day of the send
+    assert (st["work_state"], st["follow_up_on"]) == ("waiting", "2027-01-08"), st
+    assert "Marked Sent by Biller One on Nov 24, 2026" in st["state_basis"], st["state_basis"]
+    ev = work("F-appealed")
+    assert ev["sent"]["date"] == "2026-11-24" and ev["sent"]["text"] == "Marked Sent on Nov 24, 2026", ev
+    assert states.state_of(c, item_of("F-appealed"), today=today)["follow_up_on"] == "2027-01-08"
+    ev = work("F-started")
+    assert ev["started"]["date"] == "2026-11-24" and "Started by Biller One on Nov 24, 2026" in ev["started"]["text"], ev
+    assert "Started by Biller One on Nov 24, 2026" in states.state_of(c, item_of("F-started"), today=today)["state_basis"]
+    ev = work("F-fax")
+    assert ev["fax"]["date"] == "2026-11-24" and " on Nov 24, 2026" in ev["fax"]["text"], ev
+    assert "Marked Paid by Biller One on Nov 24, 2026" in states.state_of(c, item_of("F-paid"), today=today)["state_basis"]
+    # the item's story: RemitWatch's own rows are dated the practice's day, beside the payer's own dates
+    for fid in ("F-sent", "F-started", "F-fax", "F-paid"):
+        rows = [r for r in story.item_story(c, fid, today=today)["rows"] if r["source"] == "remitwatch" and r["kind"] != "raised"]
+        assert rows and {r["date"] for r in rows} == {"2026-11-24"}, (fid, rows)
+
+
+def test_a_payment_dated_the_day_after_an_evening_reopen_is_newer_than_the_reopen(store, monkeypatch):
+    """A person reopened an item RemitWatch had closed on a later payment, at 9:30 PM Eastern on Nov 24. A payment the
+    payer dated Nov 25 came after that (the next day where the practice is): it closes the item as usual. Counted by UTC's
+    date the reopen was on the 25th too, and the new payment was taken for the old one."""
+    from tests import ema_fixtures as F
+    from tests.test_states import denied, event, item, line_key, ln, remit
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    from remitwatch import ema_reports as er, states
+    states._RESPONSE_CACHE.clear()
+    states._RECOVERY_CACHE.clear()
+    er.ensure_schema(store.conn)
+    tk = denied(store, reason=("CO", "50"), paid_on="2026-11-02", received="2026-10-20")
+    remit(store, trace=F.check_no(2), paid_on="2026-11-10", claims=[{"pcn": F.claim_id(1, sub=2), "pccn": "PCN-B", "received": "2026-11-03",
+          "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         payment_date="2026-11-02", status="open", status_changed_at=NIGHT)
+    event(store, "F1", "manual", at=NIGHT, frm="resolved", to="open", actor="Biller One", note="not this line")
+    f = dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone())
+    st = states.state_of(store.conn, f, today="2026-11-30")
+    assert st["rule"] == "person_reopened" and st["state_basis"].startswith("Reopened by Biller One on Nov 24, 2026"), st["state_basis"]
+    remit(store, trace=F.check_no(3), paid_on="2026-11-25", claims=[{"pcn": F.claim_id(1, sub=3), "pccn": "PCN-C", "received": "2026-11-12",
+          "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    assert states.state_of(store.conn, f, today="2026-11-30")["work_state"] == "done"
