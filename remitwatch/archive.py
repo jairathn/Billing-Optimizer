@@ -244,19 +244,10 @@ def settings(env: dict | None = None, today: Any = None) -> dict:
 
 
 def peak_mb() -> int | None:
-    """The most memory this process has held so far, in MB (the high-water mark of the resident set)."""
-    try:
-        with open("/proc/self/status") as fh:
-            for line in fh:
-                if line.startswith("VmHWM:"):
-                    return int(line.split()[1]) // 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    try:
-        import resource
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
-    except Exception:       # noqa: BLE001  (no measure on this platform: the run records none)
-        return None
+    """The most memory this run has held so far, in MB (the high-water mark of the resident set since the run's start:
+    remitwatch.runtime.peak_mb)."""
+    from .runtime import peak_mb as run_peak
+    return run_peak()
 
 
 # -------------------------------------------------------------------------------------------------------- dates

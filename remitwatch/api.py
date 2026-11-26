@@ -3058,14 +3058,18 @@ def _cloud_sync_status() -> dict:
     return {"mode": "serverless", "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
             "interval_minutes": 0, "scheduler_running": False, "next_run": None, "cron_ready": bool(os.environ.get("CRON_SECRET")),
             "running": bool(st.get("running")), "running_since": (st.get("running") or {}).get("since"), "last_cycle": lc or None,
-            "stalled_since": (st.get("stalled") or {}).get("since"), "memory_mb": lc.get("memory_mb"),
+            # a lock left by a run the platform stopped (one left by a run that finished is only taken over: run_killed)
+            "stalled_since": (st.get("stalled") or {}).get("since") if cloud.run_killed(st.get("stalled"), lc) else None,
+            "memory_mb": lc.get("memory_mb"),
             "last_sync": lc.get("finished"), "newest_payment_date": newest, "feed_date": feed, "days_behind": behind, "has_data": st.get("has_data"),
             "last_file_ingested": files.get("last"), "last_remit_ingested": files.get("last835"), "storage_error": st.get("error"),
             "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
             "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY")),
-            # the owner's decision 1: this site analyses only on a press; every page says when it last did
+            # the owner's decision 1: this site analyses only on a press; every page says when it last did, and that the
+            # last run did not finish its work: an error, the platform stopping it (its lock left, no status of its own:
+            # cloud.run_killed), or the chain stopping after its last allowed run
             "press_only": True, "analysed": lc.get("analysed"), "unchecked": lc.get("unchecked"),
-            "last_failed": bool(lc.get("error")) and not st.get("running")}
+            "last_failed": bool(lc.get("error") or lc.get("halted") or cloud.run_killed(st.get("stalled"), lc)) and not st.get("running")}
 
 
 @app.get("/api/sync/status")
@@ -3167,27 +3171,27 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
     out = cloud.run_cloud_cycle(st, client, budget_s=max(60, runtime.max_seconds() - delay), trigger=trigger[:24], full=bool(full),
                                 force_detect=bool(force), delay_s=delay)
     # A run starts the next one only while it is getting somewhere, and only so many times in a row. Whatever goes
-    # wrong, the chain ends; a person's press starts a new one (the owner's decision 1: nothing on a schedule).
+    # wrong, the chain ends; a person's press starts a new one (the owner's decision 1: nothing on a schedule). After an
+    # analysis, one more run does what only a run that does not analyse does (the archive, the provider tables, the weekly
+    # self-audit: cloud.tidy_due). A file that could not be fetched is tried twice more, a minute and a half apart:
+    # notifications start nothing on this host, so without this the file would wait for a press. cloud.next_run decides.
     hop = max(int(hop), 0)
-    if hop >= cloud.MAX_HOPS:
-        if out.get("more"):
-            out["halted"] = f"{hop} runs in a row without finishing"
-            cloud.write_status(st, out)
-    elif out.get("more") and out.get("progress"):
-        out["continued"] = cloud.trigger_cycle(base_url(request), "continue", hop=hop + 1)
-    elif (out.get("ingest") or {}).get("download_errors"):
-        # a file could not be fetched (a timeout, a busy server): try twice more, a minute and a half apart, then leave
-        # it to the next press. Notifications start nothing on this host, so without this the file would wait for a press.
-        if hop < 2:
-            out["continued"] = cloud.trigger_cycle(base_url(request), "retry", delay=90, hop=hop + 1)
-    elif not out.get("skipped") and not out.get("more"):
+    nxt = cloud.next_run(out, hop)
+    if nxt.get("halted"):
+        out["halted"] = nxt["halted"]
+        cloud.write_status(st, out)
+    elif nxt.get("trigger"):
+        out["continued"] = bool(cloud.trigger_cycle(base_url(request), nxt["trigger"], delay=nxt.get("delay") or 0, hop=hop + 1))
+        if nxt["trigger"] == "tidy":
+            out["continued_for"] = "tidy"
+    elif not nxt.get("end"):
         # files that landed while this cycle ran: new in the Dropbox folder, or an upload finished into the state folder's
         # intake/ (its own call was skipped while this run held the lock), so it is read now, by the chain the press started
         try:
             from .intake import state_pending
             late = "uploads" if state_pending(st) else ("files" if client is not None and cloud.has_new_files(st, client) else None)
             if late:
-                out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)
+                out["continued"] = bool(cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1))
                 out["continued_for"] = late
         except Exception as exc:        # noqa: BLE001  (the next press reads them; the answer says why none was started)
             runlog.caught(exc, "cron_cycle:continue", level="warning")

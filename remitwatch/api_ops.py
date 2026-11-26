@@ -23,6 +23,7 @@ worked out again on the copy, and a request is journaled for the next run.
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional
 
@@ -35,6 +36,8 @@ from . import runlog, runtime
 router = APIRouter()
 _security = HTTPBasic(auto_error=False)
 BUNDLE_WHAT = "Give this file and the repository to Claude to find the cause of a problem. It holds no patient data."
+AUDIT_BUSY = ("A cycle is running and writing the store: try again when it has finished (a few minutes). The self-audit also "
+              "runs by itself once a week.")
 
 
 def _api():
@@ -47,9 +50,20 @@ def _user(request: Request, credentials: Optional[HTTPBasicCredentials] = Depend
     return _api().require_auth(request, credentials)
 
 
+ACCEPT_NEEDS_OWNER = ("Accepting what the checks found is the owner's decision: type the owner's password to accept it (the "
+                      "same password that opens the Providers tab).")
+
+
 def _owner(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_security)) -> str:
-    """The sign-in and, when the owner has a password, that password: accepting a change is a business decision."""
-    return _api().require_owner(request, credentials)
+    """The sign-in and, when the owner has a password, that password: accepting a change is a business decision. The page
+    sends the password the owner typed (X-Owner-Password, as the Providers tab does) and asks for it on a refusal, which
+    says what it is for (never the Providers tab's words about its figures)."""
+    try:
+        return _api().require_owner(request, credentials)
+    except HTTPException as exc:
+        if exc.status_code == 403 and "not the owner's password" not in str(exc.detail):
+            raise HTTPException(403, ACCEPT_NEEDS_OWNER) from exc
+        raise
 
 
 def _xhr(request: Request) -> None:
@@ -99,15 +113,26 @@ def analysis_status(conn=None) -> dict:
         return {"press_only": False}
     from . import cloud
     st = cloud.SERVING_COPY.state(fast=True)
-    last = (cloud.SERVING_COPY.status() or {}).get("last_cycle") or {}
+    status = cloud.SERVING_COPY.status() or {}
+    last = status.get("last_cycle") or {}
     going = None
     if st is not None:
         try:
             going = cloud.run_going(st)
         except Exception as exc:        # noqa: BLE001  (storage did not answer: the page says what it knows)
             runlog.caught(exc, "ops:run_going", level="warning")
+    lists = None
+    if conn is not None:
+        try:            # the open items the lists hold now (the dashboard's copy), not every item the analysis found
+            n, cents = cloud.open_items(conn)
+            lists = {"n": n, "cents": cents}
+        except Exception as exc:        # noqa: BLE001  (a copy with no items yet: the panel says when, not how many)
+            runlog.caught(exc, "ops:open_items", level="warning")
+    # a run that stopped with an error, one the platform stopped (its lock left behind, no status of its own), or a chain
+    # that stopped after its last allowed run: each is said with what stands and what to do (cloud.stopped_note)
+    failed = None if going else cloud.stopped_note(last, conn, stalled=status.get("stalled"))
     return {"press_only": True, "text": cloud.PRESS_ONLY_TEXT, "analysed": last.get("analysed"), "running": going,
-            "unchecked": last.get("unchecked"), "failed": None if going else cloud.failed_note(last, conn),
+            "unchecked": last.get("unchecked"), "failed": failed, "lists": lists,
             "last_run": {k: last.get(k) for k in ("started", "finished", "trigger", "error", "more", "halted", "deferred")}}
 
 
@@ -132,7 +157,9 @@ def press_run(request: Request, user: str, trigger: str) -> dict:
         raise HTTPException(503, "Storage is not connected yet. Open /setup.")
     got = cloud.press(st, _api().base_url(request), who=runlog.fingerprint(user), trigger=trigger)
     if got["started"] is None:
-        raise HTTPException(400, got["text"])
+        # the run could not be asked for: why (a setting missing, the site's own call refused, a network error), never a
+        # 400 as though the press itself were wrong
+        raise HTTPException(int(got.get("status") or 502), got["text"])
     cloud.SERVING_COPY._status = (0.0, None)        # the next status read sees the run
     return got
 
@@ -182,27 +209,58 @@ def ops_audit_now(request: Request, user: str = Depends(_user)):
         from .cloud import record_action
         record_action(_state(), {"kind": "selfcheck_request", "what": "audit", "user": user})
         return {"asked": True, "text": "The next run checks the worklist against the money: press Run the analysis now."}
+    import sqlite3
+
     from . import selfcheck
+    from .pipeline import acquire_lock, release_lock
     conn = _api().db()
     try:
-        got = selfcheck.apply_request(conn, {"what": "audit"}) or {}
-        conn.commit()
+        # under the cycle's lock, as the command line runs it: a cycle that is writing the store is never waited on for
+        # SQLite's 30 seconds and then answered with a 500; the person is told to try again when it has finished
+        conn.execute("PRAGMA busy_timeout = 2000")
+        try:
+            token = acquire_lock(conn)
+        except sqlite3.OperationalError as exc:
+            runlog.caught(exc, "ops:audit_lock", level="warning")
+            raise HTTPException(503, AUDIT_BUSY) from exc
+        if not token:
+            raise HTTPException(409, AUDIT_BUSY)
+        try:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            got = selfcheck.apply_request(conn, {"what": "audit"}) or {}
+            conn.commit()
+        finally:
+            release_lock(conn, token)
         au = got.get("audit") or {}
         return {"ran": True, "audit": {k: au.get(k) for k in ("gaps_n", "gaps_cents", "wasted_n", "alert", "today")}}
     finally:
         conn.close()
 
 
+RUN_ID = re.compile(r"^run-\d{8}T\d{6}Z(-[0-9a-f]{4,8})?$")
+NO_RUN_TEXT = "Say which run's findings to accept: reload the Data tab and press Accept beside what it shows."
+STALE_TEXT = "The checks ran again after this page was opened: look at the new results, then accept them."
+
+
 @router.post("/api/ops/selfcheck/accept")
 def ops_accept(request: Request, body: dict = Body(...), user: str = Depends(_owner)):
-    """The owner accepts exactly the offenders of the run the page showed (`run_id`); a later run's are never accepted."""
+    """The owner accepts exactly the offenders of the run the page showed (`run_id`, required); a later run's are never
+    accepted. On Vercel the acceptance goes to the journal for the next run, unless the dashboard's copy already holds a
+    later run's checks (the page was drawn before them): that is said at once, as on a server."""
     _xhr(request)
     checks = body.get("checks") if isinstance(body, dict) else None
     run_id = body.get("run_id") if isinstance(body, dict) else None
     if not isinstance(checks, list) or not all(isinstance(x, str) for x in checks) or not checks:
         raise HTTPException(400, "Choose the checks to accept.")
+    if not isinstance(run_id, str) or not RUN_ID.match(run_id):
+        raise HTTPException(400, NO_RUN_TEXT)
     if runtime.serverless():
+        from . import selfcheck
         from .cloud import record_action
+        with _Conn() as c:
+            latest = selfcheck.meta_get(c, "selfcheck:offenders_run")
+        if isinstance(latest, str) and RUN_ID.match(latest) and latest[4:20] > run_id[4:20]:
+            return {"accepted": {}, "stale": True, "run_id": latest, "text": STALE_TEXT}
         record_action(_state(), {"kind": "selfcheck_request", "what": "accept", "checks": checks, "run_id": run_id, "user": user})
         return {"asked": True, "text": "Accepted: the next run takes it (press Run the analysis now)."}
     from . import selfcheck

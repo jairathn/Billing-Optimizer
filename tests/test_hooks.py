@@ -1196,9 +1196,14 @@ def test_on_vercel_a_press_starts_the_run_chain_and_a_second_press_says_one_is_g
     assert held["started"] is False and held["running"]["since"] and len(calls) == 1
     cloud.release(state, token)
     assert _press(tc, auth).json()["started"] is True and len(calls) == 2
-    # the scheduler's own secret is still what the chain uses; without it nothing can start
+    # the scheduler's own secret is still what the chain uses; without it nothing can start (503, naming the secret); a
+    # site that has it but whose own call did not get through says that instead (502: review hook-r2-6)
     monkeypatch.setattr(cloud, "trigger_cycle", lambda *a, **k: False)
-    assert _press(tc, auth).status_code == 400
+    refused = _press(tc, auth)
+    assert refused.status_code == 502 and "CRON_SECRET is not set" not in refused.json()["detail"], refused.text
+    monkeypatch.delenv("CRON_SECRET")
+    no_secret = _press(tc, auth)
+    assert no_secret.status_code == 503 and "CRON_SECRET is not set" in no_secret.json()["detail"], no_secret.text
     monkeypatch.setenv("VERCEL_ENV", "preview")
     assert _press(tc, auth).status_code == 409
 
@@ -1531,7 +1536,9 @@ def test_the_vercel_pages_say_the_site_analyses_only_on_a_press_and_the_press_ru
     second = out["second"]
     assert second.get("started") is False and "already going" in second.get("text", ""), second
     status = json.loads(state.get("status.json"))
-    assert status["trigger"] == "press" and status.get("analysed", {}).get("trigger") == "press", {k: status.get(k) for k in ("trigger", "analysed")}
+    # the press analysed; the chain's last run (tidy: the archive's first pass) may have followed it (review hook-r1-1)
+    assert status["trigger"] in ("press", "tidy") and status.get("analysed", {}).get("trigger") == "press", \
+        {k: status.get(k) for k in ("trigger", "analysed")}
     # while a run is going, every page still says when the site last analysed and that it analyses only on a press
     from remitwatch import cloud
     token = cloud.acquire(state)

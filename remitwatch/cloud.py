@@ -97,10 +97,10 @@ def lock_stale_seconds() -> int:
 
 
 def peak_mb() -> int | None:
-    """The most memory this process has held so far, in MB."""
+    """The most memory this run has held so far, in MB (runtime.peak_mb: since the run's start set the mark back, so a warm
+    instance's earlier invocations do not count)."""
     try:
-        import resource
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
+        return runtime.peak_mb()
     except Exception as exc:        # no measure on this platform: the run records none
         from . import runlog
         runlog.caught(exc, "peak_mb", level="warning")
@@ -151,16 +151,18 @@ def gzip_chunks(data, level: int = 1, piece: int = 8 << 20) -> Iterator[bytes]:
 
 # --------------------------------------------------------------------------- lock
 
-LAST_TAKEOVER: dict | None = None   # the stale lock the last acquire() took over: a run killed before it wrote its status
+LAST_TAKEOVER: dict | None = None   # the stale lock the last acquire() took over: {since, run_id, started} of the run that held it
 
 
-def acquire(state) -> str | None:
-    """Take the cycle lock; None when another cycle holds it. A lock older than any run can be was left by a run that was
-    killed and is taken over, but only if nobody else took it first (LAST_TAKEOVER then says when it was taken)."""
+def acquire(state, run_id: str | None = None) -> str | None:
+    """Take the cycle lock; None when another cycle holds it. The lock names the run that holds it (`run_id`), so a run
+    that finds it left behind can tell a run the platform stopped from one that finished and could not remove it. A lock
+    older than any run can be is taken over, but only if nobody else took it first (LAST_TAKEOVER then says when it was
+    taken and by which run)."""
     global LAST_TAKEOVER
     LAST_TAKEOVER = None
     token = secrets.token_hex(8)
-    body = json.dumps({"token": token, "started": _now()}).encode()
+    body = json.dumps(dict({"token": token, "started": _now()}, **({"run_id": run_id} if run_id else {}))).encode()
     for _ in range(2):
         try:
             state.put(LOCK, body, mode="add")
@@ -172,8 +174,14 @@ def acquire(state) -> str | None:
             if _age_seconds(m.get("modified")) < lock_stale_seconds():
                 return None
             try:
+                held = _read_json(state, LOCK)      # which run left it (an older build's lock names none)
+            except Exception as exc:        # noqa: BLE001  (the takeover goes on; the kill is then counted by the lock's time)
+                from . import runlog
+                runlog.caught(exc, "acquire:read_lock", level="warning")
+                held = {}
+            try:
                 state.put(LOCK, body, mode="update", rev=m["rev"])
-                LAST_TAKEOVER = {"since": m.get("modified")}
+                LAST_TAKEOVER = {"since": m.get("modified"), "run_id": held.get("run_id"), "started": held.get("started")}
                 return token
             except Conflict:
                 return None
@@ -190,17 +198,71 @@ def release(state, token: str) -> None:
         runlog.caught(exc, "release", level="warning")
 
 
-def lock_state(state) -> tuple[dict | None, dict | None]:
-    """(running, stalled): a cycle in progress, or a lock left behind by one that died without finishing."""
+def lock_state(state, named: bool = False) -> tuple[dict | None, dict | None]:
+    """(running, stalled): a cycle in progress, or a lock left behind by one that died without finishing. With `named`, a
+    lock left behind says which run took it and when (its run_id and started), for run_killed."""
     m = state.meta(LOCK)
     if not m:
         return None, None
     info = {"since": m.get("modified")}
-    return (info, None) if _age_seconds(m.get("modified")) < lock_stale_seconds() else (None, info)
+    if _age_seconds(m.get("modified")) < lock_stale_seconds():
+        return info, None
+    if named:
+        held = _read_json(state, LOCK)
+        info.update({k: held.get(k) for k in ("run_id", "started") if held.get(k)})
+    return None, info
+
+
+def _when(iso: str | None) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def run_killed(stalled: dict | None, last: dict | None) -> bool:
+    """Whether a lock left behind (lock_state's stalled) was left by a run the platform stopped (out of memory or time):
+    the run that took it wrote no status of its own. A run that finished and could not remove its lock wrote its status
+    (it names the run, or, for a lock that names none, it is newer than the lock)."""
+    if not stalled:
+        return False
+    last = last or {}
+    rid = stalled.get("run_id")
+    if rid:
+        return last.get("run_id") != rid
+    # an older build's lock names no run: its run finished if a status was written after the lock was taken (a run
+    # takes seconds at least, so a status of the same second is the run before it)
+    took, done = _when(stalled.get("started") or stalled.get("since")), _when(last.get("finished"))
+    return not (took and done and done > took)
 
 
 def running(state) -> dict | None:
     return lock_state(state)[0]
+
+
+def _takeover_kill(takeover: dict | None, prev: dict | None, killed: list[dict], rl) -> dict | None:
+    """The run that left the stale lock this run took over (LAST_TAKEOVER), as a run the platform stopped, counted once: not
+    when its status says it finished (it only could not remove its lock: run_killed), not when its open marker was found
+    already (`killed`), and, when its marker is still open, by that marker, recorded as killed now (runlog.claim_killed),
+    so no later run counts the same run again under another name. None when there is nothing to count."""
+    from . import runlog
+    if not takeover:
+        return None
+    rid, took = takeover.get("run_id"), takeover.get("started") or takeover.get("since")
+    if rid:
+        if (prev or {}).get("run_id") == rid or any(k.get("run_id") == rid for k in killed):
+            return None
+        claimed = runlog.claim_killed(rl.sink, run_id=rid, exclude=rl.run_id)
+    else:
+        # an older build's lock names no run: its run is the one whose marker started as the lock was taken
+        t = _when(took)
+        if t is not None and any(runlog.started_near(k.get("started_at"), t) for k in killed):
+            return None
+        claimed = runlog.claim_killed(rl.sink, started=took, exclude=rl.run_id)
+        if not claimed and not run_killed({"started": took, "since": takeover.get("since")}, prev):
+            return None
+    return claimed or {"run_id": rid, "started_at": took, "last_step": None}
 
 
 def _hhmm(iso: str | None) -> str:
@@ -245,9 +307,13 @@ def press(state, base_url: str | None, *, who: str | None = None, trigger: str =
         return {"started": False, "running": going,
                 "text": (f"A run is already going (asked for or started {_hhmm(going.get('since'))}). It finishes by "
                          "itself, and the lists change when it has. Nothing more was started.")}
-    if not trigger_cycle(base_url, trigger, force=1):
-        return {"started": None, "running": None,
-                "text": "The site cannot start a run: CRON_SECRET is not set. Add it in Vercel and redeploy."}
+    asked = trigger_cycle(base_url, trigger, force=1)
+    if not asked:
+        # why the site's own call did not start the run (trigger_cycle says), so the person is sent to what is wrong
+        why, status = getattr(asked, "why", None), getattr(asked, "status", None)
+        if not why:
+            why, status = not_started_why(base_url)
+        return {"started": None, "running": None, "text": why, "status": status or 502}
     try:
         _write_json(state, PRESS, {"at": _now(), "by": who, "trigger": trigger})
     except Exception as exc:        # noqa: BLE001  (the run was asked for; a second press is then turned away by its lock)
@@ -448,12 +514,15 @@ def read_actions(state, skip: set[str] | None = None) -> list[tuple[str, dict]]:
     return [(n, a) for n, a in sorted(got) if isinstance(a, dict)]
 
 
-def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> tuple[list[str], list[str], bool]:
+def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]], *, results: list | None = None,
+                  copy: bool = False) -> tuple[list[str], list[str], bool]:
     """Apply journal entries to a copy of the store. Returns (names applied, names left over, whether anything was
     written). An entry is left over when a finding it names is not in this copy: that happens when the dashboard showed
     a finding the copy does not hold yet, and such an entry must be kept and tried again, never dropped. A bulk entry
     with one finding missing is left over too, though its other findings were written. Applying an entry twice is
-    harmless and writes nothing the second time."""
+    harmless and writes nothing the second time. `results` collects what the Data tab's requests came to (the run's
+    status says it); `copy`: the dashboard's copy, where a request for the self-audit waits for the run (the copy holds
+    only part of the store, so an audit worked out on it would show figures that are not the practice's)."""
     done, left = [], []
     before = conn.total_changes
     for name, a in entries:
@@ -467,7 +536,12 @@ def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> 
                 # the Data tab: the self-audit now, or the owner's acceptance of the offenders of the run the page showed
                 # (a later run's offenders nobody has seen are never accepted: remitwatch.selfcheck.apply_request)
                 from . import selfcheck
-                selfcheck.apply_request(conn, a)
+                if not (copy and a.get("what") == "audit"):
+                    got = selfcheck.apply_request(conn, a) or {}
+                    if results is not None:
+                        results.append({"what": a.get("what"), "stale": bool(got.get("stale")),
+                                        "accepted": got.get("accepted"), "text": got.get("text"),
+                                        "audit": bool(got.get("audit"))})
                 ok = True
             else:
                 ok = actions_mod.apply(conn, a) is not False
@@ -1609,7 +1683,7 @@ class ServingCopy:
                     if entries:
                         c = sqlite3.connect(self._path, timeout=30)
                         try:
-                            apply_actions(c, entries)
+                            apply_actions(c, entries, copy=True)
                         finally:
                             c.close()
                         self.applied.update(n for n, _ in entries)
@@ -1640,7 +1714,7 @@ class ServingCopy:
             if self._path and os.path.exists(self._path):
                 c = sqlite3.connect(self._path, timeout=30)
                 try:
-                    apply_actions(c, [(name, action)])
+                    apply_actions(c, [(name, action)], copy=True)
                 finally:
                     c.close()
                 self.applied.add(name)
@@ -1655,7 +1729,7 @@ class ServingCopy:
             try:
                 raw = st.get(STATUS)
                 out["last_cycle"] = json.loads(raw) if raw else None
-                out["running"], out["stalled"] = lock_state(st)
+                out["running"], out["stalled"] = lock_state(st, named=True)
                 out["has_data"] = st.meta(SERVING) is not None
             except Exception as exc:
                 out["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -1848,12 +1922,20 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
         from . import runlog
         runlog.caught(exc, "unchecked_note", level="warning")
     parts = []
+    read: dict = {}
     if pending or waiting_files:
         since = f" ({_hhmm(analysed.get('at'))})" if (analysed or {}).get("at") else ""
         items = f"{sc._n(int(n), 'open item')} ({sc.usd0(cents)})"
         if read_since or waiting_files:
             head = (f"The analysis has not run on what was read since the last analysis{since}: {items} on the lists were not "
                     "checked against it.")
+            # the money in what was read: new denials and cuts there have no item yet, so no list and no other page shows
+            # them (CLAUDE.md rule 3: what the site cannot check, in dollars)
+            read = read_since_analysis(conn)
+            if read.get("claims"):
+                head += (f" Read since then and not checked yet: {sc._n(read['claims'], 'remittance claim')} "
+                         f"({sc._n(read['lines'], 'line')}), with {sc.usd0(read['cents'])} of their charges the payers did "
+                         "not pay; none of it is on a list until the analysis runs.")
         else:
             head = (f"The analysis this press asked for has not run yet. Nothing new has been read since the last analysis"
                     f"{since}, so the {items} on the lists stand as it left them.")
@@ -1871,7 +1953,9 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
         parts.append("The weekly self-audit (money on lines no item is working) was not checked in this run, to keep within "
                      f"memory: a calmer run does it, within a week.{last}")
     return {"n": int(n), "cents": int(cents), "pending": bool(pending or waiting_files), "audit_skipped": skipped_audit,
-            "read_since": bool(read_since or waiting_files), "text": " ".join(parts)}
+            "read_since": bool(read_since or waiting_files),
+            "read": {k: read.get(k) for k in ("claims", "lines", "cents")} if read.get("claims") else None,
+            "text": " ".join(parts)}
 
 
 def open_items(conn) -> tuple[int, int]:
@@ -1914,6 +1998,125 @@ def failed_note(last: dict | None, conn=None) -> dict | None:
     return {"at": last.get("finished") or last.get("started"), "out_of_time": err.startswith("OutOfTime"), "text": text}
 
 
+def _lists_stand(conn, an: str | None) -> str:
+    """'the N open items ($X) on the lists stand as the analysis of T left them', from the dashboard's copy `conn`."""
+    from . import selfcheck as sc
+    items = "the lists"
+    if conn is not None:
+        try:
+            n, cents = open_items(conn)
+            items = f"the {sc._n(n, 'open item')} ({sc.usd0(cents)}) on the lists"
+        except sqlite3.Error as exc:        # a copy with no items yet: the sentence goes without them
+            from . import runlog
+            runlog.caught(exc, "lists_stand", level="warning")
+    return f"{items[0].upper()}{items[1:]} stand as the analysis of {_hhmm(an)} left them." if an else \
+        f"{items[0].upper()}{items[1:]} are as they were."
+
+
+def stopped_note(last: dict | None, conn=None, stalled: dict | None = None) -> dict | None:
+    """The last run did not finish its work, in the words every page of the Vercel site uses (the owner's decision 1: a
+    press that did not get through is said, in items and dollars from the dashboard's copy `conn`, with what to do): the
+    run stopped with an error (failed_note); the platform stopped it, so it wrote no status at all and left its lock
+    (`stalled`, lock_state's, when run_killed says so); or the chain stopped after MAX_HOPS runs that each left work.
+    None when the last run finished its work."""
+    last = last or {}
+    if last.get("error"):
+        return failed_note(last, conn)
+    an = (last.get("analysed") or {}).get("at")
+    if not an and conn is not None:
+        an = (_last_detection(conn) or {}).get("at")
+    if stalled and run_killed(stalled, last):
+        since = stalled.get("started") or stalled.get("since")
+        text = (f"The last run (started {_hhmm(since)}) stopped before it finished: the platform stopped it, out of memory or "
+                f"out of time, before it could say why. {_lists_stand(conn, an)} Press Run the analysis now to try again. If it "
+                "stops again, make the file for Claude in Logs and diagnostics below.")
+        return {"at": since, "killed": True, "text": text}
+    if last.get("halted"):
+        text = (f"The last run chain stopped after {last['halted']}: what was left (files to read, or the analysis) waits. "
+                f"{_lists_stand(conn, an)} Press Run the analysis now to carry on. If it stops again, make the file for "
+                "Claude in Logs and diagnostics below.")
+        return {"at": last.get("finished") or last.get("started"), "halted": True, "text": text}
+    return None
+
+
+def next_run(out: dict, hop: int) -> dict:
+    """What /api/cron/cycle starts after a run (the owner's decision 1: on this host only a person's press starts a run,
+    and the runs of its chain follow one another): {'trigger', 'delay'} for the next run; {'halted': words} once MAX_HOPS
+    runs in a row have left work; {'end': True} when the chain ends here; {} when the caller should still look for files
+    that landed while the run went on. One rule, used by the route and by the tests that follow a press's chain."""
+    if hop >= MAX_HOPS:
+        return {"halted": f"{hop} runs in a row without finishing"} if out.get("more") else {"end": True}
+    if out.get("more") and out.get("progress"):
+        return {"trigger": "continue", "delay": 0}
+    if (out.get("ingest") or {}).get("download_errors"):
+        # a file could not be fetched (a timeout, a busy server): tried twice more, a minute and a half apart
+        return {"trigger": "retry", "delay": 90} if hop < 2 else {"end": True}
+    if out.get("tidy"):
+        # the work only a run that does not analyse does (tidy_due): one more run of the chain, which reads what is new too
+        return {"trigger": "tidy", "delay": 0}
+    if out.get("skipped") or out.get("more"):
+        return {"end": True}
+    return {}
+
+
+TIDY_ARCHIVE_HOURS = 20         # the archive's pass on this host comes once a day at most (a server's comes every cycle)
+
+
+def tidy_due(conn, plan: dict | None, *, today: str | None = None) -> list[str]:
+    """What only a run that does not analyse does on this host, now due: the archive's pass ('archive': none for
+    TIDY_ARCHIVE_HOURS, or the self-regulation has since asked for the tighter horizon), the provider tables an analysis
+    left behind ('activity') and the weekly self-audit ('audit'), each unless the self-regulation leaves it for a calmer
+    run. Since the owner's decision 1 every run here is a press or a run of its chain, and a press analyses: a run that
+    analysed hands these to one more run of the chain ('tidy', next_run), which analyses nothing unless files arrived."""
+    from . import archive
+    from . import selfcheck as sc
+    plan = plan or {}
+    skip = set(plan.get("skip") or [])
+    due: list[str] = []
+    try:
+        if conn.execute("SELECT 1 FROM lines LIMIT 1").fetchone():
+            last = (archive._meta_json(conn, archive.META_HORIZON, {}) or {}).get("at")
+            tighter = False
+            if plan.get("archive_tight"):       # the level asking for the tighter horizon came after the last pass
+                since, done = _when((sc.meta_get(conn, sc.K_REGULATE, {}) or {}).get("since")), _when(last)
+                tighter = since is not None and (done is None or since > done)
+            if _age_seconds(last) >= TIDY_ARCHIVE_HOURS * 3600 or tighter:
+                due.append("archive")
+        if "activity" not in skip and activity.stale(conn):
+            due.append("activity")
+        if "audit" not in skip and sc.audit_due(conn, today):
+            due.append("audit")
+    except sqlite3.Error as exc:        # the next press asks again
+        from . import runlog
+        runlog.caught(exc, "tidy_due", level="warning")
+    return due
+
+
+def read_since_analysis(conn) -> dict:
+    """The remittance claims and lines read since the last analysis began, and the dollars of their charges the payers
+    did not pay (charge less paid, line by line, superseded copies left out): what a run that hands the analysis on, or
+    leaves files to read, read and has not checked. {'claims', 'lines', 'cents', 'since'}; zeros before any analysis. A
+    line reaches its file through its transaction (the compact store this host holds keeps no file hash on a line)."""
+    out = {"claims": 0, "lines": 0, "cents": 0, "since": None}
+    try:
+        r = conn.execute("SELECT started_at FROM detection_runs ORDER BY finished_at DESC, rowid DESC LIMIT 1").fetchone()
+        if not r or not r[0]:
+            return out
+        out["since"] = r[0]
+        n_claims, n_lines, cents = conn.execute(
+            """SELECT COUNT(DISTINCT l.claim_key), COUNT(*),
+                      COALESCE(SUM(CASE WHEN COALESCE(l.charge_cents, 0) > COALESCE(l.paid_cents, 0)
+                                        THEN COALESCE(l.charge_cents, 0) - COALESCE(l.paid_cents, 0) ELSE 0 END), 0)
+               FROM lines l JOIN transactions t ON t.transaction_key = l.transaction_key
+               JOIN files f ON f.sha256 = t.file_sha256
+               WHERE f.ingested_at > ? AND COALESCE(t.superseded, 0) = 0""", (r[0],)).fetchone()
+        out.update(claims=int(n_claims or 0), lines=int(n_lines or 0), cents=int(cents or 0))
+    except sqlite3.Error as exc:        # a store with no lines yet: nothing said
+        from . import runlog
+        runlog.caught(exc, "read_since_analysis", level="warning")
+    return out
+
+
 def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger: str = "manual", full: bool = False,
                     force_detect: bool = False, email: bool = True, delay_s: int = 0, log=print) -> dict:
     """One cycle against the state folder. Returns a summary; `more` is true when a fresh invocation should continue.
@@ -1925,13 +2128,17 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
 
     budget = budget_s or runtime.max_seconds()
     out: dict = {"started": _now(), "trigger": trigger, "mode": "serverless", "budget_seconds": budget}
-    token = acquire(state)
+    rid = runlog.new_run_id()               # in the lock too: a later run tells a run killed from one that finished
+    token = acquire(state, run_id=rid)
     if not token:
         return {"skipped": "another cycle is running"}
     takeover = LAST_TAKEOVER
+    # the run's memory figures are its own: a warm instance's earlier invocations do not count (runtime.reset_peak)
+    runtime.reset_peak()
     # (H) the run's manifest and event log in the state folder's logs/; the cycle's own lines go there (scrubbed), and
     # Vercel's function log gets the one line printed at the end
-    rl = runlog.start_run("cycle", trigger=trigger, state=state, host="serverless")
+    rl = runlog.start_run("cycle", trigger=trigger, state=state, host="serverless", run_id=rid)
+    out["run_id"] = rl.run_id
     log = rl.log
     if trigger in PRESS_TRIGGERS:
         _answer_press(state, rl.run_id)     # the run a press asked for has the lock: a later press asks for its own
@@ -1971,9 +2178,11 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if takeover:
             repair.note_stale_lock(reg, ["lock.json"], "cloud.acquire")
         # (G) self-regulation: the last run's status (and a run the platform killed) decide what this one spreads or sheds
-        killed = rl.manifest["sections"].get("killed_runs") or None     # their open markers; else the lock taken over
-        if not killed and takeover:
-            killed = [{"started_at": takeover.get("since"), "last_step": None}]
+        killed = list(rl.manifest["sections"].get("killed_runs") or [])      # their open markers
+        held = _takeover_kill(takeover, prev_status, killed, rl)               # the run whose lock this run took over
+        if held:
+            killed.append(held)
+        killed = killed or None
         sc.adopt_regulation(conn, prev_status)         # an idle run before this one saved no store: its state is in its status
         plan = sc.plan_next(conn, prev_status, mode="serverless", budget_s=budget, killed=killed)
         out["plan"] = {k: plan[k] for k in ("level", "name", "skip", "overdue")}
@@ -2032,8 +2241,11 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         from . import archive
         arc_sink = archive.StateSink(state)
         taken, journal = archive.take_journal(conn, journal, sink=arc_sink) if journal else ([], journal)
-        done, left, wrote = apply_actions(conn, journal) if journal else ([], [], False)
+        requests_done: list[dict] = []         # what the Data tab's requests came to (an acceptance refused as stale is said)
+        done, left, wrote = apply_actions(conn, journal, results=requests_done) if journal else ([], [], False)
         done, wrote = done + taken, wrote or bool(taken)
+        if requests_done:
+            out["selfcheck_requests"] = requests_done
 
         # uploads cut off part-way (their pieces and records, after a day) go at every run, not only when someone opens the
         # Upload page (a cut-off report can hold patient data)
@@ -2374,6 +2586,13 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         out["more"] = bool(remaining or "deferred" in out or left_pairs)
         # a forced analysis handed to the next run is progress: the chain goes on to it (else a press would end there)
         out["progress"] = bool(progressed or ran_detect or ran_activity or (force_detect and out.get("deferred") == "detection"))
+        # (the owner's decision 1) a run that analysed leaves to one more run of the chain the work only a run that does not
+        # analyse does (the archive, the provider tables it had no time left for, the weekly self-audit): nothing else
+        # starts a run on this host, so without it they would never run here (next_run 'tidy')
+        if ran_detect and not out["more"]:
+            tidy = tidy_due(conn, plan, today=sc.today_of())
+            if tidy:
+                out["tidy"] = tidy
         out["changed"] = bool(shown_changed or progressed)
         try:
             one = lambda sql: conn.execute(sql).fetchone()[0]       # noqa: E731
@@ -2388,6 +2607,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if ran_detect:
             out["analysed"] = {"at": out["finished"], "run_id": rl.run_id, "trigger": trigger,
                                "findings": (out.get("totals") or {}).get("findings")}
+            try:        # what the lists hold after it: the open items (Work now and Waiting), not every item it found
+                out["analysed"]["open"], out["analysed"]["open_cents"] = open_items(conn)
+            except sqlite3.Error as exc:
+                runlog.caught(exc, "analysed_open", level="warning")
         else:
             out["analysed"] = prev_status.get("analysed") or _last_detection(conn)
         # what this run could not check, in items and dollars (the analysis still to come, an optional check shed)
@@ -2433,13 +2656,66 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         release(state, token)
 
 
-def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0, **params: Any) -> bool:
+class Asked:
+    """trigger_cycle's answer: true when the run was asked for (its request is under way); otherwise false, with why in
+    words a person can act on (`why`), the status a press answers with (`status`) and the HTTP status the site's own call
+    got, if any (`code`)."""
+    __slots__ = ("ok", "why", "status", "code")
+
+    def __init__(self, ok: bool, why: str | None = None, status: int | None = None, code: int | None = None):
+        self.ok, self.why, self.status, self.code = bool(ok), why, status, code
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def __repr__(self) -> str:
+        return f"Asked({self.ok}, code={self.code})"
+
+
+NO_SECRET_TEXT = "The site cannot start a run: CRON_SECRET is not set. Add it in Vercel and redeploy."
+
+
+def not_started_why(base_url: str | None) -> tuple[str, int]:
+    """Why a run could not be asked for, when the call itself gave no reason: the setting that is missing, or the call."""
+    if not os.environ.get("CRON_SECRET"):
+        return NO_SECRET_TEXT, 503
+    if not base_url:
+        return ("The site cannot start a run: it does not know its own address. Open it at its production address and "
+                "press again."), 503
+    return "The site's own call to start the run did not get through. Try again in a minute.", 502
+
+
+def _refused_why(code: int) -> str:
+    """The site's own call to /api/cron/cycle was answered `code` at once: what that means, and what to do."""
+    if code in (401, 403):
+        if os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET"):
+            return (f"The site's own call to start the run was refused ({code}). Check that VERCEL_AUTOMATION_BYPASS_SECRET is "
+                    "the secret Vercel shows (Settings, Deployment Protection, Protection Bypass for Automation), then "
+                    "redeploy.")
+        return (f"The site's own call to start the run was refused ({code}). If the production address is protected "
+                "(Vercel, Settings, Deployment Protection), set VERCEL_AUTOMATION_BYPASS_SECRET (Protection Bypass for "
+                "Automation) and redeploy.")
+    if code == 503:
+        return ("The site's own call to start the run was answered 503: the state folder in Dropbox could not be reached. "
+                "Try again in a minute; if it stays, open /setup.")
+    if code in (301, 302, 307, 308):
+        return (f"The site's own call to start the run was sent elsewhere ({code}). Open the site at its production address "
+                "and press again.")
+    if code >= 500:
+        return (f"The site's own call to start the run failed ({code}). Try again in a minute; if it fails again, make the "
+                "file for Claude in Logs and diagnostics below.")
+    return f"The site's own call to start the run was refused ({code}). Try again in a minute."
+
+
+def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0, **params: Any) -> Asked:
     """Start a cycle in a fresh invocation and return without waiting for it. The request is sent and the reply abandoned;
-    the platform runs the invocation to its end regardless."""
+    the platform runs the invocation to its end regardless. The answer is true when the run is under way; when it is not,
+    it says why (no secret, no address, the call refused with its status, or a network error)."""
     import requests
     secret = os.environ.get("CRON_SECRET")
     if not secret or not base_url:
-        return False
+        why, status = not_started_why(base_url)
+        return Asked(False, why, status)
     headers = {"Authorization": f"Bearer {secret.strip()}"}
     bypass = os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET")
     if bypass:      # only present when the project protects its production address as well
@@ -2452,12 +2728,15 @@ def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0
             # the secret goes only to this site's own name, with or without "www."
             r = requests.post(target, headers=headers, timeout=(5, 1.5), allow_redirects=False)
     except requests.exceptions.ReadTimeout:
-        return True         # the normal case: the run is under way and will outlast this call
-    except Exception as exc:        # the next scheduled run starts all the same
+        return Asked(True)          # the normal case: the run is under way and will outlast this call
+    except Exception as exc:        # said to the person who pressed; nothing started
         from . import runlog
         runlog.caught(exc, "trigger_cycle", level="warning")
-        return False
-    return r.status_code < 300
+        return Asked(False, "The site could not reach its own address to start the run (a network error). Try again in a "
+                            "minute.", 502)
+    if r.status_code < 300:
+        return Asked(True, code=r.status_code)
+    return Asked(False, _refused_why(r.status_code), 502, code=r.status_code)
 
 
 def _same_site(a: str, b: str) -> bool:

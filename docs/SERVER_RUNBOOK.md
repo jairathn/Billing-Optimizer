@@ -70,7 +70,20 @@ The same as on Vercel, wherever Vercel has them:
   other site to point to.
 
 Server only (optional): `REMITWATCH_BACKUP_KEEP` (daily copies kept, default 7; 0 turns them off), `REMITWATCH_BACKUP_DIR`
-(default `/data/backups`), `REMITWATCH_UPLOAD_DIR` (default `/data/uploads`: leave it unset).
+(default `/data/backups`), `REMITWATCH_UPLOAD_DIR` (default `/data/uploads`: leave it unset), `REMITWATCH_ARCHIVE_DIR`
+(where older settled claims go, default `/data/archive` beside the store: leave it unset; a path outside `/data` is lost
+when the app is made again), `REMITWATCH_CYCLE_BUDGET_SECONDS` (the time a cycle is measured against, default 3600: a
+cycle past 80% of it makes the next one spread its work).
+
+The self-check and the archive, on both sites (optional: leave them unset unless the reason given applies):
+
+- `REMITWATCH_RETENTION_MONTHS`: the archive's horizon, in months of service (default 36, never below 24). Older settled
+  claims move from the store to the archive; Find a claim still opens them. Set the same value on Vercel, if it sets it.
+- `REMITWATCH_MEMORY_BUDGET_MB`: the memory a cycle is measured against, in MB (unset here: none for the self-regulation,
+  and 80% of the container's limit for the archive). Past 80% of it the next cycle spreads its work and sheds optional
+  steps, and the archive takes older claims sooner.
+- `REMITWATCH_AUDIT_WASTED_ITEMS`: how many new items on Work now that look settled the weekly self-audit allows before it
+  raises its alert (default 10). Any new line with money and no item raises it whatever its dollars.
 
 EMA's A/R and Production reports on this server (optional: leave these unset unless the reason given applies). Vercel's
 defaults for the first two are not this server's (`ar`, and 730 days): never copy them here.
@@ -100,7 +113,8 @@ Never on the server: `REMITWATCH_MODE=serverless`, `REMITWATCH_STATE_DIR`, `REMI
 with no password: for a developer's own machine only), any `VERCEL*`, `REMITWATCH_MAX_SECONDS`,
 `REMITWATCH_DEFER_DETECT_FILES`, `REMITWATCH_BACKFILL_ZIP`, `REMITWATCH_TMP` (a scratch folder for tests),
 `REMITWATCH_EMA_STRICT` (`1` is for tests: a check against EMA's reports that fails then stops the whole analysis;
-unset, as it must be here, the failure is noted on the Data tab and the items from the remittances still come out).
+unset, as it must be here, the failure is noted on the Data tab and the items from the remittances still come out),
+`REMITWATCH_TODAY` (it stands in for the day in tests and simulations only).
 `REMITWATCH_DB`
 and `REMITWATCH_DATA_DIR` are set by the image (`/data/remitwatch.sqlite`, `/data/dropbox`), `REMITWATCH_COMMIT` by the
 build (the commit `/api/health` shows) and `REMITWATCH_TRIGGER` by the scheduler for its own runs: leave them out.

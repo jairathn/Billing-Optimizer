@@ -325,11 +325,13 @@ def _pct(values: list, p: int) -> Any:
 
 
 def peak_mb() -> int | None:
-    """The most memory this process has held so far, in MB."""
+    """The most memory this run has held so far, in MB (remitwatch.runtime.peak_mb: a run sets the high-water mark back
+    when it starts, so on a warm serverless instance an earlier invocation's peak is not taken as this run's)."""
     try:
-        import resource
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
-    except Exception:          # noqa: BLE001  (no resource module on this platform)
+        from .runtime import peak_mb as run_peak
+        return run_peak()
+    except Exception as exc:          # noqa: BLE001  (no measure on this platform: the run records none)
+        _caught(exc, "peak_mb")
         return None
 
 
@@ -472,8 +474,8 @@ def budgets(mode: str, *, budget_s: Any = None) -> dict:
     except ValueError:
         mem_mb = SERVERLESS_MEMORY_BUDGET_MB if serverless else None
     try:
-        secs = float(budget_s) if budget_s else float(setting("REMITWATCH_MAX_SECONDS" if serverless else
-                                                            "REMITWATCH_CYCLE_BUDGET_SECONDS", 240 if serverless else 3600))
+        secs = float(budget_s) if budget_s else float(setting("REMITWATCH_MAX_SECONDS", 240) if serverless
+                                                      else setting("REMITWATCH_CYCLE_BUDGET_SECONDS", 3600))
     except (TypeError, ValueError):
         secs = 240.0 if serverless else 3600.0
     # serverless: the store image's save goes through one block SQLite caps at 1,024 MB (store.MEMDB_CEILING_MB); a bigger
@@ -595,7 +597,15 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
 
     def step(st: dict, b: dict) -> None:
         nonlocal level, calm, pressure
+        was = pressure
         pressure = pressure_of(st, b)
+        if pressure.get("image_mb") is None and isinstance(was, dict) and was.get("image_mb"):
+            # a run that saved no store (one that stopped, an idle one) measured no image, but the image is as large as
+            # the last save left it: its size is kept, so the ceiling's warning stays up until a save measures it smaller.
+            # It does not step the level: only a run that measured it does that
+            ceiling = pressure.get("ceiling_mb") or was.get("ceiling_mb")
+            pressure = dict(pressure, image_mb=was["image_mb"], ceiling_mb=ceiling, image_carried=True,
+                            image=round(float(was["image_mb"]) / float(ceiling), 3) if ceiling else was.get("image"))
         before = level
         if pressure["pressured"]:
             level, calm = min(level + 1, len(LEVELS) - 1), 0
@@ -2124,7 +2134,14 @@ def accept_findings(conn: sqlite3.Connection, user: str, check_ids: Iterable[str
         hist.append({"at": at, "by": who, "run_id": latest, "checks": accepted})
         meta_set(conn, K_ACCEPTED, hist)
     conn.commit()
-    return {"accepted": accepted, "by": who, "at": at, "run_id": latest}
+    if accepted:
+        text = ("Accepted: " + "; ".join(f"{_n(n, 'item')} of '{CHECKS[c][3] if c in CHECKS else c}'" for c, n in sorted(accepted.items()))
+                + f", what run {latest} found. They no longer hold a run or stay on the worklist because of these checks.")
+    else:
+        # a warning check keeps no list to accept (it holds no run and keeps no item), and a check that passed has none
+        text = ("Nothing was accepted: the checks named have no items to accept (a warning keeps no list: it holds no run "
+                "and keeps no item on the worklist).")
+    return {"accepted": accepted, "by": who, "at": at, "run_id": latest, "text": text}
 
 
 def held_copy(conn: sqlite3.Connection) -> dict:
@@ -4539,14 +4556,16 @@ def banner(conn: sqlite3.Connection) -> dict | None:
     it too): {'level': 'blind' | 'safe_mode', 'text'}, or None when there is nothing to say. Never 'all clear' while blind."""
     safe = meta_get(conn, K_SAFE, {}) or {}
     blind = meta_get(conn, K_BLIND, {}) or {}
-    parts, level = [], None
+    parts, level, safe_text = [], None, None
     if safe.get("on"):
-        parts.append("Safe mode: the worklist is the one from before RemitWatch's last run, which it is checking. Nothing was lost.")
+        safe_text = "Safe mode: the worklist is the one from before RemitWatch's last run, which it is checking. Nothing was lost."
+        parts.append(safe_text)
         level = "safe_mode"
     if blind.get("blind") and blind.get("banner"):
         parts.append(blind["banner"])
         level = level or "blind"
-    return {"level": level, "text": " ".join(parts)} if parts else None
+    # 'safe_mode' on its own: the pages draw it above everything, and the blind-spot bar already says the rest in dollars
+    return {"level": level, "text": " ".join(parts), "safe_mode": safe_text} if parts else None
 
 
 REQUESTS = ("audit", "accept")
@@ -4561,7 +4580,21 @@ def apply_request(conn: sqlite3.Connection, action: dict, *, today: Any = None) 
     if what == "audit":
         return {"audit": self_audit(conn, today=today, force=True, why="on demand")}
     if what == "accept":
-        return accept_findings(conn, str(action.get("user") or "a person"), action.get("checks"), run_id=action.get("run_id"))
+        rid = action.get("run_id")
+        if not (isinstance(rid, str) and re.fullmatch(r"run-\d{8}T\d{6}Z(-[0-9a-f]{4,8})?", rid)):
+            # an acceptance names the run the page showed: without one it could only take whatever the latest run found
+            return {"accepted": {}, "refused": True,
+                    "text": "Not accepted: the request did not say which run's findings to accept. Press Accept again on the Data tab."}
+        got = accept_findings(conn, str(action.get("user") or "a person"), action.get("checks"), run_id=rid)
+        if got.get("stale"):
+            # the checks ran again between the page and this run (Vercel's journal): kept where the panel reads it, so
+            # the owner who was told "Accepted" learns it was not, and why
+            hist = list(meta_get(conn, K_ACCEPTED, []) or [])[-49:]
+            hist.append({"at": got.get("at"), "by": got.get("by"), "run_id": rid, "latest": got.get("run_id"), "stale": True,
+                         "checks": {c: 0 for c in (action.get("checks") or []) if isinstance(c, str)}})
+            meta_set(conn, K_ACCEPTED, hist)
+            conn.commit()
+        return got
     return {"skipped": f"unknown request {what!r}"}
 
 

@@ -32,14 +32,16 @@ async function opPanels(el){
 // what the last run could not check (open items and dollars), and the button that starts the run chain.
 function opAnalysisHtml(a){
   if(!a.press_only) return '';
-  const an = a.analysed || {}, run = a.running, un = a.unchecked;
-  const last = an.at ? `This site last analysed ${opWhen(an.at)} UTC${an.findings != null ? `, ${esc(opPl(Number(an.findings), 'item'))} on its lists` : ''}.`
-    : 'This site has not analysed yet.';
+  const an = a.analysed || {}, run = a.running, un = a.unchecked, lists = a.lists;
+  // the open items the lists hold now (the dashboard's copy), not every item the analysis found
+  const onLists = lists && lists.n != null ? `: ${esc(opPl(Number(lists.n), 'open item'))} (${money(lists.cents)}) on its lists` : '';
+  const last = an.at ? `This site last analysed ${opWhen(an.at)} UTC${onLists}.` : 'This site has not analysed yet.';
+  const stopped = a.failed && a.failed.text ? `<div class="warnbox small"><b class="sev-high">${a.failed.halted ? 'The run chain stopped before it finished.' : 'The last run stopped before it finished.'}</b> ${esc(a.failed.text)}</div>` : '';
   return `<div class="panel" id="opAnalysis"><div class="panel-head"><h2>Analysis on this site</h2>
       <span class="small muted">${esc(a.text || '')}</span></div>
     <div class="small"><b>${last}</b></div>
     ${run ? `<div class="note small">A run is going (asked for or started ${opWhen(run.since)} UTC). It finishes by itself, and the lists change when it has.</div>` : ''}
-    ${a.failed && a.failed.text ? `<div class="warnbox small"><b class="sev-high">The last run stopped before it finished.</b> ${esc(a.failed.text)}</div>` : ''}
+    ${stopped}
     ${un && un.text ? `<div class="warnbox small"><b>What the last run could not check.</b> ${esc(un.text)}</div>` : ''}
     <div style="margin-top:8px"><button class="primary" data-op-press="1" ${run ? 'disabled' : ''}>Run the analysis now</button>
       <span class="small muted" data-op-press-said></span></div>
@@ -71,8 +73,17 @@ function opSelfcheckHtml(s){
       <div class="op-list" data-op-list="${esc(c.id)}"></div></div></div>`;
   }).join('');
   const failing = checks.filter(c => c.status === 'fail').map(c => c.id);
-  const accept = failing.length && last.run_id ? `<div class="small" style="margin-top:6px">If these changes are what you intended (a new rule, a payer's new policy), the owner can accept exactly what this run found:
-      <button class="btn" data-op-accept="${esc(failing.join(','))}" data-op-run="${esc(last.run_id)}">Accept what run ${esc(last.run_id)} found</button></div>` : '';
+  // Accept takes the list a failing critical check keeps (a warning keeps none: it holds no run and keeps no item), once
+  // per run: what the owner accepted for the run shown is said instead of offering the same Accept again
+  const acc = s.acceptances || [], asked = (state.opAsked || {})[last.run_id] || [];
+  const took = new Set([].concat(...acc.filter(x => !x.stale && x.run_id === last.run_id).map(x => Object.keys(x.checks || {}))).concat(asked));
+  const acceptable = checks.filter(c => c.status === 'fail' && c.severity === 'critical' && !took.has(c.id)).map(c => c.id);
+  const tookLine = took.size && last.run_id ? `<div class="small ok" style="margin-top:6px">Accepted: what run ${esc(last.run_id)} found (${esc(checks.filter(c => took.has(c.id)).map(c => c.title || c.id).join('; ') || [...took].join(', '))}).${asked.length ? ' The next run takes it.' : ''}</div>` : '';
+  const refused = acc.filter(x => x.stale).slice(-1)[0];
+  const refusedLine = refused && refused.run_id !== last.run_id ? `<div class="warnbox small">Not accepted: the acceptance of what run ${esc(refused.run_id)} found (${opWhen(refused.at)} UTC) reached the store after the checks ran again. Look at the new results below, then accept them if they are intended.</div>` : '';
+  const accept = acceptable.length && last.run_id ? `<div class="small" style="margin-top:6px">If these changes are what you intended (a new rule, a payer's new policy), the owner can accept exactly what this run found:
+      <button class="btn" data-op-accept="${esc(acceptable.join(','))}" data-op-run="${esc(last.run_id)}">Accept what run ${esc(last.run_id)} found</button>
+      <div class="small" data-op-owner></div></div>` : '';
   const audit = au.today ? `<div class="check"><div><b>The weekly self-audit</b> <span class="small muted">of ${esc(au.today)}</span>
       <div class="small">${au.gaps_n ? `<button class="linkish" data-op-audit="gap">${esc(opPl(au.gaps_n, 'line'))} with money to recover and no item (${money(au.gaps_cents)})</button>` : 'Every line with money to recover has an item.'}
       ${au.wasted_n ? ` · <button class="linkish" data-op-audit="wasted">${esc(opPl(au.wasted_n, 'item'))} on Work now that look settled</button>` : ''}</div>
@@ -81,7 +92,8 @@ function opSelfcheckHtml(s){
       <span class="small muted">After every run RemitWatch checks its own work: nothing closed without proof, nothing dropped without a reason, every dollar accounted for.</span></div>
     ${safe.on ? `<div class="warnbox"><b>Safe mode.</b> ${esc(safe.text || '')}</div>` : ''}
     ${(s.lines || []).map(t => `<div class="small">${esc(t)}</div>`).join('')}
-    <details class="dfold" ${failing.length ? 'open' : ''}><summary>${esc(opPl(checks.length, 'check'))} after the last run</summary>${rows}${accept}</details>
+    ${refusedLine}
+    <details class="dfold" ${failing.length ? 'open' : ''}><summary>${esc(opPl(checks.length, 'check'))} after the last run</summary>${rows}${tookLine}${accept}</details>
     ${audit}
     <div class="small"><button class="btn" data-op-audit-now="1">Run the self-audit now</button> <span class="small muted" data-op-audit-said></span></div>
   </div>`;
@@ -161,10 +173,41 @@ function opBind(el, p){
     const checks = b.getAttribute('data-op-accept').split(',').filter(Boolean), run = b.getAttribute('data-op-run');
     if(!confirm('Accept exactly what this run found? The items it lists leave the worklist as the newest analysis says.')) return;
     b.disabled = true;
-    try { const r = await api('/api/ops/selfcheck/accept', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({checks, run_id: run})});
-      notice(r.stale ? (r.text || 'The checks ran again after this page was opened: look at the new list first.') : (r.text || 'Accepted.')); opPanels(el); }
+    const where = b.parentElement.querySelector('[data-op-owner]');
+    try { const r = await opOwnerPost('/api/ops/selfcheck/accept', {checks, run_id: run}, where);
+      if(r.asked){ state.opAsked = Object.assign({}, state.opAsked, {[run]: checks}); }      // on Vercel the next run takes it
+      notice(r.text || (r.stale ? 'The checks ran again after this page was opened: look at the new list first.' : 'Accepted.')); opPanels(el); }
     catch(e){ notice('Not accepted: ' + (e.message || 'no answer')); b.disabled = false; }
   }));
+}
+
+// Accepting is the owner's (api_ops._owner): the owner's password the page holds (typed into the Providers tab or here)
+// goes with the request, as the Providers tab sends it; refused (403), the panel asks for it with what it is for, tries
+// once more with it, and keeps it in the page's memory as the Providers tab does (Lock forgets it).
+function opAskOwner(where, why){
+  return new Promise(resolve => {
+    if(!where){ resolve(''); return; }
+    where.innerHTML = `<div>${esc(why || "Accepting is the owner's decision: type the owner's password.")}</div>
+      <input type="password" autocomplete="off" placeholder="Owner's password" style="width:180px"> <button data-op-owner-ok>Accept with it</button> <button data-op-owner-no>Cancel</button>`;
+    const inp = where.querySelector('input'); inp.focus();
+    where.querySelector('[data-op-owner-ok]').onclick = () => resolve(inp.value);
+    inp.onkeydown = e => { if(e.key === 'Enter') resolve(inp.value); };
+    where.querySelector('[data-op-owner-no]').onclick = () => { where.innerHTML = ''; resolve(''); };
+  });
+}
+async function opOwnerPost(path, body, where){
+  const send = key => api(path, {method: 'POST', headers: Object.assign({'Content-Type': 'application/json'}, key ? {'X-Owner-Password': key} : {}), body: JSON.stringify(body || {})});
+  try { return await send(state.ownerKey || ''); }
+  catch(e){
+    if(e.status !== 403 || !where) throw e;
+    const key = await opAskOwner(where, e.message);
+    if(!key) throw new Error('nothing was accepted.');
+    const r = await send(key);
+    state.ownerKey = key;
+    if(typeof pvKeyUi === 'function') pvKeyUi();
+    if(typeof pvArmIdle === 'function') pvArmIdle();
+    return r;
+  }
 }
 
 function opBindOpen(box){

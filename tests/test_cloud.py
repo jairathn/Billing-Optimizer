@@ -436,7 +436,9 @@ def test_scheduler_address_runs_one_cycle_and_needs_the_secret(site, monkeypatch
     tc.post("/api/sync/run", headers=xhr)
     assert calls[-1][0] == "https://remitwatch.example.com"
     monkeypatch.setattr(cloud, "trigger_cycle", lambda *a, **k: False)
-    assert tc.post("/api/sync/run", headers=xhr).status_code == 400
+    # the run could not be asked for although the secret is set: a 502 that does not blame the secret (review hook-r2-6)
+    refused = tc.post("/api/sync/run", headers=xhr)
+    assert refused.status_code == 502 and "CRON_SECRET is not set" not in refused.json()["detail"], refused.text
     # the site's own pages may also call it with the login, but only with the header a cross-site page cannot send:
     # a browser attaches a saved login to requests another site's page causes, a GET for an image included
     assert tc.post("/api/cron/cycle", headers=auth).status_code == 400 and tc.get("/api/cron/cycle", headers=auth).status_code == 400

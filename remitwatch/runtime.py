@@ -165,6 +165,64 @@ def memory_mb() -> int | None:
     return None
 
 
+# A run's memory figures are its own. Vercel reuses a warm instance (one Python process, "fluid" in vercel.json) for the
+# next invocation: the process's high-water mark then still holds an earlier run's peak (a full analysis on the real
+# store holds about 1.9 GB), and a light run after it would read as near the limit, so the self-regulation would step up
+# and never come down. Each run sets the mark back when it starts (reset_peak).
+_PEAK: dict = {"reset": False, "base": None, "seen": 0}
+
+
+def _status_mb(field: str) -> int | None:
+    """VmHWM (the high-water mark) or VmRSS (now) from /proc/self/status, in MB; None where there is no /proc."""
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith(field + ":"):
+                    return int(line.split()[1]) >> 10
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _hwm_mb() -> int | None:
+    got = _status_mb("VmHWM")
+    if got is not None:
+        return got
+    try:
+        import resource
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def reset_peak() -> bool:
+    """At a run's start: the high-water mark set back to what the process holds now (Linux: '5' into /proc/self/clear_refs),
+    so peak_mb() is this run's. Where the mark cannot be reset, the mark at the start is kept, and a peak no higher than it
+    is not taken as this run's (peak_mb then gives what the run was seen to hold). True when the mark was reset."""
+    try:
+        with open("/proc/self/clear_refs", "w") as fh:
+            fh.write("5")
+        _PEAK.update(reset=True, base=None, seen=0)
+        return True
+    except OSError:
+        _PEAK.update(reset=False, base=_hwm_mb(), seen=_status_mb("VmRSS") or 0)
+        return False
+
+
+def peak_mb() -> int | None:
+    """The most memory this run has held so far, in MB: the process's high-water mark since reset_peak (the process's
+    whole life when no run has reset it, as for a server's cycle in a process of its own)."""
+    hwm = _hwm_mb()
+    if hwm is None:
+        return None
+    base = _PEAK.get("base")
+    if not _PEAK.get("reset") and base is not None and hwm <= base:
+        # the mark is still the one an earlier run left: this run's own peak is what it was seen to hold
+        _PEAK["seen"] = max(int(_PEAK.get("seen") or 0), int(_status_mb("VmRSS") or 0))
+        return _PEAK["seen"] or None
+    return hwm
+
+
 def describe() -> dict:
     """What the running platform offers, for the health check and the setup page."""
     import platform

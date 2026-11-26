@@ -1061,11 +1061,16 @@ def test_the_banner_and_the_data_tab_requests(store):
     assert out["audit"]["why"] == "on demand"
     assert sc.apply_request(c, {"what": "nonsense"})["skipped"]
     add_item(c, "F-2")
-    run(c, None, "r1")
-    run(c, bad_closure, "r2")
-    assert sc.banner(c)["level"] == "safe_mode"
-    acc = sc.apply_request(c, {"what": "accept", "checks": ["closure_proof"], "user": "owner@example.test"})
-    assert acc["accepted"] == {"closure_proof": 1}
+    r1, r2 = "run-20261102T101700Z-aa01", "run-20261102T111700Z-aa02"
+    run(c, None, r1)
+    run(c, bad_closure, r2)
+    assert sc.banner(c)["level"] == "safe_mode" and sc.banner(c)["safe_mode"].startswith("Safe mode")
+    # an acceptance names the run the page showed (review hook-r2-11): without one, nothing is accepted
+    for rid in (None, "", "r2"):
+        refused = sc.apply_request(c, {"what": "accept", "checks": ["closure_proof"], "user": "owner@example.test", "run_id": rid})
+        assert refused["accepted"] == {} and refused.get("refused") and "which run" in refused["text"], refused
+    acc = sc.apply_request(c, {"what": "accept", "checks": ["closure_proof"], "user": "owner@example.test", "run_id": r2})
+    assert acc["accepted"] == {"closure_proof": 1} and acc["text"].startswith("Accepted: 1 item of"), acc
 
 
 def test_a_server_cycle_summary_is_measured_by_its_start_and_end(store, monkeypatch):
