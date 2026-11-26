@@ -74,6 +74,11 @@ the release gates (section 0 below, "Then, in order").
   At the merge: CLAUDE.md's daily-cycle paragraph still says Vercel's cron calls /api/cron/cycle at 10:17 UTC; the
   hook removed that cron (vercel.json keeps the fax cron only), so the integrator rewrites the paragraph for the press.
   Safe mode listed the 33 new items ($2,279) of a run whose ledger check failed: sent to the fix wave (F6).
+- **Private word lists (22:05 UTC).** The repository scan uses `$S/docs_private/all_words.txt` (it holds every entry of
+  words.txt, practice_names.txt, tin_candidates.txt and removed_tokens.txt): the tip passes it. Two other files there
+  "fail" by design and are not leaks: ema_hosts.txt holds ModMed's public sign-in host (in test_docs's MODMED_PUBLIC)
+  and removed_words.txt holds two generic words taken off the list. A17's report of hits in OPERATIONS.md,
+  TRIZETTO_REQUEST.md and audit_pass1 came from its checkout before it merged 7ff4387; its branch has no such hit.
 - **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
   world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
   SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
