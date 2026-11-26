@@ -244,9 +244,10 @@ class Proc:
                  "charge", "paid", "ccas", "crarc", "lines", "npi", "trace", "sup", "copy_of", "cancelled_by", "cancels",
                  "xover", "nlines_raw", "stmt", "pk", "mks", "copy_kind",
                  # A17: the plan digests (rule 1), the rate product (product + own-schedule plan), the setting the
-                 # payer priced (rule 2), the office state of the clinician's day (rule 1), the patient's share (CLP05)
-                 # and whether the processing is a bare $0 row (rule 5)
-                 "plan_g", "plan_c", "rprod", "pos_eff", "pos_src", "ostate", "prr", "bare")
+                 # payer priced (rule 2), the office state of the clinician's day (rule 1), the patient's share (CLP05),
+                 # whether the processing is a bare $0 row (rule 5), a Federal Employee Program claim and the payer's
+                 # own name on it, normalized (rule 4: the window table's group is read from them)
+                 "plan_g", "plan_c", "rprod", "pos_eff", "pos_src", "ostate", "prr", "bare", "fep", "pname")
 
 
 class Line:
@@ -408,18 +409,268 @@ STATE_OF_FAMILY = {"MEDICARE-KY": "KY", "MEDICARE-IN": "IN"}
 # rule 5: send-day twins. EMA writes a claim's 837 the day it posts the claim's charges or the day after (measured: 99.9%
 # of the claims the link map ties to a bill went out 0 or 1 day after their first charge posting)
 TWIN_SLACK_DAYS = 1
-# rule 4: the payer window table. Its schema (one JSON file, the researched table or an invented one in the self-test):
+# rule 4: the payer window table. Two forms are read (PayerWindows):
+# - the researched table, plans/tools/a17/payer_windows.json (DEFAULT_WINDOWS, loaded unless another table is named or
+#   the rule is switched off): {"built": ..., "rows": [row, ...]}, one row per payer group and window, each with its
+#   length ("days" or "months"; "length_text" for a calendar rule), its starting point ("counted_from"), the presumed
+#   mail days added first ("receipt_days"), its source (title, section, revision, url, a short quote) and whether it was
+#   verified at that source. The row id names the group (its first part: "medicare_ky", "anthem_fep", "other", ...).
+# - an a17-payer-windows/1 table (an invented one in the self-test):
 #   {"schema": "a17-payer-windows/1", "payers": [entry, ...], "default": entry (optional)}
 #   entry: {"id": "...", "label": "...",
 #           "match": {"payer_ids": [...], "families": [...], "name_patterns": [regex, ...],
 #                     "classes": ["MCR"|"MAP"|"MCD"|"GOV"|"COM", ...], "products": [CLP06 codes ...]},
 #           "first_filing": window, "corrected_claim": window, "appeals": [window with "level": 1, 2, ...]}
 #   window: {"days": N} or {"months": N}, "from": "dos" | "remit" | "denial" | "send" | "decision", "source": "..."
-# Every window must name its source; a window without one is not used (the entry falls back to the defaults).
+#   Every window must name its source; a window without one is not used (the entry falls back to the defaults).
+# A window not verified at its source, one with no length or starting point the auditor can count, and a payer or kind
+# the table has no row for, fall back to A16's days and are UNVERIFIED: a unit past such a window is reported as
+# 'window unverified', never as expired (WINDOW_UNVERIFIED). With no table at all, A16's windows stand as they were.
 WINDOW_SCHEMA = "a17-payer-windows/1"
+DEFAULT_WINDOWS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "a17", "payer_windows.json")
 # rule 5: a remark code (RARC) posted as a reason on an EMA line
 RARC_RE = re.compile(r"^(N\d+|M\d+|MA\d+)$")
 WINDOW_FROM = {"dos", "remit", "denial", "send", "decision"}
+WINDOW_UNBOUNDED = "9999-12-31"
+# Which researched group a payer is, by the auditor's own public rules (payer names as norm_name spells them, the payer
+# families ID_MERGE builds from public payer ids, the claim filing indicator CLP06, the Federal Employee Program read
+# from CLP06 FI or the contract class), never by RemitWatch's. Tried in order; the first rule that matches wins. A row
+# group the table names by a payer's exact name (its "other" rows) is tried before these rules.
+_UHC_NAMES = r"\bUNITED ?HEALTH ?CARE\b|^UHC\b|\bUNITEDHEALTHCARE\b"
+_ANTHEM_NAMES = r"^ANTHEM\b|\bANTHEM BLUE\b|\bBLUE ?CROSS\b|\bBLUE ?SHIELD\b|^BCBS\b|\bBLUECARD\b|\bWELLPOINT\b|\bELEVANCE\b"
+_MEDSUPP_NAMES = (r"\bMUTUAL OF OMAHA\b|\bMEDICO\b|\bGREAT AMERICAN LIFE\b|\bAMERICAN ENTERPRISE\b|\bBANKERS FIDELITY\b|"
+                  r"\bWELLABE\b|\bPHYSICIANS MUTUAL\b|\bCOMBINED INSURANCE\b|\bCOMPANION LIFE\b|\bFORETHOUGHT\b|"
+                  r"\bMANHATTAN LIFE\b|\bRESERVE NATIONAL\b|\bCONTINENTAL LIFE\b|\bHEARTLAND NATIONAL\b|\bLUMICO\b|"
+                  r"\bTRANSAMERICA\b|\bSTATE FARM\b|\bUSAA\b|\bEVEREST\b|\bCENTRAL STATES\b|\bUNITED AMERICAN\b|"
+                  r"\bCOLONIAL PENN\b|\bGERBER\b|\bLIBERTY NATIONAL\b|\bGLOBE LIFE\b|\bTHRIVENT\b|\bOXFORD LIFE\b|"
+                  r"\bACCENDO\b|\bAMERICAN FAMILY\b|\bSUPPLEMENT\b|\bMEDIGAP\b|\bAMERICAN INS ADMIN\b|"
+                  r"\bACTUARIAL MANAGEMENTS?\b|\bATLANTIC COAST LIFE\b|\bGOLDEN RULE\b|\bGLOBAL CARE\b|\bSTANDARD LIFE\b")
+WINDOW_GROUP_RULES = (
+    ("champva", {"names": r"\bCHAMP ?VA\b"}),                      # before TRICARE and the VA: its names carry both
+    ("tricare", {"names": r"\bTRICARE\b|\bHUMANA MILITARY\b|\bCHAMPUS\b"}),     # before Humana
+    ("va_ccn", {"names": r"\bVETERANS?\b|^VA\b|\bTRIWEST\b|\bOPTUM VA\b|\bCOMMUNITY CARE NETWORK\b|\bVACAA\b"}),
+    ("medicare_ky", {"fams": {"MEDICARE-KY"}, "names": r"^(KY|KENTUCKY) MEDICARE\b|\bMEDICARE OF KENTUCKY\b"}),
+    ("medicare_in", {"fams": {"MEDICARE-IN"}, "names": r"^(IN|INDIANA) MEDICARE\b|\bMEDICARE OF INDIANA\b"}),
+    ("railroad", {"fams": {"MEDICARE-RR"}, "names": r"\bRAILROAD MEDICARE\b"}),
+    ("oxford", {"names": r"\bOXFORD HEALTH\b"}),                   # a UnitedHealthcare company, not Medicare
+    ("uhis", {"names": r"\bUNITEDHEALTH INTEGRATED\b|\bWAUSAU\b"}),
+    ("umr", {"fams": {"UMR"}, "names": r"\bUNITED MEDICAL RESOURCES\b|^UMR\b"}),
+    ("aarp_medsupp", {"names": r"\bAARP\b.*\bSUPPLEMENT"}),
+    ("uhc_ma", {"names": _UHC_NAMES, "prods": {"16"}}),
+    ("uhc_ma", {"names": r"(\bUNITED ?HEALTH ?CARE\b|^UHC\b|\bUNITEDHEALTHCARE\b|\bAARP\b).*\b(MEDICARE|ADVANTAGE|COMPLETE)\b",
+                "not_prods": {"MC"}}),
+    ("uhc", {"names": _UHC_NAMES, "not_prods": {"MC"}}),           # its Medicaid plans have no row
+    ("humana_caid", {"fams": {"HUMANA"}, "names": r"^HUMANA\b", "prods": {"MC"}}),
+    ("humana_ma", {"fams": {"HUMANA"}, "names": r"^HUMANA\b", "prods": {"16"}}),
+    ("humana_ma", {"names": r"^HUMANA\b.*\b(MEDICARE|ADVANTAGE|GOLD)\b|\bHUMANA CARE ?PLAN\b", "not_prods": {"MC"}}),
+    ("humana", {"fams": {"HUMANA"}, "names": r"^HUMANA\b"}),
+    ("anthem_fep", {"fams": {"BCBS-ANTHEM"}, "names": _ANTHEM_NAMES, "fep": True}),
+    ("anthem_ma", {"fams": {"BCBS-ANTHEM"}, "names": _ANTHEM_NAMES, "prods": {"16"}}),
+    ("anthem_caid", {"fams": {"BCBS-ANTHEM"}, "names": _ANTHEM_NAMES, "prods": {"MC"}}),
+    ("anthem", {"fams": {"BCBS-ANTHEM"}, "names": _ANTHEM_NAMES}),
+    ("aetna_senior", {"names": r"\bAMERICAN CONTINENTAL\b|\bAETNA SENIOR SUPPLEMENTAL\b"}),
+    ("aetna", {"names": r"^AETNA\b", "not_prods": {"MC", "16"}}),   # its Medicaid and Medicare plans have no row
+    ("cigna", {"names": r"^CIGNA\b", "not_prods": {"MC", "16"}}),
+    ("ambetter", {"names": r"\bAMBETTER\b"}),                      # Centene's marketplace plan, whatever CLP06 says
+    ("wellcare_caid", {"names": r"\bWELLCARE\b", "prods": {"MC"}}),
+    ("wellcare_ma", {"names": r"\bWELLCARE\b"}),
+    ("umwa", {"names": r"\bUMWA\b"}),
+    ("geha", {"names": r"\bGEHA\b|\bGOVERNMENT EMPLOYEES (HEALTH|HOSPITAL) ASSOCIATION\b"}),
+    ("ky_medicaid", {"names": r"\b(KY|KENTUCKY) MEDICAID\b|^MEDICAID (OF )?(KY|KENTUCKY)\b"}),
+    ("in_medicaid", {"names": r"\b(IN|INDIANA) MEDICAID\b|^MEDICAID (OF )?(IN|INDIANA)\b|\bINDIANA HEALTH COVERAGE\b"}),
+    ("medsupp", {"names": _MEDSUPP_NAMES}),
+    ("tpa", {"names": r"\bAUXIANT\b|\bMERITAIN\b|\bHEALTHCOMP\b|\bALLIANCE COAL\b|\bBENEFIT ADMINISTRATIVE\b|"
+                      r"\bADMINISTRATIVE CONCEPTS\b|\bLIFEPRINT\b|\bTRUSTMARK\b|\bALLIED BENEFIT\b|\bHEALTHSCOPE\b|"
+                      r"\bDUNN AND ASSOCIATES\b|\bGROUP AND PENSION\b|\bTPA\b|\bWEBTPA\b|\bADMINISTRATORS?\b|"
+                      r"\bBENEFITS? ADMIN|\bHEALTH BENEFIT\b|\bBENEFITS COMPANIES\b|\bBENEFIT SERVICES\b"}),
+    ("workers_comp", {"names": r"\bGALLAGHER BASSETT\b"}),
+)
+# row groups read as one (the same payer's plans the remittance does not tell apart)
+WINDOW_KEY_ALIAS = {"anthem_caid_in": "anthem_caid", "humana_caid_careplan": "humana_caid"}
+# How the auditor uses particular rows (by row id), each with its reason:
+#   skip: not a window for this practice's claims; also_appeal: the row is also the appeal path; workday: a last day on
+#   a Saturday, Sunday or Federal holiday moves to the next workday; oneof: one of several plans' windows, the auditor
+#   cannot tell which (open while every one is, unverified while some is); cond: an extension under a condition the
+#   auditor cannot check (unverified while it may run); ext: the row's window plus such an extension it does not count;
+#   floor: a minimum (unverified once past it); later_of: the later of 90 days from the return and 1 year from the
+#   service; unverified: a rule of one state the auditor cannot tell the claim is in.
+WINDOW_ROW_USE = {
+    # for a provider with no contract; the practice bills these plans in volume under contract (the product assumes so)
+    "humana_ma.noncontracted": "skip", "uhc_ma.noncontracted": "skip", "anthem_ma.noncontracted": "skip",
+    # 907 KAR 1:671 hears terminations, sanctions and repayments, not claim denials: a denial is fixed by a new claim
+    # within the 12-month filing limit, which is therefore also the appeal path
+    "ky_medicaid.appeal": "skip", "ky_medicaid.corrected_claim": "also_appeal",
+    # 42 CFR 424.44(c)
+    "medicare_ky.first_filing": "workday", "medicare_in.first_filing": "workday", "railroad.first_filing": "workday",
+    "medicare_ky.corrected_unprocessable": "workday", "medicare_in.corrected_unprocessable": "workday",
+    "railroad.corrected_unprocessable": "workday",
+    # the Kentucky plan (365 days) or the Indiana plans (90 days): the remittance does not say which
+    "anthem_caid.first_filing": "oneof", "anthem_caid_in.first_filing": "oneof",
+    # 6 months from Medicare's adjudication of a crossover claim; or 6 months from the primary payer's payment; a fully
+    # insured plan's 2 years (the 835 does not say whether a plan is fully insured)
+    "ky_medicaid.crossover": "cond", "wellcare_caid.first_filing": "ext",
+    "aetna.reconsideration_ky_in_fully_insured": "cond",
+    # ERISA's 180 days are the least a plan must allow (29 CFR 2560.503-1(h)(3)(i))
+    "tpa.appeal": "floor",
+    # 32 CFR 199.7(d)(1): the later of 1 year after the service or 90 days from the return
+    "tricare.returned_claim": "later_of",
+    # Kentucky's workers' compensation rule (803 KAR 25:096); Indiana's was not checked
+    "workers_comp.first_filing": "unverified",
+}
+
+
+def window_kinds(window):
+    """The window kinds a researched row names: first_filing, corrected_claim, appeal_1, appeal_2, dispute (a contract
+    dispute of a payment below the contracted rate)."""
+    w = (window or "").lower()
+    out = [k for k in ("first_filing", "corrected_claim", "appeal_1", "appeal_2") if k in w]
+    if w.startswith("contract_dispute"):
+        out.append("dispute")
+    return out
+
+
+def research_anchor(row, kind):
+    """The starting point of a researched row's window: 'dos' (the date of service), 'remit' (the remittance, the notice,
+    determination, EOB or EOP it carries, a payment), 'decision' (a first-level decision: the second level's start), or
+    None when the auditor cannot date it (unknown, none stated, Medicare's adjudication of a crossover claim)."""
+    c = (row.get("counted_from") or "").strip().lower()
+    if not c or c.startswith(("unknown", "none stated", "medicare_adjudication")):
+        return None
+    if kind == "appeal_2":
+        return "decision"
+    if c.startswith(("date_of_service", "date_of_treatment", "date_of_loss", "later of one year after service")):
+        return "dos"
+    return "remit"
+
+
+def research_alts(row, kind, use):
+    """The windows (alternatives) one researched row gives for one kind: dicts with unit ('days', 'months', 'eoy_next':
+    December 31 of the year after; None: no length the auditor can count), n, frm, receipt, verified, role ('path',
+    'oneof', 'cond', 'floor'), src, row, workday."""
+    rid = str(row.get("id") or "")
+    unit, n = None, None
+    if row.get("days") is not None:
+        unit, n = "days", int(row["days"])
+    elif row.get("months") is not None:
+        unit, n = "months", int(row["months"])
+    elif "december 31 of the year after" in ((row.get("length_text") or "") + " " +
+                                              (row.get("counted_from") or "")).lower():
+        unit, n = "eoy_next", 0
+    src = "; ".join(str(row[k]) for k in ("source_title", "section", "revision", "url") if row.get(k))
+    alt = {"unit": unit, "n": n, "frm": research_anchor(row, kind), "receipt": int(row.get("receipt_days") or 0),
+           "verified": bool(row.get("verified")) and bool(src) and use != "unverified",
+           "role": use if use in ("oneof", "cond", "floor") else "path", "src": src, "row": rid,
+           "workday": use == "workday"}
+    alts = [alt]
+    if use == "ext":
+        alts.append(dict(alt, unit=None, role="cond", row=rid + "+later"))
+    elif use == "later_of":
+        alt["frm"] = "remit"
+        alts.append(dict(alt, unit="months", n=12, frm="dos", row=rid + "+service"))
+    return alts
+
+
+_HOLIDAYS = {}
+
+
+def federal_holidays(year):
+    """The Federal holidays of a year as observed (5 U.S.C. 6103; a Saturday holiday is kept the Friday before, a Sunday
+    one the Monday after)."""
+    if year in _HOLIDAYS:
+        return _HOLIDAYS[year]
+
+    def nth(month, weekday, k):
+        if k > 0:
+            d = dt.date(year, month, 1)
+            return d + dt.timedelta(days=(weekday - d.weekday()) % 7 + 7 * (k - 1))
+        d = (dt.date(year, month + 1, 1) if month < 12 else dt.date(year + 1, 1, 1)) - dt.timedelta(days=1)
+        return d - dt.timedelta(days=(d.weekday() - weekday) % 7)
+    days = set()
+    for m, d in ((1, 1), (6, 19), (7, 4), (11, 11), (12, 25)):
+        if (m, d) == (6, 19) and year < 2021:
+            continue
+        x = dt.date(year, m, d)
+        days.add(x - dt.timedelta(days=1) if x.weekday() == 5 else x + dt.timedelta(days=1) if x.weekday() == 6 else x)
+    days |= {nth(1, 0, 3), nth(2, 0, 3), nth(5, 0, -1), nth(9, 0, 1), nth(10, 0, 2), nth(11, 3, 4)}
+    _HOLIDAYS[year] = days
+    return days
+
+
+def next_workday(day):
+    """day, or the first day after it that is no Saturday, Sunday or Federal holiday (42 CFR 424.44(c))."""
+    d = dt.date.fromisoformat(day)
+    while d.weekday() >= 5 or d in federal_holidays(d.year) or d in federal_holidays(d.year + 1):
+        d += dt.timedelta(days=1)
+    return d.isoformat()
+
+
+def window_alt_end(alt, anchors):
+    """The last day of one window from its starting point, or None when the auditor cannot count it."""
+    a = anchors.get(alt["frm"]) if alt["frm"] else None
+    if not a and alt["frm"] in ("denial", "decision"):
+        a = anchors.get("remit")     # a denial or a decision is dated by the remittance that carries it
+    if not a or alt["unit"] is None:
+        return None
+    if alt["receipt"]:
+        a = add_days(a, alt["receipt"])
+    if alt["unit"] == "days":
+        end = add_days(a, alt["n"])
+    elif alt["unit"] == "months":
+        end = add_months(a, alt["n"])
+    elif alt["unit"] == "eoy_next":
+        end = "%04d-12-31" % (int(a[:4]) + 1)
+    else:
+        return None
+    return next_workday(end) if alt.get("workday") else end
+
+
+class WEnd(str):
+    """A17 rule 4: the last day of a unit's window (an ISO date, compared as text) with what the auditor knows of it:
+    verified (every window it rests on was verified at its source) and ext (the latest day it may run to under a
+    condition the auditor cannot check: WINDOW_UNBOUNDED for no known limit; the day itself when none)."""
+
+    def __new__(cls, day, verified=True, ext=None, basis=""):
+        o = str.__new__(cls, day)
+        o.verified = bool(verified)
+        o.ext = max(day, ext) if ext else day
+        o.basis = basis
+        return o
+
+
+def wmax(*ends):
+    """The later of a unit's windows, each a way to recover it: open while any is open; verified only when every one is
+    (a way the auditor could not verify may still be open)."""
+    es = [e for e in ends if e]
+    if not es:
+        return ""
+    day = max(str(e) for e in es)
+    return WEnd(day, all(getattr(e, "verified", True) for e in es), max(getattr(e, "ext", e) for e in es),
+                "+".join(b for b in (getattr(e, "basis", "") for e in es) if b))
+
+
+class WProd(str):
+    """A17 rule 4: the product (CLP06, or FI for the Federal Employee Program) a payer's windows are looked up under,
+    carrying the payer's own name on the remittance (normalized), from which the window table's group is read."""
+
+    def __new__(cls, prod, pname=""):
+        o = str.__new__(cls, prod or "")
+        o.pname = pname or ""
+        return o
+
+
+class _WindowUnverified:
+    """A17 rule 4: the 'inside' value of a unit whose window ended by a window the auditor could not verify, or that may
+    run on under a condition it cannot check: not expired, not known to be open (false in a test, so it is never counted
+    as inside)."""
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "WINDOW_UNVERIFIED"
+
+
+WINDOW_UNVERIFIED = _WindowUnverified()
 
 
 def add_months(a, n):
@@ -437,12 +688,14 @@ def add_months(a, n):
 
 
 class PayerWindows:
-    """A17 rule 4: the payer window table (first filing, corrected claim, appeal levels), each window with its source,
-    in place of A16's flat days. Matching: a payer id or family named by the entry, else a pattern on the payer's name;
-    then the entry's product classes or CLP06 products when it names them. With no table, or no entry for a payer, or an
-    entry without a sourced window of the kind asked, the defaults are A16's (appeal 120 days for Medicare, 90 for
-    Medicaid, 180 otherwise, from the answer; first filing 365 days from the date of service for Medicare, Medicaid and
-    Medicare Advantage, 180 otherwise)."""
+    """A17 rule 4: the payer window table (first filing, corrected claim, appeal levels, a contract dispute), each window
+    with its source, in place of A16's flat days. See the constants above for the two forms it reads. Matching, in the
+    researched form: the exact payer names of its "other" rows, then WINDOW_GROUP_RULES in order; in the schema form: a
+    payer id or family named by the entry, else a pattern on the payer's name; then the entry's product classes or CLP06
+    products when it names them. With no table, or no entry for a payer, or an entry without a window of the kind asked
+    the auditor can count, the defaults are A16's (appeal 120 days for Medicare, 90 for Medicaid, 180 otherwise, from the
+    answer; first filing 365 days from the date of service for Medicare, Medicaid and Medicare Advantage, 180 otherwise),
+    unverified when a table is loaded (strict)."""
 
     def __init__(self, table=None):
         self.entries = []
@@ -450,9 +703,12 @@ class PayerWindows:
         self.problems = Counter()
         self.used = Counter()
         self.version = None
+        self.form = None
+        self.strict = False
         if table:
             self.load(table)
 
+    # ---- the schema form (a17-payer-windows/1)
     @staticmethod
     def _window(w):
         if not isinstance(w, dict):
@@ -468,12 +724,16 @@ class PayerWindows:
             return None
         try:
             if n_days is not None:
-                return ("days", int(n_days), frm, str(src))
-            if n_months is not None:
-                return ("months", int(n_months), frm, str(src))
+                unit, n = "days", int(n_days)
+            elif n_months is not None:
+                unit, n = "months", int(n_months)
+            else:
+                return None
         except (TypeError, ValueError):
             return None
-        return None
+        return {"unit": unit, "n": n, "frm": frm, "receipt": int(w.get("receipt_days") or 0),
+                "verified": w.get("verified", True) is not False, "role": "path", "src": str(src),
+                "row": str(w.get("id") or ""), "workday": False}
 
     def _entry(self, e):
         m = e.get("match") or {}
@@ -481,7 +741,7 @@ class PayerWindows:
                "ids": {str(x).strip().upper() for x in (m.get("payer_ids") or []) if str(x).strip()},
                "fams": {str(x).strip().upper() for x in (m.get("families") or []) if str(x).strip()},
                "pats": [], "classes": {str(x).strip().upper() for x in (m.get("classes") or [])},
-               "products": {str(x).strip().upper() for x in (m.get("products") or [])}}
+               "products": {str(x).strip().upper() for x in (m.get("products") or [])}, "kinds": {}}
         for pat in m.get("name_patterns") or []:
             try:
                 ent["pats"].append(re.compile(pat, re.I))
@@ -491,24 +751,30 @@ class PayerWindows:
             w = self._window(e.get(kind))
             if e.get(kind) is not None and w is None:
                 self.problems[kind + "_without_source_or_unreadable"] += 1
-            ent[kind] = w
-        levels = {}
+            if w:
+                ent["kinds"][kind] = [dict(w, row=w["row"] or ent["id"] + "." + kind)]
         for a in e.get("appeals") or []:
             w = self._window(a)
             if w is None:
                 self.problems["appeal_without_source_or_unreadable"] += 1
                 continue
             try:
-                levels[int(a.get("level") or 1)] = w
+                lvl = int(a.get("level") or 1)
             except (TypeError, ValueError):
                 self.problems["appeal_level_unreadable"] += 1
-        ent["appeals"] = levels
+                continue
+            ent["kinds"].setdefault("appeal_%d" % lvl, []).append(dict(w, row=w["row"] or "%s.appeal_%d" % (ent["id"], lvl)))
         return ent
 
     def load(self, table):
         if isinstance(table, str):
-            with open(table) as fh:
+            with open(table, encoding="utf-8") as fh:
                 table = json.load(fh)
+        self.strict = True
+        if isinstance(table.get("rows"), list) and "schema" not in table:
+            self._load_research(table)
+            return
+        self.form = "schema"
         if (table.get("schema") or WINDOW_SCHEMA) != WINDOW_SCHEMA:
             self.problems["unknown_schema"] += 1
         self.version = table.get("version") or table.get("as_of")
@@ -516,14 +782,77 @@ class PayerWindows:
         if isinstance(table.get("default"), dict):
             self.default = self._entry(table["default"])
 
+    # ---- the researched form
+    def _load_research(self, table):
+        self.form = "research"
+        self.version = "researched table built %s" % table.get("built")
+        by_key, other = {}, {}
+        for row in table["rows"]:
+            rid = str(row.get("id") or "")
+            key = rid.split(".", 1)[0]
+            key = WINDOW_KEY_ALIAS.get(key, key)
+            use = WINDOW_ROW_USE.get(rid, "")
+            kinds = window_kinds(row.get("window"))
+            if use == "also_appeal":
+                kinds = kinds + ["appeal_1"]
+            if not kinds:
+                self.problems["row_kind_not_read"] += 1
+                continue
+            if use == "skip":
+                self.problems["row_not_used:" + rid] += 1
+                continue
+            if key == "other":
+                targets = [other.setdefault(norm_name(g), {}) for g in row.get("groups") or [] if norm_name(g)]
+            else:
+                targets = [by_key.setdefault(key, {})]
+            for kd in targets:
+                for kind in kinds:
+                    kd.setdefault(kind, []).extend(research_alts(row, kind, use))
+        self.entries = [{"id": "other:" + nm.lower(), "rule": {"exact": {nm}}, "kinds": kd} for nm, kd in sorted(other.items())]
+        for key, rule in WINDOW_GROUP_RULES:
+            if key not in by_key:
+                self.problems["rule_without_rows:" + key] += 1
+                continue
+            self.entries.append({"id": key, "kinds": by_key[key], "rule": {
+                "fams": set(rule.get("fams") or ()), "pat": re.compile(rule["names"]) if rule.get("names") else None,
+                "prods": set(rule.get("prods") or ()), "not_prods": set(rule.get("not_prods") or ()),
+                "fep": bool(rule.get("fep"))}})
+        ruled = {k for k, r in WINDOW_GROUP_RULES}
+        for key in sorted(set(by_key) - ruled):
+            self.problems["rows_without_rule:" + key] += 1
+
     def find(self, fam, prod, names):
-        """The table's entry for a payer family, product (CLP06) and payer names; None when none matches."""
+        """The table's entry for a payer family, product (CLP06; FI for the Federal Employee Program) and payer names;
+        None when none matches."""
         if not self.entries:
-            return None
+            return self.default
         fam_u = (fam or "").upper()
+        pr = (prod or "").split("#")[0]
+        if self.form == "research":
+            # the payer's own name first (a plan named on the remittance, such as an FEHB plan a third party pays for,
+            # is that plan's), then the payer family its id names
+            nms = {norm_name(n) for n in names or () if n}
+            for by_name in (True, False):
+                for e in self.entries:
+                    r = e["rule"]
+                    if "exact" in r:
+                        if by_name and nms & r["exact"]:
+                            return e
+                        continue
+                    if by_name:
+                        if r["pat"] is None or not any(r["pat"].search(n) for n in nms):
+                            continue
+                    elif fam_u not in r["fams"]:
+                        continue
+                    if r["fep"] and pr != "FI":
+                        continue
+                    if (r["prods"] and pr not in r["prods"]) or pr in r["not_prods"]:
+                        continue
+                    return e
+            return None
         ids = {fam_u, fam_u[3:] if fam_u.startswith("ID:") else fam_u}
         ids |= {k for k, v in ID_MERGE.items() if v == fam_u}
-        cls = PRODUCT_CLASS.get((prod or "").split("#")[0], "COM")
+        cls = PRODUCT_CLASS.get(pr, "COM")
         best, best_rank = None, None
         for e in self.entries:
             if e["ids"] & ids or fam_u in e["fams"]:
@@ -533,7 +862,7 @@ class PayerWindows:
             else:
                 continue
             if e["classes"] or e["products"]:
-                if cls not in e["classes"] and (prod or "").split("#")[0] not in e["products"]:
+                if cls not in e["classes"] and pr not in e["products"]:
                     continue
             else:
                 rank += 2          # an entry for every product of the payer comes after one for this product
@@ -541,15 +870,39 @@ class PayerWindows:
                 best, best_rank = e, rank
         return best or self.default
 
+    def kind_end(self, e, kind, anchors):
+        """The end of an entry's window of one kind from these starting points, as a WEnd; None when the entry has no
+        window of that kind the auditor can count (the caller then falls back to A16's days, unverified)."""
+        paths, oneof, ext, rows = [], [], [], []
+        verified, unbounded = True, False
+        for alt in ((e or {}).get("kinds") or {}).get(kind) or []:
+            end = window_alt_end(alt, anchors)
+            if alt["role"] == "cond":
+                if end is None:
+                    unbounded = True
+                else:
+                    ext.append(end)
+                continue
+            if end is None:
+                continue          # no length or no starting point the auditor can count
+            (oneof if alt["role"] == "oneof" else paths).append(end)
+            verified = verified and alt["verified"]
+            unbounded = unbounded or alt["role"] == "floor"
+            rows.append(alt["row"])
+        if not paths and not oneof:
+            return None
+        day = max(paths) if paths else None
+        top = [day] if day else []
+        if oneof:
+            day = max(day, min(oneof)) if day else min(oneof)
+            top.append(max(oneof))
+        top = WINDOW_UNBOUNDED if unbounded else max(top + ext)
+        return WEnd(day, verified, top, "+".join(sorted(set(rows))))
+
     @staticmethod
     def end(w, anchors):
-        kind, n, frm, src = w
-        a = anchors.get(frm)
-        if not a and frm in ("denial", "decision"):
-            a = anchors.get("remit")       # a denial or a decision is dated by the remittance that carries it
-        if not a:
-            return None
-        return add_days(a, n) if kind == "days" else add_months(a, n)
+        """The last day of one window (a schema-form window dict) from its starting points (kept for direct use)."""
+        return window_alt_end(w, anchors)
 
 
 # --------------------------------------------------------------------------------------------------------- loading
@@ -715,8 +1068,10 @@ def load(con, ledger=None):
         "crossover_carrier_name", "rendering_provider_npi", "patient_last", "patient_first", "patient_id", "insured_id",
         "group_number", "contract_class"])
     # replace the patient's name and member ids by one-way keys at once; A17 rule 1: the plan (REF*1L group number,
-    # REF*CE contract class) is kept only as a one-way digest, never as the value
-    R.claims = [c[:18] + (hkey(c[18], c[19]), hkey(c[20]), hkey(c[21]), plan_digest("g", c[22]), plan_digest("c", c[23]))
+    # REF*CE contract class) is kept only as a one-way digest, never as the value; A17 rule 4: whether the claim is the
+    # Federal Employee Program's (CLP06 FI, or a contract class naming the program), whose windows are its own
+    R.claims = [c[:18] + (hkey(c[18], c[19]), hkey(c[20]), hkey(c[21]), plan_digest("g", c[22]), plan_digest("c", c[23]),
+                          (c[8] or "").strip().upper() == "FI" or "FEDERAL EMPLOYEE" in (c[23] or "").upper())
                 for c in R.claims]
     R.lines = select(con, "lines", [
         "line_key", "claim_key", "line_seq", "procedure_qualifier", "procedure_code", "modifiers", "charge_cents",
@@ -779,8 +1134,13 @@ class Audit:
         # A17 diagnostics: rules switched off to attribute a change to its rule (plan, state, setting, xclaim, windows,
         # bare, twins, feedstop); never used for a score of record
         self.disable = set(disable or ())
-        # A17 rule 4: the payer window table (a path, a parsed table, or a PayerWindows); None keeps A16's windows
-        self.windows = windows if isinstance(windows, PayerWindows) else PayerWindows(windows)
+        # A17 rule 4: the payer window table (a path, a parsed table, or a PayerWindows); None reads the researched table
+        # (DEFAULT_WINDOWS); False or "none" keeps A16's windows (as does switching the rule off)
+        if windows is None:
+            windows = DEFAULT_WINDOWS if os.path.exists(DEFAULT_WINDOWS) else False
+        if isinstance(windows, str) and windows.strip().lower() in ("none", "off", "a16"):
+            windows = False
+        self.windows = windows if isinstance(windows, PayerWindows) else PayerWindows(windows or None)
         if "windows" in self.disable:
             self.windows = PayerWindows(None)
         self.day_state, self.loc_state, self.loc_of = {}, {}, {}
@@ -827,7 +1187,7 @@ class Audit:
             (lrarc[lk] if lk else crarc[ck]).append(code.strip().upper())
         for c in R.claims:
             (ck, tk, seq, pcn, st, charge, paid, prr, prod, clp07, pos, freq, stmt, pname, pid, pdate, xover, npi,
-             pk, mk1, mk2, gdig, cdig) = c
+             pk, mk1, mk2, gdig, cdig, fep) = c
             t = R.tx.get(tk)
             p = Proc()
             p.ck, p.tk, p.seq = ck, tk, seq or 0
@@ -860,6 +1220,8 @@ class Audit:
             p.ostate = None
             p.prr = prr or 0
             p.bare = False
+            p.fep = bool(fep)
+            p.pname = norm_name(pname)
             self.procs[ck] = p
         for ln in R.lines:
             (lk, ck, seq, qual, code, mods, charge, paid, punits, oqual, ocode, omods, ounits, sdate, pstart, allowed,
@@ -1651,60 +2013,97 @@ class Audit:
 
     # ------------------------------------------------------------------ A17 rule 4: payer windows
     def win(self, fam, prod):
+        """The window table's entry for a payer: read from the payer's own name on the remittance the window runs from
+        (carried by the product, WProd), else the payer's usual name; never from every name its payer id was seen with
+        (one id can carry a payer's commercial, Medicare Advantage and supplement names)."""
         if not self.windows.entries and self.windows.default is None:
             return None
-        names = set(self.fams.all_names.get(fam, ())) | ({self.fams.label(fam)} if fam else set())
-        if fam and fam.startswith(("EMA:", "NM:")):
-            names.add(fam.split(":", 1)[1])
+        own = getattr(prod, "pname", "")
+        if own:
+            names = {own}
+        else:
+            names = {self.fams.label(fam)} if fam else set()
+            if fam and fam.startswith(("EMA:", "NM:")):
+                names.add(fam.split(":", 1)[1])
         return self.windows.find(fam, prod, names)
 
-    def appeal_end(self, fam, prod, answer_date, level=1, default_prod=None):
+    @staticmethod
+    def wprod(p):
+        """The product a payer's windows are looked up under: CLP06, or FI for a Federal Employee Program claim (its
+        CLP06 or its contract class names the program), with the payer's own name on that remittance (A17 rule 4)."""
+        return WProd("FI" if getattr(p, "fep", False) else p.prod, getattr(p, "pname", ""))
+
+    def _fallback(self, anchor, days, basis):
+        """A16's window (days from the anchor). With a window table loaded it is unverified: no row of the payer's said
+        it (A17 rule 4)."""
+        end = add_days(anchor, days)
+        return WEnd(end, False, end, basis) if self.windows.strict else end
+
+    def _kind(self, fam, prod, kind, anchors):
+        e = self.win(fam, prod)
+        w = self.windows.kind_end(e, kind, anchors) if e else None
+        if w is not None:
+            self.windows.used[(e["id"], kind)] += 1
+        return w
+
+    def inside_of(self, wend):
+        """True while a unit's window is open on the as-of date; WINDOW_UNVERIFIED when it ended by a window the auditor
+        could not verify, or may run on under a condition it cannot check (A17 rule 4: never expired on such a window);
+        False when it ended by verified windows only."""
+        if not wend:
+            return False
+        if wend >= self.as_of:
+            return True
+        if not getattr(wend, "verified", True) or getattr(wend, "ext", wend) >= self.as_of:
+            return WINDOW_UNVERIFIED
+        return False
+
+    def appeal_end(self, fam, prod, answer_date, level=1, default_prod=None, dos=None, short=False):
         """The end of the window to appeal a payer's answer dated answer_date (A17 rule 4: the table's appeal level,
-        from the answer; else A16's days by product, default_prod standing for the product where A16 used another)."""
+        from the answer; for a payment below the contracted rate (short) also its contract dispute; else A16's days by
+        product, default_prod standing for the product where A16 used another, unverified)."""
         if not answer_date:
             return None
-        e = self.win(fam, prod)
-        w = e["appeals"].get(level) if e else None
+        anchors = {"remit": answer_date, "denial": answer_date, "decision": answer_date, "dos": dos}
+        w = self._kind(fam, prod, "appeal_%d" % level, anchors)
+        if short:
+            d = self._kind(fam, prod, "dispute", anchors)
+            w = wmax(w, d) if (w and d) else (w or d)
         if w:
-            end = PayerWindows.end(w, {"remit": answer_date, "denial": answer_date, "decision": answer_date})
-            if end:
-                self.windows.used[(e["id"], "appeal_%d" % level)] += 1
-                return end
-        return add_days(answer_date, self.appeal_days(prod if default_prod is None else default_prod))
+            return w
+        return self._fallback(answer_date, self.appeal_days(prod if default_prod is None else default_prod), "a16_appeal")
 
     def filing_end(self, fam, prod, dos, send=None, default_days=None):
         """The first-filing limit of a service (A17 rule 4: the table's, from the date of service; else A16's days by
-        product, or default_days where A16 used a fixed number)."""
+        product, or default_days where A16 used a fixed number, unverified)."""
         if not dos:
             return None
-        e = self.win(fam, prod)
-        w = e["first_filing"] if e else None
+        w = self._kind(fam, prod, "first_filing", {"dos": dos, "send": send})
         if w:
-            end = PayerWindows.end(w, {"dos": dos, "send": send})
-            if end:
-                self.windows.used[(e["id"], "first_filing")] += 1
-                return end
-        return add_days(dos, self.filing_days(prod) if default_days is None else default_days)
+            return w
+        return self._fallback(dos, self.filing_days(prod) if default_days is None else default_days, "a16_filing")
 
     def corrected_end(self, fam, prod, dos, answer_date, default_days=None):
         """The window to send a corrected claim after a payer's answer (A17 rule 4: the table's corrected-claim window,
-        from the date of service or the answer; else the first-filing limit, as A16)."""
-        e = self.win(fam, prod)
-        w = e["corrected_claim"] if e else None
+        from the date of service or the answer; else the first-filing limit, as A16, which is no corrected-claim window
+        of the payer's own and so unverified as one when a table is loaded)."""
+        w = self._kind(fam, prod, "corrected_claim", {"dos": dos, "remit": answer_date, "denial": answer_date})
         if w:
-            end = PayerWindows.end(w, {"dos": dos, "remit": answer_date, "denial": answer_date})
-            if end:
-                self.windows.used[(e["id"], "corrected_claim")] += 1
-                return end
-        return self.filing_end(fam, prod, dos, default_days=default_days)
+            return w
+        f = self.filing_end(fam, prod, dos, default_days=default_days)
+        if f and self.windows.strict:
+            return WEnd(f, False, getattr(f, "ext", f), "first_filing_for_corrected")
+        return f
 
     def never_answered_end(self, fam, prod, dos, sent):
         """A claim sent and never answered (A17 rule 4): the payer's first-filing limit from the date of service (the
         table's, else A16's 365 days), and at least 180 days from the send (the practice holds the proof of timely filing
-        a resubmission needs)."""
+        a resubmission needs: the auditor's own allowance, which only ever extends a window)."""
         ends = [x for x in (self.filing_end(fam, prod, dos, sent, default_days=365) if dos else None,
                             add_days(sent, 180) if sent else None) if x]
-        return max(ends) if ends else ""
+        if not ends:
+            return ""
+        return wmax(*ends) if self.windows.strict else max(ends)
 
     def prod_hint(self, bill, fam, pks=()):
         """The product (CLP06) a payer's claim is of when no answer on the claim says it: the payer's latest answer on the
@@ -1725,7 +2124,7 @@ class Audit:
                 for p in idx.get((pk, fam), []):
                     if best is None or p.ordk > best.ordk:
                         best = p
-        return best.prod if best is not None else None
+        return self.wprod(best) if best is not None else None
 
     # ------------------------------------------------------------------ rates
     @staticmethod
@@ -2407,11 +2806,11 @@ class Audit:
         """A denial's window: its appeal window, and for a reason a corrected claim fixes (or no answer date) the
         corrected-claim window, whichever ends later (A17 rule 4: the payer window table; else A16's days)."""
         p0 = prod if default_prod is None else default_prod
-        end = self.appeal_end(fam, prod, deny_date, default_prod=p0) if deny_date else None
+        end = self.appeal_end(fam, prod, deny_date, default_prod=p0, dos=dos) if deny_date else None
         code = carc.split("-", 1)[-1] if carc else ""
         if dos and (code in CORRECTABLE_CARCS or end is None):
             tf = self.corrected_end(fam, prod, dos, deny_date, default_days=self.filing_days(p0))
-            end = max(end, tf) if end else tf
+            end = wmax(end, tf) if end else tf
         return end
 
     def primary_answers_after(self, bill, date):
@@ -3148,14 +3547,15 @@ class Audit:
                     sub = "waiting_secondary"
             tbd = max((L.tb_date or "" for A in fl for L in A.lines), default="")
             wbase = tbd if (state == "SHORT" and sub == "partly_taken_back" and tbd) else gov.p.date
-            wend = self.appeal_end(fam, gov.p.prod, wbase) if state == "SHORT" else ""
-            inside = bool(wend) and wend >= self.as_of
+            wend = self.appeal_end(fam, self.wprod(gov.p), wbase, dos=s.dos, short=sub != "partly_taken_back") \
+                if state == "SHORT" else ""
+            inside = self.inside_of(wend)
             n_short = min(PU, sum(u_ for u_, g_, d_ in short_units)) if state == "PAID" else 0
             if n_short:
                 weak = rinfo[4]
                 disc = all(d_ for u_, g_, d_ in short_units)
                 g_avg = int(round(sum(u_ * g_ for u_, g_, d_ in short_units) / max(1, sum(u_ for u_, g_, d_ in short_units))))
-                wend_s = self.appeal_end(fam, gov.p.prod, gov.p.date)
+                wend_s = self.appeal_end(fam, self.wprod(gov.p), gov.p.date, dos=s.dos, short=True)
                 if disc:
                     rv = self.review[(fam, gov.npi or "")]
                     rv[0] += 1
@@ -3163,7 +3563,7 @@ class Audit:
                     rv[2] += n_short * g_avg
                 units += [("SHORT", xsub or ("below_rate_provider_discount" if disc else "below_weak_rate" if weak
                                              else "below_rate"),
-                           "", fam, gov.lk, gov.p.date, g_avg, basis, wend_s, wend_s >= self.as_of)] * n_short
+                           "", fam, gov.lk, gov.p.date, g_avg, basis, wend_s, self.inside_of(wend_s))] * n_short
             units += [(state, sub, "", fam, gov.lk, gov.p.date, owed, basis, wend, inside)] * (PU - n_short)
         rest = U - len(units)
         if rest <= 0:
@@ -3186,9 +3586,9 @@ class Audit:
             g = tb[0]
             k = min(rest, taken_units)
             tbd = max((L.tb_date or "" for L in g.lines), default="") or g.p.date
-            wend = self.appeal_end(g.p.fam, g.p.prod, tbd)
+            wend = self.appeal_end(g.p.fam, self.wprod(g.p), tbd, dos=s.dos)
             units += [("TAKEN_BACK", "plb", "", g.p.fam, g.lk, g.p.date, int(round(g.paid / max(1, g.up))), "taken",
-                       wend, wend >= self.as_of)] * k
+                       wend, self.inside_of(wend))] * k
             rest = U - len(units)
             if rest <= 0:
                 return units[:U]
@@ -3206,9 +3606,9 @@ class Audit:
             if not evid and recon and answered >= billed - max(100, 0.01 * billed):
                 return units + [("PAID", "all_billed_units_adjudicated", "", fam, gov.lk, gov.p.date, 0, "", "",
                                  False)] * rest
-            wend = self.appeal_end(fam, gov.p.prod, gov.p.date)
+            wend = self.appeal_end(fam, self.wprod(gov.p), gov.p.date, dos=s.dos)
             return units + [("SHORT", "fewer_units_answered", "", fam, gov.lk, gov.p.date, int(round(gov.apu())),
-                             "paid_unit", wend, wend >= self.as_of)] * rest
+                             "paid_unit", wend, self.inside_of(wend))] * rest
         if unpaid:
             return units + self.unpaid_truth(s, rest, unpaid, prim, sec, ef, PU)
         # ---- no standing primary answer
@@ -3264,17 +3664,17 @@ class Audit:
         wend = self.never_answered_end(fam, self.prod_hint(s.bill, fam, s.pks), s.dos, sd)
         if self.answers_after(s.bill, sd, fam):
             return units + [("NEVER_ANSWERED", "answered_without_this_code", "", fam, "", sd, owed, basis, wend,
-                             wend >= self.as_of)] * rest
+                             self.inside_of(wend))] * rest
         if est == "Rejected":
             return units + [("NEVER_ANSWERED", "rejected_before_payer", "", fam, "", sd, owed, basis, wend,
-                             wend >= self.as_of)] * rest
+                             self.inside_of(wend))] * rest
         fs = self.feed_state(fam) if fam and not fam.startswith("EMA:") else "UNMAPPED"
         if fs in ("NO_FEED", "UNMAPPED"):
             # A16 fix 1: a payer outside the 835 feed answers through EMA only; with EMA's books read and nothing posted
             # past its answer time, the claim is never answered
             if ef is not None and days_between(sd, self.feed_date) > self.usual_days(fam):
                 return units + [("NEVER_ANSWERED", "no_answer_in_ema", "", fam, "", sd, owed, basis, wend,
-                                 wend >= self.as_of)] * rest
+                                 self.inside_of(wend))] * rest
             return units + [("NO_FEED", fs.lower(), "", fam, "", sd, owed, basis, wend, False)] * rest
         if fs == "FEED_STOPPED":
             # A17 rule 5 (the blind trace of never-answered claims): a payer whose 835s stopped answers through EMA
@@ -3283,14 +3683,14 @@ class Audit:
             if ef is not None and days_between(sd, self.feed_date) > self.usual_days(fam) and \
                     "feedstop" not in self.disable:
                 return units + [("NEVER_ANSWERED", "no_answer_in_ema_feed_stopped", "", fam, "", sd, owed, basis, wend,
-                                 wend >= self.as_of)] * rest
+                                 self.inside_of(wend))] * rest
             return units + [("FEED_STOPPED", "", "", fam, "", sd, owed, basis, wend, False)] * rest
         if days_between(sd, self.feed_date) > self.usual_days(fam):
             if cancelled and not sends:
                 sub = "reversed_not_reprocessed"
             else:
                 sub = "print_batch" if est == "Batched for Printing" else "no_answer"
-            return units + [("NEVER_ANSWERED", sub, "", fam, "", sd, owed, basis, wend, wend >= self.as_of)] * rest
+            return units + [("NEVER_ANSWERED", sub, "", fam, "", sd, owed, basis, wend, self.inside_of(wend))] * rest
         return units + [("IN_PROCESS", "", "", fam, "", sd, owed, basis, wend, False)] * rest
 
     def ema_answer_units(self, s, rest, ea, ef):
@@ -3317,8 +3717,8 @@ class Audit:
         ew = self.ema_work(ef, fam, d)
         wend = self.window_end(fam, self.prod_hint(s.bill, fam, s.pks) or "", carc, d, s.dos, default_prod="")
         if ew:
-            return [("WORKED_WAITING", ew, carc, fam, "", d, owed, basis, wend, wend >= self.as_of)] * rest
-        return [("DENIED", "ema_off_feed_answer", carc, fam, "", d, owed, basis, wend, wend >= self.as_of)] * rest
+            return [("WORKED_WAITING", ew, carc, fam, "", d, owed, basis, wend, self.inside_of(wend))] * rest
+        return [("DENIED", "ema_off_feed_answer", carc, fam, "", d, owed, basis, wend, self.inside_of(wend))] * rest
 
     def second_rate_alts(self, fam, prod, code, comp, year, pc, npi, r_obs, r_payer):
         """Amounts a payer allows on 20%+ of its answers to OTHER providers (not this provider's own, not a provider-
@@ -3449,7 +3849,7 @@ class Audit:
                                             g.npi, rinfo[2], rinfo[1])
                 second = any(abs(apu - a_) <= 2 for a_ in alt)
                 if r_amt - apu > max(100, 0.03 * r_amt) and not half and not second:
-                    wend = self.appeal_end(fam, prod, g.p.date)
+                    wend = self.appeal_end(fam, self.wprod(g.p), g.p.date, dos=s.dos, short=True)
                     basis = "rate_l6" if rinfo[3] in ("payer", "provider_discount") else "rate_" + rinfo[3]
                     ssub = "to_patient_below_rate"
                     if rinfo[3] == "provider_discount":
@@ -3459,7 +3859,7 @@ class Audit:
                         rv[1] += rest
                         rv[2] += rest * int(round(r_amt - apu))
                     return [("SHORT", ssub, carc, fam, g.lk, g.p.date, int(round(r_amt - apu)),
-                             basis, wend, wend >= self.as_of)] * rest
+                             basis, wend, self.inside_of(wend))] * rest
             return [("MOVED_TO_PATIENT", carc, carc, fam, g.lk, g.p.date, 0, "", "", False)] * rest
         if kind == "PATIENT":
             return [("MOVED_TO_PATIENT", carc, carc, fam, g.lk, g.p.date, 0, "", "", False)] * rest
@@ -3532,28 +3932,28 @@ class Audit:
                 la = max(own_after, key=lambda A: A.p.ordk)
                 k2, c2 = self.denial_of([self.unpaid_part(la)])
                 c2 = c2 if k2 == "DENIED" and c2 != "none" else carc
-                wend = self.window_end(fam, prod, c2, la.p.date, s.dos)
+                wend = self.window_end(fam, self.wprod(g.p), c2, la.p.date, s.dos)
                 return [("DENIED", "resent_and_denied_again", c2, fam, la.lk, la.p.date, owed, basis, wend,
-                         wend >= self.as_of)] * rest
+                         self.inside_of(wend))] * rest
             if self.answers_after(s.bill, nd, nfam):
                 st, sub = "NEVER_ANSWERED", "answered_without_this_code"
             elif rejected:
-                wend = self.window_end(fam, prod, carc, g.p.date, s.dos)
-                wend = max(wend, self.filing_end(fam, prod, s.dos, default_days=365)) if s.dos else wend
+                wend = self.window_end(fam, self.wprod(g.p), carc, g.p.date, s.dos)
+                wend = wmax(wend, self.filing_end(fam, self.wprod(g.p), s.dos, default_days=365)) if s.dos else wend
                 return [("DENIED", "resend_rejected_before_payer", carc, fam, g.lk, g.p.date, owed, basis, wend,
-                         wend >= self.as_of)] * rest
+                         self.inside_of(wend))] * rest
             else:
                 waited = days_between(nd, self.feed_date)
                 st = "WORKED_WAITING"
                 sub = "resent_overdue" if waited > self.usual_days(nfam or fam) else "resent_within_usual_time"
-            wend = self.window_end(fam, prod, carc, nd, s.dos)
-            wend = max(wend, self.filing_end(fam, prod, s.dos, default_days=365)) if s.dos else wend
-            return [(st, sub, carc, fam, g.lk, g.p.date, owed, basis, wend, wend >= self.as_of)] * rest
-        wend = self.window_end(fam, prod, carc, g.p.date, s.dos)
+            wend = self.window_end(fam, self.wprod(g.p), carc, nd, s.dos)
+            wend = wmax(wend, self.filing_end(fam, self.wprod(g.p), s.dos, default_days=365)) if s.dos else wend
+            return [(st, sub, carc, fam, g.lk, g.p.date, owed, basis, wend, self.inside_of(wend))] * rest
+        wend = self.window_end(fam, self.wprod(g.p), carc, g.p.date, s.dos)
         ew = self.ema_work(ef, fam, g.p.date)
         if ew:
-            return [("WORKED_WAITING", ew, carc, fam, g.lk, g.p.date, owed, basis, wend, wend >= self.as_of)] * rest
-        return [("DENIED", sub, carc, fam, g.lk, g.p.date, owed, basis, wend, wend >= self.as_of)] * rest
+            return [("WORKED_WAITING", ew, carc, fam, g.lk, g.p.date, owed, basis, wend, self.inside_of(wend))] * rest
+        return [("DENIED", sub, carc, fam, g.lk, g.p.date, owed, basis, wend, self.inside_of(wend))] * rest
 
     @staticmethod
     def is_surgical(code):
@@ -4066,7 +4466,9 @@ class Audit:
         else:
             return "WRONG_AMOUNT", self.amount_reason(it, amt, truth_c, k_claim), truth_c
         if all(not u[9] for u in owed_units):
-            sub = (sub + ";" if sub else "") + "past_window"
+            # A17 rule 4: past a window the auditor could not verify is 'window unverified', never expired
+            unv = any(u[9] is WINDOW_UNVERIFIED for u in owed_units)
+            sub = (sub + ";" if sub else "") + ("window_unverified" if unv else "past_window")
         return "CORRECT", sub, truth_c
 
     def pref_order(self, it, sv):
@@ -4175,6 +4577,7 @@ class Audit:
                 elif self.verdicts[it["fid"]]["verdict"] == "CLOSED_WRONGLY":
                     closed_cover[sv.key] = max(closed_cover[sv.key], k)
         self.lot = []
+        self.lot_unverified = []   # A17 rule 4: owed units past a window the auditor could not verify (reported apart)
         self.cw_units = []
         self.review_units = []
         self.weak_units = []
@@ -4183,11 +4586,18 @@ class Audit:
             cw = closed_cover.get(key, 0)
             for i, u in enumerate(sv.units):
                 st = u[0]
-                if st not in OWED or not u[9]:
+                unv = u[9] is WINDOW_UNVERIFIED
+                if st not in OWED or not (u[9] or unv):
                     continue
                 if st == "WORKED_WAITING" and u[1] != "resent_overdue":
                     continue
                 if i in tk or key in decided:
+                    continue
+                if unv:
+                    # not expired and not known to be open: listed apart, by the same tests as money left on the table
+                    if cw <= 0 and "provider_discount" not in u[1] and u[6] > PLACEHOLDER_CENTS and \
+                            u[1] != "below_weak_rate":
+                        self.lot_unverified.append((sv, i, u))
                     continue
                 if cw > 0:
                     cw -= 1
@@ -4312,7 +4722,8 @@ def summarize(a):
     st_scope_c = Counter()
     for sv in a.svcs.values():
         for u in sv.units:
-            key = u[0] + ("" if u[0] not in OWED else (":inside" if u[9] else ":past_window"))
+            key = u[0] + ("" if u[0] not in OWED else (":inside" if u[9] else ":window_unverified"
+                                                        if u[9] is WINDOW_UNVERIFIED else ":past_window"))
             st[key] += 1
             st_c[key] += u[6]
             if sv.in_scope:
@@ -4343,6 +4754,16 @@ def summarize(a):
         lot[k] += 1
         lot_c[k] += u[6]
     out["left_on_table"] = {f"{k[0]}|{k[1]}": [lot[k], lot_c[k]] for k in sorted(lot)}
+    # A17 rule 4: owed units past a window the auditor could not verify (not counted above, not expired)
+    lu, lu_c = Counter(), Counter()
+    for sv, i, u in getattr(a, "lot_unverified", []):
+        k = (u[0], "in_scope" if sv.in_scope else "out_of_scope")
+        lu[k] += 1
+        lu_c[k] += u[6]
+    out["left_on_table_window_unverified"] = {f"{k[0]}|{k[1]}": [lu[k], lu_c[k]] for k in sorted(lu)}
+    out["windows"] = {"table": a.windows.version, "form": a.windows.form,
+                      "problems": dict(a.windows.problems),
+                      "used": {f"{k[0]}|{k[1]}": n for k, n in sorted(a.windows.used.items())}}
     out["closed_wrongly_units"] = len(a.cw_units)
     # A16: owed units below a weak payer mode (not counted as left on the table)
     wk = Counter()
@@ -4373,7 +4794,7 @@ def write_outputs(a, out_dir):
         unit_to INTEGER, state TEXT, sub TEXT, carc TEXT, fam TEXT, gov_line_key TEXT, gov_date TEXT, owed_cents_per_unit
         INTEGER, amount_basis TEXT, window_end TEXT, inside_window INTEGER, in_scope INTEGER, scope_basis TEXT,
         open_items TEXT, closed_items TEXT, left_on_table INTEGER, primary_fam TEXT, ema_how TEXT, ema_links TEXT,
-        ema_ins_paid INTEGER, ema_status TEXT, review INTEGER)""")
+        ema_ins_paid INTEGER, ema_status TEXT, review INTEGER, window_basis TEXT)""")
     con.execute("""create table verdicts (finding_id TEXT PRIMARY KEY, signal TEXT, category TEXT, status TEXT, kind TEXT,
         verdict TEXT, sub TEXT, item_cents INTEGER, truth_cents INTEGER, recovered_cents INTEGER, units_claimed INTEGER,
         units_allocated INTEGER, unit_states TEXT, keeper TEXT, in_scope INTEGER, line_key TEXT, claim_key TEXT,
@@ -4396,13 +4817,14 @@ def write_outputs(a, out_dir):
             u = sv.units[i]
             ef = a.ema_facts(sv) if sv.eml else None
             rows.append((sv.bill, sv.code, sv.comp, sv.dos, sv.U, i + 1, j + 1, u[0], u[1], u[2], u[3], u[4], u[5], u[6],
-                         u[7], u[8], 1 if u[9] else 0, 1 if sv.in_scope else 0, sv.scope_basis,
+                         u[7], str(u[8] or ""), 1 if u[9] else 2 if u[9] is WINDOW_UNVERIFIED else 0,
+                         1 if sv.in_scope else 0, sv.scope_basis,
                          ",".join(open_on.get(key, [])), ",".join(closed_on.get(key, [])), 1 if lot_i else 0,
                          a._pfam.get(sv.bill) or "", sv.ema_how, ",".join(str(E.link) for E in sv.eml),
                          ef["paid"] if ef else None, ",".join(sorted(set(ef["status"].values()))) if ef else "",
-                         1 if (key, i) in rev_set else 0))
+                         1 if (key, i) in rev_set else 0, getattr(u[8], "basis", "")))
             i = j + 1
-    con.executemany("insert into units values (" + ",".join("?" * 28) + ")", rows)
+    con.executemany("insert into units values (" + ",".join("?" * 29) + ")", rows)
     # owner rule 4.1: unexplained provider-level discounts, one row per payer and provider (NPI's last 3 digits only)
     con.execute("""create table provider_reviews (fam TEXT, npi_tail TEXT, lines INTEGER, units INTEGER, gap_cents INTEGER,
         units_in_scope_inside INTEGER, gap_cents_in_scope_inside INTEGER)""")
@@ -4530,6 +4952,9 @@ class Fake:
         self.expect_secbal = {}   # (bill, code, comp, dos) -> reported as a secondary balance? (A16, section 5)
         self.expect_owed = {}     # (bill, code, comp, dos) -> owed cents per unit of unit 1 (A16)
         self.expect_wend = {}     # (bill, code, comp, dos) -> window end of unit 1 (A17 rule 4)
+        self.expect_inside = {}   # (bill, code, comp, dos) -> 'inside' | 'expired' | 'unverified' (A17 rule 4)
+        self.expect_lotu = {}     # (bill, code, comp, dos) -> listed apart as past an unverified window? (A17 rule 4)
+        self.expect_isub = {}     # finding id -> a word its verdict's sub-kind must hold (A17 rule 4)
         self.fix_of = {}          # check -> the A16 fix it tests (checks absent here are A15's own)
         self.fix = None           # the fix the cases being written test
 
@@ -4626,7 +5051,8 @@ class Fake:
         pass on A16; it is not required to fail on A15)."""
         d = {"unit": self.expect_unit, "item": self.expect_item, "sub": self.expect_sub, "lot": self.expect_lot,
              "counts": self.expect_unit_counts, "billed": self.expect_units_billed, "review": self.expect_review,
-             "secbal": self.expect_secbal, "owed": self.expect_owed, "wend": self.expect_wend}[kind]
+             "secbal": self.expect_secbal, "owed": self.expect_owed, "wend": self.expect_wend,
+             "inside": self.expect_inside, "lotu": self.expect_lotu, "isub": self.expect_isub}[kind]
         d[key] = value
         self.fix_of[(kind, key)] = self.fix + (" [guard]" if guard else "")
 
@@ -6142,6 +6568,17 @@ def evaluate(F, a):
         sv = a.svcs.get(key)
         got = sv.units[0][8] if sv and sv.units else None
         add("wend", key, got == want, f"window end {key[0]} {key[1]} expected {want} got {got}")
+    for key, want in getattr(F, "expect_inside", {}).items():
+        sv = a.svcs.get(key)
+        u9 = sv.units[0][9] if sv and sv.units else None
+        got = "unverified" if u9 is WINDOW_UNVERIFIED else "inside" if u9 is True else "expired" if u9 is False else None
+        add("inside", key, got == want, f"window state {key[0]} {key[1]} expected {want} got {got}")
+    lotu_keys = {sv.key for sv, i, u in getattr(a, "lot_unverified", [])}
+    for key, want_in in getattr(F, "expect_lotu", {}).items():
+        add("lotu", key, (key in lotu_keys) == want_in, f"past an unverified window {key[0]} expected {want_in}")
+    for fid, want in getattr(F, "expect_isub", {}).items():
+        got = a.verdicts[fid]["sub"] if fid in a.verdicts else None
+        add("isub", fid, bool(got) and want in got.split(";"), f"item {fid[-4:]} sub expected {want} got {got}")
     sb_keys = {x[0].key for x in getattr(a, "sec_bal", [])}
     for key, want_in in F.expect_secbal.items():
         add("secbal", key, (key in sb_keys) == want_in, f"secondary balance {key[0]} {key[1]} expected {want_in}")
@@ -6169,12 +6606,135 @@ SELFTEST_WINDOWS = {"schema": WINDOW_SCHEMA, "version": "selftest (invented)", "
      "appeals": [{"level": 1, "days": 30, "from": "remit"}]}]}
 
 
+def build_window_store():
+    """A17 rule 4 with the researched table itself (DEFAULT_WINDOWS): invented claims of payers the table has rows for
+    (Medicare's carrier for Kentucky by its public payer id, Humana and Anthem by theirs) and of an invented payer it has
+    none for. Each case's window is counted from the row the table gives, as the table says to count it."""
+    F = Fake()
+
+    def oneline(code, charge, paid, dos, **kw):
+        return [L_(code, charge, paid, dos, **kw)]
+    MKY = dict(payer="TESTPAY MCR KY", pid="15102")
+    HMA = dict(payer="TESTPAY HUMANA MA", pid="61101")
+    BLU = dict(payer="TESTPAY BLUES", pid="00660")
+    UNV = dict(payer="TESTPAY UNV", pid="T0091")
+    # Medicare: a redetermination is due 120 days from the receipt of the remittance, presumed 5 days after its date
+    # (42 CFR 405.942(a)(1)): a denial dated July 22 is still appealable on November 23 (day 124), past day 120
+    F.fix = "A17 rule 4 (researched table: Medicare's 5 days of presumed receipt)"
+    F.claim(F.tx("2026-07-22", **MKY), "ZZ76MRCP1C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2026-07-01", cas=[("CO", "50", 15000)]), prod="MB", **MKY)
+    F.exp("wend", ("ZZ76MRCP1", "99213", "G", "2026-07-01"), "2026-11-24")
+    F.exp("lot", ("ZZ76MRCP1", "99213", "G", "2026-07-01"), True)
+    # months are calendar months: Humana Medicare Advantage's 18-month dispute from May 23, 2025 ends November 23, 2026,
+    # the as-of day itself (still open), not 540 days later (November 14) nor 18 average months (548 days, November 22)
+    F.fix = "A17 rule 4 (researched table: months counted in calendar months)"
+    F.claim(F.tx("2025-05-23", **HMA), "ZZ76HUMA1C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2025-05-15", cas=[("CO", "50", 15000)]), prod="16", **HMA)
+    F.exp("wend", ("ZZ76HUMA1", "99213", "G", "2025-05-15"), "2026-11-23")
+    F.exp("lot", ("ZZ76HUMA1", "99213", "G", "2025-05-15"), True)
+    # a window from the date of service against one from the remittance: Anthem Medicare Advantage's corrected claim is
+    # due 365 days from the service (January 10 + 365), its reconsideration 120 days from the EOP (June 1); Medicare's
+    # reopening of a clerical error 1 year from the remittance (December 15), not from the service (October 1)
+    F.fix = "A17 rule 4 (researched table: a window from the date of service or from the remittance)"
+    F.claim(F.tx("2026-02-01", **BLU), "ZZ76ANMA1C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2026-01-10", cas=[("CO", "16", 15000)]), prod="16", **BLU)
+    F.exp("wend", ("ZZ76ANMA1", "99213", "G", "2026-01-10"), "2027-01-10")
+    F.claim(F.tx("2025-12-15", **MKY), "ZZ76MRCP2C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2025-10-01", cas=[("CO", "16", 15000)]), prod="MB", **MKY)
+    F.exp("wend", ("ZZ76MRCP2", "99213", "G", "2025-10-01"), "2026-12-15")
+    F.exp("lot", ("ZZ76MRCP2", "99213", "G", "2025-10-01"), True)
+    # the Federal Employee Program's own window (its contract class names the program): 6 months from the denial
+    # notice (5 CFR 890.105), not the Anthem commercial plan's 2 years
+    F.fix = "A17 rule 4 (researched table: the Federal Employee Program's own windows)"
+    F.claim(F.tx("2026-05-20", **BLU), "ZZ76FEPA1C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2026-05-01", cas=[("CO", "50", 15000)]), prod="BL",
+            cclass="FEDERAL EMPLOYEE PROGRAM", **BLU)
+    F.exp("wend", ("ZZ76FEPA1", "99213", "G", "2026-05-01"), "2026-11-20")
+    F.exp("inside", ("ZZ76FEPA1", "99213", "G", "2026-05-01"), "expired")
+    # a payer the table has no row for: A16's 180 days stand in, unverified, so the unit past them is 'window
+    # unverified' (listed apart, its item's sub-kind says so), never expired; a Medicare denial past its verified
+    # window is expired
+    F.fix = "A17 rule 4 (researched table: a window it could not verify is never expired)"
+    F.claim(F.tx("2025-01-15", **UNV), "ZZ76UNVF1C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2025-01-02", cas=[("CO", "50", 15000)]), **UNV)
+    F.exp("inside", ("ZZ76UNVF1", "99213", "G", "2025-01-02"), "unverified")
+    F.exp("lot", ("ZZ76UNVF1", "99213", "G", "2025-01-02"), False)
+    F.exp("lotu", ("ZZ76UNVF1", "99213", "G", "2025-01-02"), True)
+    ck, (lu,) = F.claim(F.tx("2025-01-15", **UNV), "ZZ76UNVF2C017", "1", 15000, 0,
+                        oneline("99213", 15000, 0, "2025-01-03", cas=[("CO", "50", 15000)]), **UNV)
+    fid = F.finding("DENIED_MEDICAL_NECESSITY", "denial", line_key=lu, shortfall=15000)
+    F.exp("isub", fid, "window_unverified")
+    # a row the table marks unverified is used unverified: Humana Medicare Advantage's corrected claim (12 months from
+    # the service, its tip sheet not found) beside its verified 18-month dispute, both past: unverified, not expired
+    F.claim(F.tx("2024-03-01", **HMA), "ZZ76HUMA2C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2024-02-01", cas=[("CO", "16", 15000)]), prod="16", **HMA)
+    F.exp("inside", ("ZZ76HUMA2", "99213", "G", "2024-02-01"), "unverified")
+    F.claim(F.tx("2025-01-15", **MKY), "ZZ76MRCP3C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2025-01-02", cas=[("CO", "50", 15000)]), prod="MB", **MKY)
+    F.exp("inside", ("ZZ76MRCP3", "99213", "G", "2025-01-02"), "expired", guard=True)
+    F.exp("lotu", ("ZZ76MRCP3", "99213", "G", "2025-01-02"), False, guard=True)
+    ck, (lm,) = F.claim(F.tx("2025-01-15", **MKY), "ZZ76MRCP4C017", "1", 15000, 0,
+                        oneline("99213", 15000, 0, "2025-01-03", cas=[("CO", "50", 15000)]), prod="MB", **MKY)
+    fid = F.finding("DENIED_MEDICAL_NECESSITY", "denial", line_key=lm, shortfall=15000)
+    F.exp("isub", fid, "past_window", guard=True)
+    return F
+
+
+def window_direct_checks(path=None):
+    """A17 rule 4: the researched table read directly (no claims): calendar arithmetic, Federal holidays, the groups a
+    payer is read into. Returns (name, fix, ok, detail) rows like evaluate."""
+    out = []
+    pw = PayerWindows(path or DEFAULT_WINDOWS)
+
+    def chk(fix, name, got, want):
+        out.append((name, "A17 rule 4 (researched table: %s)" % fix, got == want, f"{name}: expected {want} got {got}"))
+
+    def key(fam, prod, name):
+        e = pw.find(fam, WProd(prod, name), {name})
+        return e["id"] if e else None
+
+    def end(fam, prod, name, kind, anchors):
+        return pw.kind_end(pw.find(fam, prod, {name}), kind, anchors)
+    chk("months counted in calendar months", "add_months 18 from May 31", add_months("2025-05-31", 18), "2026-11-30")
+    chk("months counted in calendar months", "add_months 12 from Feb 29", add_months("2024-02-29", 12), "2025-02-28")
+    chk("months counted in calendar months", "Medicare first filing from Feb 29",
+        end("MEDICARE-KY", "MB", "TESTPAY MCR KY", "first_filing", {"dos": "2024-02-29"}), "2025-02-28")
+    chk("Medicare's 5 days of presumed receipt", "Medicare redetermination 120 + 5 days",
+        end("MEDICARE-KY", "MB", "TESTPAY MCR KY", "appeal_1", {"remit": "2026-07-22"}), "2026-11-24")
+    chk("a last day on a weekend or Federal holiday", "Medicare first filing ending on July 4, 2026 (a Saturday)",
+        end("MEDICARE-KY", "MB", "TESTPAY MCR KY", "first_filing", {"dos": "2025-07-04"}), "2026-07-06")
+    chk("a last day on a weekend or Federal holiday", "next workday after Thanksgiving 2025",
+        next_workday("2025-11-27"), "2025-11-28")
+    chk("the Federal Employee Program's own windows", "FEHB first filing: December 31 of the next year",
+        end("NM:GEHA", "", "GEHA", "first_filing", {"dos": "2025-03-10"}), "2026-12-31")
+    chk("a window from the date of service or from the remittance", "Anthem MA corrected claim from the service",
+        end("BCBS-ANTHEM", "16", "TESTPAY BLUES", "corrected_claim", {"dos": "2026-01-10", "remit": "2026-02-01"}),
+        "2027-01-10")
+    chk("the group a payer is read into", "Humana by its id, commercial product", key("HUMANA", "CI", "HUMANA"), "humana")
+    chk("the group a payer is read into", "Humana by its id, Medicare Advantage", key("HUMANA", "16", "HUMANA"),
+        "humana_ma")
+    chk("the group a payer is read into", "a plan named on the remittance of another payer's id",
+        key("UMR", "12", "GEHA"), "geha")
+    chk("the group a payer is read into", "TRICARE before Humana", key("HUMANA", "CH", "HUMANA MILITARY"), "tricare")
+    w = end("NM:AETNA", "12", "AETNA", "appeal_1", {"remit": "2026-01-15"})
+    chk("an extension it cannot check keeps a unit unverified", "Aetna 180 days, fully insured plans 2 years",
+        (str(w), w.verified, w.ext), ("2026-07-14", True, "2028-01-15"))
+    chk("a window it could not verify is never expired", "Humana commercial first filing (agreement, no length)",
+        end("HUMANA", "CI", "HUMANA", "first_filing", {"dos": "2026-01-10"}), None)
+    return out
+
+
 def selftest():
     F = build_selftest_store()
     F.expect_units_billed[("ZZ11JJJJ1", "11103", "G", "2026-08-04")] = 2
     raw = load(F.con)
     a = Audit(raw, "2026-11-23", log=lambda *x: None, windows=SELFTEST_WINDOWS).run()
     res = evaluate(F, a)
+    # A17 rule 4 with the researched table itself: its own invented store (A15's base checks are of the main store)
+    F2 = build_window_store()
+    a2 = Audit(load(F2.con), "2026-11-23", log=lambda *x: None, windows=DEFAULT_WINDOWS).run()
+    res += [r for r in evaluate(F2, a2) if r[1] != "A15 base"]
+    res += window_direct_checks()
     fails = [r for r in res if not r[2]]
     by_fix = defaultdict(lambda: [0, 0])
     for name, fix, ok, detail in res:
