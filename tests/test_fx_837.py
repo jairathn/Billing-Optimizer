@@ -564,3 +564,63 @@ def test_a_send_week_whose_claims_went_mostly_unanswered_stands_out(tmp_path, ki
     h = items["unanswered_weeks"]
     assert not h["ok"] and "The week of 2026-09-14: 8 of 10 claims sent got no answer ($940.80, Anthem / BCBS 8)" in h["detail"]
     s.close()
+
+
+# ================================================================================================ the story's 837 rows
+@pytest.mark.parametrize("kind", KINDS)
+def test_every_items_story_shows_the_837_sends_its_answers_and_the_open_balance(tmp_path, kind):
+    """(Residual: story.py showed no 837 rows.) Bill CB0000T01: C017 sent to Anthem September 1, the replacement C024
+    September 15, never answered (the item is C024's). Its story lists both sends (source 837: the day, the claim id, an
+    original or a replacement, the 99214 billed $223.65), then the item, and a balance line that reconciles to the cent
+    (charge $223.65, all of it open). Bill CB0000T02, sent to Humana as its secondary after Anthem paid $94.08 and left
+    the patient $23.52, says so on its send row. On the dashboard's copy, which keeps no 837 file, the story shows the
+    send the item was dated by, and says the 837 files are kept on the server."""
+    from remitwatch import story
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000T01C017", V)], "20260901")
+    send(s, tmp_path, [clm837("CB0000T01C024", V, freq="7"),
+                       clm837("CB0000T02C017", V, payer=HUMANA, resp="S",
+                              other={"payer": ANTHEM, "paid": 94.08, "left": 23.52, "lines": [(94.08, 23.52)]})], "20260915")
+    _remits(s, tmp_path, _visits(), "20261110")
+    _remits(s, tmp_path, _visits(start=60), "20261110", payer="HUMANA", payer_id="61101")
+    found = _chased(s, "t1")
+    st = story.item_story(s.conn, found["CB0000T01C024"]["finding_id"])
+    sends = [r for r in st["rows"] if r["source"] == "837"]
+    print([(r["date"], r["text"]) for r in sends])
+    assert [(r["date"], r["claim_id"], r["kind"]) for r in sends] == [("2026-09-01", "CB0000T01C017", "send"),
+                                                                      ("2026-09-15", "CB0000T01C024", "send")]
+    assert "an original claim" in sends[0]["text"] and "a replacement (corrected) claim" in sends[1]["text"]
+    assert "99214 on Sep 14, 2026 billed $223.65" in sends[1]["text"] and "own_send" in sends[1]["tags"]
+    assert st["rows"][0]["source"] == "837", "the sends come first: they are the oldest events"
+    assert st["reconciles"] and st["balance"]["charge_cents"] == 22365 and st["balance"]["open_cents"] == 22365
+    t2 = [r for r in story.item_story(s.conn, found["CB0000T02C017"]["finding_id"])["rows"] if r["source"] == "837"]
+    assert "as its secondary payer" in t2[0]["text"] and "after ANTHEM answered it (paid $94.08, left the patient $23.52)" in t2[0]["text"]
+    s.conn.execute("DROP TABLE lines_837")
+    s.conn.execute("DROP TABLE claims_837")
+    s.conn.commit()
+    st = story.item_story(s.conn, found["CB0000T01C024"]["finding_id"])
+    sends = [r for r in st["rows"] if r["source"] == "837"]
+    assert [(r["date"], r["claim_id"]) for r in sends] == [("2026-09-15", "CB0000T01C024")]
+    assert "sent 2 times, first on Sep 15, 2026" not in sends[0]["text"] and "a replacement (corrected) claim" in sends[0]["text"]
+    assert story.COPY_837_NOTE in st["notes"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_denials_story_shows_the_bill_sent_and_sent_again(tmp_path, kind):
+    """A remittance item: Anthem denied bill CB0000T03's C017 (a 99214, CO-16) on October 1; the practice had sent it
+    September 15 and sent it again as C024 on October 10. The denial's story shows both sends beside the 835 answer, in
+    the order they happened."""
+    from remitwatch import story
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000T03C017", V)], "20260915")
+    _remits(s, tmp_path, [answer("CB0000T03C017", paid="0.00")], "20261001")
+    send(s, tmp_path, [clm837("CB0000T03C024", V, freq="7")], "20261010")
+    _remits(s, tmp_path, _visits(), "20261110")
+    Detector(s, run_id="t1").run()
+    fid = s.query("SELECT finding_id FROM findings WHERE patient_control_number='CB0000T03C017' AND line_key IS NOT NULL")[0]["finding_id"]
+    rows = story.item_story(s.conn, fid)["rows"]
+    print([(r["date"], r["source"], r["kind"]) for r in rows])
+    seq = [(r["date"], r["source"]) for r in rows if r["source"] in ("837", "835")]
+    assert seq == [("2026-09-15", "837"), ("2026-10-01", "835"), ("2026-10-10", "837")]
+    s.close()
