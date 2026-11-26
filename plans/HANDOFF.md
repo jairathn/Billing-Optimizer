@@ -23,7 +23,7 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-26 19:21 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
+### Running now (updated 2026-11-26 19:50 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
 
 Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
 branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
@@ -31,7 +31,7 @@ a unit from its branch and progress file (the brief says what done means), or st
 
 | Unit | Branch | Brief | State |
 |---|---|---|---|
-| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | running (run wf_b849b3af-38e); at 18:40 its last push was 394f960 (a person's marks dated on the practice's day) |
+| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | built (fd50642; full suite python3 2,839 passed under three zones, 3.11.1 only serialize failures); two reviews then one fix round running (run wf_b849b3af-38e) |
 | fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | running (run wf_82efb0cc-738); at 18:40: tip merged, cached-array change whole, base vs branch measurement started (b6592c8) |
 | hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
 | the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
@@ -39,8 +39,17 @@ a unit from its branch and progress file (the brief says what done means), or st
 | a17, the independent every-claim auditor (started early: it touches no product code) | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | running (run wf_8fc9da8c-468, started 18:55 UTC): payer-window research beside the build, then integration, two reviews, one fix round. Score again with the merged code before the final trace |
 | deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | running (run wf_b5842331-6d1, started 19:20 UTC); touches codes.py, docs and tests only, so it merges after the others |
 
-Merge order when they finish: fix7d, fix7c, decisions, hook (each: merge into the integration commit, the full suite in
-the four environments from a frozen worktree of the merge commit, push to both branch names). Then the review's
+Merge order when they finish: fix7d, fix7c, decisions, hook, deadlines, then a17's tool (each: merge into the integration
+commit, the full suite in the four environments from a frozen worktree of the merge commit, push to both branch names).
+
+The review (`plans/review_2026-11-26.md`, 37 findings in five areas; verifiers running) feeds the fix wave after the
+merges, as six fixers that do not edit the same functions: F1 ledger and takebacks (money-1, 2, 5, 6, 8, 9 and fix7e-a's
+voids, PLB/J1 in paid_proof, unpaired reversals, the Medicaid catch-all); F2 recoveries and closures (money-3, 4, 7, 10,
+11, privacy-3, which blocks the release once the hook's self-checks run, privacy-4, and fix7e-a's copay, $0 lines,
+J3490, supplement and second-payer items); F3 answers and the 837 (answers-1 to 7, fix7e-b); F4 the EMA side (fix7e-c);
+F5 people (people-1 to 6: the Paid amount box first); F6 hosts (hosts-1 to 4 and 6: the server's pending-analysis
+mark, supersession after a stopped cycle, diagnose on a stopped state folder, the takeback reference tie, Vercel memory
+with fix7a's summaries) and privacy-5 (runlog.caught in 41 new except blocks). Then the review's
 confirmed findings, A17 (running already), fix7e, the final every-claim trace and the release gates (section 0 below, "Then, in order").
 
 ## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
