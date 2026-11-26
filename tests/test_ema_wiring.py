@@ -473,7 +473,10 @@ def test_the_payers_own_limit_beside_the_safe_date():
     assert legal_deadline("2026-03-01", med) == "2026-07-04"                                  # 120 days from receipt + 5
     assert legal_deadline("2026-03-01", appeal_rule("Wellcare Test", "medicare_advantage")) == "2026-05-05"   # 65 days
     assert legal_deadline("2024-02-29", appeal_rule("Anthem / BCBS", "commercial")) == "2026-02-28"
-    assert legal_deadline("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM")) == "2026-09-01"
+    # the FEP: a provider's payment dispute two years from the EOP (Anthem's Claim Payment Dispute); a clinical denial the
+    # member's 6 months (5 CFR 890.105(b)(1)): the deadlines review r2-4
+    assert legal_deadline("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM")) == "2028-03-01"
+    assert legal_deadline("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM", carc="50")) == "2026-09-01"
     assert legal_deadline("2026-03-01", appeal_rule("Aetna", "commercial")) is None             # the safe date is the payer's own
     fix = corrected_rule("Medicare KY (CGS J15)", "medicare", "", "DENIED_MISSING_INFO", "16")
     assert fix["days"] == 120 and legal_deadline("2026-03-01", fix) == "2026-07-04"
@@ -788,7 +791,9 @@ def test_a_crossover_whose_ema_line_is_not_on_file_is_chased_from_the_remittance
     assert f["patient_control_number"] == F.claim_id(10) and f["shortfall_cents"] == 3000 and "crossed over" in f["title"]
     ev = json.loads(f["evidence"])
     assert ev["crossover"] is True and ev["ema_line_on_file"] is False and ev["second_payer_kind"] == "supplement"
-    assert f["appeal_deadline"] == "2027-03-28" and "Ask" in f["hint"]
+    # the carrier's limit, 1 year from the date of service as its rule says, with Medicare's remittance (March 28) giving the
+    # last day while how the carrier counts a second claim is not known (codes.second_claim_window: deadlines review r1-2)
+    assert f["appeal_deadline"] == "2027-03-02" and f["legal_deadline"] == "2027-03-28" and "Ask" in f["hint"]
 
 
 def test_a_second_payers_ema_denial_is_not_closed_by_the_first_payers_same_day_payment(store, ledger, tmp_path):
