@@ -34,7 +34,7 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
 
 - c3bbb1f: a cut day's note names the year of a repair rate taken from another year (run 5 showed a 2026 14301 measured
   by its 2025 facility rate; the amount, the Mohs's own half, was right). README names the every-procedure-cut rule.
-- 2ac1667: merged the integration tip cb3ffef (plans only).
+- 2ac1667: merged the integration tip cb3ffef (plans only); eb7e3b7: merged 5dd2957 (docs and a docs test).
 
 ## In progress
 - Brief items 1 to 4 done (see Measured). The full suite ran on 2ac1667 + the README line (python3 and
@@ -111,7 +111,10 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
 - Suites (2ac1667 + the README line): Python 3.13 / SQLite 3.53: 2,732 passed, 55 failed, 66 skipped. The 55 (test_fax 34,
   test_hotfix2 9, test_no_fax_route 5, test_notes_bodies_cli 4, test_hotfix2c 2, test_bulk_pause 1) fail the same, test
   for test, on the base fc73dec. Python 3.11.1 / SQLite 3.40: 2,616 passed, 163 failed, 24 errors (the same fax and notes
-  tests plus the store-image tests that build has no serialize for); compared with the base below. Node checks: both pass.
+  tests plus 132 store-image tests: that build has no Connection.serialize). The 187 fail the same, test for test, on
+  the base fc73dec under the same Python. Node checks: both pass. On the final code (after the merge of 5dd2957):
+  test_plan_rates, test_sizes_and_rates, test_review_rates, test_states, test_story, test_insights pass on 3.11.1 (287);
+  test_docs, test_runlog, test_cycle_converges pass on 3.13 (103, 1 skipped).
 
 ## Open questions
 - UHC Kentucky PA/NP: paid in full from January 2025 to late October 2026, then 85 percent on some lines. The branch
