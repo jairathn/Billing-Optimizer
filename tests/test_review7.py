@@ -122,8 +122,10 @@ def test_older_undated_items_open_exactly_what_today_counts(tmp_path, monkeypatc
     assert (got["total"], got["shortfall_cents"]) == older
 
 
-def test_work_done_counts_items_moved_on_not_clicks(tmp_path):
+def test_work_done_counts_items_moved_on_not_clicks(tmp_path, monkeypatch):
+    from remitwatch import runtime
     from tests.test_insights import store_with_work
+    monkeypatch.setenv(runtime.TZ_SETTING, "America/New_York")      # the practice is in US Eastern time: 09:00 UTC is that day there
     st = store_with_work(tmp_path)
     today = utc_today().isoformat()
     ids = [r[0] for r in st.query("SELECT finding_id FROM findings WHERE category='denial' ORDER BY finding_id")]

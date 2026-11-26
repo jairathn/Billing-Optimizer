@@ -632,7 +632,8 @@ def test_one_item_inside_the_payers_own_limit_is_sent_from_its_panel(site, monke
     one at a time from its panel; the send held it as expired on the safe date alone. Past both dates it is held, and the
     message names the date that closed."""
     import datetime as dt
-    today = dt.datetime.now(dt.timezone.utc).date()
+    from remitwatch import runtime
+    today = dt.date.fromisoformat(runtime.practice_today())      # the practice's day, which the send's limits count from
     day = lambda n: (today + dt.timedelta(days=n)).isoformat()     # noqa: E731
     fid = _ready_to_fax(site, monkeypatch, status="open", work_state="work_now", appeal_block=None, appeal_deadline=day(-3), legal_deadline=day(-1))
     r = site.c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR).json()

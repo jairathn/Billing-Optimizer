@@ -30,7 +30,7 @@ function polShare(p){
 function polWhen(p){
   if(p.decision === 'decide') return `<div class="small sev-medium">Waits for your decision${p.kind === 'payer_policy' ? ': out of Work now until then' : ''}</div>`;
   if(!p.decided_by) return '';
-  return `<div class="small muted">${esc(p.decision === 'accept' ? 'Accepted' : 'Set to pursue')} by ${esc(p.decided_by)} on ${esc(longDate(String(p.decided_at||'').slice(0,10)))}${p.pending ? '; the next run applies it' : ''}</div>`;
+  return `<div class="small muted">${esc(p.decision === 'accept' ? 'Accepted' : 'Set to pursue')} by ${esc(p.decided_by)} on ${esc(longDate(practiceDate(p.decided_at)))}${p.pending ? '; the next run applies it' : ''}</div>`;
 }
 function polWho(p){ return `${p.payer_group}, ${p.code ? p.code + (p.modifier ? '-' + p.modifier : '') : 'every code'}${p.reason ? ', ' + p.reason : ''}`; }
 
@@ -53,7 +53,7 @@ async function policyTab(v){
         : `<div class="scroll"><table class="small" id="polTable"><thead><tr><th>Payer</th><th>Code</th><th>Reason</th><th class="num">Items</th><th class="num" title="Estimate: the shortfall against the payer's usual rate">Dollars (est.)</th><th class="num" title="Open items inside the safe date to appeal, or the payer's own limit (one at a time)">Still appealable</th><th class="num">By EMA's rule</th><th class="num">Paid later before</th><th>Decision</th></tr></thead>
       <tbody>${pats.map((p,i)=>polRow(p, i)).join('')}</tbody></table></div>`}
       ${pats.length > POL_SHOW ? `<button class="ghost" id="polAll">Show all ${pats.length.toLocaleString()} patterns</button>` : ''}
-      <div class="small muted" style="margin-top:6px">"By EMA's rule": items EMA wrote off the day the payer's answer posted, with nothing paid after. "Paid later before": how often this payer paid such a denial later, from the remittance archive; for a code the payer almost never pays, the share of its answered lines it paid.${t.run_at ? ` Counts as of the run on ${esc(longDate(String(t.run_at).slice(0,10)))}; a decision takes effect at the next run.` : ''}</div>
+      <div class="small muted" style="margin-top:6px">"By EMA's rule": items EMA wrote off the day the payer's answer posted, with nothing paid after. "Paid later before": how often this payer paid such a denial later, from the remittance archive; for a code the payer almost never pays, the share of its answered lines it paid.${t.run_at ? ` Counts as of the run on ${esc(longDate(practiceDate(t.run_at)))}; a decision takes effect at the next run.` : ''}</div>
       <div class="todo-err sev-high small" id="polErr" role="alert"></div></div>`
     : `<div class="panel"><div class="empty">No denial written off in EMA is on file${t.run_at ? '' : ' yet: the run that reads EMA\'s Production report fills this page'}.</div></div>`}`;
   polBind(v, pats, t);

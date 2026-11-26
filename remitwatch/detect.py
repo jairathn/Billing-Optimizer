@@ -3877,6 +3877,7 @@ class Detector:
         the denying payer has since answered itself, as secondary after saying another payer covers the claim first or
         onto the patient's share (_settled_by_answer), is settled by that answer: a finding whose every line is settled
         or paid so is closed with that answer as its proof, worked or not; a claim never listed makes no finding."""
+        from . import runtime
         c = self.conn
         c.row_factory = sqlite3.Row
         by_bill: dict[tuple, list[dict]] = defaultdict(list)
@@ -4093,7 +4094,9 @@ class Detector:
                 # a submission a person dismissed, marked lost or recovered keeps its own finding, but neither carries the
                 # bill's other denials nor counts as listing their lines
                 closed = bool(prev and prev["worked"] and prev.get("status") in ("dismissed", "lost", "resolved"))
-                again = bool(decided) and when > decided[:10] and not (prev and prev["worked"])
+                # the payer's date against the practice's day of the person's change (a UTC moment): an appeal at 9:30 PM
+                # Eastern on June 19 came before a denial the payer dated June 20, as the states count it
+                again = bool(decided) and when > runtime.practice_date(decided) and not (prev and prev["worked"])
                 if again:               # denied again after someone acted: listed apart from their finding, the repeats together
                     novel = {k: v for k, v in unpaid.items() if k not in repeats} if lines else ({} if repeat_carrier else {("*", None): [1, 0]})
                     home = repeat_carrier

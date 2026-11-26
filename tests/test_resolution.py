@@ -9,6 +9,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from remitwatch import detect as det_mod  # noqa: E402
@@ -314,6 +316,49 @@ def test_a_bills_finding_stays_on_its_submission_and_a_denial_after_someone_acte
         "SELECT patient_control_number, status FROM findings WHERE signal='CLAIM_DENIED_UNPAID' AND COALESCE(stale,0)=0"))
     assert rows == [("CB0000300C017", "appealed"), ("CB0000300C031", "open")]
     store.close()
+
+
+def _read(store, tmp_path, claims: list[str], pay_date: str, ctrl: int) -> None:
+    """Remittances of these claims read into the store at hand, of either kind, as a cycle reads new files (interchange
+    numbers from `ctrl` on)."""
+    from tests.test_remitwatch import remit
+    paths = []
+    for n, i in enumerate(range(0, len(claims), 20)):
+        p = tmp_path / f"r{ctrl + n:04d}.RMT"
+        p.write_bytes(remit("".join(claims[i:i + 20]), "100.00", payer="ANTHEM", seg_count=99, isa_ctrl=f"{ctrl + n:09d}", pay_date=pay_date))
+        paths.append(str(p))
+    store.ingest_835_paths(paths)
+
+
+APPEALED = {"afternoon": "2026-06-19T19:00:00+00:00",     # 3 PM Eastern on June 19 (UTC's day is the 19th too)
+            "evening": "2026-06-20T01:30:00+00:00"}       # 9:30 PM Eastern on June 19 (UTC's day is already the 20th)
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+@pytest.mark.parametrize("when", sorted(APPEALED))
+def test_a_denial_dated_the_day_after_an_evening_appeal_is_seen_on_its_own(tmp_path, monkeypatch, kind, when):
+    """A biller appeals the bill's denial on June 19 where the practice is (US Eastern), in the afternoon or at 9:30 PM; a
+    later submission of the bill is denied on a remittance the payer dated June 20. It came after the appeal, so it is
+    listed on its own, never folded into the appealed item. Counted from UTC's day of the evening appeal (the 20th) it was
+    not after it. The server's file store and the compact store a serverless run analyses."""
+    from remitwatch import runtime
+    from remitwatch.detect import ensure_schema
+    from remitwatch.store import Store
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)          # the default: US Eastern
+    store = Store(":memory:", compact=True) if kind == "compact" else Store(str(tmp_path / "s.sqlite"))
+    ensure_schema(store.conn)
+    who = "ELM*BO****MI*W55500302"
+    _read(store, tmp_path, base_visits() + [visit(300, who, paid="0.00", cas="CAS*CO*16*223.65~", status="4")], "20260415", 1)
+    Detector(store, run_id="t1", today="2026-06-01").run()
+    [(fid,)] = store.query("SELECT finding_id FROM findings WHERE signal='CLAIM_DENIED_UNPAID'")
+    apply_status(store.conn, fid, "appealed", "Appeal faxed", actor="biller", at=APPEALED[when])
+    store.conn.commit()
+    _read(store, tmp_path, [visit(300, who, paid="0.00", cas="CAS*CO*50*223.65~", status="4").replace("C017*4*", "C031*4*")], "20260620", 50)
+    Detector(store, run_id="t2", today="2026-06-25").run()
+    rows = sorted((r["patient_control_number"], r["status"]) for r in store.query(
+        "SELECT patient_control_number, status FROM findings WHERE signal='CLAIM_DENIED_UNPAID' AND COALESCE(stale,0)=0"))
+    store.close()
+    assert rows == [("CB0000300C017", "appealed"), ("CB0000300C031", "open")], (kind, when, rows)
 
 
 def test_a_resubmission_that_repeats_a_paid_service_is_not_three_unpaid_services(tmp_path):

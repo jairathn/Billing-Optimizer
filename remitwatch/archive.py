@@ -182,8 +182,12 @@ def _noop(*_a: Any, **_k: Any) -> None:
 
 # ------------------------------------------------------------------------------------------------- clock and settings
 def _today(today: Any = None) -> str:
-    """The run's day (YYYY-MM-DD): the one place this module reads the clock."""
-    return str(today)[:10] if today else datetime.now(timezone.utc).date().isoformat()
+    """The run's day (YYYY-MM-DD): the one place this module reads the clock. With no day passed, the practice's
+    (runtime.practice_today): the horizon moves and a pin ends at midnight where the practice is, never at UTC's."""
+    if today:
+        return str(today)[:10]
+    from .runtime import practice_today
+    return practice_today()
 
 
 def _now() -> str:
