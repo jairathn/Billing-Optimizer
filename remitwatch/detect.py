@@ -2041,7 +2041,7 @@ class Detector:
                                                      else "; at the PA/NP 85 percent Medicare pays")
         return None, ""
 
-    def _yardstick(self, l: dict, code: str, pos: str, comp: str) -> tuple[int | None, str, dict | None]:
+    def _yardstick(self, l: dict, code: str, pos: str, comp: str, pool: bool | None = None) -> tuple[int | None, str, dict | None]:
         """The payer's own rate per unit for this line, and the record it rests on (None when the figure is not the payer's
         own): the payer group's rate for the year (else the next one), the place of service and the component (a component
         with no rate of the payer's own: its global rate split as the fee schedule splits it), at the clinician's recognised
@@ -2085,14 +2085,15 @@ class Detector:
                 rate = int(round(few[0] * NP_TIER)) if tier == "nonphysician" and professional_service(code) and np_q == NP_TIER else few[0]
                 return rate, (f"{grp}'s own {year} amount for {part} ({tier}{where}): {few[1]} of its {few[2]} lines, too few for a "
                               "rate of its own"), None
-            # the typical amount of the payer's own product class (a payer of no known class: a commercial plan's, which most are);
-            # where the line's setting alone has too few lines for it (fix7c-r1-2: once the 837 named the surgery center's claims,
-            # a code billed in both settings can have too few in each), the setting's own few lines (CLASS_FEW_MIN), then the
-            # class's typical amount across settings. A caller that tries one setting after another (_rate: l['pool'] False)
-            # takes neither until its last pass, so a payer's own rate in a later setting is never passed over for them.
+            # the typical amount of the payer's own product class (a payer of no known class: a commercial plan's, which most are).
+            # Where the class has lines enough across settings but too few in the line's own (fix7c-r1-2: once the 837 named the
+            # surgery center's claims, a code billed in both settings can have too few in each), the setting's own few lines
+            # (CLASS_FEW_MIN), then its lines of every setting together: a surgery center's amounts are not an office's. A caller
+            # that tries one setting after another passes pool False (_rate, usual_rate's office figure for a facility line), so
+            # the payer's own figure in a later setting is never passed over for them.
             cls = kind if kind and kind != "other" else "commercial"
             steps = [(self.class_typical, pos, where)]
-            if l.get("pool", True):
+            if (l.get("pool", True) if pool is None else pool) and (year, code, "any", comp, cls) in self.class_typical:
                 steps += [(self.__dict__.get("class_few") or {}, pos, f"{where}, the few lines of this setting"),
                           (self.class_typical, "any", ", all settings")]
             for table, p, how in steps:
@@ -2191,20 +2192,22 @@ class Detector:
             return None, f"no rate for {code}: an unlisted code is priced claim by claim", None
         pos = l.get("pos_class") or "office"
         comp = component_of(l.get("modifiers_list"))
-        rate, basis, r = self._yardstick(l, code, pos, comp)
+        # a facility line: the payer's office figure at the fee schedule's facility share (below) comes before the class's few
+        # facility lines and its lines of every setting together (fix7c-r1-2's fallbacks, read last)
+        rate, basis, r = self._yardstick(l, code, pos, comp, pool=False if pos == "facility" else None)
         allowed = l.get("allowed_cents") or 0
         fac = self.__dict__.get("_fac_codes") or ()
         if pos == "office" and not l.get("pos") and allowed > 0 and rate and code == l.get("procedure_code") \
                 and ((self._rate_group(l), code) in fac or (l.get("payer_group"), code) in fac):
             units = self.paid_units_of(l) if l.get("line_key") else 1
-            frate, fbasis, fr = self._yardstick(l, code, "facility", comp)
+            frate, fbasis, fr = self._yardstick(l, code, "facility", comp, pool=False)
             if fr is not None and frate and frate < rate and abs(allowed / max(units, 1) - frate) <= 1:
                 return frate, fbasis + ("; the remittance does not name the place of service and the payer allowed its facility rate: "
                                         "a facility claim"), fr
         if rate is None and pos == "facility":
             # no facility-setting baseline: the office figure, at the fee schedule's facility share of it where the fee schedule
             # prices the code; good enough to size a denial, never to call a line underpaid
-            rate, basis, _r = self._yardstick(l, code, "office", comp)
+            rate, basis, _r = self._yardstick(l, code, "office", comp, pool=False)
             if rate is not None:
                 from .mpfs import medicare_amount
                 y = str(l.get("year") or "")
@@ -2213,6 +2216,9 @@ class Detector:
                     return (int(round(rate * fac / off)), basis + f" at the fee schedule's facility share of it ({fac / off:.0%}); "
                                                                   "no facility-setting baseline", None)
                 return rate, basis + " (office-setting figure; no facility-setting baseline)", None
+            if l.get("pool", True):
+                # no office figure either: the class's few facility lines, then its lines of every setting together
+                rate, basis, r = self._yardstick(l, code, pos, comp, pool=True)
         return rate, basis, r
 
     def mppr_pct(self, l: dict) -> tuple[float, bool]:

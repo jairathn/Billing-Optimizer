@@ -867,6 +867,53 @@ def test_an_office_line_is_sized_by_the_offices_few_lines_before_every_settings_
     w.store.close()
 
 
+def test_a_facility_line_takes_the_payers_office_figure_at_the_fee_schedules_share_before_the_classs_few_facility_lines(tmp_path, kind):
+    """r1-2's fallbacks are read last at a facility: a payer with an office rate of its own ($800.00 for a 14020) and no
+    facility lines sizes a surgery center's line at that rate times the fee schedule's facility share, as before the fix
+    round, never at other payers' few facility lines ($531.97 on 4 claims). A payer with no office figure either takes those
+    few facility lines (the class has 10 lines across settings, too few in each), and an office line the class's 6 office
+    lines."""
+    from remitwatch.mpfs import medicare_amount
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 6, "14020", "1800.00", "800.00"), "20260301", payer="AETNA", payer_id="AETTEST")
+    w.remit(many(200, 4, "14020", "1800.00", "531.97", pos="24"), "20260301", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    det = Detector(w.store, run_id="r", today="2026-06-15")
+    det.load()
+    det.build_baselines()
+
+    def size(group, pos):
+        return det.usual_rate({"payer_group": group, "year": "2026", "provider_tier": "physician", "pos_class": pos}, "14020")[:2]
+    share = medicare_amount("2026", "KY", "14020", facility=True) / medicare_amount("2026", "KY", "14020")
+    rate, basis = size("Aetna", "facility")
+    assert rate == int(round(80000 * share)) and "facility share" in basis, (rate, basis)
+    rate, basis = size("Humana", "facility")
+    assert rate == 53197 and "few lines" in basis, (rate, basis)
+    rate, basis = size("Humana", "office")
+    assert rate == 80000 and "few lines" in basis, (rate, basis)
+    w.store.close()
+
+
+def test_a_class_too_small_in_every_setting_leaves_the_payers_own_level_to_size_a_denial(tmp_path, kind):
+    """The class's few lines of a setting are read only in r1-2's case (lines enough across settings, too few in each): where
+    the class has fewer than 10 lines in all (7 office 17110s at $150.00), a denial of a code the payer has no rate for is
+    sized as before the fix round, by the payer's own level against the fee schedule (its 99213s at 120 percent of
+    Medicare's), not by those 7 lines."""
+    from remitwatch.mpfs import medicare_amount
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 20, "99213", "200.00", "107.42"), "20260301", payer="CIGNA", payer_id="CIGTEST")
+    w.remit(many(200, 4, "17110", "300.00", "150.00"), "20260301", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(210, 3, "17110", "300.00", "150.00"), "20260301", payer="AETNA", payer_id="AETTEST")
+    denied = claim(900, sv("17110", "300.00", "0", None, "1", "CAS*CO*197*300.00~", "20260402"), "300.00", "0", dos="20260402")
+    w.remit([denied], "20260420", payer="CIGNA", payer_id="CIGTEST")
+    w.run(today="2026-06-15")
+    level = 10742 / medicare_amount("2026", "KY", "99213")
+    got = {k: (r["expected_cents"], (r["ev"].get("basis") or "")[:60]) for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
+    assert got and all(v[0] == int(round(level * medicare_amount("2026", "KY", "17110"))) for v in got.values()), got
+    w.store.close()
+
+
 def test_a_payers_own_facility_amount_sizes_a_claim_with_no_remittance_before_the_class_across_settings(tmp_path, kind):
     """A claim with no remittance (an EMA-only denial, Detector._rate) is sized setting by setting: for a code the payer has
     paid only at the surgery center ($491.64), that amount, never its class's typical amount across settings (another
