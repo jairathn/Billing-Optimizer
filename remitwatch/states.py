@@ -2866,9 +2866,9 @@ def _note_or_follow(res: dict, fx: dict, work_ev: list, today: str, put, expired
 
 def _billed_patient(res: dict, fx: dict, billed: dict, who: str, today: str, put) -> dict:
     """A patient-group denial a person marked "Billed the patient" (the owner's decision 2): it waits for the patient's
-    payment in EMA and is done when EMA shows it (the patient paid what was billed, or the line closed with the patient's
-    money on it); with nothing paid by PATIENT_WAIT_DAYS after the billing it is work again (send another statement, or
-    mark it Done). The person's status stands throughout."""
+    payment in EMA and is done when EMA shows it (patient_side_settled: the patient paid what was billed, or the line closed
+    on the patient's side, never by a write-off); with it not paid by PATIENT_WAIT_DAYS after the billing it is work again
+    (send another statement, or mark it Done). The person's status stands throughout."""
     f = fx["item"]
     anchor = billed.get("date")
     share = patient_share(fx)

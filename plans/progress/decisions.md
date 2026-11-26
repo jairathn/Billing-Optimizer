@@ -25,7 +25,16 @@ Branch `wip/decisions`, based on the integration tip 1867f60 (nothing to merge o
       payer's windows expire anything); story _bill_patient_denial_step and the wait step; api /status 'done' (strict
       true, DONE_ONLY for other items); features.js buttons billed_patient and mark_done; results STATUS_NOTE_KINDS and
       closures done / patient_paid; docs/OPERATIONS.md daily routine step 3.
-- [ ] Measured after; 20+ moved items hand-traced from raw rows.
+- [x] Measured after (first after run, branch c432cd6): 195 items moved, all of them decision 2 or 3, none other. One
+      of them showed a fault: a PR-204 item the base closed as settled by the patient (EMA: the patient paid part, the
+      rest taken off the patient's balance, line closed) came back as "Bill the patient" for the whole share, because the
+      half-of-it test now compared with the patient's share. Two items where the patient had paid part were asked for the
+      whole share again.
+- [x] Fixed with tests first (commit 3eb4036): states.patient_share gives patient_paid and left; settled_in_ema counts
+      what EMA took off the patient's balance for a patient-group denial; paid in full is done (patient_paid); part paid
+      bills the rest; Billed the patient closes only on the patient's side (patient_side_settled), never on a write-off.
+      Each part broken on purpose and restored (states, api strict Done, Done for other items).
+- [ ] Second after run (branch 3eb4036) on a fresh copy; 20+ moved items hand-traced from raw rows (tools/hand.py).
 - [ ] Suites (touched files, then the full suite in python3 and 3.11.1).
 
 ## Design (decided while reading; see the open questions)
