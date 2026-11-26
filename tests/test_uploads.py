@@ -383,9 +383,11 @@ def test_the_same_file_twice_changes_nothing(site):
     done = next(i for i in site.c.get("/api/uploads").json()["items"] if i["name"] == "Encounter & Charge Lines.xlsx" and i["status"] == "done"
                 and any("Added 0 rows" in ln for ln in i["lines"]))
     assert any("Already in RemitWatch: 3." in ln for ln in done["lines"])
-    # its name was taken by the first export: it is kept under the day it came, so each export stays its own
+    # its name was taken by the first export: it is kept under the day it came where the practice is, so each export
+    # stays its own
+    from remitwatch import runtime
     names = sorted(r[0] for r in table(site.db, "SELECT source_name FROM ema_sources"))
-    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    today = runtime.practice_today()
     assert names == [f"Encounter & Charge Lines (uploaded {today}).xlsx", "Encounter & Charge Lines.xlsx"]
 
 

@@ -10,6 +10,15 @@ import pytest
 from remitwatch import fax
 from tests.fake_fax import FakeLine, FakeSRFax, pdf_of, pdf_text
 
+
+def _paid_a_week_ago() -> str:
+    """A payment date a week before the practice's day (YYYYMMDD): the remittances stay current, so an appeal is never
+    held as stale whatever day the suite runs. A fixed date went stale two weeks after it was written."""
+    from datetime import date, timedelta
+
+    from remitwatch import runtime
+    return (date.fromisoformat(runtime.practice_today()) - timedelta(days=7)).strftime("%Y%m%d")
+
 XHR = {"X-Requested-With": "remitwatch"}
 PAYER_FAX = "(800) 555-0142"
 LEVEL2_FAX = "800-555-0177"
@@ -36,8 +45,15 @@ def test_srfax_speaks_its_web_service():
     assert q["action"] == "Queue_Fax" and q["sToFaxNumber"] == "18005550142" and q["sCallerID"] == "2705550100" and q["sFaxType"] == "SINGLE"
     assert q["_url"] == fax.SRFAX_URL and svc.queued[fid]["pdf"].startswith(b"%PDF-")
     assert line.status(fid)["state"] == "queued"
+    # when it went: a time with its zone from EpochTime ("a unix time stamp of the DateSent field"); DateSent itself is in the
+    # account's own zone, unnamed, and is kept beside it as SRFax's words. With no EpochTime there is no time ('').
+    svc.statuses[fid] = {"SentStatus": "Sent", "Pages": "3", "DateSent": "Nov/20/2026 10:02:00", "EpochTime": "1795186920"}
+    assert line.status(fid) == {"state": "sent", "pages": 3, "error": "", "at": "2026-11-20T15:02:00+00:00", "at_text": "Nov/20/2026 10:02:00"}
     svc.statuses[fid] = {"SentStatus": "Sent", "Pages": "3", "DateSent": "Nov/20/2026 10:02:00"}
-    assert line.status(fid) == {"state": "sent", "pages": 3, "error": "", "at": "Nov/20/2026 10:02:00"}
+    assert line.status(fid)["at"] == "" and line.status(fid)["at_text"] == "Nov/20/2026 10:02:00"
+    for odd in ("0", "-5", "soon", None, "99999999999999"):          # a placeholder or a value that is no time
+        svc.statuses[fid] = {"SentStatus": "Sent", "DateSent": "", "EpochTime": odd}
+        assert line.status(fid)["at"] == "", odd
     svc.statuses[fid] = {"SentStatus": "Failed", "ErrorCode": "Busy"}
     assert line.status(fid)["state"] == "failed" and line.status(fid)["error"] == "Busy"
     # both spellings of the status call's ID go along: SRFax's documentation uses both
@@ -81,7 +97,7 @@ def _store(tmp_path):
     under = claim(202, svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~", dos="20261101"), dos="20261101") \
         .replace("NM1*QC*1*SAMPLE*PAT", "NM1*QC*1*OTHER*PAT", 1)
     fixit = claim(203, svc("17000", "150.00", "0.00", None, "CAS*CO*4*150.00~", dos="20261101") + "LQ*HE*N519~", dos="20261101")
-    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied, under, fixit], pay_date="20261110")
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied, under, fixit], pay_date=_paid_a_week_ago())
     Detector(store, run_id="t").run()
     store.conn.execute("""INSERT INTO ema_rows (row_fingerprint, family, claim_id, patient_id, service_date, cpt)
                           VALUES ('fp1', 'charges', 'CB0000300C017', 'EMA77', '2026-11-01', '99214')""")
@@ -190,6 +206,12 @@ def test_select_all_then_appeal(site):
     assert got["checked"] == 2 and got["sent"] == 2 and got["received"] == 0
     f = c.get("/api/faxes").json()
     assert f["configured"] is True and [s["status"] for s in f["sent"]] == ["sent", "sent"] and f["due"] == []
+    # when each went is kept as every record is (a time with its zone), never before it was queued: the line's own words
+    # for a time ('2026-11-20 10:00:00' here, no zone) are no such time, so the moment the status was read stands in
+    from datetime import datetime
+    for s in f["sent"]:
+        sent, made = datetime.fromisoformat(s["sent_at"]), datetime.fromisoformat(s["created_at"])
+        assert sent.tzinfo is not None and sent >= made, (s["sent_at"], s["created_at"])
 
 
 def test_the_payers_answer_is_read_matched_and_answered(site):
@@ -321,6 +343,15 @@ def test_a_note_that_falls_short_becomes_a_suggested_template(site):
 
 
 # --------------------------------------------------------------------------- the follow-up calendar
+def _noon(day: str) -> str:
+    """Noon of `day` where the practice is, as the store writes a time (UTC): a fax of that day is of that day in any
+    zone the practice may be in (a fixed UTC hour falls on another day somewhere)."""
+    from datetime import datetime, timedelta
+
+    from remitwatch import runtime
+    return (datetime.fromisoformat(runtime.practice_day_start(day)) + timedelta(hours=12)).isoformat()
+
+
 def _book(rows: list[tuple], finding_status: str = "appealed", payer_kind: str = "commercial") -> sqlite3.Connection:
     from remitwatch.actions import apply_fax, ensure_fax_tables
     conn = sqlite3.connect(":memory:")
@@ -332,7 +363,7 @@ def _book(rows: list[tuple], finding_status: str = "appealed", payer_kind: str =
         if direction == "in":           # the payer's answer, tied as a fax is tied by itself: by the claim number, from its number
             doc = dict({"tied_by": "claim_id"}, **(doc or {}))
         apply_fax(conn, {"fax_key": f"k{i}", "direction": direction, "finding_id": "F1", "purpose": purpose, "level": level, "status": status,
-                         "created_at": day + "T10:00:00+00:00", "doc": doc or {}})
+                         "created_at": _noon(day), "doc": doc or {}})
     return conn
 
 
@@ -424,7 +455,7 @@ def test_on_a_serverless_host_the_appeal_goes_out_and_lasts(box, monkeypatch):
     claims = visits_with_downcodes()
     (root / DATA).mkdir(parents=True, exist_ok=True)
     for n, i in enumerate(range(0, len(claims), 10)):          # paid last week: the filing windows are open
-        (root / DATA / f"r{n:03d}.RMT").write_bytes(remit("".join(claims[i:i + 10]), "100.00", seg_count=99, isa_ctrl=f"{n + 1:09d}", pay_date="20261110"))
+        (root / DATA / f"r{n:03d}.RMT").write_bytes(remit("".join(claims[i:i + 10]), "100.00", seg_count=99, isa_ctrl=f"{n + 1:09d}", pay_date=_paid_a_week_ago()))
     cycle(state, client)
     monkeypatch.setenv("REMITWATCH_MODE", "serverless")
     monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
@@ -1041,7 +1072,7 @@ def _named(i: int, last: str, first: str, lines: str, dos: str) -> str:
             f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~REF*CE*PPO~DTM*232*{dos}~{lines}")
 
 
-def _store_from(tmp_path, files: list[tuple[str, str, list[str]]], pay_date: str = "20261110") -> str:
+def _store_from(tmp_path, files: list[tuple[str, str, list[str]]], pay_date: str | None = None) -> str:
     from remitwatch.detect import Detector
     from remitwatch.store import Store
     from tests.test_remitwatch import remit
@@ -1050,7 +1081,8 @@ def _store_from(tmp_path, files: list[tuple[str, str, list[str]]], pay_date: str
     for n, (payer, pid, cl) in enumerate(files):
         for k, i in enumerate(range(0, len(cl), 20)):
             p = tmp_path / f"r{n}_{k}.RMT"
-            p.write_bytes(remit("".join(cl[i:i + 20]), "100.00", payer=payer, payer_id=pid, seg_count=99, isa_ctrl=f"{n * 100 + k + 1:09d}", pay_date=pay_date))
+            p.write_bytes(remit("".join(cl[i:i + 20]), "100.00", payer=payer, payer_id=pid, seg_count=99, isa_ctrl=f"{n * 100 + k + 1:09d}",
+                                pay_date=pay_date or _paid_a_week_ago()))
             paths.append(str(p))
     store.ingest_835_paths(paths)
     Detector(store, run_id="t").run()

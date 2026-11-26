@@ -104,7 +104,8 @@ def _codes(adj: Sequence, rmk: Sequence = (), status: str | None = None) -> list
 
 def _row(date: Any, source: str, kind: str, text: str, *, payer: Any = None, amount: int | None = None, codes: list | None = None,
          tags: Sequence = (), line: str | None = None, **extra: Any) -> dict:
-    r = {"n": 0, "date": str(date)[:10] if date else None, "source": source, "kind": kind, "payer": payer or None,
+    # a stored day as written; a moment (a person's mark, a fax) on the practice's calendar, as the states date it
+    r = {"n": 0, "date": S._pday(date) or None, "source": source, "kind": kind, "payer": payer or None,
          "amount_cents": amount, "codes": codes or [], "text": text, "decisive": False, "line": line, "tags": list(tags)}
     r.update(extra)
     return r
@@ -547,7 +548,7 @@ def _rows_remitwatch(fx: dict) -> list[dict]:
             text = e.get("note") or k.replace("_", " ")
         out.append(_row(e["at"], "remitwatch", k, text + ".", tags=["rw:" + k], amount=e.get("cents") if k == "manual" else None))
     for x in fx["rw"]["faxes"]:
-        when = x.get("sent_at") or x.get("created_at")
+        when = S.fax_day(x.get("sent_at"), x.get("created_at")) or None       # the day it went, as the states date it
         if (x.get("direction") or "out") == "in":
             out.append(_row(when, "remitwatch", "fax_in", f"Fax received from {x.get('payer_group') or 'the payer'}.", tags=["fax_in"]))
             continue

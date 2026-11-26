@@ -82,25 +82,49 @@ def practice_zone() -> tzinfo:
         return _UsEastern()
 
 
+def practice_zone_name() -> str:
+    """The IANA name of the zone practice_zone gives (the default's name when REMITWATCH_TZ is not a zone this host knows):
+    the pages date a stored moment in it, as the server does (practice_date)."""
+    return str(getattr(practice_zone(), "key", None) or DEFAULT_TZ)
+
+
 def practice_today(offset: int = 0) -> str:
     """Today where the practice is, plus `offset` days, as YYYY-MM-DD: the day every list, count, expiry check and follow-up
     compares with. A window whose last day this is stays open until midnight there."""
     return (_utc_now().astimezone(practice_zone()).date() + timedelta(days=offset)).isoformat()
 
 
+def _day_written(s: str) -> str:
+    """The first ten characters of s when they are a real day written YYYY-MM-DD, else ''."""
+    d = s[:10]
+    if len(d) != 10 or d[4] != "-" or d[7] != "-":
+        return ""
+    try:
+        date.fromisoformat(d)
+    except ValueError:
+        return ""
+    return d
+
+
 def practice_date(stamp: str | None) -> str:
     """The practice's date of a moment the store keeps (an ISO time with its zone, as every record is written: a fax sent
-    at 8:30 PM Eastern was sent that day, not the next). A plain date, or a time with no zone, is taken as written."""
+    at 8:30 PM Eastern was sent that day, not the next). A plain date, or a time with no zone, is taken as written.
+    Anything that is not a day ('Nov/24/2026 21:31:00', as a fax service may word a time) is '' (no day): cut to ten
+    characters it would sort after every real day and win every max(). A moment the zone cannot hold (a service's
+    placeholder '0001-01-01T00:00:00Z') keeps the day written, never stopping the caller."""
     s = (stamp or "").strip()
     if len(s) <= 10:
-        return s[:10]
+        return _day_written(s)
     try:
         t = datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
-        return s[:10]
+        return _day_written(s)
     if t.tzinfo is None:
-        return s[:10]
-    return t.astimezone(practice_zone()).date().isoformat()
+        return _day_written(s)
+    try:
+        return t.astimezone(practice_zone()).date().isoformat()
+    except (OverflowError, ValueError):         # at the calendar's ends: no zone can move it
+        return _day_written(s)
 
 
 def practice_day_start(day: str) -> str:
