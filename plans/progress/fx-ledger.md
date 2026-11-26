@@ -113,8 +113,31 @@ the uncommitted findings fixes of 7993e16 (all committed by then). Detection 259
   11-24 copy, before CS/72 netting and money-5's budget: not the same measure.)
 
 ## Needs from others
-- (being written: 88305 parts paid as a whole on another bill; money-9's stored size; listings on voided claims; the
-  claim-level rejected item beside the line's denial; a rejected claim sent as secondary sized at the full rate)
+Each with its failing test in `plans/progress/fx-ledger_needs/` (named need_*.py so the suite does not collect it; copy it
+into tests/ to run it; each fails on this branch for the reason given).
+1. `need_part_paid_as_global_elsewhere.py` (detect.resolve_elsewhere: in no fixer's row, so the integrator; or F2 if
+   routed with the closures). A part of 88305 (26 or TC) billed apart and denied after the same payer paid the whole
+   service on another bill of the same patient is a duplicate whatever its CARC; resolve_elsewhere closes a part's
+   denial on a payment of the whole only when the payment comes after the denial (or the CARC is a duplicate's). Real
+   copy: 13 Work-now items (A17: already done, paid_as_global / paid_on_other_bill), routed to "note".
+2. `need_medicaid_share_size.py` (detect._set_states: in no fixer's row, so the integrator). money-9's second half: the
+   item stays work (done here) but keeps Medicaid's whole rate as its size; store shortfall_cents =
+   fx['paid_first_partial']['owed'] (F1 can return it from the state, for example st['owed_cents'], when asked).
+3. `need_denial_on_a_voided_claim.py` (the line rules that list a denial and the claim rules: in no fixer's row; or
+   states._decide's shared branches). A denial of a claim the practice voided afterwards (837 frequency 8, nothing sent
+   after) is listed as work. F1 reads the voids only for takebacks (detect._voided_services, which the rule can call).
+   Real copy: 3 claim denials ($226.33, check first) and 2 bundling denials ($81.92, EMA voided), A17: already done.
 
 ## Open questions
-- (none yet)
+- A claim-level REJECTED_PRE_PAYER item and a line-level denial of the same service can both be listed (real copy: a drug
+  line J7345, repeatedly denied CO-16 and waiting on a resend, and the claim's latest send rejected; A17 marks the claim
+  item "partly duplicate" but correct). One item per bill would be the fold's rule (not F1's).
+- A rejected Medicaid claim sent as the second payer is sized at Medicaid's full rate (A17: wrong amount, rate over
+  25%). That is next_fixes section 3's residual (a claim sent as secondary priced at the full rate), F3a's sizing.
+- The second payers' shares taken back in full and on no item: 129 lines ($6,424.85) on the branch's real copy; 9
+  ($503.67) are on claims a recoupment took from only in part (the recoupment's own listing stands for the claim when it
+  is $500 or more; under $500 nothing lists them); a rough probe from the raw rows puts 4 ($272.75) as paid again by
+  the same payer, 4 ($20.74) as G2211 or 99024 and 1 ($21.73) as answered again, and could not tell which of the older
+  rules (billed again on another claim, voided, answered again on the same day) skips the other 111 ($5,605.96).
+  money-2 removed the one cause the review named (the primary's payment counted as covering the share). Whether the
+  partial-claim rule should list recoupments under $500 is for the owner.
