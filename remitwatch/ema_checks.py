@@ -51,7 +51,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from . import ema_ledger as el
 from . import ema_reports as er
-from .codes import EM_CODES, appeal_rule, filing_rule
+from .codes import EM_CODES, UNKNOWN_PART, appeal_rule, component_of, filing_rule, part_fits
 from .codes import legal_deadline as _legal_deadline
 from .ema_reports import status_class  # noqa: F401  (re-exported: the spec's ema_checks.status_class)
 
@@ -1200,7 +1200,8 @@ def unposted_csv(conn: sqlite3.Connection, *, today: str | None = None) -> Itera
 def claim_statuses(conn: sqlite3.Connection, *, claim_ids: Iterable[str] = (), links: Iterable[int] = ()) -> dict:
     """C3a: each claim's newest status across the A/R, Production and the Claim & Claim Status export, by as_of (the A/R
     first on a tie, then Production): {claim id or claim number: {'status', 'class', 'source', 'as_of'}}. A claim status
-    is claim-level and undated: it routes an item, it never closes one."""
+    is claim-level and undated: it routes an item, it never closes one. Whether Production holds an insurance answer for
+    the claim (which tells Resolved/Other settled from given up) is line_answered_sql's: a bare $0 row is none."""
     _prepare(conn)
     out: dict = {}
 
@@ -1220,7 +1221,7 @@ def claim_statuses(conn: sqlite3.Connection, *, claim_ids: Iterable[str] = (), l
         for cid, st, as_of in conn.execute("""SELECT a.claim_id, a.claim_status, a.as_of FROM ema_ar a
                                               WHERE a.claim_id IN (SELECT cid FROM temp.ec_ids) AND a.claim_status IS NOT NULL"""):
             offer(cid, st, "ar", as_of)
-        for cid, st, as_of, ans in conn.execute("""SELECT k.claim_id, l.status, l.as_of, l.ins_answer_rows > 0 FROM ema_claim_links k
+        for cid, st, as_of, ans in conn.execute(f"""SELECT k.claim_id, l.status, l.as_of, {line_answered_sql('l')} FROM ema_claim_links k
                     JOIN ema_lines l ON l.link = k.link WHERE k.claim_id IN (SELECT cid FROM temp.ec_ids) AND l.status IS NOT NULL
                     ORDER BY l.last_posted"""):
             offer(cid, st, "production", as_of, bool(ans))
@@ -1233,7 +1234,7 @@ def claim_statuses(conn: sqlite3.Connection, *, claim_ids: Iterable[str] = (), l
         for lk, st, as_of in conn.execute("""SELECT a.link, a.claim_status, a.as_of FROM ema_ar a
                                              WHERE a.link IN (SELECT link FROM temp.ec_lk) AND a.claim_status IS NOT NULL"""):
             offer(lk, st, "ar", as_of)
-        for lk, st, as_of, ans in conn.execute("""SELECT l.link, l.status, l.as_of, l.ins_answer_rows > 0 FROM ema_lines l
+        for lk, st, as_of, ans in conn.execute(f"""SELECT l.link, l.status, l.as_of, {line_answered_sql('l')} FROM ema_lines l
                     WHERE l.link IN (SELECT link FROM temp.ec_lk) AND l.status IS NOT NULL ORDER BY l.last_posted"""):
             offer(lk, st, "production", as_of, bool(ans))
     _drop(conn, "ec_ids", "ec_lk")
@@ -1389,13 +1390,14 @@ def _paid_elsewhere_other(lines: Iterable[tuple], paid_other: dict[tuple, dict])
 
 
 def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callable | None = None,
-             skip_claim_ids: Iterable[str] = ()) -> list[dict]:
+             skip_claim_ids: Iterable[str] = (), parts: Callable | None = None) -> list[dict]:
     """C3b: claims that never left EMA. A claim (A/R rows or Production lines) whose newest status, across the reports,
     is Batched for Printing, Batched for Sending or Invalid, for 14 days or more (3 for Invalid) since its first charge
     posting, else the bill's creation date, else the date of service, as of that status's own date. The status must be
     at most 14 days old. One NOT_SENT item per claim, keyed EMA_OPEN_CLAIM by its claim id (else 'link:<n>'), so work
     follows the claim between NO_ANSWER, REJECTED_PRE_PAYER and NOT_SENT. Dated by the payer's first-filing limit from
-    the date of service; high severity past 30 days."""
+    the date of service; high severity past 30 days. A claim whose every line its payer paid on another of EMA's claims,
+    for the line's own part of the service (parts: as unanswered_claims), was billed and paid there: not listed."""
     _prepare(conn)
     t = _today(today)
     skip = {x for x in skip_claim_ids if x}
@@ -1407,7 +1409,7 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
     first_charge = _first_charges(conn, [lk for k in claims.values() for lk in k["links"]])
     first_paid = _first_ins_paid(conn, [lk for k in claims.values() if k.get("secondary") for lk in k["links"]])
     want = {(lk, svc, cpt): k["group"] for k in claims.values() for lk in k["links"] for (cpt, svc) in k["lines"]}
-    paid_other = _paid_on_another_claim(conn, list(want), group_of=want)
+    paid_other = _paid_on_another_claim(conn, list(want), group_of=want, parts=parts or (lambda ks: line_parts(conn, ks)))
     made = _bill_created(conn, [k["claim_id"] for k in claims.values() if k["claim_id"]])
     out = []
     for key, k in sorted(claims.items()):
@@ -1558,6 +1560,213 @@ def answers_through(conn: sqlite3.Connection, payer_group: str | None, newest_83
     return max(x for x in (newest_835, cand) if x)
 
 
+# A payer's reason as EMA's Production report holds it (ema_line_reasons, alias zr): a CARC with its group, or a remark code
+# (RARC: N130, MA130, M80), which the report can only hold as an adjustment kind of its own (group '')
+_REASON_SQL = "(zr.grp <> '' OR zr.code GLOB 'N[0-9]*' OR zr.code GLOB 'M[0-9]*' OR zr.code GLOB 'MA[0-9]*')"
+
+
+def zero_answer_sql(y: str = "y") -> str:
+    """SQL that is true for a $0 row EMA posted under a check (ema_line_payments, alias `y`: a check number and no insurance
+    money) that is a payer's $0 answer: one that carries its proof, an allowed amount on the row, or the payer's reason
+    (a CARC of any group: a denial, the contractual write-down, the patient's share; or a remark code) posted on the same
+    line that day. A bare $0 row (a batch check that lists a claim it does not pay: no reason, no allowed amount, no
+    adjustment, nothing put on the patient) answers nothing: the claim may be paid weeks later on another check, or never.
+    EMA posts a payment's reasons and adjustments as rows of their own, without the check number, on the same day, and
+    repeats the line's allowed amount on each of its rows: an allowed amount says the payer adjudicated the line. A store
+    whose summary keeps the routine reasons (CO-45, the patient's share) of only some lines reads a $0 answer whose only
+    proof is one of those as bare until it holds it: the claim stays listed, never dropped."""
+    return (f"(COALESCE({y}.check_no, '') <> '' AND COALESCE({y}.ins_paid, 0) = 0 AND (COALESCE({y}.allowed, 0) <> 0 "
+            f"OR EXISTS (SELECT 1 FROM ema_line_reasons zr WHERE zr.link = {y}.link AND zr.svc = {y}.svc AND zr.cpt = {y}.cpt "
+            f"AND {_REASON_SQL} AND (zr.first_posted = {y}.posted OR zr.last_posted = {y}.posted))))")
+
+
+def answer_row_sql(y: str = "y") -> str:
+    """SQL that is true for an EMA payment row (ema_line_payments, alias `y`) that is a payer's answer: insurance money on
+    it (a payment, or one taken back), or a $0 answer that carries its proof (zero_answer_sql)."""
+    return f"(COALESCE({y}.ins_paid, 0) <> 0 OR {zero_answer_sql(y)})"
+
+
+def line_answered_sql(l: str = "l") -> str:
+    """SQL that is true for an EMA claim line (ema_lines, alias `l`) a payer answered, its bare $0 rows aside, from the
+    line's own figures (the ledger keeps them for every line, whatever the store keeps of its reasons): insurance money on
+    it, an adjustment, an allowed amount, or an answer row that is not a $0 row under a check (a payment, or the payer's
+    reason posted on its own). A line whose only answers are $0 rows with none of these was not answered."""
+    return (f"(COALESCE({l}.ins_paid, 0) <> 0 OR COALESCE({l}.contractual, 0) <> 0 OR COALESCE({l}.noncontractual, 0) <> 0 "
+            f"OR COALESCE({l}.allowed, 0) <> 0 OR COALESCE({l}.ins_answer_rows, 0) > COALESCE({l}.zero_pay_rows, 0))")
+
+
+def _bare_zero_rows(conn: sqlite3.Connection, links: Iterable[int]) -> dict[int, dict]:
+    """The first bare $0 row (zero_answer_sql's placeholder) EMA posted on each of these EMA claims, and the money on the
+    patient's side of the claim: {link: {'on', 'check_tail', 'patient_cents'}}, for the item's note."""
+    out: dict[int, dict] = {}
+    lks = sorted({int(x) for x in links if x is not None})
+    for part in _chunks(lks):
+        _temp(conn, "ec_bz", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for lk, posted, chk in conn.execute(f"""SELECT y.link, y.posted, y.check_no FROM temp.ec_bz b JOIN ema_line_payments y ON y.link = b.link
+                    WHERE COALESCE(y.check_no, '') <> '' AND COALESCE(y.ins_paid, 0) = 0 AND NOT {zero_answer_sql('y')}
+                    ORDER BY y.link, y.posted, y.check_no"""):
+            if lk not in out:
+                out[lk] = {"on": posted, "check_tail": _tail(chk)}
+    _drop(conn, "ec_bz")
+    for lk, cents in _patient_cents(conn, out).items():
+        out[lk]["patient_cents"] = cents
+    return out
+
+
+def _patient_cents(conn: sqlite3.Connection, links: Iterable[int]) -> dict[int, int]:
+    """The money on the patient's side of each of these EMA claims (paid by the patient, or written off there): whether the
+    payer may have put the amount on the patient, for a bare $0 row's note. {link: cents}."""
+    out: dict[int, int] = {}
+    for part in _chunks(sorted({int(x) for x in links if x is not None})):
+        _temp(conn, "ec_ps", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for lk, cents in conn.execute("""SELECT l.link, SUM(COALESCE(l.pat_paid_joined, 0) + COALESCE(l.pat_adj_joined, 0))
+                                         FROM temp.ec_ps x JOIN ema_lines l ON l.link = x.link GROUP BY l.link"""):
+            out[lk] = int(cents or 0)
+    _drop(conn, "ec_ps")
+    return out
+
+
+def bare_zero_note(z: dict | None) -> str | None:
+    """The item's note for a claim whose only answer in EMA is a bare $0 row (and the patient's side of it)."""
+    if not z:
+        return None
+    note = (f"EMA shows a $0 row for this claim on a check (ending {z.get('check_tail') or '?'}, posted {z.get('on')}) with no "
+            "reason, allowed amount or adjustment: a check that lists a claim it does not pay is no answer. Look it up on the "
+            "payer's portal before you send it again")
+    if (z.get("patient_cents") or 0) > 0:
+        note += (f". EMA shows {_usd(z['patient_cents'])} paid by the patient or written off on the patient's side of this claim: "
+                 "if the payer's answer put the amount on the patient, the claim is done")
+    return note
+
+
+# ------------------------------------------------------------------------------------- the part of a service a line bills
+def split_codes(conn: sqlite3.Connection) -> frozenset[str]:
+    """The codes the practice bills in parts: those that any line on the remittances, the 837s or EMA's weekly charge
+    exports carries with a 26 or a TC. Only a line of one of these can be for a part of a service; every other code is
+    billed whole, and its part needs no looking up."""
+    codes: set[str] = set()
+    for table, code, where in (("lines", "procedure_code", ""), ("lines_837", "procedure_code", ""),
+                               ("ema_rows", "cpt", "family = 'charge_lines' AND ")):
+        if not _table(conn, table):
+            continue
+        for c, m in conn.execute(f"""SELECT DISTINCT {code}, modifiers FROM {table}
+                                     WHERE {where}(modifiers LIKE '%26%' OR modifiers LIKE '%TC%')"""):
+            if c and component_of(m):
+                codes.add(str(c).strip().upper())
+    return frozenset(codes)
+
+
+def own_part(parts: Iterable[str] | None) -> str:
+    """The part of a service a claim's own line bills, from what line_parts found for it: the one part named; the whole
+    service ('') when nothing names it, or when it bills both parts."""
+    got = set(parts or ())
+    return next(iter(got)) if len(got) == 1 else ""
+
+
+def other_parts(parts: Iterable[str] | None, same_charge_as: str | None = None) -> set[str]:
+    """The parts another claim's line answers, from what line_parts found for it. One nothing names is UNKNOWN_PART,
+    unless its charge equals the claim's own line's (same_charge_as: that line's part): then it is the same service billed
+    again, or the claim's own EMA claim, and answers that part (the practice charges each part its own fee)."""
+    if parts:
+        return set(parts)
+    return {same_charge_as} if same_charge_as is not None else {UNKNOWN_PART}
+
+
+def line_charges(conn: sqlite3.Connection, keys: Iterable[tuple]) -> dict[tuple, int]:
+    """EMA's charge on each of these claim lines (link, date, code): {(link, date, code): cents}."""
+    out: dict[tuple, int] = {}
+    want = sorted({(int(k[0]), str(k[1])[:10], k[2]) for k in keys if k and k[0] is not None and k[1] and k[2]})
+    for part in _chunks(want):
+        _temp(conn, "ec_lch", ["link INTEGER", "svc TEXT", "cpt TEXT"], part, ["link, svc, cpt"])
+        for lk, svc, cpt, chg in conn.execute("""SELECT l.link, l.svc, l.cpt, l.charges FROM temp.ec_lch x
+                                                 JOIN ema_lines l ON l.link = x.link AND l.svc = x.svc AND l.cpt = x.cpt"""):
+            out[(lk, svc, cpt)] = chg or 0
+    _drop(conn, "ec_lch")
+    return out
+
+
+def line_parts(conn: sqlite3.Connection, keys: Iterable[tuple], codes: Iterable[str] | None = None) -> dict[tuple, frozenset]:
+    """The parts of a service (26, TC, or '' for the whole) that EMA claim lines (link, date, code) bill, as the files that
+    carry a line's modifiers say (EMA's Production report has none): the 837 lines, the remittances' lines and EMA's weekly
+    charge lines of the claims EMA ties to the EMA claim (the A/R's claim id, else the claim-link map's claim id, else
+    every claim of the bill the map gives it). Only lines of the codes billed in parts (`codes`, default split_codes) are
+    looked up; a line nothing names is left out: its part is not known. {(link, date, code): frozenset of parts}."""
+    codes = split_codes(conn) if codes is None else frozenset(codes)
+    want = sorted({(int(k[0]), str(k[1])[:10], k[2]) for k in keys if k and k[0] is not None and k[1] and k[2] in codes})
+    if not want:
+        return {}
+    links = sorted({k[0] for k in want})
+    ids: dict[int, set] = defaultdict(set)
+    bills: dict[int, set] = defaultdict(set)
+    for part in _chunks(links):
+        _temp(conn, "ec_lp", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
+        if _table(conn, "ema_claim_links"):
+            for lk, cid, bill in conn.execute("""SELECT link, claim_id, bill FROM ema_claim_links
+                                                 WHERE link IN (SELECT link FROM temp.ec_lp) AND claim_id IS NOT NULL"""):
+                ids[lk].add(cid)
+                if bill:
+                    bills[lk].add(bill)
+        if _table(conn, "ema_link_map"):
+            for lk, cid, bill in conn.execute("""SELECT link, claim_id, bill FROM ema_link_map
+                                                 WHERE link IN (SELECT link FROM temp.ec_lp) AND COALESCE(conflict, 0) = 0"""):
+                if cid:
+                    ids[lk].add(cid)
+                if bill:
+                    bills[lk].add(bill)
+    _drop(conn, "ec_lp")
+    # a claim EMA ties by its bill alone: every claim of that bill on file
+    by_bill = sorted({b for lk in links if not ids.get(lk) for b in bills.get(lk, ())})
+    of_bill: dict[str, set] = defaultdict(set)
+    for part in _chunks(by_bill):
+        rows = [(b, b + "~") for b in part]
+        _temp(conn, "ec_lb", ["bill TEXT PRIMARY KEY", "hi TEXT"], rows)
+        for table in ("claims", "claims_837"):
+            if _table(conn, table):
+                for b, pcn in conn.execute(f"""SELECT x.bill, c.patient_control_number FROM temp.ec_lb x JOIN {table} c
+                                               ON c.patient_control_number >= x.bill AND c.patient_control_number < x.hi"""):
+                    if _bill(pcn) == b:
+                        of_bill[b].add(pcn)
+        if _table(conn, "ema_rows"):
+            for b, cid in conn.execute("""SELECT DISTINCT x.bill, e.claim_id FROM temp.ec_lb x JOIN ema_rows e ON e.bill_id = x.bill
+                                          WHERE e.family = 'charge_lines' AND e.claim_id IS NOT NULL"""):
+                of_bill[b].add(cid)
+    _drop(conn, "ec_lb")
+    for lk in links:
+        if not ids.get(lk):
+            for b in bills.get(lk, ()):
+                ids[lk] |= of_bill.get(b, set())
+    claims = sorted({c for v in ids.values() for c in v})
+    found: dict[tuple, set] = defaultdict(set)          # (claim id, date, code) -> parts
+    for part in _chunks(claims):
+        _temp(conn, "ec_lc", ["cid TEXT PRIMARY KEY"], [(x,) for x in part])
+        srcs = []
+        if _table(conn, "lines_837") and _table(conn, "claims_837"):
+            srcs.append("""SELECT l.patient_control_number, SUBSTR(COALESCE(l.service_date, c8.service_date), 1, 10), l.procedure_code, NULL,
+                                  l.modifiers FROM temp.ec_lc x JOIN lines_837 l ON l.patient_control_number = x.cid
+                           JOIN claims_837 c8 ON c8.claim_837_key = l.claim_837_key""")
+        if _table(conn, "lines") and _table(conn, "claims"):
+            srcs.append("""SELECT c.patient_control_number, SUBSTR(COALESCE(l.service_date, c.statement_from), 1, 10), l.procedure_code,
+                                  l.original_procedure_code, l.modifiers FROM temp.ec_lc x JOIN claims c ON c.patient_control_number = x.cid
+                           JOIN lines l ON l.claim_key = c.claim_key""")
+        if _table(conn, "ema_rows"):
+            srcs.append("""SELECT e.claim_id, SUBSTR(e.service_date, 1, 10), e.cpt, NULL, e.modifiers FROM ema_rows e
+                           WHERE e.family = 'charge_lines' AND e.claim_id IN (SELECT cid FROM temp.ec_lc)""")
+        for sql in srcs:
+            for cid, svc, code, ocode, mods in conn.execute(sql):
+                for cd in {code, ocode} - {None, ""}:
+                    if cd in codes and svc:
+                        found[(cid, svc, cd)].add(component_of(mods))
+    _drop(conn, "ec_lc")
+    out: dict[tuple, frozenset] = {}
+    for lk, svc, cpt in want:
+        got = set()
+        for cid in ids.get(lk, ()):
+            got |= found.get((cid, svc, cpt), set())
+        if got:
+            out[(lk, svc, cpt)] = frozenset(got)
+    return out
+
+
 def _separate_checks(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS temp.ec_sp")
     conn.execute("""CREATE TEMP TABLE ec_sp AS SELECT check_no, payer FROM ema_checks WHERE cause = 'separate_payee'""")
@@ -1568,10 +1777,11 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
     """C3e: whether EMA shows each claim answered after it was sent. claims: [{'claim_id', 'sent', 'lines': [(svc, cpt,
     charge cents)], 'payer_group'}]. The claim's EMA claim is found by its claim id (the A/R's pairs), else its bill (the
     map), else the content bridge: the claim's (date, code, charge) rows equal the charge rows of exactly one link that
-    is not the ASC's facility claim, with the payer group agreeing (E8). Answered means a net insurance payment, a $0 check
-    row (a $0 answer) or a payer's non-routine reason, posted after the claim was sent, on that EMA claim. Payments under
-    the ASC's separate-payee checks never count, and a status alone never answers.
-    Returns {claim_id: {'answered', 'how', 'on', 'paid_cents', 'link', 'bridge'}}."""
+    is not the ASC's facility claim, with the payer group agreeing (E8). Answered means a net insurance payment, a $0 answer
+    (a $0 row under a check that carries its proof: zero_answer_sql) or a payer's non-routine reason, posted after the
+    claim was sent, on that EMA claim. A bare $0 row answers nothing: the first one after the send is kept for the item's
+    note ('bare_zero'). Payments under the ASC's separate-payee checks never count, and a status alone never answers.
+    Returns {claim_id: {'answered', 'how', 'on', 'paid_cents', 'link', 'bridge', 'bare_zero'}}."""
     _prepare(conn)
     out: dict = {}
     items = [c for c in claims if c.get("claim_id")]
@@ -1621,18 +1831,22 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
             cid = c["claim_id"]
             got = found.get(cid)
             res = {"answered": False, "how": None, "on": None, "paid_cents": 0, "link": got[0] if got else None,
-                   "bridge": got[1] if got else None}
+                   "bridge": got[1] if got else None, "bare_zero": None}
             out[cid] = res
         _temp(conn, "ec_al", ["cid TEXT", "link INTEGER", "sent TEXT"],
               [(cid, lk, next((c.get("sent") for c in part if c["claim_id"] == cid), None) or "")
                for cid, (lk, _b) in found.items()], ["link"])
-        for cid, posted, cents, zero in conn.execute("""SELECT a.cid, y.posted, y.ins_paid, y.check_no <> '' AND COALESCE(y.ins_paid, 0) = 0
+        for cid, posted, cents, chk, zero, proof in conn.execute(f"""SELECT a.cid, y.posted, y.ins_paid, y.check_no,
+                    y.check_no <> '' AND COALESCE(y.ins_paid, 0) = 0, {zero_answer_sql('y')}
                     FROM temp.ec_al a JOIN ema_line_payments y ON y.link = a.link
                     WHERE y.posted > a.sent AND NOT EXISTS (SELECT 1 FROM temp.ec_sp s WHERE s.check_no = y.check_no AND s.payer = y.payer)
-                    ORDER BY y.posted"""):
+                    ORDER BY y.posted, y.check_no, y.svc, y.cpt"""):
             r = out[cid]
             if zero:
-                if not r["answered"]:
+                if not proof:
+                    if r["bare_zero"] is None:      # a check that lists the claim and pays nothing, with no reason: no answer
+                        r["bare_zero"] = {"on": posted, "check_tail": _tail(chk)}
+                elif not r["answered"]:
                     r.update(answered=True, how="zero_check", on=posted)
             else:
                 r["paid_cents"] += cents or 0
@@ -1651,6 +1865,13 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
             if not r["answered"] or (posted and posted < (r["on"] or "9999")):
                 r.update(answered=True, how="carc", on=posted)
     _drop(conn, "ec_ca", "ec_cl", "ec_bl", "ec_al", "ec_sp")
+    # the patient's side of each claim left with only a bare $0 row, for the item's note
+    links = {r["link"] for r in out.values() if not r["answered"] and r["bare_zero"] and r["link"] is not None}
+    if links:
+        cents = _patient_cents(conn, links)
+        for r in out.values():
+            if not r["answered"] and r["bare_zero"] and r["link"] in cents:
+                r["bare_zero"]["patient_cents"] = cents[r["link"]]
     return out
 
 
@@ -1659,15 +1880,18 @@ def _routine_sql() -> str:
 
 
 def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, skip_claim_ids: Iterable[str] = (),
-                      rate: Callable | None = None) -> list[dict]:
+                      rate: Callable | None = None, parts: Callable | None = None) -> list[dict]:
     """G8: claims no payer answered, found in Production (the A/R lists only 30 days of activity). One NO_ANSWER item per
     EMA claim when all hold: it has insurance charge rows (no product or patient-only rows); no insurance payment, $0
-    answer or reason code was ever posted on it; its balance is above $0; its status is not one of the not-sent,
-    rejected or voided classes; its bill has no 835 claim (by the map, or by an 835 line for its patient, date and code);
-    it is due (first charge posting + the longer of NO_ANSWER_DAYS and the group's p95 from charge to first answer) by
-    Production's as_of; Production is at most 14 days old and the payer group has an EMA insurance posting in the 30 days
-    before that as_of. Keyed EMA_OPEN_CLAIM by the claim id when the A/R knows it, else 'link:<n>'; a claim id the weekly
-    exports already listed is skipped (that path wins). The ASC's facility claims are listed and titled as such."""
+    answer or reason code was ever posted on it (line_answered_sql: a bare $0 row under a check, with no reason, allowed
+    amount or adjustment, is no answer, and the item says EMA shows one); its balance is above $0; its status is not one
+    of the not-sent, rejected or voided classes; its bill has no 835 claim (by the map, or by an 835 line for its patient,
+    date, code and part of the service); it is due (first charge posting + the longer of NO_ANSWER_DAYS and the group's p95
+    from charge to first answer) by Production's as_of; Production is at most 14 days old and the payer group has an EMA
+    insurance posting in the 30 days before that as_of. Keyed EMA_OPEN_CLAIM by the claim id when the A/R knows it, else
+    'link:<n>'; a claim id the weekly exports already listed is skipped (that path wins). The ASC's facility claims are
+    listed and titled as such. An answer counts only for its own part of the service (part_fits; parts(keys) gives the
+    parts EMA claim lines bill, default line_parts): the TC paid never answers a claim for the reading (26)."""
     _prepare(conn)
     fr = freshness(conn, today)
     t = fr["today"]
@@ -1677,12 +1901,12 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
     skip = {x for x in skip_claim_ids if x}
     last = _group_last_posting(conn)
     tat = _turnaround(conn).get("groups") or {}
-    rows = conn.execute("""SELECT link, MIN(svc), MIN(first_charge_posted), SUM(COALESCE(charges, 0)), SUM(COALESCE(balance, 0)),
+    rows = conn.execute(f"""SELECT link, MIN(svc), MIN(first_charge_posted), SUM(COALESCE(charges, 0)), SUM(COALESCE(balance, 0)),
                                   SUM(COALESCE(ins_answer_rows, 0)), MAX(COALESCE(flags, 0) & 17), MAX(payer_group), MAX(payer_kind),
                                   MAX(primary_payer), MAX(COALESCE(facility, 0)), MAX(bill), MAX(name_key),
                                   SUM(COALESCE(ins_charges, 0))
                            FROM ema_lines GROUP BY link
-                           HAVING SUM(COALESCE(ins_answer_rows, 0)) = 0 AND SUM(COALESCE(balance, 0)) > 0
+                           HAVING MAX({line_answered_sql('ema_lines')}) = 0 AND SUM(COALESCE(balance, 0)) > 0
                               AND MAX(COALESCE(flags, 0) & 17) = 0 AND SUM(COALESCE(charges, 0)) > 0
                               AND MIN(first_charge_posted) IS NOT NULL""").fetchall()
     cands = []
@@ -1712,20 +1936,26 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
     _drop(conn, "ec_ul")
     bills835 = _bills_with_835(conn, {c["bill"] for c in cands if c["bill"]})
     keys = {(ln[4], ln[0], ln[1]) for c in cands for ln in lines[c["link"]] if ln[4] is not None}
-    seen835 = _name_day_codes_835(conn, keys)
+    seen835 = _name_day_codes_835(conn, keys, with_parts=True)
     want = {(c["link"], ln[0], ln[1]): c["group"] for c in cands for ln in lines[c["link"]]}
-    paid_other = _paid_on_another_claim(conn, list(want), group_of=want)
+    part_of = parts or (lambda ks: line_parts(conn, ks))
+    own_parts = part_of(set(want))
+    paid_other = _paid_on_another_claim(conn, list(want), group_of=want, parts=part_of)
     cid_of = _claim_id_of_links(conn, [c["link"] for c in cands])
+    bare = _bare_zero_rows(conn, [c["link"] for c in cands])
     out = []
     for c in cands:
         lk = c["link"]
         ls = lines[lk]
         if c["bill"] and c["bill"] in bills835:
             continue
-        if any((ln[4], ln[0], ln[1]) in seen835 for ln in ls if ln[4] is not None):
+        # an 835 line for the patient, date and code answers the claim when it is for the claim's part of the service (a
+        # claim whose part nothing names is read as the whole service)
+        if any(part_fits(own_part(own_parts.get((lk, ln[0], ln[1]))), seen835.get((ln[4], ln[0], ln[1])) or ())
+               for ln in ls if ln[4] is not None):
             continue
         if ls and all((paid_other.get((lk, ln[0], ln[1])) or {}).get("same") for ln in ls):
-            continue                    # its payer paid every line on another of EMA's claims: answered there
+            continue                    # its payer paid every line, its part of the service, on another of EMA's claims
         cid = cid_of.get(lk)
         if cid and cid in skip:
             continue
@@ -1765,9 +1995,10 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
             evidence={"codes": codes, "lines": [[ln[1], ln[0], ln[2]] for ln in ls], "charged": c["fc"], "answer_due": c["due"],
                       "days_waiting": waited, "production_as_of": prod, "turnaround_days": c["p95"],
                       "turnaround": turnaround_text(grp, c["p95"]) + " of the charge being posted",
-                      "balance_cents": c["balance"], "source": "production", "ema_link": lk},
-            hint=(_paid_elsewhere_note(_paid_elsewhere_other([(lk, ln[0], ln[1]) for ln in ls], paid_other)) or
-                  "No payment, $0 answer or reason code is posted in EMA for this claim: look it up on the payer's portal "
+                      "balance_cents": c["balance"], "source": "production", "ema_link": lk,
+                      **({"ema_bare_zero": bare[lk]} if lk in bare else {})},
+            hint=(_paid_elsewhere_note(_paid_elsewhere_other([(lk, ln[0], ln[1]) for ln in ls], paid_other)) or bare_zero_note(bare.get(lk))
+                  or "No payment, $0 answer or reason code is posted in EMA for this claim: look it up on the payer's portal "
                   "before sending it again"),
             link=lk, heir_keys=[("EMA_OPEN_CLAIM", f"link:{lk}")] if cid else []))
     return out
@@ -1806,10 +2037,13 @@ def _paid_on_other_links(conn: sqlite3.Connection, keys: set[tuple]) -> dict[tup
     return out
 
 
-def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple], group_of: dict | None = None) -> dict[tuple, dict]:
+def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple], group_of: dict | None = None,
+                           parts: Callable | None = None) -> dict[tuple, dict]:
     """For EMA lines (link, date, code): what insurance paid on ANOTHER of EMA's claims for the same patient, date and code
     (never the ASC's facility claim): a resubmission, or the same service billed twice. Returns {(link, date, code):
-    {'cents': all of it, 'same': the part paid by that line's payer group (group_of), 'payers': the payer groups}}."""
+    {'cents': all of it, 'same': the part paid by that line's payer group (group_of), 'payers': the payer groups}}. With
+    `parts` (keys -> the parts each EMA line bills: line_parts), 'same' counts only when the other claims paid the line's
+    own part of the service (part_fits): the TC paid is no payment of the reading (26)."""
     want = sorted({tuple(x[:3]) for x in lines if x and x[0] is not None})
     nk_of: dict[tuple, int] = {}
     for part in _chunks(want):
@@ -1833,19 +2067,28 @@ def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple], gro
             if (nk, svc, cpt) in keys and (cents or 0) > 0:
                 rows[(nk, svc, cpt)].append((lk, grp, cents))
         _drop(conn, "ec_pk")
+    every = set(nk_of) | {(lk2, k[1], k[2]) for k, nk in nk_of.items() for lk2, _g, _v in rows.get((nk, k[1], k[2]), [])}
+    pp = parts(every) if parts is not None else None
+    charge = line_charges(conn, every) if parts is not None else {}
     out: dict[tuple, dict] = {}
     for k, nk in nk_of.items():
         grp = (group_of or {}).get(k)
         tot = same = 0
         payers: set = set()
+        got_parts: set = set()
         for lk2, g2, v in rows.get((nk, k[1], k[2]), []):
             if lk2 == k[0]:
                 continue
             tot += v
             if grp and grp != "Unknown" and _same_payer(grp, g2):
                 same += v
+                if pp is not None:
+                    k2 = (lk2, k[1], k[2])
+                    got_parts |= other_parts(pp.get(k2), own_part(pp.get(k)) if charge.get(k2) and charge.get(k2) == charge.get(k) else None)
             if g2:
                 payers.add(g2)
+        if pp is not None and same and not part_fits(own_part(pp.get(k)), got_parts):
+            same = 0                    # its payer paid another part of the service only (T-C1)
         if tot > 0:
             out[k] = {"cents": tot, "same": same, "payers": sorted(payers)}
     return out
@@ -1860,21 +2103,22 @@ def _paid_elsewhere_note(got: dict | None) -> str | None:
             "this claim is still owed")
 
 
-def _name_day_codes_835(conn: sqlite3.Connection, keys: set[tuple]) -> set[tuple]:
+def _name_day_codes_835(conn: sqlite3.Connection, keys: set[tuple], with_parts: bool = False) -> set[tuple] | dict[tuple, set]:
     """The (name key, date, code) keys among these that an 835 line carries (its code or original code; the corrected
-    name counts too)."""
+    name counts too). With with_parts: {key: the parts of the service those lines are for (component_of: '26', 'TC', or
+    '' for the whole)}."""
     if not keys or not _table(conn, "lines"):
-        return set()
+        return {} if with_parts else set()
     dates = sorted({k[1] for k in keys if k[1]})
     codes = sorted({k[2] for k in keys if k[2]})
     _temp(conn, "ec_nd", ["svc TEXT PRIMARY KEY"], [(d,) for d in dates])
     _temp(conn, "ec_nc", ["cpt TEXT PRIMARY KEY"], [(c,) for c in codes])
-    found: set[tuple] = set()
+    found: dict[tuple, set] = defaultdict(set)
     cur = conn.execute("""SELECT rw_name_key(c.patient_last, c.patient_first),
                                  CASE WHEN c.corrected_patient_last IS NOT NULL OR c.corrected_patient_first IS NOT NULL
                                       THEN rw_name_key(COALESCE(c.corrected_patient_last, c.patient_last),
                                                        COALESCE(c.corrected_patient_first, c.patient_first)) END,
-                                 l.service_date, l.procedure_code, l.original_procedure_code
+                                 l.service_date, l.procedure_code, l.original_procedure_code, l.modifiers
                           FROM lines l JOIN claims c ON c.claim_key = l.claim_key
                           WHERE l.service_date IN (SELECT svc FROM temp.ec_nd)
                             AND (l.procedure_code IN (SELECT cpt FROM temp.ec_nc) OR l.original_procedure_code IN (SELECT cpt FROM temp.ec_nc))""")
@@ -1882,15 +2126,15 @@ def _name_day_codes_835(conn: sqlite3.Connection, keys: set[tuple]) -> set[tuple
         rows = cur.fetchmany(5000)
         if not rows:
             break
-        for nk, cnk, svc, code, ocode in rows:
+        for nk, cnk, svc, code, ocode, mods in rows:
             for n in (nk, cnk):
                 if n is None:
                     continue
                 for cd in (code, ocode):
                     if cd and (n, svc, cd) in keys:
-                        found.add((n, svc, cd))
+                        found[(n, svc, cd)].add(component_of(mods))
     _drop(conn, "ec_nd", "ec_nc")
-    return found
+    return dict(found) if with_parts else set(found)
 
 
 # ------------------------------------------------------------------------------------------ G3: an item's line outcome
@@ -2828,8 +3072,9 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
                 got = None
         if not got:
             if not ema_share:
-                for g, c, n, paid in conn.execute("""SELECT payer_group, cpt, COUNT(*), SUM(COALESCE(ins_paid, 0) > 0) FROM ema_lines
-                                                     WHERE svc >= ? AND (COALESCE(ins_answer_rows, 0) > 0 OR denial_first_posted IS NOT NULL)
+                # an answered line (a bare $0 row under a check answers nothing: line_answered_sql)
+                for g, c, n, paid in conn.execute(f"""SELECT payer_group, cpt, COUNT(*), SUM(COALESCE(ins_paid, 0) > 0) FROM ema_lines
+                                                     WHERE svc >= ? AND ({line_answered_sql('ema_lines')} OR denial_first_posted IS NOT NULL)
                                                      GROUP BY 1, 2""", (POLICY_SINCE,)):
                     ema_share[(g, c)] = [paid or 0, n or 0]
                 ema_share[("", "")] = [0, 0]
