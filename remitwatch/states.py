@@ -663,12 +663,14 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     rmk_l: dict[str, list] = {}
     rmk_c: dict[str, list] = {}
     # what the detection run's ledger found the payer's recoupments (PLB WO, FB, J1 naming a claim, on any later check)
-    # took from each payment: paid_proof never counts it as paid (detect._save_taken)
-    taken_l: dict[str, int] = {}
+    # took from each payment, and whether that takeback is on an item of its own (detect._save_taken): paid_proof never
+    # counts what an unlisted takeback took as paid
+    taken_l: dict[str, tuple] = {}
     if lkeys and _table(conn, "ledger_taken"):
+        listed = "listed" if "listed" in _cols(conn, "ledger_taken") else "0"
         for part in _chunks(lkeys):
-            taken_l.update(conn.execute(f"SELECT line_key, taken_cents FROM ledger_taken WHERE line_key IN ({','.join('?' * len(part))})",
-                                        part).fetchall())
+            taken_l.update((r[0], (r[1] or 0, bool(r[2]))) for r in conn.execute(
+                f"SELECT line_key, taken_cents, {listed} FROM ledger_taken WHERE line_key IN ({','.join('?' * len(part))})", part))
     if has_adj and (lkeys or ckeys):
         _temp(conn, "st_lk", ["k TEXT PRIMARY KEY"], [(k,) for k in lkeys])
         _temp(conn, "st_ck", ["k TEXT PRIMARY KEY"], [(k,) for k in ckeys])
@@ -707,7 +709,9 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
                          "method": r[7], "received": r[8], "freq": r[9], "pccn": r[10], "crossover": r[11], "claim_charge": r[12],
                          "claim_paid": r[13], "claim_pr": r[14], "line_key": r[15], "svc": r[16], "code": r[17], "ocode": r[18],
                          "modifiers": r[19], "charge": r[20], "paid": r[21], "allowed": r[22], "units": r[23], "ounits": r[24],
-                         "lcn": r[25], "tk": r[26], "cfi": r[27], "read": r[28], "taken": taken_l.get(r[15], 0) if r[15] else 0,
+                         "lcn": r[25], "tk": r[26], "cfi": r[27], "read": r[28],
+                         "taken": (taken_l.get(r[15]) or (0, False))[0] if r[15] else 0,
+                         "taken_listed": (taken_l.get(r[15]) or (0, False))[1] if r[15] else False,
                          "adj": adj_l.get(r[15], []) if r[15] else [], "rmk": rmk_l.get(r[15], []) if r[15] else [],
                          "cadj": adj_c.get(r[1], []), "crmk": rmk_c.get(r[1], [])})
         _pair_reversals(recs)
@@ -1692,6 +1696,20 @@ def taken_back_since(fx: dict, since: Any) -> bool:
     return False
 
 
+def _taken_unlisted(x: dict) -> bool:
+    """A recoupment took money from this 835 payment (ledger_taken) and no item of its own carries that takeback."""
+    return bool(x.get("taken")) and not x.get("taken_listed")
+
+
+def _taken_note(rows: list[dict]) -> str:
+    """The words a proof adds when a payment it counts was taken back since and that takeback is an item of its own (a
+    TAKEBACK item, or the recoupment's own listing): the person checking the proof sees the takeback and where it is worked."""
+    x = next((y for y in rows if y.get("taken") and y.get("taken_listed")), None)
+    if not x:
+        return ""
+    return f"; {x['payer'] or 'the payer'} took {usd(min(x['taken'], abs(x['paid'] or 0)))} of it back later, worked on its own takeback item"
+
+
 def paid_proof(fx: dict) -> dict | None:
     """Proof the item's money arrived or was settled, or None: {'rule', 'cents', 'date', 'payer', 'text', 'source',
     'watch'}. In order: a later EMA payment no 835 carries (same payer, or another payer when EMA shows the line
@@ -1726,10 +1744,13 @@ def paid_proof(fx: dict) -> dict | None:
     gone = set(_ev(f).get("taken_back_lines") or [])
     if gone:
         stand = [x for x in stand if x.get("line_key") not in gone]
-    # and what the ledger's recoupments took from any payment of the bill (a WO, FB or J1 on a later check): a payment taken
-    # back in full pays nothing, one taken back in part pays what is left of it
-    stand = [dict(x, paid=(x["paid"] or 0) - x["taken"]) if x.get("taken") else x for x in stand
-             if not (x.get("taken") and x["taken"] >= (x["paid"] or 0) > 0)]
+    # and what the ledger's recoupments took from any payment of the bill (a WO, FB or J1 on a later check), when no item of
+    # its own carries that takeback (the service's own answer is the only place it is worked): a payment taken back in full
+    # pays nothing, one taken back in part pays what is left of it. A takeback on an item of its own (a TAKEBACK item of the
+    # payment, or the recoupment's own listing) is worked there: the payment still answers this item and its proof names
+    # the takeback, so the same money is never worked twice
+    stand = [dict(x, paid=(x["paid"] or 0) - x["taken"]) if _taken_unlisted(x) else x for x in stand
+             if not (_taken_unlisted(x) and x["taken"] >= (x["paid"] or 0) > 0)]
     own = own_rows(fx)
     once = code_once(fx)
     lcns = {x.get("lcn") for x in own if x.get("lcn")}
@@ -1771,7 +1792,8 @@ def paid_proof(fx: dict) -> dict | None:
             return {"rule": "paid_as_secondary", "cents": sum(y["paid"] or 0 for y in second), "date": x["date"], "payer": x["payer"],
                     "check_tail": x["check_tail"], "source": "835",
                     "text": f"Paid as the second payer: {usd(sum(y['paid'] or 0 for y in second))} by {x['payer']} on {day(x['date'])}, after the "
-                            f"primary payer's answer (OA-23); this denial was of the claim sent to {denier} as if it were primary"}
+                            f"primary payer's answer (OA-23); this denial was of the claim sent to {denier} as if it were primary"
+                            + _taken_note(second)}
         if cat in SHORT:
             # an underpayment or downcode is settled when the payer that paid short paid the shortfall later (95%), net of
             # its own payment a reversal took back (a reversal and the same amount paid again is no money), or when its
@@ -1790,7 +1812,7 @@ def paid_proof(fx: dict) -> dict | None:
                        f"Paid at the usual rate on a later remittance: {x['payer']} allowed {usd(x.get('allowed'))} on {day(x['date'])} "
                        f"(check ending {x['check_tail']}), at least the usual {usd(exp)}")
                 return {"rule": "paid_later_835", "cents": max(0, net), "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
-                        "source": "835", "text": got}
+                        "source": "835", "text": got + _taken_note(mine_)}
         else:
             # a denial is settled by a later payment of the line as a payer that pays first; a second payer's payment of its
             # share (claim status 2, 3, 20, 21 from another payer) never settles the primary's denial. With no expected
@@ -1807,7 +1829,7 @@ def paid_proof(fx: dict) -> dict | None:
                 x = prim[0]
                 return {"rule": "paid_later_835", "cents": paid, "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
                         "source": "835", "text": f"Paid on a later remittance: {usd(paid)} by {x['payer']} on {day(x['date'])} "
-                                                 f"(check ending {x['check_tail']})"}
+                                                 f"(check ending {x['check_tail']})" + _taken_note(prim)}
     # reprocessed to the patient: a reversal of the denial and a new answer with the patient's share and no payment
     if cat in ("denial", "bundling"):
         reproc = [x for x in stand if (x["date"] or "") > mine and (x["paid"] or 0) == 0 and x["status"] in ("1", "19")
@@ -1874,14 +1896,14 @@ def paid_proof(fx: dict) -> dict | None:
                 return {"rule": "paid_before_other_payer", "cents": x["paid"], "date": x["date"], "payer": x["payer"],
                         "check_tail": x["check_tail"], "source": "835",
                         "text": f"Already paid: {usd(x['paid'])} by {x['payer']} on {day(x['date'])}, before this denial; the "
-                                f"{denier} denial is another plan's answer and owes nothing"}
+                                f"{denier} denial is another plan's answer and owes nothing" + _taken_note([x])}
             if same and (carc in DUP_CARCS or replacement) and settled:
                 return {"rule": "replacement_denied_paid" if replacement else "paid_before_duplicate", "cents": x["paid"],
                         "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"], "source": "835", "watch": True,
                         "text": (f"Paid {usd(x['paid'])} on {day(x['date'])} on the original claim; the payer denied the replacement "
                                  "claim and has not taken the payment back: watch for a takeback" if replacement else
                                  f"Already paid {usd(x['paid'])} on {day(x['date'])} (check ending {x['check_tail']}); this denial is "
-                                 "of a duplicate")}
+                                 "of a duplicate") + _taken_note([x])}
             # the same payer paid this service before, the payment still stands (no reversal, no takeback naming the
             # claim) and brought at least what this line should: the later denial answers another copy of the claim (a
             # superseded original after the corrected claim was paid, C62), whatever its reason

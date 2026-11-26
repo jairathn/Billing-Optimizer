@@ -642,6 +642,58 @@ def test_a_payment_a_recoupment_took_back_proves_nothing_paid(tmp_path, kind, re
     w.store.close()
 
 
+MCD = {"payer": "KY MEDICAID", "payer_id": "MCDKY"}
+
+
+@pytest.mark.parametrize("reason", ["WO", "J1"])
+def test_a_takeback_on_an_item_of_its_own_is_not_worked_again_on_another_payers_denial(tmp_path, kind, reason):
+    """(hand trace of the measurement) Medicaid denies the whole of claim C017 in April; Medicare, the first payer, pays
+    its 99214 $117.60 in May, then withholds the $117.60 naming C017 from a June check that pays another patient. The
+    takeback is a TAKEBACK item of Medicare's line (find out why, then dispute or bill the right payer). Medicaid's
+    denial still rests on Medicare's answer: listing it as work (or as lost to its deadline) too would put the same
+    service's money on two items. The ledger marks the takeback as listed on its own item (ledger_taken.listed) and the
+    denial's proof names it."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301", **KY)
+    w.remit([clm(f"{BILL}C017", "4", "223.65", "0.00", sv("99214", "223.65", "0.00", 1, "CAS*CO*22*223.65~"), payer_ctl="PC300D")],
+            "20260415", **MCD)
+    w.remit([visit_paid(f"{BILL}C017", payer_ctl="PC300M")], "20260520", **KY)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260615",
+            plb=f"PLB*1777777772*20261231*{reason}:87654321 {BILL}C017*117.60~", **KY)
+    det = w.run("r1", today="2026-09-20")
+    assert left_on(det, f"{BILL}C017") == 0, "the ledger did not take the payment back"
+    rows = w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0")
+    print(brief(rows), [(r["signal"], r["payer_group"], r["work_state"], r["state_basis"]) for r in rows])
+    tb = [r for r in rows if r["signal"] == "TAKEBACK"]
+    assert len(tb) == 1 and tb[0]["work_state"] == "work_now", "Medicare's takeback is its own work item"
+    mcd = [r for r in rows if r["signal"] != "TAKEBACK" and "Medicaid" in (r["payer_group"] or "")]
+    assert mcd, "Medicaid's denial is an item"
+    for r in mcd:
+        assert r["work_state"] == "done", f"Medicaid's denial is listed again ({r['work_state']}): {r['state_basis']}"
+        assert "took" in (r["state_basis"] or "") and "back" in (r["state_basis"] or ""), r["state_basis"]
+    listed = dict(w.store.conn.execute("SELECT line_key, listed FROM ledger_taken").fetchall())
+    assert listed.get(tb[0]["line_key"]) == 1, f"the takeback is marked as listed on its own item: {listed}"
+    w.store.close()
+
+
+def test_a_takeback_no_item_carries_leaves_the_payment_unmarked(tmp_path, kind):
+    """The control of the test above: the payer answers the service again after its payment (a duplicate denial), so no
+    TAKEBACK item carries the takeback (that answer is the work): the ledger leaves it unmarked and the payment proves
+    nothing paid (test_a_payment_a_recoupment_took_back_proves_nothing_paid)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_denied_line(f"{BILL}C031", carc="18", payer_ctl="PC300C")], "20260615")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*117.60~")
+    w.run("r1", today="2026-09-20")
+    rows = w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0")
+    assert not [r for r in rows if r["signal"] == "TAKEBACK"], "the duplicate denial is the work, not a TAKEBACK item"
+    taken = w.store.conn.execute("SELECT taken_cents, listed FROM ledger_taken").fetchall()
+    assert [tuple(t) for t in taken] == [(11760, 0)], taken
+    w.store.close()
+
+
 def _states_store(tmp_path, kind: str):
     """A store of either kind with EMA's tables and the derived tables, as tests/test_states.py's store."""
     from remitwatch import detect as D, ema_reports as er

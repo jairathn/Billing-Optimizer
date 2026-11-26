@@ -1881,6 +1881,9 @@ class Detector:
         # what the PLB entries took from each payment: (the payment's line, the day, cents, the entry: its reference, reasons,
         # payer name), for the services a takeback left unpaid (_taken_back_items)
         self.plb_took: list[tuple] = []
+        # the payments whose takeback is on an item of its own (a TAKEBACK item of the line, or the recoupment's own listing),
+        # marked in ledger_taken once the items are made (_mark_taken_listed)
+        self.taken_listed: set[str] = set()
 
         def take_from(p, cents: int, day: str, entry: dict | None = None) -> None:
             left[p["line_key"]] -= cents
@@ -2142,19 +2145,32 @@ class Detector:
         """What the recoupments (PLB WO, FB, J1 naming a claim) took from each payment, saved for the item states: the states
         read it beside each 835 answer (states._r835), so a payment a takeback left unpaid never proves an item paid
         (paid_proof sees reversals on the remittances themselves, not recoupments on other checks). ledger_taken holds one row
-        per payment line a recoupment took from: the cents taken, the day of the last take, what still stands. Written on
-        every run, on either kind of store (the dashboard's copy does not carry it: its states are the stored ones)."""
+        per payment line a recoupment took from: the cents taken, the day of the last take, what still stands, and 'listed'
+        (1 once the takeback is on an item of its own: a TAKEBACK item of the line, or the recoupment's own listing for a
+        claim it took from only in part; _mark_taken_listed). A listed takeback is worked on that item, so the payment still
+        answers the other items of the service (the same money never worked twice); an unlisted one is on no item but the
+        service's own answer, which the payment then no longer pays. Rebuilt on every run, on either kind of store (the
+        dashboard's copy does not carry it: its states are the stored ones)."""
         per: dict[str, list] = {}
         for p, day, cents, _entry in getattr(self, "plb_took", None) or []:
             r = per.setdefault(p["line_key"], [0, ""])
             r[0] += cents
             r[1] = max(r[1], day or "")
         c = self.conn
-        c.execute("CREATE TABLE IF NOT EXISTS ledger_taken (line_key TEXT PRIMARY KEY, taken_cents INTEGER, taken_on TEXT, "
-                  "standing_cents INTEGER)")
-        c.execute("DELETE FROM ledger_taken")
+        c.execute("DROP TABLE IF EXISTS ledger_taken")
+        c.execute("CREATE TABLE ledger_taken (line_key TEXT PRIMARY KEY, taken_cents INTEGER, taken_on TEXT, standing_cents INTEGER, "
+                  "listed INTEGER NOT NULL DEFAULT 0)")
         c.executemany("INSERT INTO ledger_taken (line_key, taken_cents, taken_on, standing_cents) VALUES (?,?,?,?)",
                       [(lk, v[0], v[1] or None, max(0, left.get(lk, 0))) for lk, v in sorted(per.items())])
+
+    def _mark_taken_listed(self) -> None:
+        """ledger_taken's 'listed' mark (_save_taken) for the payments whose takeback is now on an item of its own."""
+        keys = sorted(getattr(self, "taken_listed", None) or ())
+        if not keys or not self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_taken'").fetchone():
+            return
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            self.conn.execute(f"UPDATE ledger_taken SET listed = 1 WHERE line_key IN ({','.join('?' * len(part))})", part)
 
     def _plb_names(self, rows: list) -> tuple[list[str], set[str]]:
         """The claim each PLB entry (rows of reference, amount, date, payer, ...) names, for netting and taking back,
@@ -7241,11 +7257,17 @@ class Detector:
             title = f"{code} paid, then taken back by {grp} on {day}: find out why, then dispute or bill the right payer"
         self._emit("TAKEBACK", "fees", "high" if cents >= 500000 else "medium", "review", title,
                    None, cents, cents, None, None, ev, key_parts=(p["line_key"],), claim=base, resolved_by=resolved_by)
+        self.taken_listed.add(p["line_key"])
 
     def run_aggregate_rules(self) -> None:
         c = self.conn
         c.row_factory = sqlite3.Row
         judged = self._taken_back_items()
+        # the payments each claim's recoupments took (ledger_taken's listed mark, when a recoupment is listed on its own)
+        took_of: dict[str, set] = defaultdict(set)
+        for p, _day, _cents, entry in getattr(self, "plb_took", None) or []:
+            if entry and entry.get("claim"):
+                took_of[entry["claim"]].add(p["line_key"])
         rows = c.execute("""SELECT p.payer_name, substr(p.payment_date,1,7) AS month, p.reason_code, p.reference, p.amount_cents, p.transaction_key, p.payment_date
                             FROM plb p JOIN transactions t ON t.transaction_key=p.transaction_key WHERE t.superseded=0""").fetchall()
         fees: dict[tuple, dict] = {}
@@ -7271,11 +7293,17 @@ class Detector:
                 base = {"payer_name": r["payer_name"], "payer_group": grp, "payer_kind": kind, "transaction_key": r["transaction_key"], "payment_date": r["payment_date"], "year": (r["payment_date"] or "")[:4]}
                 ev = {"reference": r["reference"], "reason_code": "WO"}
                 title = f"Overpayment recovery of ${amt/100:,.2f} withheld by {r['payer_name']}"
+                key = (r["transaction_key"], r["reference"], amt)
+                if key not in judged:
+                    # a claim the recoupment took payments of only in part: this listing carries what it took, so those
+                    # payments still answer the claim's other items (ledger_taken's listed mark)
+                    self.taken_listed |= took_of.get((getattr(self, "plb_wo_keys", None) or {}).get(key) or "", set())
                 if size < amt:
                     ev.update(withheld_cents=amt, not_applied_cents=size)
                     title += f": ${size/100:,.2f} of it takes back no payment on file"
                 self._emit("TAKEBACK", "fees", "high" if size >= 500000 else "medium", "review", title, None, None, size, None, None,
                            ev, key_parts=(r["transaction_key"], r["reference"], amt), claim=base)
+        self._mark_taken_listed()
         for key, f in fees.items():
             self._emit("FEE_SKIM", "fees", "medium", "opt_out", f"${f['cents']/100:,.2f} in payment fees withheld by {f['payer_name']} in {f['month']}", None, None, f["cents"], None, None,
                        {"count": f["n"], "references": dict(f["refs"].most_common(5))}, key_parts=key, claim=f)
