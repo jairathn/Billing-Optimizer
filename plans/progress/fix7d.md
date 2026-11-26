@@ -38,7 +38,8 @@ Brief: `plans/briefs/2026-11-26_fix7d.md`. Branch `wip/fix7d`. Rules: `plans/bri
   (substr(recorded_at,1,10) only orders sources).
 
 ## In progress
-- Brief item 5: the full suite in python3 under REMITWATCH_TZ=Etc/GMT-14, then Etc/GMT+12, then as it is, from a
+- Brief item 5: the zone runs are green; left: the full suite as it is (python3), then $S/fix/venv_sqlite340/bin/python,
+  and the two node checks. Runs go from a
   frozen worktree of the tip (`git worktree add --detach $S/tk/units/fix7d/frozen <tip>`), with
   `RW_RUNS=$S/tk/units/fix7d/runs REMITWATCH_TZ=Etc/GMT-14 $S/tk/units/fix7d/shard_tz.sh $S/tk/units/fix7d/frozen python3 tz_minus14 3`
   (shard_tz.sh is plans/tools/shard.sh keeping REMITWATCH_TZ; copy it from this file's section "How to run" if the unit
@@ -60,6 +61,9 @@ Brief: `plans/briefs/2026-11-26_fix7d.md`. Branch `wip/fix7d`. Rules: `plans/bri
   the new practice-day dating moved: test_results x6 (fax/fix/settings moments at 08:00-12:00 UTC), test_swing x7 (runs at
   10:17 UTC), test_uploads x1 (the UTC day in an upload's name)). Fixed in the tests (Eastern pinned in test_results' and
   test_swing's module fixtures, the practice's day in test_uploads); both zones then pass those three files.
+- Full suite, python3, REMITWATCH_TZ=Etc/GMT+12, on 253d961: 2,839 passed, 29 skipped, 1 xfailed, 0 failed.
+- Full suite, python3, REMITWATCH_TZ=Etc/GMT-14, on 253d961 (again): 2,839 passed, 29 skipped, 1 xfailed, 0 failed.
+- Merged the integration tip again (cefa3b2/7001513: plans only, no code).
 
 ## Open questions
 - (none)
