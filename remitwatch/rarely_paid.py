@@ -21,7 +21,7 @@ accepts the pattern on the write-off policy page.
   entry_for(group, code, service_date) -> the researched entry for this payer group and code on that date, resolved
       (its verdict, rule, what to show and sources for the date), or None
   pattern_key(group, code, service_date) -> the owner's key for the pair, 'group|code||payer_policy', with the research's
-      period in the modifier's place where the rule changes on a date ('group|code|from 2026-01-01|payer_policy')
+      period in the modifier's place where the rule is bound to dates ('group|code|from 2026-01-01|payer_policy')
   item_codes(f) -> the (code, service date) pairs an item is about that can be such a pair: the code the practice billed
       on an unpaid denial line (a code the payer changed and paid nothing on included)
   evidence(lines, ...) -> the store's evidence for the pairs a run asks for (detect.py)
@@ -55,7 +55,7 @@ VERDICT_WORDS = {
 CONDITIONS = ("em_with_modifier_25",)
 EM_VISITS = frozenset(f"992{n:02d}" for n in (2, 3, 4, 5, 11, 12, 13, 14, 15))
 # signals whose line is no denial of the code by this payer: a claim sent on to another carrier, a second payer never
-# billed, a claim the practice voided
+# billed
 SKIP_SIGNALS = frozenset({"FORWARDED_TO_CARRIER", "SECONDARY_NOT_BILLED"})
 DENIAL_CATEGORIES = ("denial", "bundling")
 
@@ -432,15 +432,20 @@ def save(conn: sqlite3.Connection, pairs: dict[str, dict], *, at: str | None, ru
 
 
 def _meta(conn: sqlite3.Connection, key: str) -> dict:
+    """A meta value as a dict; {} when it is missing. A store that cannot be read or a value that is not JSON gives {}
+    too, and the run's log says so (the panel then shows no evidence rather than failing)."""
+    from . import runlog
     try:
         row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "rarely_paid.meta")
         return {}
     if not row or not row[0]:
         return {}
     try:
         got = json.loads(row[0])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "rarely_paid.meta")
         return {}
     return got if isinstance(got, dict) else {}
 
@@ -545,7 +550,9 @@ def _claim_lines(conn: sqlite3.Connection, f: dict) -> list[dict]:
     try:
         cur = conn.execute("SELECT procedure_code, modifiers, service_date FROM lines WHERE claim_key=?", (f["claim_key"],))
         return [{"procedure_code": r[0], "modifiers": r[1], "service_date": r[2]} for r in cur.fetchall()]
-    except sqlite3.Error:
+    except sqlite3.Error as exc:          # the condition is then said to be unchecked, never assumed
+        from . import runlog
+        runlog.caught(exc, "rarely_paid.claim_lines")
         return []
 
 

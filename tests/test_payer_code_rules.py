@@ -387,6 +387,23 @@ console.log(JSON.stringify(ctx.render(JSON.parse(process.argv[3]))));
     assert "RULE-TWO" in parts[2] and "SHOW-TWO" in parts[2] and "the same as" not in parts[2]
 
 
+def test_a_store_that_cannot_be_read_is_logged_and_shows_nothing_assumed(monkeypatch):
+    """No exception is swallowed without a word: a store without the meta or lines tables (or a meta value that is not
+    JSON) gives no evidence and an unchecked condition, and the run's log says why (runlog.caught)."""
+    import sqlite3
+    from remitwatch import runlog
+    seen = []
+    monkeypatch.setattr(runlog, "caught", lambda exc, step, **kw: seen.append((type(exc).__name__, step)))
+    bare = sqlite3.connect(":memory:")
+    assert rp._meta(bare, rp.WHY_META) == {} and rp._claim_lines(bare, {"claim_key": "CK1"}) == []
+    assert seen == [("OperationalError", "rarely_paid.meta"), ("OperationalError", "rarely_paid.claim_lines")]
+    bare.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    bare.execute("INSERT INTO meta VALUES (?, ?)", (rp.WHY_META, "{not json"))
+    assert rp._meta(bare, rp.WHY_META) == {} and seen[-1] == ("JSONDecodeError", "rarely_paid.meta")
+    e = rp.entry_for("Medicare KY (CGS J15)", "G2211", "2026-03-02")
+    assert rp._condition(e, {"service_date": "2026-03-02"}, rp._claim_lines(bare, {"claim_key": "CK1"}))[0] is None
+
+
 def test_the_packet_pdf_never_carries_the_checklist():
     from remitwatch.appeals import build_packet
     from remitwatch.notes import render_pdf

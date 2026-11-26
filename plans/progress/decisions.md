@@ -198,12 +198,13 @@ then `fullsnap.py`, `diff_ba.py <base snap> <after snap> moved.json`, `pick.py m
 
 ## Tests
 
-- tests/test_payer_code_rules.py (20 tests, 24 runs with the two store kinds; both hosts for the panel): the data
+- tests/test_payer_code_rules.py (21 tests, 25 runs with the two store kinds; both hosts for the panel): the data
   file holds public facts only; RULE_FILES; dates to the day (leap day, year end); split keys; alias needs rarity;
   item codes; the run's evidence, drawer and next step; a failing step contained; G2211 and modifier 25; the packet's
   checklist, enclosures and PDF; the note review's prompt; the EMA fold pursued until accepted; C5 periods with EMA's
   evidence; the server panel and packet; the serverless panel from the copy; one rule for several codes; EMA's books in
-  words; the page's renderer in node; the docs' words. Each change was broken on purpose (15 breaks) and its test failed;
+  words; the page's renderer in node; a store that cannot be read is logged (runlog.caught) and assumes nothing; the docs'
+  words. Each change was broken on purpose (16 breaks) and its test failed;
   restored (`git diff` empty).
 - Related suites (story, ema pages, decisions, docs, ema wiring, notes): 430 passed, 1 skipped, 4 failed in python3; the
   4 are test_notes_bodies_cli.py's date-bound failures, which fail the same way with this change stashed.
