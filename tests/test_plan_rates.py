@@ -44,13 +44,16 @@ def kind(request):
 
 
 def claim(i: int, lines: str, charge: str, paid: str, *, pat: int | None = None, npi: str = DOC, prov: str = DR, cfi: str = "12",
-          dos: str = "20260401", pos: str | None = "11", group: str | None = None, cls: str | None = None) -> str:
+          dos: str = "20260401", pos: str | None = "11", group: str | None = None, cls: str | None = None, status: str = "1",
+          insured: int | None = None) -> str:
     """Claim number `i` of patient `pat` (each patient their own member number), with an employer plan's group number
-    (REF*1L), a product (REF*CE) and the place of service (CLP08; None leaves it out, as some payers do)."""
+    (REF*1L), a product (REF*CE) and the place of service (CLP08; None leaves it out, as some payers do). `status` is
+    CLP02 (22: a reversal); `insured` names a subscriber other than the patient (NM1*IL, a family member's number)."""
     pat = i if pat is None else pat
     refs = (f"REF*1L*{group}~" if group else "") + (f"REF*CE*{cls}~" if cls else "")
-    return (f"CLP*CB{i:07d}C017*1*{charge}*{paid}*0.00*{cfi}*PC{i:07d}" + (f"*{pos}" if pos else "") + "~"
-            f"NM1*QC*1*PATIENT*P{pat:05d}****MI*M{pat:08d}~NM1*82*{prov}****XX*{npi}~{refs}DTM*232*{dos}~{lines}")
+    il = f"NM1*IL*1*SUBSCRIBER*S{insured:05d}****MI*M{insured:08d}~" if insured is not None else ""
+    return (f"CLP*CB{i:07d}C017*{status}*{charge}*{paid}*0.00*{cfi}*PC{i:07d}" + (f"*{pos}" if pos else "") + "~"
+            f"NM1*QC*1*PATIENT*P{pat:05d}****MI*M{pat:08d}~{il}NM1*82*{prov}****XX*{npi}~{refs}DTM*232*{dos}~{lines}")
 
 
 def visit(i: int, code: str, charge: str, allowed: str, *, mods: str = "", dos: str = "20260401", **kw) -> str:
@@ -61,6 +64,13 @@ def visit(i: int, code: str, charge: str, allowed: str, *, mods: str = "", dos: 
 
 def many(start: int, n: int, code: str, charge: str, allowed: str, **kw) -> list[str]:
     return [visit(start + k, code, charge, allowed, **kw) for k in range(n)]
+
+
+def reversal(i: int, code: str, charge: str, allowed: str, *, dos: str = "20260401", **kw) -> str:
+    """The payer's reversal (CLP02 22) of claim i's payment at `allowed`."""
+    co = f"{float(charge) - float(allowed):.2f}"
+    line = f"SVC*HC:{code}*-{charge}*-{allowed}**-1~DTM*472*{dos}~CAS*CO*45*-{co}~"
+    return claim(i, line, f"-{charge}", f"-{allowed}", dos=dos, status="22", **kw)
 
 
 def medicare(start: int, n: int, npi: str, allowed: str, prov: str, dos: str = "20260401") -> list[str]:
@@ -508,4 +518,459 @@ def test_the_raised_since_reason_is_dated_by_the_payers_first_visit_at_the_new_r
     w.run(today="2026-06-15")
     assert not w.rows("signal='SECOND_RATE'"), [(r["signal"], r["ev"].get("note")) for r in w.rows("signal='SECOND_RATE'")]
     assert w.one("signal='OLD_FEE_SCHEDULE'")["ev"]["lines"] == 5
+    w.store.close()
+
+
+# =============================================================================================== the review's findings (fix7c)
+# Each test below is a reviewer's failing case (review fix7c-r1 and fix7c-r2, 2026-11-26), with invented data.
+
+# ----------------------------------------------------------------------------- the new-year rule (repricing requests)
+def test_a_repriced_one_off_closes_as_recovered_as_the_base_closed_it(tmp_path, kind):
+    """fix7c-r2-1. One January 2026 visit paid on the 2025 schedule ($76.64 of $82.36), then reprocessed by the payer (the
+    payment reversed, CLP02 22, and paid again at $82.36). The repriced claim is recovered ($5.72): nothing stays owed
+    and the recovery is counted, as it was when the line was a one-off."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(100, 25, "99213", "156.66", "76.64", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(200, 25, "99213", "156.66", "82.36", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit([visit(900, "99213", "156.66", "76.64", cfi="16", dos="20260112")], "20260215", **payer)
+    w.remit([reversal(900, "99213", "156.66", "76.64", cfi="16", dos="20260112"),
+             visit(900, "99213", "156.66", "82.36", cfi="16", dos="20260112")], "20260501", **payer)
+    w.run(today="2026-06-15")
+    still_owed = [(r["signal"], r["status"], r["work_state"], r["shortfall_cents"], r["recovered_cents"])
+                  for r in w.rows("category='underpayment' AND status='open'")]
+    assert not still_owed, still_owed
+    w.store.close()
+
+
+def test_a_repriced_claim_leaves_the_repricing_request(tmp_path, kind):
+    """fix7c-r2-1. Ten January 2026 visits paid on the 2025 schedule; the payer then reprocessed four of them (each payment
+    reversed and paid again at $82.36). The repricing request lists the six still at the old amount; the four repriced
+    claims are recovered (each closed on its own line, as a one-off is) and named on the item, not still owed. Once every
+    claim is repriced the item is resolved."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(100, 25, "99213", "156.66", "76.64", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(200, 25, "99213", "156.66", "82.36", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit(many(900, 10, "99213", "156.66", "76.64", cfi="16", dos="20260112"), "20260215", **payer)
+    w.run(today="2026-04-15")
+    fid = w.one("signal='OLD_FEE_SCHEDULE'")["finding_id"]
+    w.remit([reversal(900 + k, "99213", "156.66", "76.64", cfi="16", dos="20260112") for k in range(4)]
+            + many(900, 4, "99213", "156.66", "82.36", cfi="16", dos="20260112"), "20260501", **payer)
+    w.run(today="2026-06-15")
+    item = w.one("signal='OLD_FEE_SCHEDULE'")
+    listed = sorted(c[0] for c in item["ev"]["claims"])
+    assert item["finding_id"] == fid
+    assert listed == sorted(pcn(i) for i in range(904, 910)) and item["shortfall_cents"] == 6 * (8236 - 7664), \
+        (listed, item["shortfall_cents"], item["ev"]["lines"])
+    assert sorted(c[0] for c in item["ev"]["repriced"]) == sorted(pcn(i) for i in range(900, 904)), item["ev"].get("repriced")
+    # each repriced claim is closed as recovered on its own line, as a one-off is (its $5.72 counted once)
+    back = {r["patient_control_number"]: (r["status"], r["recovered_cents"]) for r in w.rows("signal='UNDERPAID_VS_OWN_RATE'")}
+    assert back == {pcn(i): ("resolved", 572) for i in range(900, 904)}, back
+    w.remit([reversal(904 + k, "99213", "156.66", "76.64", cfi="16", dos="20260112") for k in range(6)]
+            + many(904, 6, "99213", "156.66", "82.36", cfi="16", dos="20260112"), "20260620", **payer)
+    w.run(today="2026-07-15")
+    row = w.store.conn.execute("SELECT status, stale FROM findings WHERE finding_id=?", (fid,)).fetchone()
+    assert row is not None and row["status"] == "resolved" and not row["stale"], dict(row) if row else None
+    assert not w.rows("category='underpayment' AND status='open'")
+    got = w.store.conn.execute("SELECT SUM(recovered_cents) FROM findings WHERE category='underpayment' AND status='resolved' "
+                               "AND COALESCE(stale,0)=0").fetchone()[0]
+    assert got == 10 * (8236 - 7664), got
+    w.store.close()
+
+
+def test_a_repricing_requests_claims_are_counted_by_their_own_windows(tmp_path, kind):
+    """fix7c-r2-2. Six January 2026 visits paid on the 2025 schedule, three processed in February (their 12-month windows
+    close 2027-02-10) and three in May (closing 2027-05-20). On 2027-05-01 the first three are past their window and the
+    last three close within 30 days. The deadline views count a repricing request's claims by their own windows, as they
+    do a routine-rate review's (detect.pattern_windows): the gone ones as expired ($17.16), the others as due within 30 days."""
+    from remitwatch import insights
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(100, 25, "99213", "156.66", "76.64", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(200, 25, "99213", "156.66", "82.36", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit(many(900, 3, "99213", "156.66", "76.64", cfi="16", dos="20260112"), "20260210", **payer)
+    w.remit(many(910, 3, "99213", "156.66", "76.64", cfi="16", dos="20260113"), "20260520", **payer)
+    w.run(today="2026-06-15")
+    w.run(today="2027-05-01")
+    got = insights.work(w.store.conn, "2027-05-01")
+    assert got["expired_cents"] >= 3 * 572 and got["total"]["due30_cents"] >= 3 * 572, \
+        (got["expired_n"], got["expired_cents"], got["total"]["due30_n"], got["total"]["due30_cents"],
+         [(r["signal"], r["shortfall_cents"], r["ev"].get("lines"), r["ev"].get("lines_open")) for r in w.rows("category='underpayment'")])
+    w.store.close()
+
+
+def test_a_sent_repricing_request_keeps_the_claims_it_was_sent_with(tmp_path, kind):
+    """fix7c-r2-3. Ten January 2026 visits on the 2025 schedule are one repricing request; the biller sends it and marks it
+    appealed. A late remittance then brings three more January visits at the old amounts. The request sent keeps the ten
+    claims it listed ($57.20), as a worked routine-rate review keeps its lines; the three new claims are listed apart,
+    since they were never in the request the payer has."""
+    from remitwatch.actions import apply_status
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(100, 25, "99213", "156.66", "76.64", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(200, 25, "99213", "156.66", "82.36", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit(many(900, 10, "99213", "156.66", "76.64", cfi="16", dos="20260112"), "20260215", **payer)
+    w.run(today="2026-06-15")
+    first = [r for r in w.rows("category='underpayment'")]
+    assert len(first) == 1 and first[0]["ev"]["lines"] == 10, [(r["signal"], r["ev"].get("lines")) for r in first]
+    sent = first[0]
+    apply_status(w.store.conn, sent["finding_id"], "appealed", "Repricing request sent", actor="biller", at="2026-06-16T15:00:00+00:00")
+    w.store.conn.commit()
+    w.remit(many(950, 3, "99213", "156.66", "76.64", cfi="16", dos="20260114"), "20260620", **payer)
+    w.run(today="2026-06-25")
+    after = w.one(f"finding_id='{sent['finding_id']}'")
+    assert after["status"] == "appealed"
+    assert after["ev"]["lines"] == 10 and after["shortfall_cents"] == sent["shortfall_cents"], \
+        (after["ev"]["lines"], after["shortfall_cents"], sent["shortfall_cents"])
+    new = [r for r in w.rows("signal='OLD_FEE_SCHEDULE'") if r["finding_id"] != sent["finding_id"]]
+    assert len(new) == 1 and new[0]["ev"]["lines"] == 3 and new[0]["shortfall_cents"] == 3 * 572, \
+        [(r["ev"].get("lines"), r["shortfall_cents"]) for r in new]
+    assert "not in the repricing request" in new[0]["ev"]["note"], new[0]["ev"]["note"]
+    w.store.close()
+
+
+def test_a_code_raised_mid_year_is_not_owed_its_new_rate_from_another_codes_new_year_date(tmp_path, kind):
+    """fix7c-r2-4. A commercial payer's 2025 rates: 99213 $100.00, 99214 $150.00. In 2026 it paid 99214 at its new $160.00
+    from the first week of January, but kept 99213 at $100.00 until July and paid $110.00 on visits from July 10: a
+    mid-year raise of that one code. Eight 99213 visits of March paid $100.00 are the payer's earlier 99213 rate, raised
+    since (the routine-rate review), not a repricing request that says the 2026 99213 rate was already in effect."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    aet = dict(payer="AETNA", payer_id="AETTEST")
+    w.remit(many(100, 25, "99213", "156.66", "100.00", dos="20250610") + many(130, 25, "99214", "223.65", "150.00", dos="20250610"),
+            "20250701", **aet)
+    w.remit(many(400, 25, "99214", "223.65", "160.00", dos="20260105"), "20260301", **aet)
+    w.remit(many(200, 8, "99213", "156.66", "100.00", dos="20260310"), "20260415", **aet)
+    w.remit(many(300, 25, "99213", "156.66", "110.00", dos="20260710"), "20260801", **aet)
+    w.run(today="2026-09-15")
+    old = w.rows("signal='OLD_FEE_SCHEDULE'")
+    assert not old, [(r["title"], r["shortfall_cents"], r["ev"].get("effective")) for r in old]
+    item = w.one("signal='SECOND_RATE'")
+    assert "raised since" in item["ev"]["note"], item["ev"]["note"]
+    w.store.close()
+
+
+def test_the_repricing_request_lists_every_service_paid_on_the_old_schedule(tmp_path, kind):
+    """fix7c-r1-3. The payer's 2025 schedule pays a destruction 17000 $55.79, its 2026 schedule $56.42 (a small rise, 1.1
+    percent). It paid the January 2026 visits on the 2025 schedule (six 99213 at $76.64) and, the same month, two
+    destructions at $55.79: on the 2025 schedule too. The one repricing request lists the two 17000 claims as well ($0.63
+    each more): each alone is far below what an appeal is worth, which is why they belong in the one request."""
+    w = World(tmp_path, kind)
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    _schedules(w, payer)
+    w.remit(many(300, 25, "17000", "120.00", "55.79", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(330, 25, "17000", "120.00", "56.42", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit(many(900, 6, "99213", "156.66", "76.64", cfi="16", dos="20260112")
+            + many(950, 2, "17000", "120.00", "55.79", cfi="16", dos="20260115"), "20260215", **payer)
+    w.run(today="2026-06-15")
+    item = w.one("signal='OLD_FEE_SCHEDULE'")
+    assert item["ev"]["lines"] == 8 and item["shortfall_cents"] == 6 * (8236 - 7664) + 2 * (5642 - 5579), \
+        (item["ev"]["lines"], item["shortfall_cents"], item["ev"]["codes"])
+    w.store.close()
+
+
+# ----------------------------------------------------------------------------- rates: settings, plans and states
+def test_a_repair_the_payer_mostly_cuts_is_ranked_at_its_full_facility_rate(tmp_path, kind):
+    """fix7c-r1-1. Humana MA-like, 2025: the Mohs 17313 is $539.37 at the office. At the surgery center the payer paid the
+    repair 14021 $617.13 on the one day it ranked it first, and $308.57 (exactly half) on nine: the surgery center's repairs
+    are nearly all split days, so the half is the common amount. The 14021's facility rate is $617.13. On a split day the
+    payer halved both, the Mohs ($269.69) and the 14021 ($308.57): the 14021 is the higher-valued and no procedure was paid
+    as the first, so the day is owed one missing half, at the least the Mohs's $269.68. Ranked at its half, the 14021 would
+    look cheaper than the Mohs and 'paid in full' ($115.40 listed)."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17313", "900.00", "539.37", cfi="16", dos="20250310")
+            + many(200, 9, "14021", "1800.00", "308.57", cfi="16", pos="24", dos="20250310")
+            + many(220, 1, "14021", "1800.00", "617.13", cfi="16", pos="24", dos="20250310"), "20250401", **hum)
+    w.remit([visit(800, "17313", "900.00", "269.69", cfi="16", pat=800, dos="20250602"),
+             visit(801, "14021", "1800.00", "308.57", cfi="16", pat=800, dos="20250602", pos="24")], "20250620", **hum)
+    w.run(today="2025-09-15")
+    got = {k: (r["signal"], r["shortfall_cents"], r["ev"].get("note") or "") for k, r in by_pcn(w, "category='underpayment'").items()}
+    day = sum(v[1] or 0 for v in got.values())
+    assert 26968 <= day <= 30856, got
+    assert not any("14021 (paid in full" in v[2] for v in got.values()), got
+    w.store.close()
+
+
+def test_a_denial_keeps_its_size_when_the_837_moves_some_of_the_class_lines_to_the_surgery_center(tmp_path, kind):
+    """fix7c-r1-2. Commercial plans paid the complex repair 13132 on ten claims ($250.00); the 835s name no place of
+    service on three of them, which the 837 shows were billed from the surgery center (POS 24). A payer with no rate of its
+    own for 13132 denies one at the office (CO-197): it is sized at the commercial plans' typical amount, read across
+    settings when the office alone has too few lines (seven). An item on the list is never left at no amount."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 4, "13132", "700.00", "250.00", cfi="CI"), "20260310", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(110, 3, "13132", "700.00", "250.00", cfi="CI"), "20260310", payer="AETNA", payer_id="AETTEST")
+    w.remit(many(120, 3, "13132", "700.00", "250.00", cfi="CI", pos=None), "20260310", payer="HUMANA", payer_id="HUMTEST")
+    _site_837(w, [(120, "24"), (121, "24"), (122, "24")])
+    denied = claim(900, sv("13132", "700.00", "0", None, "1", "CAS*CO*197*700.00~", "20260402"), "700.00", "0", cfi="CI",
+                   dos="20260402")
+    w.remit([denied], "20260420", payer="CIGNA", payer_id="CIGTEST")
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"], (r["ev"].get("basis") or "")[:80])
+           for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
+    assert got and all((v[1] or 0) > 0 for v in got.values()), got
+    w.store.close()
+
+
+def test_a_surgery_center_denial_is_never_sized_below_what_the_payer_pays_for_the_code(tmp_path, kind):
+    """fix7c-r1-4. Anthem-like, 2024: the payer paid the adjacent tissue transfer 14301 $1,103.00 at the office (four
+    claims) and $932.12 on its three surgery-center claims (the 835 names no place of service; the 837 says POS 24). It
+    denied a whole surgery-center claim for a 14301: worth $932.12, what it pays for the code there. Neither setting holds
+    the five lines a rate of the payer's own needs, but its own amounts agree: never sized by its share of charges below
+    anything it has paid for the code."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    ant = dict(payer="ANTHEM", payer_id="ANTHM")
+    w.remit(many(300, 200, "99213", "157.66", "60.00", dos="20240305"), "20240401", **ant)
+    w.remit(many(100, 4, "14301", "1600.00", "1103.00", dos="20240310"), "20240410", **ant)
+    w.remit(many(200, 3, "14301", "1600.00", "932.12", pos=None, dos="20240510"), "20240610", **ant)
+    denied = claim(900, sv("14301", "1600.00", "0", None, "1", "CAS*CO*197*1600.00~", "20240802"), "1600.00", "0", pos=None,
+                   dos="20240802").replace("C017*1*", "C017*4*", 1)        # the whole claim denied (CLP02 4)
+    w.remit([denied], "20240901", **ant)
+    _site_837(w, [(200, "24"), (201, "24"), (202, "24"), (900, "24")])
+    w.run(today="2024-10-15")
+    got = {k: (r["signal"], r["expected_cents"], (r["ev"].get("basis") or "")[:120]) for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
+    sizes = [v[1] for v in got.values()]
+    assert sizes and all((s or 0) >= 0.9 * 93212 for s in sizes), got
+    w.store.close()
+
+
+def test_a_plan_apart_keeps_its_payers_pa_np_rate_where_it_shows_none_of_its_own(tmp_path, kind):
+    """fix7c-r1-5. UMR-like: the payer pays NPs 85 percent of a physician's amount on its network plans (30 NP lines). One
+    large employer plan pays a schedule of its own ($130.00 for a 99214 to physicians, 22 lines) and has only two NP lines
+    of its own: too few for a PA/NP rate of the plan's own. Five NP 99214 lines of that plan paid $68.90 are short of the
+    PA/NP rate the payer pays (85 percent of the plan's $130.00, $110.50): $208.00 for the five, not $305.50 against the
+    plan's full physician rate."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1), (NP, "108.63", NR, 40))
+    net = []
+    for k in range(6):          # six network employer plans
+        g = f"NET{k:03d}"
+        net += many(100 + 20 * k, 5, "99213", "156.66", "76.15", group=g)
+        net += many(105 + 20 * k, 5, "99214", "223.65", "110.00", group=g)
+        net += many(110 + 20 * k, 4, "11102", "150.00", "112.74", group=g)
+        net += many(1000 + 10 * k, 3, "99213", "156.66", "64.73", group=g, npi=NP, prov=NR)
+        net += many(1003 + 10 * k, 2, "99214", "223.65", "93.50", group=g, npi=NP, prov=NR)
+    big = (many(300, 8, "99213", "156.66", "94.00", group="BIG001")
+           + many(400, 22, "99214", "223.65", "130.00", group="BIG001")
+           + many(320, 8, "11102", "150.00", "91.72", group="BIG001")
+           + many(330, 2, "99213", "156.66", "80.56", group="BIG001", npi=NP, prov=NR))
+    w.remit(net + big, "20260415", payer="UMR", payer_id="UMRTEST")
+    w.remit(many(900, 5, "99214", "223.65", "68.90", group="BIG001", npi=NP, prov=NR, dos="20260505"), "20260520",
+            payer="UMR", payer_id="UMRTEST")
+    w.run(today="2026-06-15")
+    short = sum(r["shortfall_cents"] or 0 for r in w.rows("category='underpayment'"))
+    got = sorted((r["signal"], r["expected_cents"], r["shortfall_cents"]) for r in w.rows("category='underpayment'"))
+    assert short == 20800, got
+    w.store.close()
+
+
+def test_a_plan_renumbered_mid_year_keeps_its_own_schedule(tmp_path, kind):
+    """fix7c-r2-13. UMR-like, as the first plan test: six employer plans pay the network rate (biopsy $112.74); one large
+    plan (BIG001) pays its own schedule (biopsy $91.72 to physicians) and is read apart. In July the same employer's plan
+    comes back under a new group number (BIG002) and pays exactly BIG001's amounts: six biopsies at $91.72. They are the
+    plan's own schedule, not underpayments: no routine-rate review and no one-off."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1), (NP, "108.63", NR, 40))
+    net = []
+    for k in range(6):
+        g = f"NET{k:03d}"
+        net += many(100 + 10 * k, 4, "11102", "150.00", "112.74", group=g)
+        net += many(104 + 10 * k, 4, "11102", "150.00", "112.74", group=g, npi=NP, prov=NR)
+        net += many(1000 + 10 * k, 5, "99213", "156.66", "76.15", group=g)
+    big = (many(300, 8, "11102", "150.00", "91.72", group="BIG001")
+           + many(310, 14, "11102", "150.00", "78.62", group="BIG001", npi=NP, prov=NR)
+           + many(330, 8, "99213", "156.66", "94.00", group="BIG001")
+           + many(340, 14, "99213", "156.66", "80.57", group="BIG001", npi=NP, prov=NR))
+    w.remit(net + big, "20260415", payer="UMR", payer_id="UMRTEST")
+    w.remit(many(700, 6, "11102", "150.00", "91.72", group="BIG002", dos="20260710"), "20260801", payer="UMR", payer_id="UMRTEST")
+    w.run(today="2026-09-15")
+    got = [(r["signal"], r["patient_control_number"], r["shortfall_cents"], (r["ev"].get("lines"))) for r in w.rows("category='underpayment'")]
+    assert not got, got
+    w.store.close()
+
+
+@pytest.mark.parametrize("first", ["KY", "IN"])
+def test_a_day_the_clinician_billed_both_states_is_a_visit_of_no_known_state_whatever_the_file_order(tmp_path, kind, first):
+    """fix7c-r2-5. NPs paid in full in Kentucky's offices ($110.43) and 85 percent in Indiana's ($93.87), the state of the
+    day's Medicare carrier for the clinician. On one day the NP's Medicare claims went to both carriers (a morning in each
+    office). A visit of that day paid $93.87 is a visit whose state is not known: held to the lower rate, not short,
+    whichever Medicare file was read last."""
+    w = World(tmp_path, kind)
+    ky = [f"202604{d:02d}" for d in range(1, 21)]
+    ind = [f"202605{d:02d}" for d in range(1, 21)]
+    both = "20260615"
+    med_ky = medicare(1, 25, DOC, "127.80", DR) + [visit(40 + k, "99214", "223.65", "108.63", npi=NP, prov=NR, cfi="MB", dos=d)
+                                                    for k, d in enumerate(ky)]
+    med_ky.append(visit(60, "99214", "223.65", "108.63", npi=NP, prov=NR, cfi="MB", dos=both))
+    med_in = [visit(70 + k, "99214", "223.65", "108.63", npi=NP, prov=NR, cfi="MB", dos=d) for k, d in enumerate(ind)]
+    med_in.append(visit(95, "99214", "223.65", "108.63", npi=NP, prov=NR, cfi="MB", dos=both))
+    files = {"KY": (med_ky, dict(payer="KY MEDICARE", payer_id="15102")), "IN": (med_in, dict(payer="IN MEDICARE", payer_id="00630"))}
+    for st in (first, "IN" if first == "KY" else "KY"):
+        claims, payer = files[st]
+        w.remit(claims, "20260701", **payer)
+    uhc = (many(100, 20, "99214", "223.65", "110.43", dos="20260410")
+           + [visit(200 + k, "99214", "223.65", "110.43", npi=NP, prov=NR, dos=d) for k, d in enumerate(ky[:15])]
+           + [visit(300 + k, "99214", "223.65", "93.87", npi=NP, prov=NR, dos=d) for k, d in enumerate(ind[:12])])
+    w.remit(uhc, "20260710", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit([visit(900, "99214", "223.65", "93.87", npi=NP, prov=NR, dos=both)], "20260720", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.run(today="2026-08-15")
+    got = {k: (r["signal"], r["expected_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {}, got
+    w.store.close()
+
+
+def test_a_corrected_837_names_the_setting_not_the_first_one_sent(tmp_path, kind):
+    """fix7c-r2-10. A repair is $774.00 at the office and $630.79 at the surgical site, whose claims the 835 sends without
+    CLP08. One site claim was first sent with place of service 11 by mistake and corrected (frequency 7, place of service
+    24, the same claim id): it is a site claim, paid exactly the site's rate, not short."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 60, "14040", "1100.00", "774.00") + many(200, 20, "14040", "1100.00", "630.79", pos=None)
+            + [visit(900, "14040", "1100.00", "630.79", pos=None)], "20260415")
+    w.store.conn.executescript(DDL_837)
+    rows = [(f"k837-{200 + k}", pcn(200 + k), "24", "1", "20260402") for k in range(20)]
+    rows += [("k837-900a", pcn(900), "11", "1", "20260402"), ("k837-900b", pcn(900), "24", "7", "20260409")]
+    for key, p, pos, freq, bht in rows:
+        w.store.conn.execute("INSERT INTO claims_837 (claim_837_key, patient_control_number, place_of_service, frequency_code, "
+                             "bht_created, service_date) VALUES (?, ?, ?, ?, ?, '2026-04-01')", (key, p, pos, freq, bht))
+    w.store.conn.commit()
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {}, got
+    w.store.close()
+
+
+# ----------------------------------------------------------------------------- split days (the cross-claim ranking)
+def test_two_procedures_of_equal_worth_on_separate_claims_both_cut_owe_one_missing_half(tmp_path, kind):
+    """fix7c-r2-12. 17311 is $585.12 at the office. One patient's two Mohs of the day were billed on two claims and the
+    payer paid each at $292.56. One of them is the first procedure (owed in full), the other rightly the second: the day
+    is owed one missing half, $292.56, listed once."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16"), "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(801, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302")], "20260410", **hum)
+    w.run(today="2026-06-15")
+    got = [(r["patient_control_number"], r["signal"], r["shortfall_cents"], r["title"]) for r in w.rows("category='underpayment'")]
+    assert sum(g[2] or 0 for g in got) == 29256 and len(got) == 1, got
+    w.store.close()
+
+
+def test_a_family_members_procedure_on_the_same_subscriber_number_does_not_rank_the_patients_day(tmp_path, kind):
+    """fix7c-r2-8. The subscriber had a Mohs at the office, paid $292.56 of $585.12, and nothing else that day. The spouse
+    (another patient, under the subscriber's number on the 835's NM1*IL and as the 837's subscriber) had a 14301 at the
+    surgery center the same day with the same doctor, paid in full. The spouse's repair is no part of the subscriber's
+    day: the Mohs is owed its half, $292.56."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 25, "17311", "900.00", "585.12") + many(220, 6, "14301", "2500.00", "943.80", pos="24"), "20260301")
+    w.remit([visit(800, "17311", "900.00", "292.56", pat=800, dos="20260302"),
+             visit(801, "14301", "2500.00", "943.80", pat=900, insured=800, dos="20260302", pos="24")], "20260410")
+    _sent_837(w, [(800, 800, "20260302", "17311", "11"), (801, 800, "20260302", "14301", "24")])
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", 29256)}, got
+    w.store.close()
+
+
+def test_a_cut_day_with_two_lower_valued_procedures_is_owed_one_missing_half_once(tmp_path, kind):
+    """fix7c-r2-6. A split day on three claims: the surgery center's 14041 ($589.45 facility rate, a few lines: no item of
+    its own) paid $294.73, the office Mohs 17311 ($585.12) paid $292.56, and an office biopsy 11102 ($112.74) on a third
+    claim paid $56.37. The day is owed one missing half: listed once, at the least ($292.56 on the Mohs), not the biopsy's
+    half as well."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16") + many(240, 6, "14041", "1800.00", "589.45", cfi="16", pos="24")
+            + many(300, 25, "11102", "150.00", "112.74", cfi="16"), "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(801, "14041", "1800.00", "294.73", cfi="16", pat=800, dos="20260302", pos="24"),
+             visit(802, "11102", "150.00", "56.37", cfi="16", pat=800, dos="20260302")], "20260410", **hum)
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["shortfall_cents"], bool(r["ev"].get("every_cut"))) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", 29256, True)}, got
+    w.store.close()
+
+
+@pytest.mark.parametrize("worked", [False, True])
+def test_a_cut_day_the_payer_fixes_as_asked_is_counted_recovered(tmp_path, kind, worked):
+    """fix7c-r2-7. An every-procedure-cut day: the office Mohs paid $292.56 of $585.12 and the surgery center's 14041
+    $294.73 of $589.45. The item, on the Mohs line, says the 14041 is the higher-valued and was owed in full. The payer then
+    does exactly that: it reverses the 14041's payment and pays it $589.45. The day's missing half came in: the item is
+    closed with its recovery counted, whether or not a person had worked it."""
+    from remitwatch.actions import apply_status
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16") + many(240, 6, "14041", "1800.00", "589.45", cfi="16", pos="24"),
+            "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(801, "14041", "1800.00", "294.73", cfi="16", pat=800, dos="20260302", pos="24")], "20260410", **hum)
+    w.run(today="2026-06-15")
+    f = w.one("category='underpayment'")
+    assert f["ev"].get("every_cut") is True and f["shortfall_cents"] == 29256
+    if worked:
+        apply_status(w.store.conn, f["finding_id"], "appealed", "Asked the payer to reprocess the day", actor="biller",
+                     at="2026-06-16T15:00:00+00:00")
+        w.store.conn.commit()
+    w.remit([reversal(801, "14041", "1800.00", "294.73", cfi="16", pat=800, dos="20260302", pos="24"),
+             visit(801, "14041", "1800.00", "589.45", cfi="16", pat=800, dos="20260302", pos="24")], "20260701", **hum)
+    w.run(today="2026-07-15")
+    row = w.store.conn.execute("SELECT status, stale, work_state, shortfall_cents, recovered_cents FROM findings WHERE finding_id=?",
+                               (f["finding_id"],)).fetchone()
+    assert row is not None and (row["recovered_cents"] or 0) > 0, dict(row) if row else None
+    assert row["status"] == "resolved" and not row["stale"], dict(row)
+    w.store.close()
+
+
+def _units_line(i: int, code: str, charge: str, allowed: str, units: int, *, dos: str, pos: str, pat: int, cfi: str = "16") -> str:
+    co = f"{float(charge) - float(allowed):.2f}"
+    return claim(i, sv(code, charge, allowed, allowed, str(units), f"CAS*CO*45*{co}~", dos), charge, allowed, pat=pat, cfi=cfi, dos=dos, pos=pos)
+
+
+@pytest.mark.parametrize("units,allowed,owed", [(3, "500.00", 16756), (4, "625.00", 16756)])
+def test_a_line_of_several_units_on_the_other_claim_is_ranked_unit_by_unit(tmp_path, kind, units, allowed, owed):
+    """fix7c-r2-11. 17311 is $585.12 at the office; 11602 is $250.00 a lesion at the surgery center. A split day: the Mohs
+    paid $292.56 (as a second procedure) and, on the surgery center's claim, 11602 for 3 (or 4) lesions on one line, allowed
+    $500.00 ($250 + $125 + $125) or $625.00. Each excision is worth $250, less than the Mohs: the Mohs is the highest-valued
+    and is owed in full, less what a correct ranking takes back from the excisions (each at half: $375 or $500 due, $125
+    paid above it): $167.56 both times."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16") + many(240, 6, "11602", "600.00", "250.00", cfi="16", pos="24"),
+            "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             _units_line(801, "11602", f"{600 * units}.00", allowed, units, dos="20260302", pos="24", pat=800)], "20260410", **hum)
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", owed)}, got
+    w.store.close()
+
+
+def test_a_site_claim_with_no_setting_named_is_ranked_at_the_facility_rate_it_was_paid(tmp_path, kind):
+    """fix7c-r2-9. A 14040 is $720.00 at the office and $491.64 at the surgery center (both firm). A split day: the Mohs paid
+    $292.56 (as a second procedure), and the surgery center's 14040 paid $491.64 in full on a claim whose 835 leaves CLP08
+    out, with no 837 or EMA location to name the setting. usual_rate holds such a line to the facility rate it was paid;
+    the ranking values it the same way: $491.64 < $585.12, so the Mohs is the highest-valued and is owed $292.56 -
+    ($491.64 - $245.82) = $46.74."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16") + many(200, 25, "14040", "1500.00", "720.00", cfi="16")
+            + many(300, 25, "14040", "1500.00", "491.64", cfi="16", pos="24"), "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(801, "14040", "1500.00", "491.64", cfi="16", pat=800, dos="20260302", pos=None)], "20260410", **hum)
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", 4674)}, got
     w.store.close()
