@@ -6,7 +6,32 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-25, 13:50 UTC.
+Last updated: 2026-11-26, 18:40 UTC.
+
+## 00. Two sessions take turns (read this first, every time you resume)
+
+The owner alternates two Claude sessions as their usage limits run out. Either can stop at any moment, so:
+
+- **One integration commit, two names.** `claude/ecstatic-fermi-orfcgo` and `claude/epic-davinci-imb6tj` always point at
+  the same integration commit. On resume: `git fetch origin`, then fast-forward your branch to whichever of the two is
+  newer (they never diverge; if they ever do, merge, never force-push). After every merge, push the result to both names.
+- **Every unit works on its own `wip/<unit>` branch** (its own worktree), commits and pushes a WIP commit at each
+  milestone, at least every 45 minutes, and keeps its exact state in `plans/progress/<unit>.md` on that branch: what is
+  done, what is half done (file and function), the next command to run, and the numbers measured so far. A unit that
+  stopped mid-way is resumed by checking out its branch and reading that file.
+- **"Running now" below is the truth about who is doing what.** Update it when a unit starts, stops or merges.
+- **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
+  `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
+
+### Running now (updated 2026-11-26 18:40 UTC, session on `claude/ecstatic-fermi-orfcgo`)
+
+| Unit | Branch | State |
+|---|---|---|
+| Review of every change since 2026-11-23 (a84c781..cdbfc4d) | findings in `plans/review_2026-11-26.md` | starting |
+| fix7d, one practice day | `wip/fix7d` | resuming from section 0 below |
+| fix7c, underpayment rates by plan | `wip/fix7c` | resuming from section 0 below |
+| hook-in unit (E, G, H wired) | `wip/hook` | resuming from section 0 below |
+| The owner's decisions 1-4 (section 3b) | `wip/decisions` (to start) | after the review and fix7d |
 
 ## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
 
