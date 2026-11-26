@@ -828,6 +828,25 @@ def test_a_denial_no_rate_sizes_is_never_below_the_payers_own_amount_there(tmp_p
     w.store.close()
 
 
+def test_a_line_priced_off_the_clinicians_contract_is_never_the_payers_own_amount(tmp_path, kind):
+    """A regression the world run of the fix round showed: a payer priced a clinician's 13132s off the contract (CO-147,
+    $229.20 where the commercial plans pay $250.00). Those lines agree with each other, but they are what the item
+    disputes, not the payer's rate: the denial-at-the-contract-rate item is sized by the commercial plans' typical amount,
+    $20.80 short, never by the off-contract amounts (which would leave it nothing to ask for and drop it)."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 4, "13132", "700.00", "250.00"), "20260310", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(110, 4, "13132", "700.00", "250.00"), "20260310", payer="AETNA", payer_id="AETTEST")
+    w.remit(many(120, 3, "13132", "700.00", "250.00"), "20260310", payer="HUMANA", payer_id="HUMTEST")
+    off = [claim(900 + k, sv("13132", "700.00", "229.20", "229.20", "1", "CAS*CO*147*470.80~", "20260402"), "700.00", "229.20",
+                 dos="20260402") for k in range(3)]
+    w.remit(off, "20260420", payer="CIGNA", payer_id="CIGTEST")
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
+    assert got == {pcn(900): ("DENIED_CONTRACT_RATE", 25000, 2080)}, got
+    w.store.close()
+
+
 def test_a_plan_apart_keeps_its_payers_pa_np_rate_where_it_shows_none_of_its_own(tmp_path, kind):
     """fix7c-r1-5. UMR-like: the payer pays NPs 85 percent of a physician's amount on its network plans (30 NP lines). One
     large employer plan pays a schedule of its own ($130.00 for a 99214 to physicians, 22 lines) and has only two NP lines

@@ -1498,7 +1498,9 @@ class Detector:
     def _rate_line(self, l) -> tuple[int, str] | None:
         """(amount per unit, component) of a clean full-rate line the payer's rate is read on (claim status 1 or 19, paid,
         one listed code unchanged, first procedure on its claim, no pricing modifier but 26/TC, no multiple-procedure,
-        bundling or level cut, not under Medicare's 2027 same-day rule, a count of units that is a count); None otherwise."""
+        bundling or level cut, not priced off the clinician's contract (CO-147: what archive rule 8 disputes, never the
+        payer's rate, though a few such lines agree: fix7c), not under Medicare's 2027 same-day rule, a count of units that
+        is a count); None otherwise."""
         if l.claim_status_code not in ("1", "19") or (l.paid_cents or 0) <= 0 or not l.allowed_cents:
             return None
         code = l.procedure_code
@@ -1507,7 +1509,7 @@ class Detector:
         mods = l.modifiers_list
         if mods and any(m in PRICING_MODIFIERS and m not in COMPONENTS for m in mods):
             return None
-        if any(rc in ("59", "B10", "97", "236", "234", "150", "186") for _g, rc, _a in self.adj.get(l.line_key, ())):
+        if any(rc in ("59", "B10", "97", "236", "234", "150", "186", "147") for _g, rc, _a in self.adj.get(l.line_key, ())):
             return None
         if self._same_day_policy_claim(l):
             return None
