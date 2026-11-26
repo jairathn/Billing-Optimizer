@@ -1347,6 +1347,26 @@ def test_the_note_counts_open_items_a_release_has_not_given_a_state_yet(tmp_path
     st.close()
 
 
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_a_run_that_only_left_the_self_audit_does_not_count_the_open_items_as_unchecked(tmp_path, kind):
+    """A run at the self-regulation's "shed" level that analysed what it read but left the weekly self-audit for a calmer
+    run: its note says the audit was not checked (with the last audit's figures), and does not count every open item as
+    not checked (the header shows the count only when items went unchecked). On both store kinds."""
+    from remitwatch import cloud
+    from tests.test_runlog import make_store
+    st = make_store(kind, tmp_path)
+    st.conn.executemany("INSERT INTO findings (finding_id, status, work_state, stale, shortfall_cents) VALUES (?,?,?,?,?)", [
+        ("a" * 24, "open", "work_now", 0, 12000), ("b" * 24, "open", "waiting", 0, 3000)])
+    st.conn.commit()
+    note = cloud.unchecked_note(st.conn, pending=False, waiting_files=False, plan={"level": 3, "skip": ["audit"]}, analysed=None)
+    assert note and note["audit_skipped"] and "self-audit" in note["text"], note
+    assert note["n"] == 0 and note["cents"] == 0 and not note["pending"], note
+    assert "open items" not in note["text"], note["text"]
+    pend = cloud.unchecked_note(st.conn, pending=True, waiting_files=False, plan={"level": 3, "skip": ["audit"]}, analysed=None)
+    assert pend["n"] == 2 and pend["cents"] == 15000 and "self-audit" in pend["text"], pend
+    st.close()
+
+
 def test_a_deferred_press_with_nothing_new_says_so_and_names_the_reason(box):
     """The note of a pressed run that hands the analysis on is true to what happened: with nothing read since the last
     analysis, the lists stand as that analysis left them (no file went unchecked), and the reason named is the one that

@@ -1840,7 +1840,8 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
         return None
     n = cents = 0
     try:        # an item with no state yet (the first run of a release that adds it) counts by its status (open_items)
-        n, cents = open_items(conn)
+        if pending or waiting_files:    # only then are the open items unchecked; a self-audit left alone has its own figures
+            n, cents = open_items(conn)
     except sqlite3.Error as exc:        # a store with no items yet: said as such
         from . import runlog
         runlog.caught(exc, "unchecked_note", level="warning")
