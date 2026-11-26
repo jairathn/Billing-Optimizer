@@ -585,10 +585,12 @@ def test_an_evening_fax_is_dated_and_followed_up_from_the_practices_day(store, m
         (ev["fax"]["date"], st["work_state"], st["follow_up_on"], st["state_basis"])
 
 
-def test_a_fax_is_stored_as_sent_at_a_time_with_its_zone_never_before_it_was_queued():
+def test_a_fax_is_stored_as_sent_at_a_time_with_its_zone_never_before_it_was_queued(monkeypatch):
     """What the status check stores as a fax's sent time (fax.sent_moment): the line's time when it is one with its zone,
-    else the moment the status was read; never before the fax was queued, never after that moment."""
+    else the moment the status was read; never before the fax was queued, never after that moment. (The last line dates
+    it for a practice in US Eastern time.)"""
     from remitwatch import fax
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
     queued, now = "2026-11-25T02:30:00.000001+00:00", "2026-11-25T03:00:00.000000+00:00"
     assert fax.sent_moment("2026-11-25T02:31:00+00:00", queued, now) == "2026-11-25T02:31:00.000000+00:00"
     assert fax.sent_moment("2026-11-24T21:31:00-05:00", queued, now) == "2026-11-25T02:31:00.000000+00:00"   # moved to UTC
