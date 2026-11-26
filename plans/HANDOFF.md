@@ -32,12 +32,12 @@ a unit from its branch and progress file (the brief says what done means), or st
 | Unit | Branch | Brief | State |
 |---|---|---|---|
 | fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | **merged** at 993f440 (22:15 UTC): build, two reviews (10 findings), fix round all done; its code equals the merge's; python3 green, under GMT-14 and GMT+12 too, 3.11.1 only the serialize class |
-| fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | running (run wf_82efb0cc-738); at 18:40: tip merged, cached-array change whole, base vs branch measurement started (b6592c8) |
+| fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | **merged** at ecaef14 (23:55 UTC): build, two reviews (18 findings, all fixed), fix round; its code equals the merge's; full suite on its code merged with fix7d: python3 2,993 passed 0 failed, 3.11.1 only the serialize class. Left: UHC Kentucky PA/NP since late October (owner), a UMR NP review sized at the plan's full rate (about $217 if NPs are paid like PAs), the dependent's own patient loop (F3a), pattern items' reversed lines and Results credit (F2) |
 | hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
 | the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
 | review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b): areas answers and money first, then hosts, people, privacy. The orchestrator's own read of the whole diff is in `plans/review_notes_orchestrator_2026-11-26.md` (merge it into the review file) |
 | a17, the independent every-claim auditor (started early: it touches no product code) | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | running (run wf_8fc9da8c-468, started 18:55 UTC): payer-window research beside the build, then integration, two reviews, one fix round. Score again with the merged code before the final trace |
-| deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | running (run wf_b5842331-6d1, started 19:20 UTC); touches codes.py, docs and tests only, so it merges after the others |
+| deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | **merged** at 63fc3df (23:40 UTC): build, two reviews (15 findings, all fixed), fix round; merged cleanly on top of fix7c, the shared modules' tests pass on the merge (469), the full python3 suite runs on it. Its leftovers are fix-wave F8 (codes.py) and parts of F4 and F6 |
 | fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | running (run wf_ea1ab0ef-037, started 22:18 UTC): build, two reviews, one fix round |
 | fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | running (run wf_91b074e9-48a, started 22:18 UTC) |
 | fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | running (run wf_fc5edc8c-c0f, started 22:18 UTC) |
@@ -85,7 +85,10 @@ the release gates (section 0 below, "Then, in order").
 - **At the deadlines merge (22:10 UTC).** A17's table has 34 rows that disagree with codes.py; the 28 items the deadlines
   unit fixes cover all 34. One more point from A17 reached no unit: codes.py marks Humana Medicare Advantage's
   corrected-claim rule verified, but the research could not find the tip sheet it cites. After the deadlines merge the
-  integrator marks it unverified (or finds the source), with a test, unless the deadlines fix round already did.
+  integrator marks it unverified (or finds the source), with a test, unless the deadlines fix round already did. Also
+  (A17 review a17-r1-3, 23:05 UTC): the VA Community Care claims go out under 837 payer id VACCN and every send is named
+  as Optum/UnitedHealthcare, so the name rules may give them UHC's windows; check the product's group and windows for
+  that payer id against the va_ccn rows of plans/tools/a17/payer_windows.json and fix by the payer id if they differ.
 - **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
   world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
   SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
