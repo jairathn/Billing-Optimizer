@@ -473,6 +473,33 @@ def test_no_live_site_address_is_in_the_repository():
     assert not bad, "\n".join(bad)
 
 
+def test_no_public_ip_address_is_in_the_repository():
+    """The live server is never written down by its address either: a bare public IPv4 address in a tracked document or
+    settings file is found by its shape (the private, loopback, reserved and documentation ranges of RFC 5737 aside, and
+    the section numbers of a standard such as the X12 TR3's). Only the file and line are reported, never the address."""
+    import ipaddress
+    ipv4 = re.compile(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])")
+    docs = ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+    bad = []
+    for p in tracked_files():
+        rel = str(p.relative_to(ROOT))
+        if not (rel.endswith((".md", ".example", ".env", ".txt", ".yml", ".yaml", ".toml", ".json", ".sh")) or rel.startswith("docs/")):
+            continue
+        for i, line in enumerate(_text(p).split("\n"), 1):
+            if "\u00a7" in line or "section" in line.lower() or "TR3" in line:
+                continue
+            for m in ipv4.finditer(line):
+                try:
+                    ip = ipaddress.IPv4Address(m.group(1))
+                except ValueError:
+                    continue
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_reserved or ip.is_multicast \
+                        or any(ip in ipaddress.ip_network(n) for n in docs):
+                    continue
+                bad.append(f"{rel}:{i}: a public IPv4 address")
+    assert not bad, "\n".join(bad)
+
+
 def test_no_ema_tenant_host_is_in_the_repository():
     bad = []
     for p in tracked_files():
