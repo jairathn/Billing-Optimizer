@@ -5958,6 +5958,7 @@ class Detector:
         # send, in _load_837's shape, and the bill's newest void
         rows: dict[str, list] = {}          # bill -> [claim id, send row]
         voided: dict[str, str] = {}
+        sent_first: dict[str, str] = {}     # bill -> its first send on file (any submission)
         for pcn, bht, freq, pid, pname, chg, key, member in c.execute(
                 """SELECT patient_control_number, bht_created, TRIM(COALESCE(frequency_code, '')), payer_id, payer_name,
                           total_charge_cents, claim_837_key, subscriber_id
@@ -5970,6 +5971,8 @@ class Detector:
             if freq == "8":
                 voided[b] = max(voided.get(b, ""), bht)
                 continue
+            if bht < sent_first.get(b, "9999"):
+                sent_first[b] = bht
             got = rows.get(b)
             if got is None or sub_no(pcn) > sub_no(got[0]) or (sub_no(pcn) == sub_no(got[0]) and pcn > got[0]):
                 rows[b] = [pcn, [bht, bht, freq, False, pid, pname, chg, key, member, 1]]
@@ -6004,6 +6007,13 @@ class Detector:
                     first[b] = paid_on
         c.execute("DROP TABLE IF EXISTS temp.d837_rs")
         keep = sorted(b for b in bills if first.get(b) and rows[best[b]][0] > first[b])
+        # a bill the payer answered before any send of it on file went out before the 837 files on file begin: its first
+        # submission and the answers to it may be older than the files (a CO-97 on the visit says its procedure was
+        # answered elsewhere), so the archive cannot tell that a service the resend carries was never answered
+        older = [b for b in keep if sent_first.get(b, "9999") > first[b]]
+        if older:
+            self.ema_counts["837_resend_bill_older_than_837s"] += len(older)
+            keep = [b for b in keep if sent_first.get(b, "9999") <= first[b]]
         answered: dict[str, dict] = defaultdict(lambda: defaultdict(set))
         for i in range(0, len(keep), 500):
             c.execute("DROP TABLE IF EXISTS temp.d837_rs")

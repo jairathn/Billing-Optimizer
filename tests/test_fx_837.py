@@ -443,6 +443,31 @@ def test_a_line_added_in_a_resend_after_the_bill_was_paid_is_chased_from_the_837
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_a_resend_of_a_bill_whose_first_send_is_older_than_the_837s_on_file_is_not_chased(tmp_path, kind):
+    """(Found hand-tracing the world copy: a bill sent before the 837 files on file begin.) Bill CB0000L09's visit of July 1
+    (a 99214 and a 17110) went out before the first 837 on file. Anthem's remittance of August 20 (the first on file)
+    answers its 99214 only, with CO-97 (included in another service already adjudicated): the 17110 was answered before
+    the remittances on file begin. The practice sent the claim again September 1 with both services. The 837s on file
+    hold no send of the bill before its first answer, so the archive cannot tell whether the 17110 was answered: it is
+    not chased as never answered (counted in meta ema:wiring). The reviewer's L01, whose first send is on file, still is."""
+    from tests.test_features import claim
+    s = _store(tmp_path, kind)
+    rates = [claim(600 + i, svc("17110", "200.00", "80.00", "80.00", "CAS*CO*45*120.00~")) for i in range(25)]
+    v = [("99214", "223.65", "20260701"), ("17110", "200.00", "20260701")]
+    _remits(s, tmp_path, [answer("CB0000L09C017", paid="0.00", dos="20260701", cas="CAS*CO*97*223.65~")], "20260820")
+    send(s, tmp_path, [clm837("CB0000L09C017", v)], "20260901")
+    _remits(s, tmp_path, rates + _visits(), "20261110")
+    det = Detector(s, run_id="t1")
+    det.run()
+    rows = [dict(r) for r in s.query("SELECT signal, patient_control_number, shortfall_cents FROM findings WHERE patient_control_number LIKE 'CB0000L09%' "
+                                     "AND signal IN ('NO_ANSWER', 'REJECTED_PRE_PAYER')")]
+    print(rows, dict(det.ema_counts))
+    assert rows == []
+    assert det.ema_counts["837_resend_bill_older_than_837s"] == 1
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_the_837_pass_walks_its_bills_not_every_answered_claim(tmp_path, kind):
     """(Found measuring on the world copy: the run spent more than 20 minutes in the resend scan, _837_resends.) Each query
     that reads claims by a bill's range of claim ids from a temporary list of bills must walk that list and look the claims
