@@ -416,3 +416,203 @@ def test_answers5_the_exports_item_for_a_resend_with_an_added_line_is_not_put_do
     print(f["signal"], f["work_state"], "|", f["state_basis"], "|", f["shortfall_cents"], json.loads(f["evidence"])["lines"])
     assert f["work_state"] != "done", f"the 17110 was never answered, yet the item is done: {f['state_basis']}"
     s.close()
+
+
+# ================================================================================================ F1's own edges of each fix
+def test_money1_the_data_tab_names_a_recoupment_of_a_payment_not_on_file(tmp_path, kind):
+    """The $85.00 recoupment of money-1 is on the Data tab beside the reversals of payments not on file: one claim, the
+    amount, the entry, and words that say a recoupment took it."""
+    from remitwatch.insights import data_health
+    w = World(tmp_path, kind)
+    _recoup_not_on_file(w, f"WO:87654321 {BILL}C024", "85.00")
+    w.run("r1", today="2026-09-20")
+    got = {h["key"]: h for h in data_health(w.store.conn, "2026-08-03", "2026-09-20")}.get("reversal_not_on_file")
+    assert got and not got["ok"], got
+    assert (got["claims"], got["cents"], got["lines"], got["entries"], got["recouped_claims"], got["recouped_cents"]) == (1, 8500, 0, 1, 1, 8500)
+    assert "recoupment the payer withheld from a later check ($85.00)" in got["detail"], got["detail"]
+    w.store.close()
+
+
+def test_money1_a_recoupment_of_a_payment_made_before_the_archive_begins_is_counted_as_expected(tmp_path, kind):
+    """The claim's service is dated before the payer's first remittance on file: the payment it recoups was made before
+    the archive begins. It is counted with the older ones (expected), not as a missing remittance."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_denied_line(f"{BILL}C024", carc="16", payer_ctl="PC300B", dos="20251110")], "20260415")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*85.00~")
+    w.run("r1", today="2026-09-20")
+    m = w.meta(REVERSALS_NOT_ON_FILE_META)
+    assert (m["cents"], m["older_cents"], m["older_recouped_cents"], m["older_entries"], m["older_claims"]) == (0, 8500, 8500, 1, 1), m
+    w.store.close()
+
+
+def test_money1_a_recoupment_the_ledger_applied_is_not_counted(tmp_path, kind):
+    """Control: a recoupment that took a payment on file is no gap."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*117.60~")
+    det = w.run("r1", today="2026-09-20")
+    assert left_on(det, f"{BILL}C024") == 0
+    m = w.meta(REVERSALS_NOT_ON_FILE_META)
+    assert m["cents"] == 0 and m["older_cents"] == 0 and m["entries"] == 0, m
+    w.store.close()
+
+
+def test_money5_a_recoupment_larger_than_the_carried_balance_takes_the_rest_from_the_repayment(tmp_path, kind):
+    """June: the payer reverses C024's $117.60 and pays it again at $40.00; the $77.60 it is owed is carried forward under
+    its own number (FB naming no claim). August: it withholds $100.00 naming C024. $77.60 of it is that balance (the
+    reversal already took it); the other $22.40 comes off the $40.00 re-payment."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_reversed(f"{BILL}C024", payer_ctl="PC300B"), visit_paid(f"{BILL}C024", paid="40.00", payer_ctl="PC300C")], "20260610",
+            plb="PLB*1777777772*20261231*FB:900000000000001*-77.60~")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*100.00~")
+    det = w.run("r1", today="2026-09-20")
+    assert left_on(det, f"{BILL}C024") == 4000 - 2240
+    w.store.close()
+
+
+def test_money5_a_carried_balance_excuses_one_recovery_only(tmp_path, kind):
+    """The same June, then two recoupments of $77.60 naming C024 (August 3 and 10): the first recovers the carried
+    balance; the second takes the $40.00 re-payment, and the $37.60 it could not apply is counted for the Data tab."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_reversed(f"{BILL}C024", payer_ctl="PC300B"), visit_paid(f"{BILL}C024", paid="40.00", payer_ctl="PC300C")], "20260610",
+            plb="PLB*1777777772*20261231*FB:900000000000001*-77.60~")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*77.60~")
+    w.remit([visit_paid("CB0000901C017", who=OTHER, payer_ctl="PC901")], "20260810",
+            plb=f"PLB*1777777772*20261231*WO:87654322 {BILL}C024*77.60~")
+    det = w.run("r1", today="2026-09-20")
+    assert left_on(det, f"{BILL}C024") == 0
+    m = w.meta(REVERSALS_NOT_ON_FILE_META)
+    assert m["recouped_cents"] + m["older_recouped_cents"] == 3760, m
+    w.store.close()
+
+
+def test_money2_a_share_another_second_payer_answered_since_is_not_listed(tmp_path, kind):
+    """The supplement pays its $16.00 share, then recoups it; meanwhile another supplement (the right one) answered the
+    service as second payer: the right payer was billed, so no item lists the first supplement's takeback."""
+    w = World(tmp_path, kind)
+    pcn = "CB0000300C017"
+    _primary_and_share(w, pcn, "99214", "223.65", "80.00", "64.00", "16.00")
+    w.remit([clm(pcn, "2", "223.65", "16.00", sv("99214", "223.65", "16.00", 1, "CAS*OA*23*207.65~"), payer_ctl="GQ1")], "20260601",
+            payer="OTHERGAP SUPPLEMENT", payer_id="OGAP1")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="GP9", paid="16.00")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:5550001 {pcn}*16.00~", **GAP)
+    w.run("r1", today="2026-09-20")
+    assert w.rows("signal='TAKEBACK'") == [], brief(w.rows("signal='TAKEBACK'"))
+    w.store.close()
+
+
+def test_money2_the_share_item_says_who_took_it_and_what_to_do(tmp_path, kind):
+    """The item of a second payer's share taken back says so: bill the patient, or dispute the takeback; its evidence marks
+    the second payer."""
+    w = World(tmp_path, kind)
+    pcn = "CB0000300C017"
+    _primary_and_share(w, pcn, "99214", "223.65", "80.00", "64.00", "16.00")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="GP9", paid="16.00")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:5550001 {pcn}*16.00~", **GAP)
+    w.run("r1", today="2026-09-20")
+    (r,) = w.rows("signal='TAKEBACK'")
+    ev = json.loads(r["evidence"])
+    assert ev["second_payer"] is True and ev["taken_back"]["cents"] == 1600
+    assert "bill the patient, or dispute the takeback" in r["title"] and "second payer" in r["title"], r["title"]
+    w.store.close()
+
+
+def test_money6_the_rest_of_two_recoupments_is_on_their_own_listings(tmp_path, kind):
+    """$600.00 and $550.00 withheld naming C024, whose only payment on file is $117.60: the service's item lists the
+    $117.60, the $600.00 recoupment its whole amount and the $550.00 one the $432.40 left. Every dollar is on an item."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*600.00~")
+    w.remit([visit_paid("CB0000901C017", who=OTHER, payer_ctl="PC901")], "20260810",
+            plb=f"PLB*1777777772*20261231*WO:87654322 {BILL}C024*550.00~")
+    w.run("r1", today="2026-09-20")
+    tb = w.rows("signal='TAKEBACK'")
+    got = sorted((r["line_key"] is None, r["shortfall_cents"]) for r in tb)
+    assert got == [(False, 11760), (True, 43240), (True, 60000)], brief(tb)
+    part = next(r for r in tb if r["shortfall_cents"] == 43240)
+    assert json.loads(part["evidence"])["not_applied_cents"] == 43240 and "$432.40 of it takes back no payment on file" in part["title"]
+    w.store.close()
+
+
+def test_hosts4_equal_recoupments_on_one_day_name_one_reference_whatever_the_order(tmp_path, kind):
+    """Two equal recoupments ($58.80 each) of one $117.60 payment on two checks of the same day, under two references:
+    the proof names the same reference whichever check was read first."""
+    first = ("20260803", "PC900", "CB0000900C017", "PLB*1777777772*20261231*WO:AAA111 CB0000300C024*58.80~")
+    second = ("20260803", "PC901", "CB0000901C017", "PLB*1777777772*20261231*WO:BBB222 CB0000300C024*58.80~")
+    a = _takeback_reference(tmp_path / "a", kind, (first, second))
+    b = _takeback_reference(tmp_path / "b", kind, (second, first))
+    assert a == b and a in ("AAA111 CB0000300C024", "BBB222 CB0000300C024"), (a, b)
+
+
+@pytest.mark.parametrize("reason", ["CS", "72"])
+def test_money8_a_recoupment_its_own_adjustment_cancels_leaves_the_denial_done(tmp_path, kind, reason, monkeypatch):
+    """A WO naming claim 31 and, in the same remittance, a CS or 72 of the same amount naming it: they cancel (the ledger
+    nets them), no money was taken, and the Medicaid denial stays done on the first payer's payment."""
+    s, lg = _host(tmp_path, kind, monkeypatch)
+    try:
+        _history(s)
+        paid_on = _claim(s, 31, payer=STATE, carc="96")
+        rows, ar = _ema(31)
+        rows.append(_carry(dt.date(2026, 5, 25)))
+        EW.load(s, lg, tmp_path, rows, ar)
+        on = (paid_on + dt.timedelta(days=10)).isoformat()
+        tk = EW.remit(s, trace="777000931", paid_on=on, payer=STATE,
+                      claims=[{"pcn": "ZZ09X0001C001", "lines": [(_svc(1).isoformat(), "99214", 150, 70, [("CO", "45", 80)])]}])
+        for code, cents in (("WO", 9218), (reason, -9218)):
+            s.conn.execute("INSERT INTO plb (transaction_key, reason_code, reference, amount_cents, payer_name, payment_date, trace_number) "
+                           "VALUES (?,?,?,?,?,?,?)", (tk, code, f"{code}:1234567 {F.claim_id(31)}", cents, STATE, on, "777000931"))
+        s.conn.commit()
+        EW.run(s, today=TODAY)
+        st = states.state_of(s.conn, _by_claim(s)[F.claim_id(31)], today=TODAY)
+        assert (st["work_state"], st.get("rule")) == ("done", "paid_first_other_payer"), st
+    finally:
+        lg.close()
+        s.close()
+
+
+def test_money9_a_first_payment_under_medicaids_rate_with_nothing_open_in_ema_is_done(tmp_path, kind, monkeypatch):
+    """The first payer paid $50.00 of Medicaid's $70.00 and EMA wrote the rest off (nothing open): nothing is left of
+    Medicaid's share to recover, so the denial is done as before."""
+    s, lg = _host(tmp_path, kind, monkeypatch)
+    try:
+        _history(s)
+        _claim(s, 44, payer=STATE, carc="96")
+        rows, ar = _ema(44, first_paid=50)                 # the rest written off (CO-B7): $0.00 open
+        rows.append(_carry(dt.date(2026, 5, 25)))
+        EW.load(s, lg, tmp_path, rows, ar)
+        EW.run(s, today=TODAY)
+        st = states.state_of(s.conn, _by_claim(s)[F.claim_id(44)], today=TODAY)
+        assert (st["work_state"], st.get("rule")) == ("done", "paid_first_other_payer"), st
+    finally:
+        lg.close()
+        s.close()
+
+
+def test_money9_the_open_denial_names_what_medicaid_still_owes(tmp_path, kind, monkeypatch):
+    """The money-9 case: its basis names the first payment and the $20.00 still Medicaid's to pay."""
+    s, lg = _host(tmp_path, kind, monkeypatch)
+    try:
+        _history(s)
+        _claim(s, 44, payer=STATE, carc="96")
+        rows, ar = _ema(44, first_paid=50, share="open")
+        rows.append(_carry(dt.date(2026, 5, 25)))
+        EW.load(s, lg, tmp_path, rows, ar)
+        EW.run(s, today=TODAY)
+        st = states.state_of(s.conn, _by_claim(s)[F.claim_id(44)], today=TODAY)
+        assert st["work_state"] == "work_now", st
+        assert "Medicaid owes up to $20.00 as second payer ($70.00 open in EMA)" in st["state_basis"], st["state_basis"]
+    finally:
+        lg.close()
+        s.close()

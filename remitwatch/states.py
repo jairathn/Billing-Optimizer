@@ -1661,6 +1661,30 @@ def _threshold(f: dict) -> int:
     return ec._threshold(f)
 
 
+# The PLB reasons the ledger reads as a takeback naming a claim (detect._build_ledger): an overpayment recovered (WO), a
+# balance carried forward or recovered (FB) and Medicare's non-reimbursable withholding (J1); an adjustment (CS) or an
+# authorized return (72) naming the claim nets with them, and never starts a takeback alone.
+TAKEBACK_REASONS = ("WO", "FB", "J1")
+TAKEBACK_NETS = ("WO", "FB", "J1", "CS", "72")
+
+
+def taken_back_since(fx: dict, since: Any) -> bool:
+    """A recoupment the 835s name for one of the bill's claims still takes money after `since`: the claim's WO, FB, J1,
+    CS and 72 entries net to more than nothing and one of them, a WO, FB or J1 taking money, is dated on or after
+    `since` (the ledger nets a claim's entries the same way: a balance carried forward and recovered later is no
+    takeback). A payment made before it may not stand (money-8: a WO, an FB or a J1 alike)."""
+    since = str(since or "")[:10]
+    per: dict[str, list] = {}
+    for q in fx["r835"].get("plb") or []:
+        if q.get("reason") in TAKEBACK_NETS:
+            per.setdefault(q.get("claim_id") or "", []).append(q)
+    for qs in per.values():
+        if sum(q.get("cents") or 0 for q in qs) > 0 and any(
+                q["reason"] in TAKEBACK_REASONS and (q.get("cents") or 0) > 0 and str(q.get("date") or "")[:10] >= since for q in qs):
+            return True
+    return False
+
+
 def paid_proof(fx: dict) -> dict | None:
     """Proof the item's money arrived or was settled, or None: {'rule', 'cents', 'date', 'payer', 'text', 'source',
     'watch'}. In order: a later EMA payment no 835 carries (same payer, or another payer when EMA shows the line
@@ -1719,7 +1743,11 @@ def paid_proof(fx: dict) -> dict | None:
         return once and x["claim_key"] != f.get("claim_key") and covers
     # the detection run found fewer units paid than billed (its hint 'partly paid'): the 835 has decided it is short
     short_units = "partly_paid" in _ev(f)
-    later_paid = [] if short_units else [x for x in stand if (x["date"] or "") > mine and (x["paid"] or 0) > 0 and same_line(x)]
+    # a claim nobody answered (a never-answered claim's item): only a payment made after the claim went out answers it, and
+    # every service it bills must be paid (a resend that added a service is not paid by the first send's payment: answers-5)
+    whole_claim = sig in CLAIM_SIGNALS and not f.get("line_key")
+    after = max(mine, str(_ev(f).get("sent") or "")[:10]) if whole_claim else mine
+    later_paid = [] if short_units else [x for x in stand if (x["date"] or "") > after and (x["paid"] or 0) > 0 and same_line(x)]
     denier = f.get("payer_group") or _grp_kind(f.get("payer_name"))[0]
     if later_paid and cat in MONEY:
         paid = sum(x["paid"] or 0 for x in later_paid)
@@ -1759,6 +1787,11 @@ def paid_proof(fx: dict) -> dict | None:
             prim = [x for x in later_paid if not (x["status"] in SECOND_STATUS and not _same_payer(row_group(x)[0], denier))]
             paid = sum(x["paid"] or 0 for x in prim)
             floor = thr if thr > 1 else _close_floor(own, prim)
+            if whole_claim:
+                keys = set(_service_keys(f))
+                got = {(x["svc"], c) for x in prim for c in (x["code"], x["ocode"]) if c}
+                if not keys <= got:
+                    prim = []           # a service of the claim has no payment of its own since the send: not paid
             if prim and paid >= floor:
                 x = prim[0]
                 return {"rule": "paid_later_835", "cents": paid, "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
@@ -1841,7 +1874,7 @@ def paid_proof(fx: dict) -> dict | None:
             # the same payer paid this service before, the payment still stands (no reversal, no takeback naming the
             # claim) and brought at least what this line should: the later denial answers another copy of the claim (a
             # superseded original after the corrected claim was paid, C62), whatever its reason
-            takeback = any(p["reason"] in ("WO", "72") and (p["date"] or "") >= (x["date"] or "") for p in fx["r835"].get("plb") or [])
+            takeback = taken_back_since(fx, x["date"])
             # the same line: its line control number (EMA keeps it across submissions), or neither line has one and the
             # code is on the claim once; a second unit or lesion billed on its own line is never closed by the first one's
             # payment
@@ -1997,9 +2030,13 @@ def paid_first_elsewhere(fx: dict) -> dict | None:
       open on the line ('paid_before_duplicate').
     Counted: the payments on the item's own EMA lines (never the surgery center's; for a claim's item, a line whose charge
     is the claim's lines' to the cent; for a line's item, a code the claim carries once), payer by payer, posted before the
-    item's remittance and net of that payer's later takebacks, and never a payment whose remittance was reversed. Together
-    they reach half of what the item should bring. A takeback the 835s name for the claim after the first payment keeps
-    the item as work. EMA's postings decide, never its claim status; a person's status decides before any of this."""
+    item's remittance and net of that payer's later takebacks, and never a payment whose remittance was reversed. For a
+    duplicate denial they reach half of what the item should bring. For a Medicaid denial they reach the whole of it:
+    Medicaid owes up to its own rate less what the first payer paid, so a first payment under that rate leaves the rest
+    owed, and the item stays work, its basis naming what is still Medicaid's to pay (fx['paid_first_partial'], money-9).
+    A takeback the 835s name for the claim after the first payment keeps the item as work (the ledger's takeback reasons:
+    WO, FB, J1, with CS and 72 netting, money-8). EMA's postings decide, never its claim status; a person's status decides
+    before any of this."""
     f = fx["item"]
     if f.get("category") not in ("denial", "bundling") or (f.get("paid_cents") or 0) > 0 or f.get("signal") in EMA_ONLY:
         return None
@@ -2047,16 +2084,30 @@ def paid_first_elsewhere(fx: dict) -> dict | None:
             if sum(p["cents"] for p in kept) > 0:
                 counted += kept
     total = sum(p["cents"] for p in counted)
-    need = _threshold(f)
+    # a duplicate denial restates its payer's own payment: half of what the item should bring settles it. Medicaid as second
+    # payer pays up to its own rate: the first payer's payments must reach the whole of what the item should bring
+    worth = int(f.get("expected_cents") or f.get("shortfall_cents") or 0)
+    need = _threshold(f) if dup else worth
     if need <= 1:
         # nothing says what the item should bring: half of what its own EMA lines charge
         need = max(1, sum(ln.get("charges") or 0 for ln in lines) // 2)
-    if total <= 0 or total < need:
+    if total <= 0:
         return None
     pos = sorted((p for p in counted if p["cents"] > 0), key=lambda p: (p["posted"] or "", p["check"]))
     first = pos[0]
-    if any(q.get("reason") in ("WO", "72") and (q.get("date") or "") >= (first["posted"] or "") for q in fx["r835"].get("plb") or []):
-        return None                 # a takeback named for the claim since: the payment may not stand
+    if taken_back_since(fx, first["posted"]):
+        return None                 # a takeback named for the claim since: the payment may not stand (money-8)
+    if total < need:
+        if dup or total < _threshold(f):
+            return None
+        # the first payer paid part of what Medicaid allows: the rest of it is still Medicaid's to pay, up to what EMA shows
+        # open on the line. Nothing of it open in EMA leaves nothing to recover, as when the first payment reached the rate
+        open_ = sum(ln.get("balance") or 0 for ln in lines)
+        owed = max(0, min(worth - total, open_))
+        if owed > 0:
+            fx["paid_first_partial"] = {"paid": total, "owed": owed, "worth": worth, "open": open_, "payer": first["payer"],
+                                        "date": first["posted"], "in_835": bool(first.get("in_835"))}
+            return None
     rows = [{"source": "production", "kind": "payment", "date": p["posted"], "payer": p["payer"], "cents": p["cents"],
              "check_tail": p["check_tail"], "in_835": bool(p.get("in_835")), "line": f"{p['cpt']} {p['svc']}",
              "text": (f"EMA posted {usd(p['cents'])} from {p['payer'] or 'insurance'} on {day(p['posted'])} for {p['cpt']} "
@@ -3112,6 +3163,12 @@ def _open_basis(fx: dict, late: bool = False) -> str:
             "SECONDARY_NOT_BILLED": f"Nothing from {second} on file: bill it for the share the first payer left"}.get(f.get("signal") or "",
                                                                                                                  "Not paid and nobody has worked it")
     tail_ = f"; {words[oc]}" if oc in words else ""
+    part = fx.get("paid_first_partial")
+    if part:
+        # the first payer paid part of what Medicaid allows (paid_first_elsewhere): the rest is still Medicaid's to pay
+        tail_ = (f"; {part['payer'] or 'the first payer'} paid {usd(part['paid'])} first ({day(part['date'])}"
+                 + ("" if part.get("in_835") else ", no 835") + f"), under the {usd(part['worth'])} this service should bring: "
+                 f"Medicaid owes up to {usd(part['owed'])} as second payer ({usd(part['open'])} open in EMA)")
     hint = _archive_hint(f)
     if hint and f.get("signal") not in CLAIM_SIGNALS and _hint_text(hint):
         # the 835 archive's reading of the item (a likely 'done' is never done without a person: check it first)
