@@ -335,6 +335,7 @@ const SIGNAL_HELP = {
   FEE_SKIM:'Payment fees withheld from the remittance (Zelis transaction fees, origination fees). Opt out: demand fee-free standard EFT.',
   TAKEBACK:'Overpayment recovery withheld from a later remittance (PLB WO). Review the reason and the recoupment notice.',
   PROVIDER_RATE_GAP:'This payer pays one clinician at a level of the clinician\'s own, below its usual rate for the code, on many claims, and no rule explains it (it is not the rate for a PA or NP, or the multiple-procedure rule). Check the clinician\'s credentialing and the contract; if the payer is wrong, one request can fix every claim listed that is still inside its filing window.',
+  OLD_FEE_SCHEDULE:'This payer paid services dated after its new rates took effect at the amounts of its earlier fee schedule (it loaded the new rates late and did not reprocess them). Each is owed the new rate. Send the payer one repricing request listing every claim; each claim keeps its own filing window, and the date shown is the last of them.',
   CONTRACT_RATE_GAP:'Commercial payer\'s usual allowed is far below Medicare for a high-volume code. Renegotiate or reconsider participation.',
   MA_BELOW_MEDICARE:'Medicare Advantage payer\'s usual allowed is below the Medicare fee schedule. Check the contract terms.',
   CHARGE_BELOW_RATE:'Your charge for this code is below what this payer allows, so it paid your charge. Raise the fee for the code; claims billed after that are paid in full. Past claims cannot be appealed.',
