@@ -44,7 +44,8 @@ the Medicare 77600 payments. Until you say so, every one of them stays on Work n
   is the one the billers use.
 - Built for decision 1: the Vercel site has no daily run any more (its fax follow-up run stays); the Data tab has a
   "Run the analysis now" button, and every page says the site analyses only on a press. Measured on a copy of Vercel's
-  own store: a press takes about 3.5 minutes of the 5 a run may take.
+  own store: a first press took about 3.5 minutes (the site gives an analysis 4 of the 5 minutes Vercel allows a run;
+  when that is not enough, the analysis carries on in a next run by itself).
 - One call I made so that it fits: the Vercel site reads EMA's A/R report only, not the Production report. With
   Production in its store, an analysis did not fit one Vercel run in time or memory (5 tries, all out of time). The AWS
   server reads both, so its lists are the complete ones; the Vercel pages will say that they show the A/R only and can
