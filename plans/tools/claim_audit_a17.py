@@ -2416,9 +2416,10 @@ class Audit:
         st_obs, st_all = getattr(self, "_st_obs", {}), getattr(self, "_st_all", {})
 
         def leans_away(t):
-            # the clinician's own answers of the year: fewer than half of them at the pooled tier
+            # the clinician's own answers of the year: 3 or more (one answer, the one judged, never excuses itself),
+            # fewer than half of them at the pooled tier
             n = st_all.get(k + (year,), 0) if year else 0
-            return n > 0 and st_obs.get(k + (year,), {}).get(t, 0) < 0.5 * n
+            return n >= 3 and st_obs.get(k + (year,), {}).get(t, 0) < 0.5 * n
         if year:
             t = getattr(self, "state_tier_y", {}).get(k + (year,))
             if t is not None:
@@ -5191,6 +5192,7 @@ class Fake:
         self.expect_inside = {}   # (bill, code, comp, dos) -> 'inside' | 'expired' | 'unverified' (A17 rule 4)
         self.expect_lotu = {}     # (bill, code, comp, dos) -> listed apart as past an unverified window? (A17 rule 4)
         self.expect_isub = {}     # finding id -> a word its verdict's sub-kind must hold (A17 rule 4)
+        self.expect_wver = {}     # (bill, code, comp, dos) -> unit 1's window rests on verified windows only (A17 rule 4)
         self.fix_of = {}          # check -> the A16 fix it tests (checks absent here are A15's own)
         self.fix = None           # the fix the cases being written test
 
@@ -5268,7 +5270,8 @@ class Fake:
             elif kind == "pay":
                 vals["ins_paid"], vals["check_no"] = amt, extra
             elif kind == "answer":
-                vals["check_no"] = extra
+                # a $0 payer row under a check; extra = check, or (check, allowed amount)
+                vals["check_no"], vals["allowed"] = extra if isinstance(extra, tuple) else (extra, 0)
             elif kind == "adj":
                 g, c, nonc = extra
                 vals["grp"], vals["code"] = g, c
@@ -5288,7 +5291,8 @@ class Fake:
         d = {"unit": self.expect_unit, "item": self.expect_item, "sub": self.expect_sub, "lot": self.expect_lot,
              "counts": self.expect_unit_counts, "billed": self.expect_units_billed, "review": self.expect_review,
              "secbal": self.expect_secbal, "owed": self.expect_owed, "wend": self.expect_wend,
-             "inside": self.expect_inside, "lotu": self.expect_lotu, "isub": self.expect_isub}[kind]
+             "inside": self.expect_inside, "lotu": self.expect_lotu, "isub": self.expect_isub,
+             "wver": self.expect_wver}[kind]
         d[key] = value
         self.fix_of[(kind, key)] = self.fix + (" [guard]" if guard else "")
 
@@ -6785,6 +6789,489 @@ def build_selftest_store():
     return F
 
 
+def build_fix_store():
+    """The review round's invented cases (reviews a17-r1 and a17-r2, 2026-11-27), scored with A16's windows: a check for
+    each finding fixed and for each sub-rule of A17 rules 1, 2, 3 and 5 whose break no other check caught. Invented
+    data only: ZZ8x claim ids, TESTPAY payers with ids T01xx, made-up clinicians, people, keys and amounts."""
+    F = Fake()
+    seq = Counter()
+
+    def one(code, charge, paid, dos, **kw):
+        return [L_(code, charge, paid, dos, **kw)]
+
+    def cid(tag):
+        # ZZ8 + a digit + a letter + 4 digits: the bill; C017 its claim suffix
+        seq[tag] += 1
+        return "ZZ8%s%04d" % (tag, seq[tag])
+    MKY = dict(payer="TESTPAY MCR KY", pid="15102")
+    MIN_ = dict(payer="TESTPAY MCR IN", pid="08102")
+
+    def carrier(npi, d, car=MKY, code="99211", amt=6000):
+        # the Medicare carrier answers the clinician's claim that day: the office's state (no rate of interest)
+        F.claim(F.tx(add_days(d, 14), **car), cid("9C") + "C017", "1", amt + 2000, int(amt * 0.8),
+                one(code, amt + 2000, int(amt * 0.8), d, allowed=amt,
+                    cas=[("CO", "45", 2000), ("PR", "2", amt - int(amt * 0.8))]), prod="MB", npi=npi, **car)
+
+    PHR = "2000000190"           # a reference physician at Medicare (the NP/PA test of build_rates is pairwise)
+
+    def np_type(npi, year="2026", car=MKY):
+        # an NP/PA: its own Medicare modes sit at 85% of a physician's on two codes
+        for code, full in (("99212", 7000), ("99213", 10000)):
+            for i in range(3):
+                d = add_days(year + "-10-05", i)
+                for who, amt in ((PHR, full), (npi, int(full * 0.85))):
+                    F.claim(F.tx(add_days(d, 14), **car), cid("9N") + "C017", "1", amt + 2000, int(amt * 0.8),
+                            one(code, amt + 2000, int(amt * 0.8), d, allowed=amt,
+                                cas=[("CO", "45", 2000), ("PR", "2", amt - int(amt * 0.8))]), prod="MB", npi=who, **car)
+
+    def paid(payer, tag, code, amt, d, npi="1000000001", prod="12", charge=None, **kw):
+        bill = cid(tag)
+        ch = charge or amt + 5000
+        F.claim(F.tx(add_days(d, 20), **payer), bill + "C017", "1", ch, amt,
+                one(code, ch, amt, d, allowed=amt, cas=[("CO", "45", ch - amt)]), prod=prod, npi=npi, **payer, **kw)
+        return bill
+    # ============================================================================================ A17 rule 1
+    # ---- review a17-r1-1: an office-state tier is a share of the full rate of one service year; a payer that paid an
+    # NP in full through 2025 and at 85% on every 2026 answer pays the 2026 answers right
+    F.fix = "A17 rule 1 (an office-state tier is learned per service year: review a17-r1-1)"
+    TYR = dict(payer="TESTPAY YR", pid="T0101")
+    NPA, PHA = "2000000101", "2000000102"
+    for year, amt_np, n_np in (("2025", 10000, 30), ("2026", 8500, 12)):
+        for i in range(n_np):
+            d = add_days(year + "-02-02", i * 3)
+            carrier(NPA, d)
+            paid(TYR, "0A", "99213", amt_np, d, npi=NPA, prod="16")
+        for i in range(10):
+            d = add_days(year + "-03-01", i * 2)
+            carrier(PHA, d)
+            paid(TYR, "0A", "99213", 10000, d, npi=PHA, prod="16")
+    carrier(NPA, "2026-09-01")
+    b = paid(TYR, "0A", "99213", 8500, "2026-09-01", npi=NPA, prod="16")
+    F.exp("sub", (b, "99213", "G", "2026-09-01"), ("PAID", "full"))
+    carrier(PHA, "2026-09-02")
+    b = paid(TYR, "0A", "99213", 8500, "2026-09-02", npi=PHA, prod="16")
+    F.exp("unit", (b, "99213", "G", "2026-09-02"), "SHORT", guard=True)
+    # the year's tier is read across codes: 2 answers a code at 85% in 2026 (too few on any one code for A16's own
+    # evidence) after a 2025 in full make the clinician's 2026 tier
+    TYX = dict(payer="TESTPAY YX", pid="T0107")
+    NPH, PHH = "2000000115", "2000000116"
+    for i in range(30):
+        d = add_days("2025-02-02", i * 3)
+        carrier(NPH, d)
+        paid(TYX, "0G", "99213", 10000, d, npi=NPH)
+    for code, full in (("99212", 7000), ("99213", 10000), ("99214", 14000)):
+        for i in range(6):
+            d = add_days("2026-03-02", i * 2 + len(code))
+            carrier(PHH, d)
+            paid(TYX, "0G", code, full, d, npi=PHH)
+        for i in range(2):
+            d = add_days("2026-05-04", i * 5 + len(code) + int(code[-1]))
+            carrier(NPH, d)
+            paid(TYX, "0G", code, int(full * 0.85), d, npi=NPH)
+    carrier(NPH, "2026-09-10")
+    b = paid(TYX, "0G", "99213", 8500, "2026-09-10", npi=NPH)
+    F.exp("sub", (b, "99213", "G", "2026-09-10"), ("PAID", "full"))
+    # ---- the tier read over every year does not stand for a year whose own few answers lean the other way: an NP/PA
+    # paid in full in 2025 and at 85% on 4 answers in 2026 (too few for a 2026 tier) is judged as A16 judged it
+    TYS = dict(payer="TESTPAY YS", pid="T0102")
+    NPC, PHC = "2000000103", "2000000104"
+    np_type(NPC)
+    for year, n_np, amt_np in (("2025", 12, 10000), ("2026", 3, 8500)):
+        for i in range(n_np):
+            d = add_days(year + "-04-01", i * 3)
+            carrier(NPC, d)
+            paid(TYS, "0B", "99213", amt_np, d, npi=NPC, prod="16")
+        for i in range(10):
+            d = add_days(year + "-05-01", i * 2)
+            carrier(PHC, d)
+            paid(TYS, "0B", "99213", 10000, d, npi=PHC, prod="16")
+    carrier(NPC, "2026-09-03")
+    b = paid(TYS, "0B", "99213", 8500, "2026-09-03", npi=NPC, prod="16")
+    F.exp("sub", (b, "99213", "G", "2026-09-03"), ("PAID", "full"))
+    # ---- review a17-r2-2: a tier needs 5 clean answers (4 at 85% make none: the clinician, not known as an NP/PA,
+    # is owed the full rate)
+    F.fix = "A17 rule 1 (office-state tiers: answers, state-wide NP/PA tier, EMA location, ties: review a17-r2-2)"
+    TYT = dict(payer="TESTPAY YT", pid="T0103")
+    NPD, PHD = "2000000105", "2000000106"
+    for i in range(10):
+        d = add_days("2026-03-02", i * 2)
+        carrier(PHD, d)
+        paid(TYT, "0C", "99213", 10000, d, npi=PHD)
+    for i in range(3):
+        d = add_days("2026-04-01", i * 3)
+        carrier(NPD, d)
+        paid(TYT, "0C", "99213", 8500, d, npi=NPD)
+    carrier(NPD, "2026-09-04")
+    b = paid(TYT, "0C", "99213", 8500, "2026-09-04", npi=NPD)
+    F.exp("unit", (b, "99213", "G", "2026-09-04"), "SHORT")
+    # ---- a state-wide NP/PA tier: two NP/PAs this payer pays in full in Kentucky offices; a third NP/PA with no answers
+    # of its own there is owed the full rate too (A16 would accept 85% for an NP/PA)
+    TYU = dict(payer="TESTPAY YU", pid="T0104")
+    NPE1, NPE2, NPE3, PHE = "2000000107", "2000000108", "2000000109", "2000000110"
+    for n_ in (NPE1, NPE2, NPE3):
+        np_type(n_)
+    for i in range(10):
+        d = add_days("2026-03-02", i * 2)
+        carrier(PHE, d)
+        paid(TYU, "0D", "99213", 10000, d, npi=PHE)
+    for n_, start in ((NPE1, "2026-04-01"), (NPE2, "2026-05-01")):
+        for i in range(6):
+            d = add_days(start, i * 3)
+            carrier(n_, d)
+            paid(TYU, "0D", "99213", 10000, d, npi=n_)
+    carrier(NPE3, "2026-09-07")
+    b = paid(TYU, "0D", "99213", 8500, "2026-09-07", npi=NPE3)
+    F.exp("unit", (b, "99213", "G", "2026-09-07"), "SHORT")
+    # ---- the office state from the claim's EMA location when no Medicare carrier answered the clinician that day:
+    # the location's clinician days are Indiana's; this payer pays the NP in full in Kentucky and at 85% in Indiana
+    TYV = dict(payer="TESTPAY YV", pid="T0105")
+    NPF, PHF = "2000000111", "2000000112"
+
+    def ema_location(pcn_, loc):
+        F.con.execute("insert into ema_rows (row_fingerprint, family, source_name, row_index, claim_id, cpt, payer, "
+                      "activity_type, location) values (?,?,?,?,?,?,?,?,?)",
+                      ("fp%06d" % F.n, "charge_lines", "loc.csv", F.n, pcn_, "99211", None, "Adjustment", loc))
+        F.n += 1
+    for i in range(20):
+        d = add_days("2026-06-01", i)
+        F.claim(F.tx(add_days(d, 14), **MIN_), "ZZ80L%04dC017" % i, "1", 8000, 4800,
+                one("99211", 8000, 4800, d, allowed=6000, cas=[("CO", "45", 2000), ("PR", "2", 1200)]), prod="MB",
+                npi=PHF, **MIN_)
+        ema_location("ZZ80L%04dC017" % i, "TESTLOC INDIANA")
+    for i in range(10):
+        d = add_days("2026-03-02", i * 2)
+        carrier(PHF, d)
+        paid(TYV, "0E", "99213", 10000, d, npi=PHF)
+        carrier(NPF, add_days(d, 1))
+        paid(TYV, "0E", "99213", 10000, add_days(d, 1), npi=NPF)
+    for i in range(5):
+        d = add_days("2026-07-06", i * 2)
+        carrier(NPF, d, car=MIN_)
+        paid(TYV, "0E", "99213", 8500, d, npi=NPF)
+    b = paid(TYV, "0E", "99213", 8500, "2026-09-08", npi=NPF)
+    ema_location(b + "C017", "TESTLOC INDIANA")
+    F.exp("sub", (b, "99213", "G", "2026-09-08"), ("PAID", "full"))
+    # ---- a day both carriers answered once has no state: the NP's own payments at this payer (in full) decide
+    TYW = dict(payer="TESTPAY YW", pid="T0106")
+    NPG, PHG = "2000000113", "2000000114"
+    for i in range(10):
+        d = add_days("2026-03-02", i * 2)
+        carrier(PHG, d)
+        paid(TYW, "0F", "99213", 10000, d, npi=PHG)
+        carrier(NPG, add_days(d, 1))
+        paid(TYW, "0F", "99213", 10000, add_days(d, 1), npi=NPG)
+    for i in range(6):
+        d = add_days("2026-07-06", i * 2)
+        carrier(NPG, d, car=MIN_)
+        paid(TYW, "0F", "99213", 8500, d, npi=NPG)
+    carrier(NPG, "2026-09-09", car=MIN_)       # Indiana's carrier first: a tie must not fall to it
+    carrier(NPG, "2026-09-09")
+    b = paid(TYW, "0F", "99213", 8500, "2026-09-09", npi=NPG)
+    F.exp("unit", (b, "99213", "G", "2026-09-09"), "SHORT")
+    # ---- review a17-r2-2: the plan-level keys' thresholds. One payer per case; the codes' network amounts
+    NET = {"99212": 7000, "99213": 10000, "99214": 14000, "99203": 12000, "11102": 10000, "11104": 8000,
+           "17000": 6000}
+    F.fix = "A17 rule 1 (plan-level keys: when a plan is read apart: review a17-r2-2)"
+
+    def plan(payer, tag, code, amt, n, group=None, cclass=None, start="2026-02-02"):
+        for j in range(n):
+            paid(payer, tag, code, amt, add_days(start, j % 150), group=group, cclass=cclass)
+
+    def smalls(payer, tag, code, n, start="2026-02-02"):
+        for j in range(n):
+            paid(payer, tag, code, NET[code], add_days(start, j % 150), group="GRPSMALL%02d" % (j % 25))
+    # a plan differing on 2 codes (and agreeing on 1) is not read apart: 3 codes are needed
+    TP1 = dict(payer="TESTPAY PA1", pid="T0111")
+    for code, n_rest, n_own, own in (("99213", 90, 15, 8000), ("99214", 45, 45, 11000), ("99212", 45, 45, 7000)):
+        smalls(TP1, "1A", code, n_rest)
+        plan(TP1, "1A", code, own, n_own, group="GRPP1")
+    b = paid(TP1, "1A", "99213", 8000, "2026-07-10", group="GRPP1")
+    F.exp("unit", (b, "99213", "G", "2026-07-10"), "SHORT")
+    # a plan differing on 3 codes and agreeing on 4 is not read apart (it must differ on more codes than it agrees)
+    TP2 = dict(payer="TESTPAY PA2", pid="T0112")
+    for k, code in enumerate(sorted(NET)):
+        smalls(TP2, "1B", code, 20)
+        own = int(NET[code] * 0.8) if code in ("99212", "99213", "99214") else NET[code]
+        plan(TP2, "1B", code, own, 15, group="GRPP2")
+    b = paid(TP2, "1B", "99213", 8000, "2026-07-10", group="GRPP2")
+    F.exp("unit", (b, "99213", "G", "2026-07-10"), "SHORT")
+    # a plan paying 85% of the rest on every code is not read apart (an NP/PA tier's ratio says nothing)
+    TP3 = dict(payer="TESTPAY PA3", pid="T0113")
+    for code in ("99212", "99213", "99214", "99203"):
+        smalls(TP3, "1C", code, 30)
+        plan(TP3, "1C", code, int(NET[code] * 0.85), 26, group="GRPP3")
+    b = paid(TP3, "1C", "99213", 8500, "2026-07-10", group="GRPP3")
+    F.exp("unit", (b, "99213", "G", "2026-07-10"), "SHORT")
+    # a product (contract class) is compared on the answers no employer plan read apart holds: the large plan of its
+    # own schedule carries the product's class too, the product's other answers are few and at the network rate
+    TP4 = dict(payer="TESTPAY PA4", pid="T0114")
+    for code in ("99212", "99213", "99214", "99203"):
+        smalls(TP4, "1D", code, 30)
+        plan(TP4, "1D", code, int(NET[code] * 0.8), 30, group="GRPBIG4", cclass="TESTCLASS ONE")
+        plan(TP4, "1D", code, NET[code], 3, group="GRPC4", cclass="TESTCLASS ONE")
+    b = paid(TP4, "1D", "99213", 10000, "2026-07-10", group="GRPC4", cclass="TESTCLASS ONE")
+    F.exp("sub", (b, "99213", "G", "2026-07-10"), ("PAID", "full"))
+    # a plan read apart leaves the rest before the next is compared: a second large plan on the network schedule is
+    # then not read apart, and the payer keeps its rate for the few answers of small plans
+    TP5 = dict(payer="TESTPAY PA5", pid="T0115")
+    for code in ("99212", "99213", "99214", "99203"):
+        plan(TP5, "1E", code, int(NET[code] * 0.8), 40, group="GRPA5")
+        plan(TP5, "1E", code, NET[code], 30, group="GRPB5")
+        smalls(TP5, "1E", code, 3)
+    b = paid(TP5, "1E", "99213", 10000, "2026-07-10", group="GRPSMALL24")
+    F.exp("sub", (b, "99213", "G", "2026-07-10"), ("PAID", "full"))
+    # a plan of 60 answers is not read apart (100 are needed)
+    TP6 = dict(payer="TESTPAY PA6", pid="T0116")
+    for code in ("99212", "99213", "99214", "99203"):
+        smalls(TP6, "1F", code, 30)
+        plan(TP6, "1F", code, int(NET[code] * 0.8), 15, group="GRPP6")
+    b = paid(TP6, "1F", "99213", 8000, "2026-07-10", group="GRPP6")
+    F.exp("unit", (b, "99213", "G", "2026-07-10"), "SHORT")
+    # ============================================================================================ A17 rule 2
+    # ---- review a17-r2-3: the setting a payer priced when CLP08 is empty: the bill's other claim id's 837, the EMA
+    # location's setting; a void 837 gives none
+    F.fix = "A17 rule 2 (the setting from the bill's 837s and EMA's location: review a17-r2-3)"
+    TS2 = dict(payer="TESTPAY ST2", pid="T0121")
+    for i in range(10):
+        d = add_days("2026-03-10", i)
+        p_ = cid("2A") + "C017"
+        F.send837(p_, d, one("11402", 20000, 0, d), pos="11", **TS2)
+        F.claim(F.tx(add_days(d, 20), **TS2), p_, "1", 20000, 15000,
+                one("11402", 20000, 15000, d, allowed=15000, cas=[("CO", "45", 5000)]), pos="", **TS2)
+    for i in range(20):
+        d = add_days("2026-04-10", i)
+        p_ = cid("2B") + "C017"
+        F.claim(F.tx(add_days(d, 20), **TS2), p_, "1", 20000, 9000,
+                one("11402", 20000, 9000, d, allowed=9000, cas=[("CO", "45", 11000)]), pos="24", **TS2)
+        ema_location(p_, "TESTLOC SURGERY CENTER")
+    # the remittance answers claim id C017; the bill's only 837 went out under C018, place of service 24
+    b = cid("2C")
+    F.send837(b + "C018", "2026-06-01", one("11402", 20000, 0, "2026-06-01"), pos="24", **TS2)
+    F.claim(F.tx("2026-06-20", **TS2), b + "C017", "1", 20000, 9000,
+            one("11402", 20000, 9000, "2026-06-01", allowed=9000, cas=[("CO", "45", 11000)]), pos="", **TS2)
+    F.exp("sub", (b, "11402", "G", "2026-06-01"), ("PAID", "full"))
+    # no 837 and no CLP08: the claim's EMA location is the surgery center's
+    b = cid("2C")
+    F.claim(F.tx("2026-06-21", **TS2), b + "C017", "1", 20000, 9000,
+            one("11402", 20000, 9000, "2026-06-02", allowed=9000, cas=[("CO", "45", 11000)]), pos="", **TS2)
+    ema_location(b + "C017", "TESTLOC SURGERY CENTER")
+    F.exp("sub", (b, "11402", "G", "2026-06-02"), ("PAID", "full"))
+    # two void 837s said place 24; the claim went out again as an office claim and was paid the surgery center's
+    # amount: short of the office rate
+    b = cid("2C")
+    for k in range(2):
+        F.send837(b + "C017", "2026-06-03", one("11402", 20000, 0, "2026-06-03"), freq="8", pos="24", **TS2)
+    F.send837(b + "C017", "2026-06-05", one("11402", 20000, 0, "2026-06-03"), pos="11", **TS2)
+    F.claim(F.tx("2026-06-25", **TS2), b + "C017", "1", 20000, 9000,
+            one("11402", 20000, 9000, "2026-06-03", allowed=9000, cas=[("CO", "45", 11000)]), pos="", **TS2)
+    F.exp("unit", (b, "11402", "G", "2026-06-03"), "SHORT")
+    # ============================================================================================ A17 rule 3
+    F.fix = "A17 rule 3 (cross-claim ranking: clinicians, threshold, value, reducing modifiers: review a17-r2-3)"
+    TX = dict(payer="TESTPAY XC", pid="T0131")
+    for i in range(6):
+        d = add_days("2026-03-16", i)
+        F.claim(F.tx(add_days(d, 21), **TX), cid("3A") + "C017", "1", 80000, 60000,
+                one("17311", 80000, 60000, d, allowed=60000, cas=[("CO", "45", 20000)]), pos="11", prod="16", **TX)
+        F.claim(F.tx(add_days(d, 21), **TX), cid("3A") + "C017", "1", 40000, 30000,
+                one("13132", 40000, 30000, d, allowed=30000, cas=[("CO", "45", 10000)]), pos="24", prod="16", **TX)
+
+    def day(tag, d, mohs, repair, npi_m="2000000131", npi_r="2000000131", rmods=None):
+        who = ("TESTLAST" + tag, "TESTFIRST" + tag)
+        bm, br = cid("3B"), cid("3B")
+        kw = dict(mods=rmods) if rmods else {}
+        rc = max(40000, repair + 5000)
+        F.claim(F.tx(add_days(d, 19), **TX), br + "C017", "1", rc, repair,
+                one("13132", rc, repair, d, allowed=repair, cas=[("CO", "45", rc - repair)], **kw), pos="24",
+                prod="16", patient=who, npi=npi_r, **TX)
+        F.claim(F.tx(add_days(d, 21), **TX), bm + "C017", "1", 80000, mohs,
+                one("17311", 80000, mohs, d, allowed=mohs, cas=[("CO", "45", 80000 - mohs)]), pos="11", prod="16",
+                patient=who, npi=npi_m, **TX)
+        return bm, br
+    # two clinicians' procedures of one patient's day are not ranked together: the Mohs paid at half is short of
+    # its full rate (ranked with the other clinician's repair it would be owed only half the difference)
+    bm, br = day("XA", "2026-06-01", 30000, 30000, npi_r="2000000132")
+    F.exp("sub", (bm, "17311", "G", "2026-06-01"), ("SHORT", "below_rate"))
+    # a day $0.80 short in total is the payer's day ranked right (the threshold is $1 and 3%)
+    bm, br = day("XB", "2026-06-02", 30000, 44920)
+    F.exp("sub", (bm, "17311", "G", "2026-06-02"), ("PAID", "half_rate_mppr_cross_claim"))
+    # a procedure is worth no less than it was allowed: a repair allowed above the Mohs' full rate is the day's top,
+    # and the Mohs below half of its rate is short
+    bm, br = day("XC", "2026-06-03", 28000, 65000)
+    F.exp("sub", (bm, "17311", "G", "2026-06-03"), ("SHORT", "below_half_cross_claim"))
+    # a line with a reducing modifier (52) is left out of the ranking: the Mohs at half is then short of its full rate
+    bm, br = day("XD", "2026-06-04", 30000, 10000, rmods=["52"])
+    F.exp("sub", (bm, "17311", "G", "2026-06-04"), ("SHORT", "below_rate"))
+    # review a17-r1-5: a procedure allowed in full but taken wholly by the deductible is one of the day's procedures:
+    # the payer ranked the day right (its full rate to the first 17263, half to the other), nothing is short
+    F.fix = "A17 rule 3 (a procedure the deductible took is ranked by what it was allowed: review a17-r1-5)"
+    for i in range(6):
+        d = add_days("2026-02-02", i)
+        F.claim(F.tx(add_days(d, 14), **MKY), cid("3C") + "C017", "1", 17426, 13941,
+                one("17263", 17426, 13941, d, allowed=17426, cas=[("CO", "45", 0), ("PR", "2", 3485)]), prod="MB",
+                **MKY)
+        F.claim(F.tx(add_days(d, 15), **MKY), cid("3C") + "C017", "1", 6133, 4906,
+                one("17000", 6133, 4906, d, allowed=6133, cas=[("PR", "2", 1227)]), prod="MB", **MKY)
+    b = cid("3D")
+    F.send837(b + "C017", "2026-05-05", [L_("17263", 17426, 0, "2026-05-04"), L_("17263", 17426, 0, "2026-05-04"),
+                                         L_("17000", 6133, 0, "2026-05-04")])
+    F.claim(F.tx("2026-05-20", **MKY), b + "C017", "1", 23559, 2453,
+            [L_("17263", 17426, 0, "2026-05-04", allowed=17426, cas=[("PR", "1", 17426)]),
+             L_("17000", 6133, 2453, "2026-05-04", mods=["51"], allowed=3067, cas=[("CO", "59", 3066), ("PR", "2", 614)])],
+            prod="MB", **MKY)
+    F.claim(F.tx("2026-07-30", **MKY), b + "C017", "1", 17426, 6970,
+            [L_("17263", 17426, 6970, "2026-05-04", mods=["51"], allowed=8713, cas=[("CO", "59", 8713), ("PR", "2", 1743)])],
+            prod="MB", **MKY)
+    F.exp("counts", (b, "17263", "G", "2026-05-04"), {"PAID": 1, "MOVED_TO_PATIENT": 1})
+    # ============================================================================================ A17 rule 5
+    # ---- review a17-r1-2: an EMA $0 row is judged with its claim's check
+    F.fix = "A17 rule 5 (an EMA $0 row on its claim's paying check is the line's answer: review a17-r1-2)"
+    TCC = dict(payer="TESTPAY CC", pid="T0171")
+    CC = TCC["payer"]
+    # the check paid the claim's 17000 and gave 99213 $0; EMA posted the reason (CO-97) two months later: a denial
+    # dated by the check (its appeal window runs from the check, 180 days for A16's commercial default)
+    b = cid("5A")
+    F.send837(b + "C017", "2026-06-02", [L_("17000", 9000, 0, "2026-06-01"), L_("99213", 15000, 0, "2026-06-01")],
+              **TCC)
+    F.ema_line(950001, "2026-06-01", "17000", [(1, "charge", 9000, CC, None), (30, "pay", 6000, CC, "CHKCC1")],
+               bill=b, status="Resolved/Other")
+    F.ema_line(950001, "2026-06-01", "99213", [(1, "charge", 15000, CC, None), (30, "answer", 0, CC, "CHKCC1"),
+                                               (90, "adj", 15000, CC, ("CO", "97", False))],
+               bill=b, status="Resolved/Other")
+    F.exp("sub", (b, "99213", "G", "2026-06-01"), ("DENIED", "ema_off_feed_answer"))
+    F.exp("wend", (b, "99213", "G", "2026-06-01"), "2026-12-28")
+    # the same with no reason ever posted, EMA's status still pending: a denial whose reason EMA never posted
+    b = cid("5A")
+    F.send837(b + "C017", "2026-06-03", [L_("17000", 9000, 0, "2026-06-02"), L_("99213", 15000, 0, "2026-06-02")],
+              **TCC)
+    F.ema_line(950002, "2026-06-02", "17000", [(1, "charge", 9000, CC, None), (30, "pay", 6000, CC, "CHKCC2")],
+               bill=b, status="Payment Pending")
+    F.ema_line(950002, "2026-06-02", "99213", [(1, "charge", 15000, CC, None), (30, "answer", 0, CC, "CHKCC2")],
+               bill=b, status="Payment Pending")
+    F.exp("sub", (b, "99213", "G", "2026-06-02"), ("DENIED", "ema_off_feed_answer"))
+    # a $0 row on a check that paid another EMA claim that day answers nothing
+    b = cid("5A")
+    F.send837(b + "C017", "2026-06-04", [L_("99213", 15000, 0, "2026-06-03")], **TCC)
+    F.ema_line(950003, "2026-06-03", "99213", [(1, "charge", 15000, CC, None), (30, "answer", 0, CC, "CHKCC3")],
+               bill=b, status="Payment Pending")
+    F.ema_line(950004, "2026-06-03", "99214", [(1, "charge", 20000, CC, None), (30, "pay", 9000, CC, "CHKCC3")],
+               person=7004, status="Resolved/Paid")
+    F.exp("sub", (b, "99213", "G", "2026-06-03"), ("NEVER_ANSWERED", "no_answer_in_ema"), guard=True)
+    # ---- review a17-r1-4: a send-day twin is the bill's only when its EMA patient is proven the bill's
+    F.fix = "A17 rule 5 (a send-day twin needs the bill's patient: review a17-r1-4)"
+    TTW = dict(payer="TESTPAY TW", pid="T0141")
+    TW = TTW["payer"]
+
+    def proof(person, link, sub, dos):
+        # the EMA patient's other claim, tied by the link map to a bill sent under this subscriber id
+        pb = cid("5P")
+        F.send837(pb + "C017", add_days(dos, 1), one("99212", 9000, 0, dos), sub=sub, **TTW)
+        F.ema_line(link, dos, "99212", [(0, "charge", 9000, TW, None), (30, "pay", 6000, TW, "CHKP%d" % link)],
+                   bill=pb, person=person)
+
+    def twin(link, person, dos, charge_day, code="99213", amt=15000, pay=8000):
+        F.ema_line(link, dos, code, [(charge_day, "charge", amt, TW, None)] +
+                   ([(30, "pay", pay, TW, "CHK%d" % link)] if pay else []), person=person)
+
+    def decoy(link, dos, code="99213", amt=15000):
+        # an EMA claim of the same line no bill names, charged weeks later: no twin, and no 'only such line' either
+        F.ema_line(link, dos, code, [(40, "charge", amt, TW, None)], person=7999, status="Payment Pending")
+    # the only twin is another patient's (the payer's own member ids differ): the bill stays unanswered
+    b = cid("5B")
+    F.send837(b + "C017", "2026-07-08", one("99213", 15000, 0, "2026-07-07"), sub="SUBW1", **TTW)
+    twin(960001, 8001, "2026-07-07", 1)
+    proof(8001, 960002, "SUBW1OTHER", "2026-04-01")
+    decoy(960003, "2026-07-07")
+    F.exp("sub", (b, "99213", "G", "2026-07-07"), ("NO_FEED", "no_feed"))
+    # a twin whose EMA patient nothing ties to a bill, holding a payment: neither paid nor owed
+    b = cid("5B")
+    F.send837(b + "C017", "2026-07-09", one("99213", 15000, 0, "2026-07-08"), sub="SUBW2", **TTW)
+    twin(960011, 8002, "2026-07-08", 1)
+    decoy(960012, "2026-07-08")
+    F.exp("sub", (b, "99213", "G", "2026-07-08"), ("TWIN_UNPROVEN", "send_day_twin_patient_unproven"))
+    # one EMA claim proven for two bills (two sends of one patient's lines, a day apart): the twin of neither
+    for k, sd in enumerate(("2026-07-11", "2026-07-12")):
+        b = cid("5C")
+        F.send837(b + "C017", sd, one("99214", 21000, 0, "2026-07-10"), sub="SUBW3", **TTW)
+        F.exp("sub", (b, "99214", "G", "2026-07-10"), ("TWIN_UNPROVEN", "send_day_twin_patient_unproven"))
+    twin(960021, 8003, "2026-07-10", 1, code="99214", amt=21000, pay=9000)
+    proof(8003, 960022, "SUBW3", "2026-04-02")
+    decoy(960023, "2026-07-10", code="99214", amt=21000)
+    # the only EMA line of the bill's day, code and charge is another patient's: no match ('unique') either
+    b = cid("5D")
+    F.send837(b + "C017", "2026-07-15", one("99215", 25000, 0, "2026-07-14"), sub="SUBW4", **TTW)
+    F.ema_line(960031, "2026-07-14", "99215", [(1, "charge", 25000, TW, None), (30, "pay", 9000, TW, "CHK960031")],
+               person=8004)
+    proof(8004, 960032, "SUBW4OTHER", "2026-04-03")
+    F.exp("sub", (b, "99215", "G", "2026-07-14"), ("NO_FEED", "no_feed"))
+    # ---- review a17-r2-3: send-day twins (one day of slack, tied links), with the patient proven
+    F.fix = "A17 rule 5 (send-day twins: the slack day, links the map ties: review a17-r2-3)"
+    # charged the day before the send: a twin
+    b = cid("5E")
+    F.send837(b + "C017", "2026-07-21", one("99213", 15000, 0, "2026-07-20"), sub="SUBT1", **TTW)
+    twin(960041, 8011, "2026-07-20", 0)
+    proof(8011, 960042, "SUBT1", "2026-04-04")
+    decoy(960043, "2026-07-20")
+    F.exp("sub", (b, "99213", "G", "2026-07-20"), ("PAID", "ema_paid_off_feed"))
+    # charged two days before the send: no twin
+    b = cid("5E")
+    F.send837(b + "C017", "2026-07-24", one("99213", 15000, 0, "2026-07-22"), sub="SUBT2", **TTW)
+    twin(960051, 8012, "2026-07-22", 0)
+    proof(8012, 960052, "SUBT2", "2026-04-05")
+    decoy(960053, "2026-07-22")
+    F.exp("sub", (b, "99213", "G", "2026-07-22"), ("NO_FEED", "no_feed"), guard=True)
+    # an EMA claim the link map ties to a bill (in conflict, so it names no bill) is no twin
+    b = cid("5E")
+    F.send837(b + "C017", "2026-07-27", one("99213", 15000, 0, "2026-07-26"), sub="SUBT3", **TTW)
+    twin(960061, 8013, "2026-07-26", 1)
+    F.con.execute("insert or replace into ema_link_map (link, bill, method, conflict, facility) values (?,?,?,?,?)",
+                  (960061, "ZZ85X9999", "payment", 1, 0))
+    proof(8013, 960062, "SUBT3", "2026-04-06")
+    decoy(960063, "2026-07-26")
+    F.exp("sub", (b, "99213", "G", "2026-07-26"), ("NO_FEED", "no_feed"))
+    # ---- review a17-r2-3: a bare $0 remittance answers nothing, but a patient share, an allowed amount or a
+    # claim-level reason does; an EMA $0 check row with an allowed amount is an answer
+    F.fix = "A17 rule 5 (what makes a $0 row an answer: review a17-r2-3)"
+    TBR = dict(payer="TESTPAY BR", pid="T0151")
+    for i in range(3):
+        paid(TBR, "5F", "99213", 10000, add_days("2026-11-01", i))      # the payer's feed runs to November
+    b = cid("5G")
+    F.send837(b + "C017", "2026-06-02", one("99213", 15000, 0, "2026-06-01"), **TBR)
+    F.claim(F.tx("2026-06-20", **TBR), b + "C017", "1", 15000, 0, one("99213", 15000, 0, "2026-06-01"), prr=15000,
+            **TBR)
+    # (A16 reads a $0 answer that gives no reason as a denial of no stated reason: an answer, not 'never answered')
+    F.exp("sub", (b, "99213", "G", "2026-06-01"), ("DENIED", ""))
+    b = cid("5G")
+    F.send837(b + "C017", "2026-06-03", one("99213", 15000, 0, "2026-06-02"), **TBR)
+    F.claim(F.tx("2026-06-21", **TBR), b + "C017", "1", 15000, 0,
+            one("99213", 15000, 0, "2026-06-02", allowed=8000), **TBR)
+    F.exp("unit", (b, "99213", "G", "2026-06-02"), "DENIED")
+    b = cid("5G")
+    F.send837(b + "C017", "2026-06-04", one("99213", 15000, 0, "2026-06-03"), **TBR)
+    F.claim(F.tx("2026-06-22", **TBR), b + "C017", "1", 15000, 0, one("99213", 15000, 0, "2026-06-03"),
+            ccas=[("CO", "16", 15000)], **TBR)
+    F.exp("unit", (b, "99213", "G", "2026-06-03"), "DENIED")
+    TEA = dict(payer="TESTPAY EA", pid="T0152")
+    b = cid("5H")
+    F.send837(b + "C017", "2026-06-06", one("99213", 15000, 0, "2026-06-05"), **TEA)
+    F.ema_line(950101, "2026-06-05", "99213", [(1, "charge", 15000, TEA["payer"], None),
+                                               (30, "answer", 0, TEA["payer"], ("CHKEA1", 8000))],
+               bill=b, status="Resolved/Paid")
+    F.exp("unit", (b, "99213", "G", "2026-06-05"), "MOVED_TO_PATIENT")
+    # ---- review a17-r2-3: a payer whose 835s stopped answers through EMA only past its usual answer time
+    F.fix = "A17 rule 5 (a stopped feed's claim inside the payer's usual time: review a17-r2-3)"
+    TFS = dict(payer="TESTPAY FS", pid="T0161")
+    for i in range(3):
+        paid(TFS, "5J", "99213", 10000, add_days("2025-08-20", i))
+    b = cid("5K")
+    F.send837(b + "C017", "2026-11-10", one("99213", 15000, 0, "2026-11-09"), **TFS)
+    F.ema_line(950201, "2026-11-09", "99213", [(1, "charge", 15000, TFS["payer"], None)], bill=b,
+               status="Payment Pending")
+    F.exp("sub", (b, "99213", "G", "2026-11-09"), ("FEED_STOPPED", ""))
+    F.fix = None
+    F.con.commit()
+    return F
+
+
 def evaluate(F, a):
     """Every check of the self-test against an auditor's results: [(check, fix label or 'A15 base', passed, detail)].
     Works on A15's Audit objects too (selftest_vs_a15.py)."""
@@ -6828,6 +7315,11 @@ def evaluate(F, a):
         u9 = sv.units[0][9] if sv and sv.units else None
         got = "unverified" if u9 is WINDOW_UNVERIFIED else "inside" if u9 is True else "expired" if u9 is False else None
         add("inside", key, got == want, f"window state {key[0]} {key[1]} expected {want} got {got}")
+    for key, want in getattr(F, "expect_wver", {}).items():
+        sv = a.svcs.get(key)
+        w8 = sv.units[0][8] if sv and sv.units else None
+        got = None if not w8 else bool(getattr(w8, "verified", True))
+        add("wver", key, got == want, f"window verified {key[0]} {key[1]} expected {want} got {got} ({w8})")
     lotu_keys = {sv.key for sv, i, u in getattr(a, "lot_unverified", [])}
     for key, want_in in getattr(F, "expect_lotu", {}).items():
         add("lotu", key, (key in lotu_keys) == want_in, f"past an unverified window {key[0]} expected {want_in}")
@@ -6932,6 +7424,137 @@ def build_window_store():
                         oneline("99213", 15000, 0, "2025-01-03", cas=[("CO", "50", 15000)]), prod="MB", **MKY)
     fid = F.finding("DENIED_MEDICAL_NECESSITY", "denial", line_key=lm, shortfall=15000)
     F.exp("isub", fid, "past_window", guard=True)
+    # ================================================================ the review round (reviews a17-r1 and a17-r2)
+    seq = Counter()
+
+    def cid(tag):
+        seq[tag] += 1
+        return "ZZ8%s%04d" % (tag, seq[tag])
+
+    def recent(payer, prod, d="2026-11-20", who=None):
+        # a recent answer of the payer: its 835s are live (a claim it never answered is 'never answered', not a feed
+        # gap), and the feed runs to late November
+        F.claim(F.tx(d, **payer), cid("7Z") + "C017", "1", 15000, 10000,
+                oneline("99213", 15000, 10000, add_days(d, -20), allowed=10000, cas=[("CO", "45", 5000)]), prod=prod,
+                patient=who, **payer)
+
+    def denial(payer, tag, prod, remit, dos, carc, finding=False, **kw):
+        bill = cid(tag)
+        ck, (lk,) = F.claim(F.tx(remit, **payer), bill + "C017", "1", 15000, 0,
+                            oneline("99213", 15000, 0, dos, cas=[("CO", carc, 15000)]), prod=prod, **payer, **kw)
+        fid = F.finding("DENIED_MEDICAL_NECESSITY", "denial", line_key=lk, shortfall=15000) if finding else None
+        return bill, fid
+
+    def unanswered(payer, tag, dos, sent, sub=None):
+        bill = cid(tag)
+        F.send837(bill + "C017", sent, oneline("99213", 15000, 0, dos), sub=sub, **payer)
+        return bill
+    # ---- review a17-r1-3: the group by payer id first. The VA's network (837 payer id VACCN) under a name UHC's rules
+    # match: its first-filing limit (180 days from the service, 38 USC 1703D(b)), not UHC's agreement
+    F.fix = "A17 rule 4 (researched table: a payer id names the group first: review a17-r1-3)"
+    VAN = dict(payer="TESTPAY UNITEDHEALTHCARE", pid="VACCN")
+    b = unanswered(VAN, "6A", "2026-04-01", "2026-04-02")
+    F.exp("wend", (b, "99213", "G", "2026-04-01"), "2026-09-29")
+    # the same network's denial answered only in EMA, under that name: the network has no verified appeal window, so
+    # past A16's 180 days it is 'window unverified', never UHC's verified 12 months (expired)
+    for k in range(2):
+        unanswered(VAN, "6A", "2026-03-0%d" % (k + 1), "2026-03-1%d" % k)
+    b = unanswered(VAN, "6A", "2025-09-01", "2025-09-02")
+    F.ema_line(970001, "2025-09-01", "99213", [(1, "charge", 15000, VAN["payer"], None),
+                                               (30, "answer", 0, VAN["payer"], "CHKVA1"),
+                                               (30, "adj", 15000, VAN["payer"], ("CO", "96", False))],
+               bill=b, status="Denied")
+    F.exp("inside", (b, "99213", "G", "2025-09-01"), "unverified")
+    # UnitedHealthcare's AARP Medicare Supplement (payer id 36273) named UHC: its supplement rows (no verified appeal
+    # window), not UHC's commercial 12 months
+    AAR = dict(payer="UHC TESTPAY", pid="36273")
+    b, _ = denial(AAR, "6B", "15", "2025-10-15", "2025-10-01", "50")
+    F.exp("inside", (b, "99213", "G", "2025-10-01"), "unverified")
+    # ---- review a17-r1-6: UMR's dispute window is the main guide's 12 months from the original EOB (the UMR supplement
+    # refers to it and states none of its own): a denial 312 days old is inside it
+    F.fix = "A17 rule 4 (researched table: UMR's 12 months from the original EOB: review a17-r1-6)"
+    UMRP = dict(payer="TESTPAY UMR", pid="39026")
+    b, _ = denial(UMRP, "6C", "12", "2026-01-15", "2026-01-02", "50")
+    F.exp("wend", (b, "99213", "G", "2026-01-02"), "2027-01-15")
+    F.exp("inside", (b, "99213", "G", "2026-01-02"), "inside")
+    F.exp("wver", (b, "99213", "G", "2026-01-02"), True)
+    # ---- review a17-r1-7: the auditor's own 180 days from the send has no source: a never-answered claim inside it
+    # but past the payer's verified first-filing limit rests on an unverified window; past the allowance the payer's
+    # later verified limit stands alone
+    F.fix = "A17 rule 4 (researched table: the 180 days from the send is no verified window: review a17-r1-7)"
+    CIG = dict(payer="CIGNA TESTPAY", pid="T0192")
+    recent(CIG, "12")
+    b = unanswered(CIG, "6D", "2026-07-01", "2026-09-15")
+    F.exp("wend", (b, "99213", "G", "2026-07-01"), "2027-03-14")
+    F.exp("wver", (b, "99213", "G", "2026-07-01"), False)
+    recent(MKY, "MB")
+    b = unanswered(MKY, "6D", "2026-06-01", "2026-06-02")
+    F.exp("wend", (b, "99213", "G", "2026-06-01"), "2027-06-01", guard=True)
+    F.exp("wver", (b, "99213", "G", "2026-06-01"), True, guard=True)
+    # ---- review a17-r2-1: the uses of particular rows, each checked once
+    F.fix = "A17 rule 4 (researched table: how particular rows are used: review a17-r2-1)"
+    # Kentucky Medicaid: a denial is fixed by a new claim within 12 months of the service, its appeal path too
+    KYM = dict(payer="TESTPAY KENTUCKY MEDICAID", pid="T0193")
+    b, _ = denial(KYM, "6E", "MC", "2026-08-15", "2026-03-01", "96")
+    F.exp("wend", (b, "99213", "G", "2026-03-01"), "2027-03-01")
+    F.exp("inside", (b, "99213", "G", "2026-03-01"), "inside")
+    # Kentucky Medicaid never answered 13 months after the service: past its 12 months, but a crossover claim's
+    # 6 months from Medicare's decision may still run (a condition the auditor cannot check): unverified
+    recent(KYM, "MC")
+    b = unanswered(KYM, "6E", "2025-10-01", "2025-10-02")
+    F.exp("inside", (b, "99213", "G", "2025-10-01"), "unverified")
+    # WellCare Medicaid never answered 13 months after the service: 12 months, or 6 months from a primary payer's
+    # payment if later (unchecked): unverified
+    WCM = dict(payer="TESTPAY WELLCARE", pid="T0194")
+    recent(WCM, "MC", who=("TESTLASTWC", "TESTFIRST"))
+    b = unanswered(WCM, "6F", "2025-10-01", "2025-10-02", sub="MTESTLASTWC")
+    F.exp("inside", (b, "99213", "G", "2025-10-01"), "unverified")
+    # Anthem Medicaid (the Kentucky plan's 365 days or the Indiana plans' 90: the remittance does not say which, and the
+    # two row groups are read as one) never answered 200 days after the service: unverified
+    recent(BLU, "MC", who=("TESTLASTAC", "TESTFIRST"))
+    b = unanswered(BLU, "6G", "2026-05-07", "2026-05-08", sub="MTESTLASTAC")
+    F.exp("inside", (b, "99213", "G", "2026-05-07"), "unverified")
+    # an ERISA plan's 180 days are the least it must allow: a TPA denial 200 days old is unverified (listed apart, its
+    # item's sub-kind says so)
+    TPA = dict(payer="TESTPAY BENEFIT ADMINISTRATORS", pid="T0195")
+    b, _ = denial(TPA, "6H", "12", "2026-05-07", "2026-04-20", "50")
+    F.exp("inside", (b, "99213", "G", "2026-04-20"), "unverified")
+    F.exp("lotu", (b, "99213", "G", "2026-04-20"), True)
+    b, fid = denial(TPA, "6H", "12", "2026-05-07", "2026-04-21", "50", finding=True)
+    F.exp("isub", fid, "window_unverified")
+    # Aetna's 180 days, or 2 years for a fully insured plan (the remittance does not say which): a denial 200 days old
+    # is past the verified base but inside the extension it cannot check: unverified, listed apart
+    AET = dict(payer="AETNA TESTPAY", pid="T0196")
+    b, _ = denial(AET, "6J", "12", "2026-05-07", "2026-04-20", "50")
+    F.exp("inside", (b, "99213", "G", "2026-04-20"), "unverified")
+    F.exp("lotu", (b, "99213", "G", "2026-04-20"), True)
+    b, fid = denial(AET, "6J", "12", "2026-05-07", "2026-04-21", "50", finding=True)
+    F.exp("isub", fid, "window_unverified")
+    # TRICARE's returned claim: the later of 1 year after the service or 90 days from the return (100 days ago)
+    TRI = dict(payer="TESTPAY TRICARE", pid="T0197")
+    b, _ = denial(TRI, "6K", "CH", "2026-08-15", "2026-03-01", "16")
+    F.exp("wend", (b, "99213", "G", "2026-03-01"), "2027-03-01")
+    F.exp("inside", (b, "99213", "G", "2026-03-01"), "inside")
+    # Humana Medicaid paid below its rate 200 days ago: the 24-month contract dispute of a short payment, not the
+    # 120-day appeal
+    for i in range(6):
+        d = add_days("2026-03-02", i)
+        F.claim(F.tx(add_days(d, 20), **HMA), cid("6L") + "C017", "1", 15000, 10000,
+                oneline("99213", 15000, 10000, d, allowed=10000, cas=[("CO", "45", 5000)]), prod="MC", **HMA)
+    b = cid("6L")
+    F.claim(F.tx("2026-05-07", **HMA), b + "C017", "1", 15000, 8000,
+            oneline("99213", 15000, 8000, "2026-04-20", allowed=8000, cas=[("CO", "45", 7000)]), prod="MC", **HMA)
+    F.exp("unit", (b, "99213", "G", "2026-04-20"), "SHORT")
+    F.exp("inside", (b, "99213", "G", "2026-04-20"), "inside")
+    # a correctable denial of a payer with no corrected-claim row (Cigna) past its appeal (180 days) and its first
+    # filing (90 days): the first filing stands in for the corrected-claim window, unverified as one
+    b, _ = denial(CIG, "6M", "12", "2026-05-07", "2026-01-02", "16")
+    F.exp("inside", (b, "99213", "G", "2026-01-02"), "unverified")
+    # the Federal Employee Program read from CLP06 FI alone (no contract class): its 6 months from the denial
+    # (a guard: a CLP06 FI claim's product is FI itself, which the program's group matches with or without the flag)
+    b, _ = denial(BLU, "6N", "FI", "2026-05-20", "2026-05-01", "50")
+    F.exp("wend", (b, "99213", "G", "2026-05-01"), "2026-11-20", guard=True)
+    F.exp("inside", (b, "99213", "G", "2026-05-01"), "expired", guard=True)
     return F
 
 
@@ -6978,6 +7601,34 @@ def window_direct_checks(path=None):
         (str(w), w.verified, w.ext), ("2026-07-14", True, "2028-01-15"))
     chk("a window it could not verify is never expired", "Humana commercial first filing (agreement, no length)",
         end("HUMANA", "CI", "HUMANA", "first_filing", {"dos": "2026-01-10"}), None)
+    # review a17-r2-1: the Federal holidays as observed, the Monday holidays, the corrected (unprocessable) claim's
+    # workday, Aetna's Medicare names, the Kentucky workers' compensation rule kept unverified
+    chk("how particular rows are used: review a17-r2-1", "Medicare first filing ending on July 3, 2026 (July 4 observed)",
+        end("MEDICARE-KY", "MB", "TESTPAY MCR KY", "first_filing", {"dos": "2025-07-03"}), "2026-07-06")
+    chk("how particular rows are used: review a17-r2-1", "Medicare first filing ending on Sunday July 4, 2027",
+        end("MEDICARE-KY", "MB", "TESTPAY MCR KY", "first_filing", {"dos": "2026-07-04"}), "2027-07-06")
+    chk("how particular rows are used: review a17-r2-1", "Medicare first filing ending on Labor Day 2026",
+        end("MEDICARE-KY", "MB", "TESTPAY MCR KY", "first_filing", {"dos": "2025-09-07"}), "2026-09-08")
+    chk("how particular rows are used: review a17-r2-1", "Medicare corrected (unprocessable) claim ending on Labor Day",
+        end("MEDICARE-KY", "MB", "TESTPAY MCR KY", "corrected_claim", {"dos": "2025-09-07", "remit": "2025-09-01"}),
+        "2026-09-08")
+    chk("how particular rows are used: review a17-r2-1", "Aetna's Medicare Advantage plan is not Aetna's commercial group",
+        key("NM:AETNA MEDICARE ADVANTAGE TESTPAY", "12", "AETNA MEDICARE ADVANTAGE TESTPAY"), None)
+    w = end("NM:TESTPAY GALLAGHER BASSETT", "WC", "TESTPAY GALLAGHER BASSETT", "first_filing", {"dos": "2026-09-01"})
+    chk("how particular rows are used: review a17-r2-1", "Kentucky workers' compensation 45 days, kept unverified",
+        (str(w), getattr(w, "verified", None)), ("2026-10-16", False))
+    # review a17-r1-3: the payer id names the group first; a UHC Medicare supplement is not UHC's commercial plan
+    chk("a payer id names the group first: review a17-r1-3", "the VA's network by its 837 payer id, UHC's name",
+        key("ID:VACCN", "", "TESTPAY UNITEDHEALTHCARE"), "va_ccn")
+    chk("a payer id names the group first: review a17-r1-3", "UHC's AARP Medicare Supplement by its payer id",
+        key("ID:36273", "15", "UHC TESTPAY"), "aarp_medsupp")
+    chk("a payer id names the group first: review a17-r1-3", "a UnitedHealthcare Medicare supplement by its name",
+        key("ID:87726", "12", "UNITEDHEALTHCARE MEDICARE SUPPLEMENT"), "aarp_medsupp")
+    chk("a payer id names the group first: review a17-r1-3", "a supplement named before UnitedHealthcare",
+        key("ID:87726", "12", "MEDICARE SUPPLEMENT UNITEDHEALTHCARE"), "medsupp")
+    out.append(("UnitedHealthcare's commercial plan", "A17 rule 4 (researched table: a payer id names the group first: "
+                "review a17-r1-3) [guard]", key("ID:87726", "12", "UNITEDHEALTHCARE") == "uhc",
+                "UnitedHealthcare's commercial plan: expected uhc got %s" % key("ID:87726", "12", "UNITEDHEALTHCARE")))
     return out
 
 
@@ -6992,6 +7643,10 @@ def selftest():
     a2 = Audit(load(F2.con), "2026-11-23", log=lambda *x: None, windows=DEFAULT_WINDOWS).run()
     res += [r for r in evaluate(F2, a2) if r[1] != "A15 base"]
     res += window_direct_checks()
+    # the review round's cases of rules 1, 2, 3 and 5, on their own invented store with A16's windows
+    F3 = build_fix_store()
+    a3 = Audit(load(F3.con), "2026-11-23", log=lambda *x: None, windows=False).run()
+    res += [r for r in evaluate(F3, a3) if r[1] != "A15 base"]
     fails = [r for r in res if not r[2]]
     by_fix = defaultdict(lambda: [0, 0])
     for name, fix, ok, detail in res:
