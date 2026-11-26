@@ -37,9 +37,9 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
 - 2ac1667: merged the integration tip cb3ffef (plans only); eb7e3b7: merged 5dd2957 (docs and a docs test).
 
 ## In progress
-- The fix round is done (see Fix round below): all 18 findings fixed, three regressions the world runs showed fixed, the
-  world measured on the final code (br9). The full suite runs in python3 and in `$S/fix/venv_sqlite340/bin/python` on
-  the final code (results in the final report and the next commit of this file).
+- Nothing. The fix round is done (see Fix round below): all 18 findings fixed, the regressions the world runs showed
+  fixed, the world measured on the final rules (br9, e7cbacc), the moved integration tip merged (26b2877) and the full
+  suite run on it in both environments. Ready for the integrator's merge.
 
 ## Left, in order
 1. The open questions below are for the owner or a fixer; none blocks the merge.
@@ -203,8 +203,15 @@ lines and 13 small ones, r1-3), $138.07 inside their windows.
 - tests/test_plan_rates.py, test_sizes_and_rates, test_review_rates, test_archive_rules, test_ema_checks,
   test_ema_wiring: 513 passed (python3, final code). test_story, test_states, test_api_review, test_claims, test_desk,
   test_insights, test_resolution passed on dfbbe8a.
-- Full suite: see the final report (python3 and `$S/fix/venv_sqlite340/bin/python`, plans/tools/shard.sh, RW_RUNS in the
-  unit folder).
+- Full suite before the merge of the moved tip (b79f712), python3: 2,847 passed, 55 failed, 29 skipped, 1 xfailed; the 55
+  are the integration tip's own, test for test (test_fax 34, test_hotfix2 9, test_no_fax_route 5, test_notes_bodies_cli
+  4, test_hotfix2c 2, test_bulk_pause 1; the tip's list from its own run).
+- 26b2877 merged the integration tip 5eb528e (fix7d merged there; it touched detect.py, api.py, alerts.py, report.py and
+  story.py beside this unit's lines, merged cleanly). Full suite on it, python3 (3.13, SQLite 3.5x): 2,993 passed, 0
+  failed, 29 skipped, 1 xfailed. `$S/fix/venv_sqlite340/bin/python` (3.11.1, SQLite 3.40.0): 2,876 passed, 109 failed and
+  24 errors, every one "'sqlite3.Connection' object has no attribute 'serialize'" (one per failing test, 133 of 133: the
+  store-image class that build cannot run), 13 skipped, 1 xfailed. The node checks pass (this unit changed no page; the
+  merge brought the tip's).
 
 ## Open questions
 - UHC Kentucky PA/NP: paid in full from January 2025 to late October 2026, then 85 percent on some lines. The branch
