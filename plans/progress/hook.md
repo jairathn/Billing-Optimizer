@@ -1,7 +1,8 @@
 # Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
 
 Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
-Branch: wip/hook. Last updated: 2026-11-26 22:45 UTC (fix round in progress).
+Branch: wip/hook. Last updated: 2026-11-26 23:10 UTC (fix round: fixes, tests, break and restore and the real-data
+check done; the suites are running).
 
 ## Done
 - 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
@@ -93,6 +94,22 @@ Branch: wip/hook. Last updated: 2026-11-26 22:45 UTC (fix round in progress).
   - r2-12: status analysed open/open_cents; analysis_status lists (the copy's open items); ops.js shows them.
   - r1-6: runlog.panel on a serverless host: no stale flag, "nobody has pressed for N days".
 - Docs: VERCEL_SETUP.md, SERVER_RUNBOOK.md, .env.example, ARCHITECTURE.md.
+- Break and restore ($S/tk/units/hook/brk_round.py and brk_round2.py: each break an exact replacement, its tests run,
+  then the files restored with git; the tree was clean after every one). First pass, 33 breaks: 30 failed their tests.
+  The 3 that did not: run_killed's and _takeover_kill's rules for a lock an older build left (it names no run: the
+  first run after this build is deployed may meet one) had no test of their own, and _takeover_kill's check that a
+  run's marker was already counted is backed by the regulation counting each run once by its id. Three tests added
+  (test_an_older_builds_lock_left_by_a_run_that_finished_is_not_said_as_a_stopped_run, ..._is_not_counted_as_a_kill,
+  test_a_kill_found_by_its_marker_and_by_its_lock_in_one_run_is_counted_once). Second pass, 8 breaks: the 6 that
+  must fail did (named and older locks, as a stop and as a kill; the older lock's claim of its marker; both guards
+  off), and with either guard alone off the twice-found kill is still counted once, as designed.
+- Real data after the fix (r1-1), Vercel's image of 11-24 (722 MB in memory), one press with a 900 s budget (load 8
+  to 9 on 4 CPUs here): the press analysed (169 CPU s, 252 s wall, peak 1,933 MB; 19,791 items, 7,696 open on the
+  lists) and built the provider tables. The chain's next run was the tidy run: the archive's pass (15,862 bills,
+  37,530 lines, 852 settled items) and the weekly self-audit, in 65 CPU s (109 s wall), its own peak 1,757 MB,
+  analysing nothing (its status carries the press's analysis); then the chain ended. Before the fix no run did that
+  work after a press. The image stays 722.6 MB (70% of the 1,024 MB ceiling): the archive freed 3.4% of the store,
+  under the 10% at which archive.compact vacuums. Copies deleted.
 
 ## Real-data runs (2026-11-26, private copy in $S/tk/units/hook, deleted after; machine load 7 to 15 on 4 CPUs, so wall
 ## times are long: CPU seconds are given where they matter)
