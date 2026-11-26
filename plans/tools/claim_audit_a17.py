@@ -199,6 +199,7 @@ class Families:
     def __init__(self):
         self.name_to_fam = {}
         self.labels = {}
+        self.all_names = defaultdict(set)    # A17 rule 4: every payer name of a family (the window table matches them)
 
     @staticmethod
     def id_fam(sid):
@@ -215,6 +216,7 @@ class Families:
         for name, pid, n in pairs:
             lab[self.of(name, pid)][norm_name(name)] += n
         self.labels = {f: c.most_common(1)[0][0] for f, c in lab.items()}
+        self.all_names = defaultdict(set, {f: set(c) for f, c in lab.items()})
 
     def of(self, name, pid):
         sid = specific_payer_id(pid)
@@ -514,8 +516,8 @@ class PayerWindows:
         if isinstance(table.get("default"), dict):
             self.default = self._entry(table["default"])
 
-    def find(self, fam, prod, name):
-        """The table's entry for a payer family, product (CLP06) and payer name; None when none matches."""
+    def find(self, fam, prod, names):
+        """The table's entry for a payer family, product (CLP06) and payer names; None when none matches."""
         if not self.entries:
             return None
         fam_u = (fam or "").upper()
@@ -526,7 +528,7 @@ class PayerWindows:
         for e in self.entries:
             if e["ids"] & ids or fam_u in e["fams"]:
                 rank = 0
-            elif name and any(p.search(name) for p in e["pats"]):
+            elif any(p.search(nm) for p in e["pats"] for nm in names or ()):
                 rank = 1
             else:
                 continue
@@ -1649,7 +1651,12 @@ class Audit:
 
     # ------------------------------------------------------------------ A17 rule 4: payer windows
     def win(self, fam, prod):
-        return self.windows.find(fam, prod, self.fams.label(fam) if fam else "")
+        if not self.windows.entries and self.windows.default is None:
+            return None
+        names = set(self.fams.all_names.get(fam, ())) | ({self.fams.label(fam)} if fam else set())
+        if fam and fam.startswith(("EMA:", "NM:")):
+            names.add(fam.split(":", 1)[1])
+        return self.windows.find(fam, prod, names)
 
     def appeal_end(self, fam, prod, answer_date, level=1, default_prod=None):
         """The end of the window to appeal a payer's answer dated answer_date (A17 rule 4: the table's appeal level,
