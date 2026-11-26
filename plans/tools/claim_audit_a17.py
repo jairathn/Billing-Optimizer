@@ -1874,10 +1874,13 @@ class Audit:
     def learn_state_tiers(self):
         """A17 rule 1 (the office-state PA/NP rule; the hand-check found a payer paying NPs and PAs in full in one state's
         offices and at 85% in the other's). For each payer, product class (a plan read apart has its own: tier_class),
-        clinician and office state: the tier the payer pays that clinician at there (100 or 85) when 5 or more of its clean answers there sit at the payer's full rate
-        or at 85% of it, 60% of them at one. For each payer, product class and state: the tier it pays NP/PA clinicians at
-        there, when every NP/PA clinician with a tier there has the same one (2 clinicians at least)."""
+        clinician and office state: the tier the payer pays that clinician at there (100 or 85) when 5 or more of its clean
+        answers there sit at the payer's full rate or at 85% of it, and 60% of all its clean answers there at one (a
+        clinician the payer pays at another share, 89% say, has no tier: a few answers at the full rate on another code
+        do not make one). For each payer, product class and state: the tier it pays NP/PA clinicians at there, when every
+        NP/PA clinician with a tier there has the same one (2 clinicians at least)."""
         st_obs = defaultdict(Counter)
+        st_all = Counter()
         for A, apu, yr, pc in getattr(self, "_clean_rate_answers", []):
             p, s = A.p, A.svc
             if not A.npi:
@@ -1889,14 +1892,16 @@ class Audit:
             if not full:
                 continue
             r = apu / full
+            key = (p.fam, self.tier_class(p.rprod), A.npi, state)
+            st_all[key] += 1
             b = "100" if abs(r - 1) <= 0.015 else "85" if abs(r - 0.85) <= 0.015 else None
             if b:
-                st_obs[(p.fam, self.tier_class(p.rprod), A.npi, state)][b] += 1
+                st_obs[key][b] += 1
         self.state_tier = {}
         for k, c in st_obs.items():
             n = sum(c.values())
             b, m = c.most_common(1)[0]
-            if n >= 5 and m >= 0.6 * n:
+            if n >= 5 and m >= 0.6 * n and m >= 0.6 * st_all[k]:
                 self.state_tier[k] = b
         per = defaultdict(Counter)
         for (fam, cls, npi, state), b in self.state_tier.items():
@@ -5929,6 +5934,30 @@ def build_selftest_store():
             oneline("99213", 15000, 8500, np_days[19], allowed=8500, cas=[("CO", "45", 6500)]), group="GRPSMALL03",
             npi=NPB, **TPL)
     F.exp("unit", ("ZZ70NSLAS", "99213", "G", np_days[19]), "SHORT", guard=True)
+    # ---- rule 1: a tier needs most of the clinician's answers. A payer pays an NP 89% of its rate on most lines (no
+    # tier) and the full rate on a few lines of another code: those few make no full tier, so the 89% lines are judged
+    # as A16 judged them (an NP's 85% accepted), not short of the full rate
+    F.fix = "A17 rule 1 (a tier needs most of the clinician's answers in that state)"
+    TNX = dict(payer="TESTPAY NX", pid="T0057")
+    PH2, NP2 = "2000000004", "2000000005"
+    nx_days = [add_days("2026-09-01", i) for i in range(13)]
+    for i, d in enumerate(nx_days):
+        med("NX", i, d, "99213" if i % 2 == 0 else "99214", 8500 if i % 2 == 0 else 11900, NP2, MKY)
+    for i in range(8):
+        d = add_days("2026-08-03", i)
+        F.claim(F.tx(add_days(d, 20), **TNX), "ZZ78PA%03dC017" % i, "1", 15000, 10000,
+                oneline("99213", 15000, 10000, d, allowed=10000, cas=[("CO", "45", 5000)]), npi=PH2, **TNX)
+        F.claim(F.tx(add_days(d, 20), **TNX), "ZZ78PB%03dC017" % i, "1", 9000, 7000,
+                oneline("99212", 9000, 7000, d, allowed=7000, cas=[("CO", "45", 2000)]), npi=PH2, **TNX)
+    for i, d in enumerate(nx_days[:5]):
+        F.claim(F.tx(add_days(d, 20), **TNX), "ZZ78NA%03dC017" % i, "1", 9000, 7000,
+                oneline("99212", 9000, 7000, d, allowed=7000, cas=[("CO", "45", 2000)]), npi=NP2, **TNX)
+    for i, d in enumerate(nx_days[5:12]):
+        F.claim(F.tx(add_days(d, 20), **TNX), "ZZ78NB%03dC017" % i, "1", 15000, 8900,
+                oneline("99213", 15000, 8900, d, allowed=8900, cas=[("CO", "45", 6100)]), npi=NP2, **TNX)
+    F.claim(F.tx(add_days(nx_days[12], 20), **TNX), "ZZ78NBLASC017", "1", 15000, 8900,
+            oneline("99213", 15000, 8900, nx_days[12], allowed=8900, cas=[("CO", "45", 6100)]), npi=NP2, **TNX)
+    F.exp("unit", ("ZZ78NBLAS", "99213", "G", nx_days[12]), "PAID")
     # ---- rule 2: a payer that leaves CLP08 empty; the claims of the surgery center (the 837's place of service 24)
     # are priced on the facility schedule, not short of the office rate
     F.fix = "A17 rule 2 (a separate surgical site's own schedule, CLP08 empty)"
