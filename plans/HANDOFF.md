@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-26, 18:40 UTC.
+Last updated: 2026-11-26, 19:05 UTC.
 
 ## 00. Two sessions take turns (read this first, every time you resume)
 
@@ -23,15 +23,25 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-26 18:40 UTC, session on `claude/ecstatic-fermi-orfcgo`)
+### Running now (updated 2026-11-26 19:21 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
 
-| Unit | Branch | State |
-|---|---|---|
-| Review of every change since 2026-11-23 (a84c781..cdbfc4d) | findings in `plans/review_2026-11-26.md` | starting |
-| fix7d, one practice day | `wip/fix7d` | resuming from section 0 below |
-| fix7c, underpayment rates by plan | `wip/fix7c` | resuming from section 0 below |
-| hook-in unit (E, G, H wired) | `wip/hook` | resuming from section 0 below |
-| The owner's decisions 1-4 (section 3b) | `wip/decisions` (to start) | after the review and fix7d |
+Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
+branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
+a unit from its branch and progress file (the brief says what done means), or start it again from its brief.
+
+| Unit | Branch | Brief | State |
+|---|---|---|---|
+| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | running (run wf_b849b3af-38e); at 18:40 its last push was 394f960 (a person's marks dated on the practice's day) |
+| fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | running (run wf_82efb0cc-738); at 18:40: tip merged, cached-array change whole, base vs branch measurement started (b6592c8) |
+| hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
+| the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
+| review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b): areas answers and money first, then hosts, people, privacy. The orchestrator's own read of the whole diff is in `plans/review_notes_orchestrator_2026-11-26.md` (merge it into the review file) |
+| a17, the independent every-claim auditor (started early: it touches no product code) | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | running (run wf_8fc9da8c-468, started 18:55 UTC): payer-window research beside the build, then integration, two reviews, one fix round. Score again with the merged code before the final trace |
+| deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | running (run wf_b5842331-6d1, started 19:20 UTC); touches codes.py, docs and tests only, so it merges after the others |
+
+Merge order when they finish: fix7d, fix7c, decisions, hook (each: merge into the integration commit, the full suite in
+the four environments from a frozen worktree of the merge commit, push to both branch names). Then the review's
+confirmed findings, A17 (running already), fix7e, the final every-claim trace and the release gates (section 0 below, "Then, in order").
 
 ## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
 
