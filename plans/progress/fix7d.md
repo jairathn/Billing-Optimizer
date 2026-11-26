@@ -30,8 +30,19 @@ Brief: `plans/briefs/2026-11-26_fix7d.md`. Branch `wip/fix7d`. Rules: `plans/bri
   Tests in tests/test_practice_day.py, tests/test_results.py (spot day, rewritten to the new rule), tests/test_swing.py;
   each fix broken on purpose and restored.
 
+- Brief item 4 (rest of the search, nothing more to change): api*.py, cloud.py, pipeline.py, fax.py and the pages read
+  the practice's day already; left on purpose: the server's daily backup (cli._daily_backup, an operational UTC day),
+  the log files' day names (runlog, UTC by design), runtime's SQL self-probe (date('now') on a blank store, no data),
+  fax._range_days (asks SRFax for both days), today.js localDay / features.js / index.html fallbacks used only before the
+  brief has loaded, the scoreboard's frozen_at display (results.py, one display line), ema_checks' export status order
+  (substr(recorded_at,1,10) only orders sources).
+
 ## In progress
-- Brief item 4: the rest of the search (api*.py, cloud.py, pipeline.py, fax.py follow-ups, JS fallbacks).
+- Brief item 5: the full suite in python3 under REMITWATCH_TZ=Etc/GMT-14, then Etc/GMT+12, then as it is, from a
+  frozen worktree of the tip (`git worktree add --detach $S/tk/units/fix7d/frozen <tip>`), with
+  `RW_RUNS=$S/tk/units/fix7d/runs REMITWATCH_TZ=Etc/GMT-14 $S/tk/units/fix7d/shard_tz.sh $S/tk/units/fix7d/frozen python3 tz_minus14 3`
+  (shard_tz.sh is plans/tools/shard.sh keeping REMITWATCH_TZ; copy it from this file's section "How to run" if the unit
+  folder is gone: it is shard.sh with `[ "$v" = "REMITWATCH_TZ" ] ||` before `unset`).
 
 ## Left, in order
 4. Search the whole tree for other "today" reads (date('now'), utcnow().date(), date.today(), new Date() as a day).
