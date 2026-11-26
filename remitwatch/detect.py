@@ -4414,10 +4414,17 @@ class Detector:
         code, tcode = l["procedure_code"], top.get("procedure_code")
         grp = l.get("payer_group") or "The payer"
         mine = rate - allowed <= top_w - top_got
+        # the year of the rate the other procedure is measured by: a rate the payer paid in another year (none on file for the
+        # procedure's own) is named as such, never passed off as this year's (2026 cut facility rates)
+        _r, _b, trec = self._yardstick(top, tcode or "", top.get("pos_class") or "office", component_of(top.get("modifiers_list")))
+        ty, own_y = ((trec or {}).get("key") or (None, None))[1], str(top.get("year") or "")
+        other_year = bool(ty and own_y and ty != own_y)
+        whose = f"{grp}'s {ty} rate for its setting, the latest on file" if other_year else f"{grp}'s own rate for its setting"
         note = (f"{grp} paid every procedure of the day at its share for a second procedure: {code} here ({_usd(allowed)} of "
-                f"{_usd(rate)}) and {tcode} on the patient's other claim that day ({_usd(top_got)} of {_usd(top_w)}, {grp}'s own rate "
-                f"for its setting). No procedure that day was paid as the first. The {tcode} is the higher-valued: it was owed in full, "
-                f"{_usd(top_w - top_got)} more. {_usd(least)} is the least owed for the day"
+                f"{_usd(rate)}) and {tcode} on the patient's other claim that day ({_usd(top_got)} of {_usd(top_w)}, {whose}). "
+                f"No procedure that day was paid as the first. The {tcode} is the higher-valued: it was owed in full, "
+                f"{'about ' if other_year else ''}{_usd(top_w - top_got)} more. "
+                f"{_usd(least)} is the least owed for the day"
                 + (f" (the {code}'s own missing half, at its firm rate)" if mine else "")
                 + ". Ask the payer to reprocess the day's claims together")
         ev = dict(one_off[10], every_cut=True, same_day=rows, net_cents=least, note=note,

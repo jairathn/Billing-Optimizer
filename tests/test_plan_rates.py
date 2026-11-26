@@ -285,6 +285,25 @@ def test_a_split_day_on_which_the_payer_cut_every_procedure_is_owed_the_least_mi
     w.store.close()
 
 
+def test_a_cut_day_names_the_year_of_a_repair_rate_from_another_year(tmp_path, kind):
+    """The surgery center's 14301 has a facility rate on file only for the year before ($757.52 in 2025; 2026 facility rates
+    fell): the day is still listed at the least missing half (the Mohs's $292.56, on its firm 2026 rate), and the note says
+    the 14301's figure is its 2025 rate, never passing it off as this year's."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    hum = dict(payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(200, 5, "14301", "1800.00", "757.52", cfi="16", pos="24", dos="20250601"), "20250701", **hum)
+    w.remit(many(100, 25, "17311", "900.00", "585.12", cfi="16"), "20260301", **hum)
+    w.remit([visit(800, "17311", "900.00", "292.56", cfi="16", pat=800, dos="20260302"),
+             visit(801, "14301", "1800.00", "346.96", cfi="16", pat=800, dos="20260302", pos="24")], "20260410", **hum)
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["shortfall_cents"]) for k, r in by_pcn(w, "category='underpayment'").items()}
+    assert got == {pcn(800): ("UNDERPAID_VS_OWN_RATE", 29256)}, got
+    note = w.one(f"patient_control_number='{pcn(800)}'")["ev"]["note"]
+    assert "2025 rate" in note and "$757.52" in note, note
+    w.store.close()
+
+
 def test_a_split_day_whose_higher_valued_procedure_is_an_item_of_its_own_is_listed_once(tmp_path, kind):
     """Where the payer's facility rate for the surgery center's 14041 is firm (20 lines and more), the 14041 halved beside a
     halved Mohs is the day's item (its missing half, $294.72, on its own line), and the Mohs is not listed as well."""
