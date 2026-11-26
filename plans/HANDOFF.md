@@ -23,7 +23,7 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-26 18:40 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
+### Running now (updated 2026-11-26 18:56 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
 
 Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
 branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
@@ -36,10 +36,11 @@ a unit from its branch and progress file (the brief says what done means), or st
 | hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
 | the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
 | review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b): areas answers and money first, then hosts, people, privacy. The orchestrator's own read of the whole diff is in `plans/review_notes_orchestrator_2026-11-26.md` (merge it into the review file) |
+| a17, the independent every-claim auditor (started early: it touches no product code) | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | running (run wf_8fc9da8c-468, started 18:55 UTC): payer-window research beside the build, then integration, two reviews, one fix round. Score again with the merged code before the final trace |
 
 Merge order when they finish: fix7d, fix7c, decisions, hook (each: merge into the integration commit, the full suite in
 the four environments from a frozen worktree of the merge commit, push to both branch names). Then the review's
-confirmed findings, A17, fix7e, the final every-claim trace and the release gates (section 0 below, "Then, in order").
+confirmed findings, A17 (running already), fix7e, the final every-claim trace and the release gates (section 0 below, "Then, in order").
 
 ## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
 
