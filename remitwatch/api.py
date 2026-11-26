@@ -5206,7 +5206,8 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
         else:
             _settle(r, status="failed", error="SRFax has no record of it: the run stopped before it went out.")
         out["settled"] += 1
-    for q in rows("SELECT fax_key, provider_id FROM faxes WHERE direction='out' AND status='queued' AND provider=? ORDER BY created_at LIMIT 200", (prov.name,)):
+    for q in rows("SELECT fax_key, provider_id, created_at FROM faxes WHERE direction='out' AND status='queued' AND provider=? "
+                  "ORDER BY created_at LIMIT 200", (prov.name,)):
         if late():
             out["more"] = True
             break
@@ -5220,7 +5221,9 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
             continue
         rec = {"fax_key": q["fax_key"], "status": s["state"], "updated_at": _fax_now()}
         if s["state"] == "sent":
-            rec["sent_at"] = s.get("at") or _fax_now()
+            # a time with its zone, as every record is written (the states date it on the practice's calendar): the line's
+            # own when it gives one, else now; never before the fax was queued
+            rec["sent_at"] = fax.sent_moment(s.get("at"), q["created_at"], rec["updated_at"])
             out["sent"] += 1
         else:
             rec["error"] = s.get("error") or "the payer's line did not take it"

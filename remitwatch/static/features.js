@@ -1,6 +1,9 @@
 /* RemitWatch dashboard: alerts, breakdown explorer, progress scoreboard, feed status and the note-based appeal builder.
    Loaded before the inline script in index.html and uses its helpers ($, api, qs, esc, money, money2, chart, kpi, state, findingsTable, render). */
 
+// a stored moment's date and time where the practice is (today.js practiceTime); before today.js has loaded, UTC's, said so
+function atTime(s){ return typeof practiceTime === 'function' ? practiceTime(s) : (String(s || '').replace('T', ' ').slice(0, 16) + (/T\d\d:\d\d/.test(String(s || '')) ? ' UTC' : '')); }
+
 const DIM_LABELS = {provider:'Provider', payer:'Payer', payer_kind:'Payer type', plan:'Plan', billed_code:'Billed code', paid_code:'Paid code',
   code_pair:'Billed → paid', level_drop:'Levels dropped', signal:'Signal', category:'Category', month:'Month paid', quarter:'Quarter paid', year:'Year paid',
   modifier:'Modifier', pos:'Place of service', tier:'Provider type', location:'Location', diagnosis:'Diagnosis', carc:'Reason code', status:'Status',
@@ -64,7 +67,7 @@ function alertCard(a){
   if(a.kind==='SWING'){ if(d.action) facts.push(d.action); if(Array.isArray(d.lines)) facts.push(...d.lines); }
   const can = a.family && a.family!=='feed' && a.family!=='rate' && a.family!=='reason_code' && a.family!=='swing';
   return `<div class="alert ${a.status}"><div class="row1"><span class="chip sev-${a.severity}">${a.severity}</span><span class="chip">${ALERT_KIND[a.kind]||a.kind}</span>
-    <span class="muted small">first seen ${String(a.first_seen).slice(0,10)} · last checked ${String(a.last_seen).slice(0,10)}${a.status==='acknowledged'?' · acknowledged':''}${a.status==='cleared'?' · cleared':''}</span></div>
+    <span class="muted small">first seen ${typeof practiceDate === 'function' ? practiceDate(a.first_seen) : String(a.first_seen).slice(0,10)} · last checked ${typeof practiceDate === 'function' ? practiceDate(a.last_seen) : String(a.last_seen).slice(0,10)}${a.status==='acknowledged'?' · acknowledged':''}${a.status==='cleared'?' · cleared':''}</span></div>
     <div class="ttl">${esc(a.title)}</div>${facts.length?`<div class="small muted">${facts.map(esc).join(' · ')}</div>`:''}
     <div class="actions" style="margin-top:6px">${can?`<button data-see="${a.alert_id}">See the lines</button>`:''}${a.status==='new'?`<button data-ack="${a.alert_id}">Acknowledge</button>`:''}</div></div>`;
 }
@@ -193,7 +196,7 @@ async function progressTab(v){
     <div class="panel"><h2>By payer</h2><table><thead><tr><th>Payer</th><th class="num">Findings</th><th class="num">Identified</th><th class="num">Recovered</th><th class="num">Paid later</th><th class="num">Avg days to payment</th><th class="num">Being worked</th><th class="num">Lost</th><th class="num">Open</th><th class="num">Still appealable</th></tr></thead>
       <tbody>${p.by_payer.map(r=>`<tr class="row" data-p="${esc(r.payer_group)}"><td>${esc(r.payer_group)}</td><td class="num">${r.n.toLocaleString()}</td><td class="num">${money(r.cents)}</td><td class="num">${money(r.recovered_cents)}</td><td class="num">${pct(r.resolved_n/r.n,0)}</td><td class="num">${r.avg_days==null?'–':r.avg_days}</td><td class="num">${r.working_n}</td><td class="num">${r.lost_n}</td><td class="num">${money(r.open_cents)}</td><td class="num">${money(r.live_cents)}</td></tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>Activity</h2><table class="small"><thead><tr><th>When</th><th>What</th><th>Payer</th><th>Finding</th><th class="num">Amount</th><th>By</th></tr></thead>
-      <tbody>${p.events.map(e=>`<tr class="row" data-id="${esc(e.finding_id)}"><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${eventWhat(e)}${e.kind==='paid_on_later_remit'?' (paid on a later remit)':''}</td><td>${esc(e.payer_group||'')}</td><td>${esc(e.signal||'')} ${esc(e.procedure_code||'')}</td><td class="num">${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No status changes yet. Mark findings appealed, resolved or lost from their detail panel and they show up here.</td></tr>'}</tbody></table></div>`;
+      <tbody>${p.events.map(e=>`<tr class="row" data-id="${esc(e.finding_id)}"><td>${esc(atTime(e.at))}</td><td>${eventWhat(e)}${e.kind==='paid_on_later_remit'?' (paid on a later remit)':''}</td><td>${esc(e.payer_group||'')}</td><td>${esc(e.signal||'')} ${esc(e.procedure_code||'')}</td><td class="num">${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No status changes yet. Mark findings appealed, resolved or lost from their detail panel and they show up here.</td></tr>'}</tbody></table></div>`;
   // each card opens the Worklist list of its own number
   const KPI_GO = {working:{status:'in_progress,appealed', deadline:'', sort:'deadline'}, open:{deadline:'valid', sort:'deadline'}, closed:{deadline:'expired', sort:'deadline'}};
   v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{ const go = KPI_GO[k.dataset.go]; if(go) goWork(go); });
@@ -233,7 +236,7 @@ async function feedPanel(el){
     : `<tr><td>Automatic sync</td><td>${s.interval_minutes?`every ${s.interval_minutes} minutes${s.next_run?', next about '+s.next_run.replace('T',' ').slice(0,16)+' UTC':''}`:'off (set REMITWATCH_SYNC_INTERVAL_MINUTES, for example 60)'} ${s.scheduler_running?'<span class="ok">· scheduler running</span>':''}</td></tr>`}
     <tr><td>Instant sync on upload</td><td>${yes(s.webhook_ready,'ready: point the Dropbox app webhook at /api/dropbox/webhook','needs DROPBOX_APP_SECRET')}</td></tr>
     <tr><td>Newest payment in the store</td><td>${esc(s.newest_payment_date||'–')} ${s.days_behind!=null?`(${s.days_behind} days ago)`:''}</td></tr>
-    <tr><td>Last new remittance file</td><td>${esc(String(s.last_remit_ingested||'–').replace('T',' ').slice(0,16))}</td></tr>
+    <tr><td>Last new remittance file</td><td>${s.last_remit_ingested ? esc(atTime(s.last_remit_ingested)) : '–'}</td></tr>
     <tr><td>Last cycle</td><td>${lc.finished?`${esc(String(lc.finished).replace('T',' ').slice(0,16))} UTC (${esc(lc.trigger||'')})${lc.error?' <span class="sev-high">failed: '+esc(lc.error)+'</span>':''} · ${lc.ingest?`${num(lc.ingest.remits)} remits, ${num(lc.ingest.ema)} EMA exports, ${num(lc.ingest.claims_837)} claim files`:''}${lc.alerts?` · ${num(lc.alerts.new)} new alerts`:''}`:'never'}</td></tr>
     <tr><td>Email (alerts and weekly summary)</td><td>${yes(s.smtp_configured,'configured','not configured: set SMTP_HOST and REPORT_TO')}</td></tr>
     <tr><td>Alert webhook</td><td>${s.alert_webhook?'<span class="ok">configured</span>':'off (optional: ALERT_WEBHOOK_URL)'}</td></tr>
@@ -252,7 +255,7 @@ function drawerExtras(f, r){
     return `<div class="note"><b>EMA shows this line paid.</b> ${money2(e.paid_cents)} from insurance${e.date?' on '+esc(e.date):''} (${esc(e.source||'EMA')}), but no remittance in the files shows that payment. Check the payment in EMA; if it is real, mark this recovered. If the remittance for it is missing, put it in the Dropbox folder.</div>`;
   };
   const facts = [['Billed code', f.billed_code], ['Billed → paid', f.code_pair], ['Plan on the remit', f.plan], ['Place of service', f.pos_class], ['Location', f.location], ['Diagnosis', f.diagnosis],
-    ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? String(f.appealed_at).slice(0,10) : null]].filter(x=>x[1]!=null && x[1]!=='');
+    ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? (typeof practiceDate === 'function' ? practiceDate(f.appealed_at) : String(f.appealed_at).slice(0,10)) : null]].filter(x=>x[1]!=null && x[1]!=='');
   const ev = f.evidence || {};
   const why = f.signal==='SECOND_RATE' && ev.note ? `<div class="note"><b>Likely reason.</b> ${esc(ev.note)}</div>` : '';
   // today as the lists count it (siteDay: the practice's day, from the brief), else the reader's own: a window open until
@@ -282,7 +285,7 @@ function drawerExtras(f, r){
   const datedOpen = !!f.appeal_deadline && f.appeal_deadline >= site;
   const wroteOff = f.written_off_cents ? `<div class="note sev-medium"><b>Written off in EMA.</b> ${money2(f.written_off_cents)} of the money in dispute on this ${f.line_key ? 'line' : 'claim'} is written off (or moved to the patient) in EMA${f.written_off_on ? ', as of ' + esc(f.written_off_on) : ''}${!['open','in_progress'].includes(f.status) ? '.' : datedOpen ? '. The payer can still be asked for it: work it, and reverse the write-off in EMA when the payer pays.' : f.appeal_deadline ? '. Its filing window has closed.' : '. No filing date is on file for it: check the payer\'s rules before working it.'}</div>` : '';
   const notes = `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${wroteOff}${why}${windows}${later}`;
-  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
+  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${esc(atTime(e.at))}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
   const factsHtml = `${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
       <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
@@ -291,7 +294,7 @@ function drawerExtras(f, r){
   const builder = f.claim_key ? `${ema ? `<div class="filters" style="margin-bottom:6px"><button id="noteEma">${byHand ? 'Use the note uploaded from EMA and build the packet' : 'Get the note from EMA and build the packet'}</button>${byHand ? ' <a class="small" href="/upload">Upload notes</a>' : ''}</div><div id="emaMsg" class="small muted"></div>` : ''}<div class="note">${ema ? 'Or attach' : 'Attach'} the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
       <div class="filters"><input type="file" id="noteFile" accept=".pdf,.docx,.txt,.rtf,.html,.htm"><label class="small"><input type="checkbox" id="noteAi" checked> review with Claude</label><button id="noteGo">Build packet</button></div>
       <textarea id="noteText" rows="4" placeholder="…or paste the note text here" style="width:100%"></textarea>
-      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
+      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${typeof practiceDate === 'function' ? practiceDate(p.created_at) : String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
   return {notes, facts: factsHtml, builder};
 }
 // One line of an item's history (its panel, and Activity on Progress): a status change, from → to, or what happened with
@@ -519,7 +522,7 @@ const XP_BY_STATUS = {waiting: ["Wait for the payer's answer. The next run dates
 function xpEffective(f, x){
   const ex = (x && x.explain) || {}, told = (ex.verdict || {}).state || (ex.state || {}).work_state;
   if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state]) return x;
-  const when = f.status_changed_at ? ` on ${longDate(String(f.status_changed_at).slice(0, 10))}` : '';
+  const when = f.status_changed_at ? ` on ${longDate(practiceDate(f.status_changed_at))}` : '';
   const [action, buttons] = XP_BY_STATUS[f.work_state];
   return Object.assign({}, x, {explain: Object.assign({}, ex, {
     verdict: {state: f.work_state, sentence: `${(typeof STATUS_WORDS !== 'undefined' && STATUS_WORDS[f.status]) || f.status} by a person${when}.`, rows: []},
@@ -641,7 +644,7 @@ async function xpDecisions(id, el){
   const items = (r && r.items) || [];
   if(!items.length){ el.hidden = true; return; }
   const change = c => Object.entries(c || {}).map(([k, v]) => `${esc(k)}: ${esc(Array.isArray(v) ? v[0] : '')} → <b>${esc(Array.isArray(v) ? v[1] : v)}</b>`).join('; ');
-  el.innerHTML = `<details class="dfold"><summary>Why did this change?</summary><table class="small"><tbody>${items.map(d => `<tr><td class="day">${esc(String(d.at || '').replace('T', ' ').slice(0, 16))}</td><td>${change(d.change)}</td><td class="muted">${esc(d.rule || '')}${d.rule_version ? ' v' + esc(d.rule_version) : ''}</td></tr>`).join('')}</tbody></table></details>`;
+  el.innerHTML = `<details class="dfold"><summary>Why did this change?</summary><table class="small"><tbody>${items.map(d => `<tr><td class="day">${esc(atTime(d.at))}</td><td>${change(d.change)}</td><td class="muted">${esc(d.rule || '')}${d.rule_version ? ' v' + esc(d.rule_version) : ''}</td></tr>`).join('')}</tbody></table></details>`;
   el.hidden = false;
 }
 // the next step's buttons. Each changes what it says it changes and nothing else: a status (with its note), a line in the

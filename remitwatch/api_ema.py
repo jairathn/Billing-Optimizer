@@ -158,8 +158,13 @@ def _meta(c: sqlite3.Connection, key: str, default: Any = None) -> Any:
 
 
 def _today() -> str:
-    """The site's day, as the lists count it (SQL date('now') in api._filters): UTC."""
-    return datetime.now(timezone.utc).date().isoformat()
+    """The site's day: the practice's (runtime.practice_today, REMITWATCH_TZ), the day api._filters and every list count
+    windows from. Never SQL's date('now'), which is UTC and a day ahead of a US practice each evening. Always YYYY-MM-DD,
+    so it can stand in a query as a literal."""
+    day = runtime.practice_today()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise ValueError("the practice's day is not a date")
+    return day
 
 
 def _days(a: Any, b: Any) -> int | None:
@@ -203,7 +208,7 @@ def condition(name: str, value: str, c: sqlite3.Connection | None = None) -> tup
     """The `state=` and `ema=` filters as a condition on a findings row: the rule the Today counts use when api._filters
     does not take them yet (needs_C2.md section 4 gives the same SQL to unit C1). None for an unknown value."""
     if name == "state":
-        due = "(follow_up_on IS NOT NULL AND follow_up_on <= date('now'))"
+        due = f"(follow_up_on IS NOT NULL AND follow_up_on <= '{_today()}')"
         if value == "followup_due":
             return (f"work_state IN ('work_now','waiting') AND {due}", [])
         if value == "todo":
@@ -881,13 +886,14 @@ def policy_table(c: sqlite3.Connection) -> dict:
         w, params = _pattern_where(c)
         # still appealable: the safe date, or the payer's own limit where it is later (legal_deadline)
         last = "MAX(appeal_deadline, COALESCE(legal_deadline, appeal_deadline))" if "legal_deadline" in fcols else "appeal_deadline"
-        legal = "(appeal_deadline < date('now') AND legal_deadline >= date('now'))" if "legal_deadline" in fcols else "0"
+        today = _today()            # the practice's day, never SQL's date('now') (UTC)
+        legal = f"(appeal_deadline < '{today}' AND legal_deadline >= '{today}')" if "legal_deadline" in fcols else "0"
         todo = "status IN ('open','in_progress')"
         for (key, n, cents, appealable, appealable_cents, legal_n, legal_cents, auto, at_posting, proven, by_policy, open_n, upper_n,
              upper) in c.execute(
                 f"""SELECT json_extract(evidence, '$.writeoff_pattern') k, COUNT(*), COALESCE(SUM(shortfall_cents),0),
-                           SUM({todo} AND {last} >= date('now')),
-                           COALESCE(SUM(CASE WHEN {todo} AND {last} >= date('now') THEN shortfall_cents END),0),
+                           SUM({todo} AND {last} >= '{today}'),
+                           COALESCE(SUM(CASE WHEN {todo} AND {last} >= '{today}' THEN shortfall_cents END),0),
                            SUM({todo} AND {legal}), COALESCE(SUM(CASE WHEN {todo} AND {legal} THEN shortfall_cents END),0),
                            SUM(ema_outcome = 'auto_written_off'), SUM(written_off_when = 'at_posting'),
                            SUM(ema_writeoff_evidence = 'rule_proven'), SUM(ema_outcome = 'written_off_by_policy'),

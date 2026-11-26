@@ -177,6 +177,7 @@ def test_with_no_time_zone_data_the_eastern_rule_still_holds(monkeypatch):
 
 @pytest.mark.parametrize("host", HOSTS, indirect=True)
 def test_an_item_due_today_stays_workable_until_midnight_eastern(host, monkeypatch):
+    monkeypatch.setenv(runtime.TZ_SETTING, "America/New_York")          # the practice is in US Eastern time
     c, h, line, (a, b), write = host(date(2026, 11, 10))
     write("UPDATE findings SET appeal_deadline='2026-11-24' WHERE finding_id IN (?, ?)", (a, b))
     assert c.post("/api/faxes/payer", json={"payer_group": "Anthem / BCBS", "number": PAYER_FAX}, headers=dict(XHR, **h)).status_code == 200
@@ -327,6 +328,8 @@ def test_people_s_changes_count_on_the_practice_s_day(tmp_path, monkeypatch):
     """Moved on today: a change made at 8 PM Eastern (01:00 UTC the next day) counts on the practice's day it was made."""
     import sqlite3 as sq
 
+    monkeypatch.setenv(runtime.TZ_SETTING, "America/New_York")          # the practice is in US Eastern time
+
     from remitwatch import insights
     conn = sq.connect(":memory:")
     from remitwatch.detect import ensure_schema
@@ -405,7 +408,8 @@ def _detect(tmp_path, claims: list[str], pay: str, payer: str, payer_id: str, co
         paths.append(str(p))
     store.ingest_835_paths(paths)
     ensure_schema(store.conn)
-    Detector(store, run_id="t").run()
+    # analysed on a day of its own: the Humana window closes 2026-11-24, and an analysis after it raises no item to date
+    Detector(store, run_id="t", today="2026-11-20").run()
     out = {r[0]: r[1] for r in store.conn.execute("SELECT signal, appeal_deadline FROM findings WHERE appeal_deadline IS NOT NULL")}
     store.close()
     return out

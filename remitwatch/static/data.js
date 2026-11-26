@@ -15,7 +15,8 @@ const DT_STATUS = {current: ['Current', 'ok'], partly_replaced: ['Current, partl
 const DT_SHOW = 8;          // catalog rows shown before "Show all"
 const DT_ASK_SHOW = 12;     // re-send requests shown before "Show all" (newest month first, most dollars first)
 
-function dtDay(d){ return d ? longDate(String(d).slice(0, 10)) : ''; }
+// a day as written, or a stored moment (a decision, a check, a file read, a run) on the practice's day (today.js practiceDate)
+function dtDay(d){ return d ? longDate(typeof practiceDate === 'function' ? practiceDate(d) : String(d).slice(0, 10)) : ''; }
 // a phone (390 px): lists instead of wide tables, so each row's button stays on screen
 function dtNarrow(){ return typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth <= 640; }
 function dtAge(days, limit){ if(days == null) return ''; const cls = days > limit ? 'sev-high' : 'ok'; return `<span class="${cls}">${esc(pl(days, 'day'))} old</span>`; }

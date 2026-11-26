@@ -25,7 +25,7 @@ import subprocess
 
 import pytest
 
-from remitwatch import cloud, ema_checks as ec, ema_ledger as el, ema_reports as er
+from remitwatch import cloud, ema_checks as ec, ema_ledger as el, ema_reports as er, runtime
 from remitwatch.detect import Detector
 from remitwatch.state import LocalState
 from remitwatch.store import Store
@@ -35,7 +35,7 @@ P = F.PAYERS
 SALT_HEX = "cd" * 32
 XHR = {"X-Requested-With": "remitwatch"}
 BCBS = "Anthem / BCBS"
-T = dt.datetime.now(dt.timezone.utc).date()          # the site's day: the lists count windows from it (SQL date('now'))
+T = dt.date.fromisoformat(runtime.practice_today())  # the site's day: the practice's, as every list counts windows
 TODAY = T.isoformat()
 _N = itertools.count(1)
 _TX = itertools.count(1)
@@ -1800,3 +1800,52 @@ def test_the_unposted_line_counts_every_row_of_its_file(page_run):
     out, _ = page_run({"/api/ema/data": data})
     text = re.sub(r"<[^>]+>", "", out["data_html"])
     assert "1 payment the payer reported but never sent, $524 (ask the payer for it)" in text
+
+
+def test_today_and_the_pattern_counts_take_the_practices_day_not_utcs(server, monkeypatch):
+    """The Today page's day and the write-off patterns' "still appealable" counts are the practice's day
+    (runtime.practice_today), as every list is. SQL's date('now') is UTC, a day off the practice's for hours each evening in
+    the US: an item whose last day is the practice's today was counted lost, and one whose last day passed there was
+    counted appealable. The zone below puts the practice a day off UTC whatever the hour the test runs."""
+    behind = dt.datetime.now(dt.timezone.utc).hour < 12
+    monkeypatch.setenv("REMITWATCH_TZ", "Etc/GMT+12" if behind else "Etc/GMT-14")     # UTC-12 before noon UTC, UTC+14 after
+    day = runtime.practice_today()
+    assert day != dt.datetime.now(dt.timezone.utc).date().isoformat()
+    c, db = server.c, server.db
+    f = fid(db, "DENIED_AUTH", "auto_written_off")
+    # behind UTC: the last day is the practice's today, still appealable; ahead of UTC: the last day was yesterday there, lost
+    last = day if behind else runtime.practice_today(-1)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET appeal_deadline=?, legal_deadline=NULL WHERE finding_id=?", (last, f))
+    conn.commit()
+    conn.close()
+    assert c.get("/api/ema/today").json()["today"] == day
+    pol = c.get("/api/ema/policy").json()
+    a = {p["pattern"]: p for p in pol["patterns"]}[P_AUTH]
+    assert (a["appealable"], a["appealable_cents"]) == ((1, 9000) if behind else (0, 0)), (behind, a)
+    assert pol["today"] == day
+
+
+def test_the_data_tab_and_today_count_the_reports_ages_to_the_practices_day_on_both_hosts(worlds, tmp_path, monkeypatch):
+    """The reports' ages on the Data tab and Today (fresh: ar_days, production_days) count to the practice's day, as the
+    blind spot beside them and every list do. They counted to the machine's day (ema_checks' default, UTC on both hosts):
+    from 7 PM Eastern an A/R pulled eight days ago read nine, past the eight that still counts as fresh. The zone puts the
+    practice a day off UTC whatever the hour. Both hosts: the server's store, and the serverless host's dashboard copy."""
+    from tests.test_practice_day import pin_zone
+    pin_zone(monkeypatch)
+    day = dt.date.fromisoformat(runtime.practice_today())
+    db = copied(worlds, tmp_path)
+    ar_as_of = rows(db, "SELECT MAX(as_of) FROM ema_report_files WHERE report='ar_report'")[0][0]
+    prod_as_of = rows(db, "SELECT MAX(as_of) FROM ema_report_files WHERE report='production'")[0][0]
+    want = {"today": day.isoformat(), "ar_days": (day - dt.date.fromisoformat(ar_as_of)).days,
+            "production_days": (day - dt.date.fromisoformat(prod_as_of)).days}
+
+    def check(c, host):
+        for path in ("/api/ema/data", "/api/ema/today"):
+            fr = c.get(path).json()["fresh"]
+            assert {k: fr[k] for k in want} == want, (host, path, fr)
+        feeds = {f["feed"]: f["days"] for f in c.get("/api/ema/data").json()["blind"]["feeds"]}
+        assert (feeds["ar"], feeds["production"]) == (want["ar_days"], want["production_days"]), (host, feeds)
+    check(_site(monkeypatch, db), "server")           # asked before the serverless site switches the mode
+    (tmp_path / "vercel").mkdir()
+    check(_site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel"), "serverless")
