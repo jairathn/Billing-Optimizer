@@ -1980,7 +1980,8 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         if rule == "billed_patient":
             buttons.append("mark_done")
             basis = "two monthly statements after the patient was billed"
-            expected, expected_basis = int((st.get("patient_share") or {}).get("cents") or 0), "what the payer put on the patient on its 835"
+            sh = st.get("patient_share") or {}
+            expected, expected_basis = int(sh.get("left", sh.get("cents")) or 0), "what the payer put on the patient on its 835, less what the patient paid"
         expected, expected_basis = (expected, expected_basis)
     elif route == "refund":
         action, steps, who, deadline, basis = _refund_step(f, fx, st, bal, deadline, basis)
@@ -1996,7 +1997,8 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
     elif route == "bill_patient" and rule in ("bill_patient_denial", "patient_unpaid"):
         action, steps, who, owed, extra = _bill_patient_denial_step(f, fx, st, tot, deadline, t)
         buttons += extra
-        expected, expected_basis = owed, "what the payer put on the patient on its 835, at most the charge less what any payer paid"
+        expected, expected_basis = owed, ("what the payer put on the patient on its 835, at most the charge less what any payer paid, "
+                                          "less what EMA shows the patient paid")
         deadline, basis = None, "the next statement cycle"
     elif route == "bill_patient":
         action, steps, who, owed, extra = _bill_patient_step(f, fx, st, tot)
@@ -2376,14 +2378,18 @@ def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: 
     Done close it; a person's choice is never undone by a run."""
     grp = f.get("payer_group") or "the payer"
     share = st.get("patient_share") or S.patient_share(fx)
-    owed = int(share.get("cents") or 0)
+    whole = int(share.get("cents") or 0)
+    # what the patient already paid on EMA's line comes off what is billed
+    owed = int(share.get("left", whole) or 0)
+    so_far = (f" (the rest: EMA shows {usd(share.get('patient_paid'))} of {usd(whole)} paid by the patient)"
+              if owed < whole and share.get("patient_paid") else "")
     carc = str(f.get("carc") or "")
     pr = ", ".join(f"{g}-{c} {usd(a)}" for g, c, a in share.get("pr") or []) or f"PR-{carc}"
     why = PATIENT_DENIAL_WORDS.get(carc, "not the payer's to pay")
     if st.get("rule") == "patient_unpaid":
         action = f"Send the patient another statement for {usd(owed)}, or mark it Done: {_lower(st.get('state_basis') or '')}."
     else:
-        action = f"Bill the patient {usd(owed)}: {grp} put this service on the patient ({pr}: {why})."
+        action = f"Bill the patient {usd(owed)}{so_far}: {grp} put this service on the patient ({pr}: {why})."
     steps: list[str] = []
     if tot["n"] and tot["balance"] >= owed:
         steps.append(f"EMA shows {usd(tot['balance'])} open on this line: put {usd(owed)} on the patient's next statement.")

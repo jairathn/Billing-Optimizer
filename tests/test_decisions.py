@@ -234,12 +234,15 @@ def _patient_denial(s, reason="27", *, charge=150, signal="DENIED_COVERAGE_DATES
     return tk
 
 
-def _ema_patient(s, *, balance, pat_paid=0, noncontractual=0, charges=15000):
-    """EMA's line for the visit (written straight into its summary tables): what is open, what the patient paid."""
+def _ema_patient(s, *, balance, pat_paid=0, noncontractual=0, charges=15000, pat_adj=0):
+    """EMA's line for the visit (written straight into its summary tables): what is open, what the patient paid, what EMA
+    took off the patient's balance (a patient adjustment)."""
     from tests import ema_fixtures as F
     bill = F.claim_id(1)[:9]
-    s.conn.execute("""INSERT OR REPLACE INTO ema_lines (link, svc, cpt, bill, payer_group, charges, balance, pat_paid_joined, noncontractual)
-                      VALUES (?,?,?,?,?,?,?,?,?)""", (7001, "2026-03-02", "99213", bill, "Anthem / BCBS", charges, balance, pat_paid, noncontractual))
+    s.conn.execute("""INSERT OR REPLACE INTO ema_lines (link, svc, cpt, bill, payer_group, charges, balance, pat_paid_joined, noncontractual,
+                                                        pat_adj_joined)
+                      VALUES (?,?,?,?,?,?,?,?,?,?)""", (7001, "2026-03-02", "99213", bill, "Anthem / BCBS", charges, balance, pat_paid,
+                                                        noncontractual, pat_adj))
     s.conn.execute("INSERT OR REPLACE INTO ema_link_map (link, bill, claim_id, method, conflict, facility) VALUES (?,?,?,?,0,0)",
                    (7001, bill, F.claim_id(1), "test"))
     s.conn.commit()
@@ -322,6 +325,62 @@ def test_d2_billed_the_patient_waits_for_the_patients_payment_and_closes_when_em
     assert sstore.conn.execute("SELECT status FROM findings WHERE finding_id='F1'").fetchone()[0] == "appealed"
 
 
+def test_d2_a_patient_share_ema_settled_on_the_patients_side_is_done_not_billed_again(sstore):
+    """PR-204 put the visit's $150.00 on the patient. EMA shows the patient paid $40.00 and $110.00 taken off the
+    patient's balance, and the line closed: the patient was billed and the practice settled the rest on the patient's
+    account, so the item is done (settled by the patient), never "Bill the patient $150.00" again. The same $40.00 with the
+    rest written off as non-contractual is not the patient's side: the share was written off, so it is still work, for the
+    $110.00 the patient has not paid, after reversing the write-off."""
+    from remitwatch import story
+    _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
+    _ema_patient(sstore, balance=0, pat_paid=4000, pat_adj=11000)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("done", "moved_to_patient"), st["state_basis"]
+    assert "$40.00 paid by the patient" in st["state_basis"] and "$110.00 taken off the patient's balance" in st["state_basis"], st["state_basis"]
+    _ema_patient(sstore, balance=0, pat_paid=4000, noncontractual=11000)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Bill the patient $110.00 (the rest: EMA shows $40.00 of $150.00 paid by the patient):"), n["action"]
+    assert n["expected_cents"] == 11000 and any(x.startswith("EMA wrote $110.00 off on this line: reverse that write-off") for x in n["steps"]), n
+
+
+def test_d2_a_patient_who_paid_part_is_billed_the_rest_and_one_who_paid_it_all_is_done(sstore):
+    """The patient paid $90.00 of the $150.00 and EMA shows $60.00 open: the next step bills the $60.00 left, not the
+    $150.00. Once EMA shows the patient paid all $150.00 the item is done, paid by the patient, even while EMA still shows
+    money open on the line for another reason."""
+    from remitwatch import story
+    _patient_denial(sstore, "27")
+    _ema_patient(sstore, balance=6000, pat_paid=9000)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    assert st["state_basis"].endswith("bill the patient the $60.00 left (EMA shows $90.00 of $150.00 paid by the patient)"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Bill the patient $60.00 (the rest: EMA shows $90.00 of $150.00 paid by the patient):"), n["action"]
+    assert n["expected_cents"] == 6000 and "EMA shows $60.00 open on this line: put $60.00 on the patient's next statement." in n["steps"]
+    _ema_patient(sstore, balance=2000, pat_paid=15000, charges=17000)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("done", "patient_paid"), st["state_basis"]
+    assert st["state_basis"] == "Paid by the patient: EMA shows $150.00 paid by the patient", st["state_basis"]
+
+
+def test_d2_billed_the_patient_is_not_closed_by_a_write_off_of_the_patients_share(sstore):
+    """After Billed the patient, EMA closes the line by writing $130.00 off as non-contractual with only the $20.00 the
+    patient paid: that is a write-off, not the patient's payment, so the item keeps waiting (and is work again at the
+    follow-up day) for a person to decide; it is never closed as paid by the patient."""
+    from remitwatch import actions
+    _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-11-20T15:00:00+00:00")
+    _ema_patient(sstore, balance=0, pat_paid=2000, noncontractual=13000)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("waiting", "billed_patient"), st["state_basis"]
+    assert st["state_basis"].endswith("EMA shows $20.00 of $150.00 paid so far"), st["state_basis"]
+    late = _state(sstore, today="2027-01-20")
+    assert (late["work_state"], late["rule"]) == ("work_now", "patient_unpaid"), late["state_basis"]
+    _ema_patient(sstore, balance=0, pat_paid=2000, pat_adj=13000)
+    assert (_state(sstore)["work_state"], _state(sstore)["rule"]) == ("done", "patient_paid")
+
+
 def test_d2_done_is_a_persons_decision_with_who_and_when(sstore):
     from remitwatch import actions
     _patient_denial(sstore, "49", signal="DENIED_PLAN_EXCLUSION")
@@ -378,9 +437,10 @@ def _row(db, fid):
 def test_d2_done_through_the_api_is_strict_bound_to_its_item_and_checked_against_the_page(api_site):
     c, db = api_site.c, api_site.db
     # an override is strict JSON true: a string or a number is refused, and nothing changes
-    for bad in ("true", 1, "yes"):
-        r = _post(c, "F1", status="resolved", done=bad, seen_status="open")
-        assert r.status_code == 400, (bad, r.text)
+    from remitwatch import api as rw_api
+    for bad in ("true", 1, "yes", False):
+        r = _post(c, "F1", status="resolved", done=bad, recovered_cents=0, seen_status="open")
+        assert r.status_code == 400 and r.json().get("detail") == rw_api.DONE_STRICT, (bad, r.text)
     # Done is for a patient-group denial only; $0 Paid without it stays refused
     r = _post(c, "F2", status="resolved", done=True, seen_status="open")
     assert r.status_code == 400 and r.json().get("code") == "done", r.text
