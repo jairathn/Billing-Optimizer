@@ -92,6 +92,63 @@ def test_one_visit_billed_again_under_a_new_bill_is_chased_once_from_the_837s(tm
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_the_work_on_the_older_bill_passes_to_the_bill_made_again(tmp_path, kind):
+    """(answers-1: the older item's work goes to the newest bill's item through save()'s heir keys.) Bill CB0000M61 (one
+    patient's 99214 of September 14) is listed as never answered; a biller starts it and writes a note. The practice makes
+    the bill again as CB0000M62 and sends it September 25. The next run lists the visit once, on M62, Started, with the
+    note; M61's item is not listed."""
+    from remitwatch.actions import apply_status
+    s = _store(tmp_path, kind)
+    member = "WDUP000061"
+    send(s, tmp_path, [clm837("CB0000M61C017", V, member=member)], "20260915")
+    _remits(s, tmp_path, _visits(), "20261020")
+    found = _chased(s, "t1")
+    assert set(found) == {"CB0000M61C017"}
+    apply_status(s.conn, found["CB0000M61C017"]["finding_id"], "in_progress", "Called Anthem: no record of it", actor="biller")
+    s.conn.commit()
+    send(s, tmp_path, [clm837("CB0000M62C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, _visits(start=40), "20261110")
+    found = _chased(s, "t2")
+    _show(found)
+    assert set(found) == {"CB0000M62C017"}
+    m62 = found["CB0000M62C017"]
+    assert m62["status"] == "in_progress" and "no record of it" in (m62["notes"] or ""), (m62["status"], m62["notes"])
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_line_added_in_a_resend_the_exports_do_not_show_yet_is_chased_from_the_837s(tmp_path, kind):
+    """(answers-5, the reviewer's L02.) Anthem paid bill CB0000L02's C017 (a 99214) in full. EMA's weekly exports list the
+    replacement C024 (the 99214 and a forgotten 17110, submitted September 1); then the 837s show the bill sent again as
+    C031 (September 20, both lines), which the exports do not list yet. Nothing answered C024 or C031. The exports' pass
+    leaves C024 for the newer submission; the 837 pass chases C031's 17110, the one service no remittance of the bill
+    answered (before: no item of any kind on L02)."""
+    from tests.test_features import claim
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    rates = [claim(600 + i, svc("17110", "200.00", "80.00", "80.00", "CAS*CO*45*120.00~")) for i in range(25)]
+    v1 = [("99214", "223.65", "20260730")]
+    v2 = v1 + [("17110", "200.00", "20260730")]
+    send(s, tmp_path, [clm837("CB0000L02C017", v1)], "20260801")
+    _remits(s, tmp_path, [answer("CB0000L02C017", dos="20260730")], "20260820")
+    send(s, tmp_path, [clm837("CB0000L02C024", v2, freq="7")], "20260901")
+    send(s, tmp_path, [clm837("CB0000L02C031", v2, freq="7")], "20260920")
+    ema(s.conn, "CB0000L02C024", service_date="2026-07-30", bill_created="2026-07-31")
+    ema(s.conn, "CB0000L02C024", cpt="17110", charges_cents=20000, service_date="2026-07-30", bill_created="2026-07-31")
+    ema(s.conn, "CB0000L02C024", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-01",
+        service_date="2026-07-30")
+    s.conn.commit()
+    _remits(s, tmp_path, rates + _visits(), "20261110")
+    Detector(s, run_id="t1").run()
+    rows = [dict(r) for r in s.query("SELECT signal, patient_control_number, status, shortfall_cents, evidence FROM findings "
+                                     "WHERE patient_control_number LIKE 'CB0000L02%' AND COALESCE(stale,0)=0")]
+    print([{k: v for k, v in r.items() if k != "evidence"} for r in rows])
+    mine = [r for r in rows if r["patient_control_number"] == "CB0000L02C031" and r["signal"] == "NO_ANSWER"]
+    assert len(mine) == 1 and json.loads(mine[0]["evidence"])["codes"] == ["17110"] and mine[0]["shortfall_cents"] == 8000, rows
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_two_family_members_on_one_subscriber_id_seen_the_same_day_are_two_services(tmp_path, kind):
     """(The verifier's guard for answers-1.) Two dependents on one subscriber id, each seen September 14 for a 99214,
     billed on two bills sent the same day. Each 837 names its own patient (the patient loop, 2000C/2010CA): a one-visit
@@ -108,17 +165,37 @@ def test_two_family_members_on_one_subscriber_id_seen_the_same_day_are_two_servi
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_two_bills_of_one_subscriber_id_sent_the_same_day_with_no_patient_named_stay_two(tmp_path, kind):
-    """(The verifier's note, as it stands at fc73dec.) Two bills under one subscriber id, both sent September 15 for a
-    99214 of September 14, with no patient loop and nothing else naming the patient (no remittance, no EMA row): nothing
-    shows whether they are one visit billed twice or two family members, so neither is dropped."""
+def test_two_bills_of_one_subscriber_id_with_no_patient_named_stay_two(tmp_path, kind):
+    """(The verifier's guard, as it stands for the 837s read before the patient loop was read.) Two bills under one
+    subscriber id, both sent September 15 for a 99214 of September 14, read by the first release's reader (no patient, no
+    read_version), and nothing else naming the patient (no remittance of either bill, no EMA row): nothing shows whether
+    they are one visit billed twice or two family members, so neither is dropped."""
     s = _store(tmp_path, kind)
     member = "WFAMV00002"
     send(s, tmp_path, [clm837("CB0000F11C017", V, member=member), clm837("CB0000F12C017", V, member=member)], "20260915")
+    s.conn.execute("UPDATE claims_837 SET patient_key = NULL, person_key = NULL, relationship = NULL, read_version = NULL")
+    s.conn.commit()
     _remits(s, tmp_path, _visits(), "20261110")
     found = _chased(s, "t1")
     _show(found)
     assert set(found) == {"CB0000F11C017", "CB0000F12C017"}
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_one_patient_billed_twice_for_one_visit_the_same_day_is_chased_once(tmp_path, kind):
+    """Two bills, both sent September 15, whose 837s name the same patient (the subscriber, with the same birth date) for
+    the same 99214 of September 14: one visit billed twice. Only the newer bill (the higher claim id on the same day) carries
+    it. A 99214 with modifier 76 (a repeat service) on a third bill of the same day is another service and stays."""
+    s = _store(tmp_path, kind)
+    member = "WDUP000009"
+    pt = ("SAMPLE", "PAT", "19700101")
+    send(s, tmp_path, [clm837("CB0000D11C017", V, member=member, subscriber=pt), clm837("CB0000D12C017", V, member=member, subscriber=pt),
+                       clm837("CB0000D13C017", [("99214", "223.65", "20260914", "76")], member=member, subscriber=pt)], "20260915")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    _show(found)
+    assert set(found) == {"CB0000D12C017", "CB0000D13C017"}
     s.close()
 
 
@@ -324,4 +401,90 @@ def test_a_siblings_paid_visit_does_not_answer_the_other_siblings_unanswered_cla
     _show(found)
     assert "CB0000S12C017" in found, f"listed {sorted(found)}: child B's own visit was never answered"
     assert "CB0000S11C017" not in found
+    s.close()
+
+
+# ================================================================================================ the 837 reader
+def _file837(claims: list[str], bht: str = "20260915", n: int = 1) -> bytes:
+    """An 837P file made on `bht` holding these subscriber loops (tests/test_837_sends.send's envelope)."""
+    st = (f"ST*837*{n:04d}*005010X222A1~BHT*0019*00*{n}*{bht}*1200*CH~HL*1**20*1~NM1*85*2*TEST DERMATOLOGY*****XX*1777777772~"
+          + "".join(claims) + f"SE*99*{n:04d}~")
+    return (f"ISA*00*          *00*          *ZZ*999999999      *ZZ*TRIZETTO       *{bht[2:]}*1200*^*00501*{n:09d}*0*P*:~"
+            f"GS*HC*999999999*TRIZETTO*{bht}*1200*{n}*X*005010X222A1~" + st + f"GE*1*{n}~IEA*1*{n:09d}~").encode()
+
+
+def test_the_837_reader_reads_the_patient_the_payers_place_and_the_other_payer():
+    """Three subscriber loops of invented claims:
+    - CB0000P01 (the subscriber is the patient, SBR02 18, with a birth date): relationship 18, the patient keyed by the
+      subscriber's name and birth date; Anthem is the primary (SBR01 P), claim filing indicator CI.
+    - CB0000P02 (a dependent: the patient loop names the child): relationship 19, the patient keyed by the child's name
+      and birth date, not the subscriber's; the member id stays the subscriber's.
+    - CB0000P03 sent to Humana as secondary (SBR01 S) after Anthem paid $94.08 (2320: AMT*D, AMT*EAF $23.52; 2430: the
+      line's SVD and its CAS*PR $23.52) and
+      CB0000P04 in the same subscriber loop after it: P04 keeps its own payer (Humana), not the other payer's loop's.
+    No name or birth date reaches the parsed claims; keys are made only with the store's salt."""
+    from remitwatch.ema_reports import name_key_parts, person_key
+    from remitwatch.x12_837 import parse_837_bytes
+    salt = bytes(range(32))
+    data = _file837([
+        clm837("CB0000P01C017", V, member="WSELF00001", subscriber=("TESTLAST", "ALPHA", "19800102")),
+        clm837("CB0000P02C017", V, member="WFAM000001", subscriber=("TESTLAST", "BRAVO", "19790304"),
+               patient=("TESTLAST", "CHARLIE", "20150506")),
+        clm837("CB0000P03C017", V, payer=HUMANA, member="WSEC000001", resp="S", cfi="MB",
+               other={"payer": ANTHEM, "paid": 94.08, "left": 23.52, "co": 106.05, "lines": [(94.08, 23.52)]})
+        + f"CLM*CB0000P04C017*223.65***11:B:1*Y*A*Y*Y~LX*1~SV1*HC:99214*223.65*UN*1***1~DTP*472*D8*20260914~",
+    ])
+    out = parse_837_bytes(data, salt=salt)
+    c = {x["patient_control_number"]: x for x in out["claims"]}
+    assert c["CB0000P01C017"]["relationship"] == "18" and c["CB0000P01C017"]["payer_resp"] == "P"
+    assert c["CB0000P01C017"]["filing_indicator"] == "CI"
+    assert c["CB0000P01C017"]["patient_key"] == name_key_parts(salt, "TESTLAST", "ALPHA")
+    assert c["CB0000P01C017"]["person_key"] == person_key(salt, "TESTLAST, ALPHA", "1980-01-02")
+    assert c["CB0000P02C017"]["relationship"] == "19" and c["CB0000P02C017"]["subscriber_id"] == "WFAM000001"
+    assert c["CB0000P02C017"]["patient_key"] == name_key_parts(salt, "TESTLAST", "CHARLIE")
+    assert c["CB0000P02C017"]["person_key"] == person_key(salt, "TESTLAST, CHARLIE", "2015-05-06")
+    p3 = c["CB0000P03C017"]
+    assert (p3["payer_resp"], p3["filing_indicator"], p3["payer_name"]) == ("S", "MB", "HUMANA")
+    assert (p3["other_payer_name"], p3["other_payer_id"], p3["other_payer_resp"]) == ("ANTHEM", "00660", "P")
+    assert (p3["other_paid_cents"], p3["other_left_cents"], p3["other_pr_cents"]) == (9408, 2352, 2352)
+    p4 = c["CB0000P04C017"]
+    assert (p4["payer_name"], p4["payer_id"], p4["subscriber_id"]) == ("HUMANA", "61101", "WSEC000001"), (
+        "the other payer's loop of the claim before it changed this claim's payer or member")
+    assert p4["other_payer_name"] is None and p4["other_paid_cents"] is None
+    flat = json.dumps(out, default=str).upper()
+    for word in ("ALPHA", "BRAVO", "CHARLIE", "TESTLAST", "1980-01-02", "2015-05-06", "19800102", "20150506"):
+        assert word not in flat, f"{word} reached the parsed claims"
+    nokey = parse_837_bytes(data)
+    assert all(x["patient_key"] is None and x["person_key"] is None for x in nokey["claims"])
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_837_read_before_the_patient_loop_was_read_is_filled_in_when_read_again(tmp_path, kind):
+    """A store whose 837 tables were made by the first release (no patient, payer's place or other payer columns): the
+    columns are added on the next read, a file read before keeps NULLs (read_version NULL) and is listed to be read again,
+    and reading its bytes again fills them in by each claim's key without touching anything else. No name is stored."""
+    from remitwatch import x12_837 as X
+    s = _store(tmp_path, kind)
+    c = s.conn
+    old = X.DDL
+    c.executescript(old)
+    data = _file837([clm837("CB0000P11C017", V, member="WFAM000002", patient=("TESTLAST", "DELTA", "20160707"))])
+    parsed = X.parse_837_bytes(data)
+    cols = ["claim_837_key", "file_sha256", "bht_created", "patient_control_number", "total_charge_cents", "payer_name", "payer_id",
+            "subscriber_id"]
+    c.executemany(f"INSERT INTO claims_837 ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                  [tuple(x.get(k) for k in cols) for x in parsed["claims"]])
+    c.commit()
+    X.ensure_schema(c)
+    have = {r[1] for r in c.execute("PRAGMA table_info(claims_837)")}
+    assert set(X.EXTRA_CLAIM_COLS) <= have
+    assert X.files_to_reread(c) == [parsed["sha256"]]
+    got = X.reread_837_bytes(c, data)
+    assert got["updated"] == 1
+    row = dict(zip([d[0] for d in c.execute("SELECT * FROM claims_837").description], c.execute("SELECT * FROM claims_837").fetchone()))
+    assert row["relationship"] == "19" and row["read_version"] == X.READ_VERSION and row["patient_key"] is not None
+    assert row["subscriber_id"] == "WFAM000002" and row["bht_created"] == "2026-09-15"
+    assert X.files_to_reread(c) == []
+    blob = json.dumps([list(r) for r in c.execute("SELECT * FROM claims_837")], default=str).upper()
+    assert "DELTA" not in blob and "TESTLAST" not in blob and "2016-07-07" not in blob
     s.close()

@@ -7,14 +7,32 @@ date (DTP*472), procedure code and modifiers, charge, units, diagnosis
 pointers and the line item control number (REF*6R). Stored in `claims_837`
 and `lines_837` so the 835 paid code can be compared with the submitted code
 even when the payer omits SVC06.
+
+Read since READ_VERSION 2 (the fix wave's F3a), per claim:
+- who the payer is to this claim (SBR01 of the subscriber loop 2000B: P primary, S secondary, T tertiary, ...), the
+  claim filing indicator (SBR09) and the patient's relationship to the subscriber (SBR02 18 when the subscriber is the
+  patient, else PAT01 of the patient loop);
+- the patient: the dependent of the patient loop (2000C/2010CA, NM1*QC and its DMG) where the 837 has one, else the
+  subscriber (2010BA, NM1*IL and its DMG). The store keeps only keyed values of the patient's name (patient_key) and of
+  the name with the birth date (person_key), made with the store's own key salt as EMA's reports' are
+  (ema_reports.name_key_parts and person_key), never the name or the birth date: a dependent's claim carries the
+  subscriber's member id, and only the patient tells two family members on one id apart;
+- for a claim sent to a payer after another payer answered it (2320/2330B): the other payer that answered last (its
+  name, id and responsibility), what the other payers paid (AMT*D), and what that payer left to the patient (AMT*EAF,
+  else its CAS*PR adjustments on the claim and on the lines' 2430 SVD): what a secondary payer is asked to pay.
+The segments of the other payer's loops (2320 to 2330G) never change the claim's own payer, subscriber or rendering
+clinician, as they did before (a second claim of the same subscriber loop took the other payer as its payer).
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 from typing import Any
 
 from .x12_835 import Seg, cents, iso_date, iter_segments, sniff_delims, split_envelopes, to_float
+
+READ_VERSION = 2            # claims read since the patient loop, SBR01/SBR09 and the other payer's loop were read
 
 DDL = """
 CREATE TABLE IF NOT EXISTS claims_837 (
@@ -32,61 +50,164 @@ CREATE TABLE IF NOT EXISTS lines_837 (
 CREATE INDEX IF NOT EXISTS ix_l837_pcn ON lines_837(patient_control_number);
 """
 
+# columns added after the first release (ensure_schema adds them to an older store; a claim read before has them NULL,
+# and read_version NULL says so)
+EXTRA_CLAIM_COLS = {
+    "payer_resp": "TEXT", "relationship": "TEXT", "filing_indicator": "TEXT", "patient_key": "INTEGER", "person_key": "INTEGER",
+    "other_payer_name": "TEXT", "other_payer_id": "TEXT", "other_payer_resp": "TEXT", "other_paid_cents": "INTEGER",
+    "other_left_cents": "INTEGER", "other_pr_cents": "INTEGER", "read_version": "INTEGER",
+}
+CLAIM_COLS = ["claim_837_key", "file_sha256", "source_name", "st_control", "bht_created", "patient_control_number", "total_charge_cents",
+              "frequency_code", "place_of_service", "payer_name", "payer_id", "billing_npi", "rendering_npi", "subscriber_id",
+              "service_date", "original_reference_number", "prior_auth", "line_count"] + list(EXTRA_CLAIM_COLS)
+LINE_COLS = ["line_837_key", "claim_837_key", "patient_control_number", "line_seq", "procedure_code", "modifiers", "charge_cents", "units",
+             "service_date", "diagnosis_pointers", "line_control_number", "rendering_npi"]
+_RESP_ORDER = "PSTABCDEFGH"     # SBR01's payer responsibility sequence, first to last (U, unknown, after them)
 
-def parse_837_bytes(data: bytes, source: str = "") -> dict[str, list[dict]]:
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    """The 837 tables, with the columns added since the first release on a store made before them."""
+    conn.executescript(DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(claims_837)")}
+    for col, typ in EXTRA_CLAIM_COLS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE claims_837 ADD COLUMN {col} {typ}")
+
+
+def _cas_pr(seg: Seg) -> int:
+    """The patient-responsibility amounts (group PR) of one CAS segment: CAS01 the group, then up to six (reason, amount,
+    quantity) triples."""
+    if seg.get(1) != "PR":
+        return 0
+    total = 0
+    for i in range(3, 19, 3):
+        c = cents(seg.get(i))
+        if c:
+            total += c
+    return total
+
+
+def _resp_rank(resp: str | None) -> int:
+    r = (resp or "").strip().upper()
+    i = _RESP_ORDER.find(r) if r else -1
+    return i if i >= 0 else len(_RESP_ORDER)
+
+
+def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) -> dict[str, list[dict]]:
+    """The claims and lines of an 837P file. With the store's key salt, each claim carries its patient's keyed name
+    (patient_key) and keyed name and birth date (person_key); without one (a preview of an upload) they are None. No name
+    or birth date is ever returned."""
     text = data.decode("utf-8", errors="replace").lstrip("﻿")
     sha = hashlib.sha256(data).hexdigest()
     claims: list[dict] = []
     lines: list[dict] = []
+    if salt is not None:
+        from .ema_reports import name_key_parts, person_key
     for env_index, env in enumerate(split_envelopes(text)):
         d = sniff_delims(env)
         st_control = None
         bht_created = None
         payer_name = payer_id = billing_npi = None
-        loop = ""
         claim: dict | None = None
         line: dict | None = None
         claim_seq = 0
         line_seq = 0
         rendering_npi = None
         subscriber_id = None
+        # the subscriber loop's (2000B/2010BA) and the patient loop's (2000C/2010CA) own fields: never the other payer's
+        sub = {"resp": None, "rel": None, "cfi": None, "last": None, "first": None, "dob": None}
+        pat: dict | None = None
+        where = ""          # inside a claim: "claim" (2300/2310), "other" (2320/2330), "line" (2400/2420), "line_other" (2430)
+        level = ""          # the HL level the segments before a claim belong to: "subscriber" or "patient"
+        others: list[dict] = []
+        svd_payer = None
+
+        def keys() -> tuple[Any, Any, Any]:
+            who = pat if pat is not None else sub
+            rel = (pat or {}).get("rel") if pat is not None else sub.get("rel")
+            if salt is None or not (who.get("last") or who.get("first")):
+                return rel, None, None
+            pk = name_key_parts(salt, who.get("last"), who.get("first"))
+            name = f"{who.get('last') or ''}, {who.get('first') or ''}"
+            return rel, pk, (person_key(salt, name, who["dob"]) if who.get("dob") else None)
 
         def finish_claim():
-            nonlocal claim, line
+            nonlocal claim, line, others
             if line is not None:
                 lines.append(line)
                 line = None
             if claim is not None:
                 claim["line_count"] = sum(1 for x in lines if x["claim_837_key"] == claim["claim_837_key"])
+                if others:
+                    last = max(others, key=lambda o: _resp_rank(o["resp"]))
+                    claim["other_payer_name"], claim["other_payer_id"], claim["other_payer_resp"] = last["name"], last["id"], last["resp"]
+                    paid = [o["paid"] for o in others if o["paid"] is not None]
+                    claim["other_paid_cents"] = sum(paid) if paid else None
+                    claim["other_left_cents"] = last["left"]
+                    pr = last["pr"] + last["line_pr"]
+                    claim["other_pr_cents"] = pr if (last["has_pr"] or pr) else None
                 claims.append(claim)
                 claim = None
+            others = []
 
         for seg in iter_segments(env, d):
             sid = seg.id
             if sid == "ST":
                 finish_claim()
                 st_control = seg.get(2)
+                where = ""
             elif sid == "BHT":
                 bht_created = iso_date(seg.get(4))
             elif sid == "HL":
-                level = seg.get(3)
-                if level == "20":
-                    loop = "billing"
-                elif level == "22":
-                    loop = "subscriber"
+                hl = seg.get(3)
+                if hl == "20":
                     finish_claim()
-                elif level == "23":
-                    loop = "patient"
+                    level, where = "billing", ""
+                elif hl == "22":
                     finish_claim()
+                    level, where = "subscriber", ""
+                    # a new subscriber: none of the previous one's payer, member id or names carries over
+                    payer_name = payer_id = subscriber_id = None
+                    sub = {"resp": None, "rel": None, "cfi": None, "last": None, "first": None, "dob": None}
+                    pat = None
+                elif hl == "23":
+                    finish_claim()
+                    level, where = "patient", ""
+                    pat = {"rel": None, "last": None, "first": None, "dob": None}
+            elif sid == "SBR":
+                if claim is None:
+                    # 2000B: this payer's responsibility for the claims below, the relationship (18: the subscriber is the
+                    # patient) and the claim filing indicator
+                    sub["resp"], sub["rel"], sub["cfi"] = seg.get(1) or None, seg.get(2) or None, seg.get(9) or None
+                else:
+                    # 2320: another payer of this claim (its responsibility); its loops follow until the service lines
+                    where = "other"
+                    others.append({"resp": seg.get(1) or None, "name": None, "id": None, "paid": None, "left": None, "pr": 0,
+                                   "line_pr": 0, "has_pr": False})
+            elif sid == "PAT" and claim is None:
+                if pat is not None and seg.get(1):
+                    pat["rel"] = seg.get(1)
+            elif sid == "DMG" and claim is None:
+                if seg.get(1) == "D8":
+                    who = pat if level == "patient" and pat is not None else sub
+                    who["dob"] = iso_date(seg.get(2))
             elif sid == "NM1":
                 ent = seg.get(1)
+                if where in ("other", "line_other"):
+                    # 2330A to 2330G: the other payer's own subscriber, payer and providers. Only its payer is kept
+                    if ent == "PR" and others:
+                        others[-1]["name"], others[-1]["id"] = seg.get(3) or None, seg.get(9) or None
+                    continue
                 if ent == "85":
                     billing_npi = seg.get(9) if seg.get(8) == "XX" else billing_npi
-                elif ent == "PR":
+                elif ent == "PR" and claim is None:
                     payer_name = seg.get(3)
                     payer_id = seg.get(9) or payer_id
-                elif ent == "IL":
+                elif ent == "IL" and claim is None:
                     subscriber_id = seg.get(9) or subscriber_id
+                    sub["last"], sub["first"] = seg.get(3) or None, seg.get(4) or None
+                elif ent == "QC" and claim is None and pat is not None:
+                    pat["last"], pat["first"] = seg.get(3) or None, seg.get(4) or None
                 elif ent == "82":
                     npi = seg.get(9) if seg.get(8) == "XX" else None
                     if line is not None:
@@ -99,7 +220,9 @@ def parse_837_bytes(data: bytes, source: str = "") -> dict[str, list[dict]]:
                 finish_claim()
                 claim_seq += 1
                 line_seq = 0
+                where = "claim"
                 pos = seg.comp(5, d)
+                rel, pk, prk = keys()
                 claim = {
                     "claim_837_key": f"{sha[:16]}:{env_index}:{st_control}:{claim_seq}", "file_sha256": sha,
                     "source_name": os.path.basename(source) if source else None, "st_control": st_control, "bht_created": bht_created,
@@ -107,12 +230,35 @@ def parse_837_bytes(data: bytes, source: str = "") -> dict[str, list[dict]]:
                     "frequency_code": pos[2] if len(pos) > 2 else None, "place_of_service": pos[0] if pos else None,
                     "payer_name": payer_name, "payer_id": payer_id, "billing_npi": billing_npi, "rendering_npi": rendering_npi,
                     "subscriber_id": subscriber_id, "service_date": None, "original_reference_number": None, "prior_auth": None,
-                    "line_count": 0,
+                    "line_count": 0, "payer_resp": sub["resp"], "relationship": rel, "filing_indicator": sub["cfi"],
+                    "patient_key": pk, "person_key": prk, "other_payer_name": None, "other_payer_id": None, "other_payer_resp": None,
+                    "other_paid_cents": None, "other_left_cents": None, "other_pr_cents": None, "read_version": READ_VERSION,
                 }
             elif claim is None:
                 continue
+            elif sid == "CAS":
+                pr = _cas_pr(seg)
+                if where == "other" and others:
+                    others[-1]["pr"] += pr
+                    others[-1]["has_pr"] = others[-1]["has_pr"] or seg.get(1) == "PR"
+                elif where == "line_other" and others:
+                    o = next((x for x in others if x["id"] and x["id"] == svd_payer), others[-1])
+                    o["line_pr"] += pr
+                    o["has_pr"] = o["has_pr"] or seg.get(1) == "PR"
+            elif sid == "AMT":
+                if where == "other" and others:
+                    q = seg.get(1)
+                    if q == "D":
+                        others[-1]["paid"] = cents(seg.get(2))
+                    elif q == "EAF":
+                        others[-1]["left"] = cents(seg.get(2))
+            elif sid == "SVD":
+                where = "line_other"
+                svd_payer = seg.get(1) or None
             elif sid == "REF":
                 q, v = seg.get(1), seg.get(2)
+                if where in ("other", "line_other"):
+                    continue
                 if line is not None and q == "6R":
                     line["line_control_number"] = v
                 elif q == "F8":
@@ -131,10 +277,12 @@ def parse_837_bytes(data: bytes, source: str = "") -> dict[str, list[dict]]:
                 if line is not None:
                     lines.append(line)
                 line = None
+                where = "line"
             elif sid == "SV1":
                 if line is not None:
                     lines.append(line)
                 line_seq += 1
+                where = "line"
                 comp = seg.comp(1, d)
                 code = comp[1] if len(comp) > 1 else None
                 mods = [m for m in comp[2:6] if m]
@@ -149,6 +297,7 @@ def parse_837_bytes(data: bytes, source: str = "") -> dict[str, list[dict]]:
                 }
             elif sid == "SE":
                 finish_claim()
+                where = ""
         finish_claim()
     by_key = {c["claim_837_key"]: c for c in claims}
     for l in lines:
@@ -163,24 +312,46 @@ def parse_837_bytes(data: bytes, source: str = "") -> dict[str, list[dict]]:
     return {"claims": claims, "lines": lines, "sha256": sha}
 
 
+def _salt(conn: sqlite3.Connection) -> bytes:
+    """The store's key salt (ema_reports.key_salt: made on first use by a reader, never leaves the store)."""
+    from .ema_reports import key_salt
+    return key_salt(conn)
+
+
 def ingest_837_file(store, path: str) -> dict:
     with open(path, "rb") as fh:
         data = fh.read()
     sha = hashlib.sha256(data).hexdigest()
     conn = store.conn
-    conn.executescript(DDL)
+    ensure_schema(conn)
     if store.file_seen(sha):
         return {"skipped": True}
-    parsed = parse_837_bytes(data, source=path)
-    ccols = ["claim_837_key", "file_sha256", "source_name", "st_control", "bht_created", "patient_control_number", "total_charge_cents",
-             "frequency_code", "place_of_service", "payer_name", "payer_id", "billing_npi", "rendering_npi", "subscriber_id", "service_date",
-             "original_reference_number", "prior_auth", "line_count"]
-    lcols = ["line_837_key", "claim_837_key", "patient_control_number", "line_seq", "procedure_code", "modifiers", "charge_cents", "units",
-             "service_date", "diagnosis_pointers", "line_control_number", "rendering_npi"]
-    conn.executemany(f"INSERT OR IGNORE INTO claims_837 ({','.join(ccols)}) VALUES ({','.join('?' * len(ccols))})",
-                     [tuple(c.get(k) for k in ccols) for c in parsed["claims"]])
-    conn.executemany(f"INSERT OR IGNORE INTO lines_837 ({','.join(lcols)}) VALUES ({','.join('?' * len(lcols))})",
-                     [tuple(l.get(k) for k in lcols) for l in parsed["lines"]])
+    parsed = parse_837_bytes(data, source=path, salt=_salt(conn))
+    conn.executemany(f"INSERT OR IGNORE INTO claims_837 ({','.join(CLAIM_COLS)}) VALUES ({','.join('?' * len(CLAIM_COLS))})",
+                     [tuple(c.get(k) for k in CLAIM_COLS) for c in parsed["claims"]])
+    conn.executemany(f"INSERT OR IGNORE INTO lines_837 ({','.join(LINE_COLS)}) VALUES ({','.join('?' * len(LINE_COLS))})",
+                     [tuple(l.get(k) for k in LINE_COLS) for l in parsed["lines"]])
     store.record_file(sha, path, kind="837", status="ok", claims=len(parsed["claims"]), lines=len(parsed["lines"]))
     conn.commit()
     return {"claims": len(parsed["claims"]), "lines": len(parsed["lines"])}
+
+
+def files_to_reread(conn: sqlite3.Connection) -> list[str]:
+    """The 837 files (by sha256) whose claims were read before READ_VERSION: their patient, payer responsibility and
+    other payer are not on file until the file is read again (reread_837_bytes)."""
+    ensure_schema(conn)
+    return [r[0] for r in conn.execute("""SELECT DISTINCT file_sha256 FROM claims_837 WHERE file_sha256 IS NOT NULL
+                                          AND COALESCE(read_version, 0) < ? ORDER BY file_sha256""", (READ_VERSION,))]
+
+
+def reread_837_bytes(conn: sqlite3.Connection, data: bytes) -> dict:
+    """Fill in what an 837 file read before READ_VERSION left out (the claim's patient, the payer's responsibility, the
+    claim filing indicator and the other payer), by each claim's key: the same file read again makes the same keys. The
+    rest of each row, and the lines, stay as they are. A file the store never read changes nothing."""
+    ensure_schema(conn)
+    parsed = parse_837_bytes(data, salt=_salt(conn))
+    cols = list(EXTRA_CLAIM_COLS)
+    cur = conn.executemany(f"UPDATE claims_837 SET {', '.join(c + '=?' for c in cols)} WHERE claim_837_key=?",
+                           [tuple(c.get(k) for k in cols) + (c["claim_837_key"],) for c in parsed["claims"]])
+    conn.commit()
+    return {"claims": len(parsed["claims"]), "updated": cur.rowcount if cur.rowcount is not None else 0}
