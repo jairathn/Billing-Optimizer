@@ -1154,12 +1154,14 @@ def _clean(s: str) -> str:
 
 
 def _window(deadline: str | None, today: str, legal: str | None = None, route: str = "appeal", second: str | None = None,
-            basis: str | None = None) -> str:
+            basis: str | None = None, no_appeal: bool = False) -> str:
     """The item's window in one sentence, in the words of the work its route asks for (an appeal, a corrected claim, a
     bill to the second payer, or only the payer's window). legal: the payer's own limit when detection found it later than
-    the safe date."""
+    the safe date. no_appeal: the payer takes no appeal of an ordinary denial, so its window is a corrected claim's."""
     if not deadline:
         return ""
+    if no_appeal and route in ("appeal", "rate"):
+        route = "corrected"
     if route in ("refund", "post", "bill_patient", "contract", "policy", "fees", "nothing", "wait"):
         return ""
     if route in ("appeal", "rate"):
@@ -1217,7 +1219,8 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
     ns: list[int] = []
     started = rule == "person_started"
     late = _late_words(st) if rule == "open_late" else ""
-    window = "" if late else _window(deadline, today, st.get("legal_deadline"), route, S._ev(f).get("second_payer"), st.get("deadline_basis"))
+    window = "" if late else _window(deadline, today, st.get("legal_deadline"), route, S._ev(f).get("second_payer"), st.get("deadline_basis"),
+                                     no_appeal=S.no_appeal(f))
     resolved = str(o.get("status") or "").lower().startswith("resolved") or o.get("status_class") in ("paid", "settled")
     carcs = _carcs(fx)
     wo = usd(o.get("written_off") or o.get("contractual_routine"))
@@ -1463,7 +1466,7 @@ def _short_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, t
         ns += en
         ema = f" A person wrote the difference off in EMA on {day(o.get('outcome_on'))} {_refs(en)}."
     chk = _short_check(conn, fx)
-    window = _window(st.get("deadline"), today, st.get("legal_deadline"), st.get("route") or "rate")
+    window = _window(st.get("deadline"), today, st.get("legal_deadline"), st.get("route") or "rate", no_appeal=S.no_appeal(f))
     if chk and chk["kind"] == "reduced":
         return (f"Check first: {chk['text']}. {head}{ema}", ns, "inferred", "a same-day procedure or the facility rate may explain the cut")
     if chk and chk["kind"] == "top_cut":
@@ -2064,10 +2067,14 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             aw = st["answer_window"]
             deadline, basis = aw["date"], aw["basis"]
     elif route == "eob_first":
+        na = S.no_appeal_step(f)
         action = (f"Get the EOB from {_poss(grp)} portal (no 835 reached RemitWatch for this answer), then work the denial: "
-                  + ("send a corrected claim." if f.get("actionable") == "correct_and_resubmit" else "appeal with the record."))
+                  + ("send a corrected claim." if f.get("actionable") == "correct_and_resubmit" or na else "appeal with the record."))
         steps += ["Download the EOB for the check that carried the denial (EMA shows the posting day).",
+                  "Read its reason and remark codes; fix and resend as they say." if na else
                   "Read its reason and remark codes; fix and resend, or appeal, as they say."]
+        if na:
+            steps.append(na[:1].upper() + na[1:] + ".")
         zero = next((p for p in sorted(fx["ema"]["pays"], key=lambda p: p["posted"] or "") if not p.get("in_835") and p.get("check_tail")), None)
         era = _era_request(conn, fx, {"check_tail": zero["check_tail"], "payer": zero.get("payer"), "rule": "eob_first"}) if zero else None
         buttons += ["copy_instructions", "mark_sent"]
@@ -2080,6 +2087,10 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         buttons += ["copy_instructions", "log_outcome", "mark_billed"]
     elif route == "corrected":
         action = _corrected_change(f, fx) + "."
+        if S.no_appeal(f):
+            steps.append("Kentucky Medicaid takes no appeal of an ordinary claim denial (907 KAR 1:671): send a corrected or new claim with "
+                         "what the denial asks for within 12 months of the date of service (907 KAR 1:673), or within 6 months of "
+                         "Medicare's answer where Medicare answered it first and that is later (907 KAR 3:005).")
         medicare_fix = f.get("payer_kind") == "medicare" and sig not in ("REJECTED_PRE_PAYER", "NOT_SENT")
         if medicare_fix:
             from . import appeals
@@ -2581,8 +2592,46 @@ def _grp_of(payer: Any) -> str | None:
     return S._grp_kind(payer)[0] if payer else None
 
 
+# Where a decision step would say "appeal", the words for a payer that takes no appeal of an ordinary claim denial
+# (Kentucky Medicaid, 907 KAR 1:671): its denials are worked by a corrected or new claim (deadlines review r2-2)
+NO_APPEAL_WORDS = (
+    ("fix and resubmit if it names an error, appeal if the payer is wrong, let it go",
+     "fix it and send a corrected or new claim if it names an error, let it go"),
+    ("if not, appeal it.", "if not, send a corrected or new claim."),
+    ("before appealing", "before sending a corrected or new claim"),
+    (": appeal it and refund the patient if the payer pays", ": send a corrected or new claim and refund the patient if the payer pays"),
+    ("if not, appeal", "if not, send a corrected or new claim"),
+    ("appeal only with proof", "send it again only with proof"),
+    ("Appeal with the clearinghouse acceptance report", "Send it again with the clearinghouse acceptance report"),
+    ("Appeal only with a diagnosis unrelated to that procedure", "Send a corrected claim only with a diagnosis unrelated to that procedure"),
+    ("unrelated problem, appeal with modifier 24", "unrelated problem, a corrected claim with modifier 24"),
+    ("or appeal with the coverage rule", "or a corrected or new claim with what the coverage rule asks for"),
+    ("dispute with the note", "send a corrected claim with the note"),
+    ("if the code billed was right, appeal;", "if the code billed was right, send a corrected or new claim with it;"),
+    ("File a reconsideration (or call) quoting", "Call, or send a corrected claim, quoting"),
+)
+
+
+def _no_appeal_words(text: str) -> str:
+    for old, new in NO_APPEAL_WORDS:
+        text = text.replace(old, new)
+    return text
+
+
 def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple[str, list[str], str, list[str]]:
-    """A decision before any work: what to check, and the choices it leads to. Returns (action, steps, who, buttons)."""
+    """A decision before any work: what to check, and the choices it leads to. Returns (action, steps, who, buttons). A
+    payer that takes no appeal of an ordinary claim denial is never offered one: its choices are a corrected or new claim or
+    letting it go, and the step says why (states.no_appeal_step)."""
+    action, steps, who, buttons = _decide_choices(conn, f, fx, st)
+    na = S.no_appeal_step(f)
+    if na:
+        action = _no_appeal_words(action)
+        steps = [_no_appeal_words(x) for x in steps] + [na[:1].upper() + na[1:] + "."]
+    return action, steps, who, buttons
+
+
+def _decide_choices(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple[str, list[str], str, list[str]]:
+    """_decide_step's choices in the words for a payer that takes appeals."""
     sig = f.get("signal") or ""
     carc = str(f.get("carc") or "")
     rarcs = {x.strip() for x in str(f.get("rarc") or "").split(",") if x.strip()}
@@ -2798,7 +2847,7 @@ def _clerical_remark_step(f: dict, clocks: list[dict], st: dict) -> str | None:
 def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:
     """Every clock the item runs on (states.windows, the same windows its state expires by), and the window counted from
     the first denial of the same service where the payer counts from the original determination (a safe, earlier date)."""
-    from .codes import appeal_rule, filing_rule
+    from .codes import appeal_rule, filing_rule, rule_at, rule_facts
     out = []
     for w in S.windows(f, st.get("deadline"), st.get("deadline_basis"), fx):
         what = {"the item's deadline": "the item's deadline", "the payer's own limit": "the payer's own limit",
@@ -2807,13 +2856,14 @@ def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:
         out.append({"what": what, "date": w["date"], "basis": w["basis"], "process": w["process"]})
     grp, kind = f.get("payer_group"), f.get("payer_kind")
     if f.get("payment_date") and f.get("signal") not in S.CLAIM_SIGNALS and f.get("category") in S.MONEY:
-        a = appeal_rule(grp, kind)
-        start = S.first_denial(fx, a)
+        a = appeal_rule(grp, kind, **rule_facts(f))
+        start = S.first_denial(fx, a) if not S.no_appeal(f) else None
         if start:
+            a = rule_at(start, a)           # the window before an effective date, for an earlier first denial
             out.append({"what": "first denial of this service", "date": S._add(start, a["days"]), "process": "appeal",
                         "basis": f"{_short(a['label'])}, counted from the first denial of this service ({day(start)}) to be safe"})
     if f.get("signal") in S.CLAIM_SIGNALS and f.get("service_date"):
-        r = filing_rule(grp, kind)
+        r = filing_rule(grp, kind, **rule_facts(f))
         if r.get("earliest"):
             out.append({"what": "first filing (shortest common limit)", "date": S._add(f["service_date"], r["earliest"]), "process": "first_filing",
                         "basis": "the shortest common first-filing limit for this kind of payer; send it by then where possible"})
