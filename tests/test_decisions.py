@@ -269,12 +269,23 @@ def sstore(request, tmp_path, monkeypatch):
     s.close()
 
 
+def _production_covers(s, lo="2026-01-01", hi="2026-11-20"):
+    """EMA's Production report on file covers services of these dates (a box as ema_reports.coverage reads it), so
+    RemitWatch can see the patient's side of a service of those dates: decision 2 bills the patient only then."""
+    s.conn.execute("""INSERT OR REPLACE INTO ema_report_files (file_id, report, status, scope, svc_lo, svc_hi, posted_lo, posted_hi, as_of)
+                      VALUES (?, 'production', 'current', 'service', ?, ?, ?, ?, ?)""", (f"P{lo}", lo, hi, lo, hi, hi))
+    s.conn.commit()
+
+
 def _patient_denial(s, reason="27", *, charge=150, signal="DENIED_COVERAGE_DATES", other_paid=0, group="PR", fid="F1",
-                    deadline="2026-09-24", payer_kind="commercial"):
+                    deadline="2026-09-24", payer_kind="commercial", covered=True):
     """A patient-group denial as archive rule 8 raises it: the payer put the whole charge on the patient (PR-<reason>)
-    on March 28; another payer paid `other_paid` dollars for the same service the week before, when given."""
+    on March 28; another payer paid `other_paid` dollars for the same service the week before, when given. EMA's
+    Production report on file covers the visit's date unless `covered` is False."""
     from tests import ema_fixtures as F
     from tests.test_states import item, ln, remit
+    if covered:
+        _production_covers(s)
     if other_paid:
         remit(s, trace=F.check_no(900), paid_on="2026-03-20", payer="TESTCARE OTHER PLAN",
               claims=[{"pcn": F.claim_id(1, sub=9), "received": "2026-03-05",
@@ -328,6 +339,7 @@ def test_d2_the_amount_is_what_the_payer_put_on_the_patient_never_more_than_the_
     from remitwatch import states, story
     from tests import ema_fixtures as F
     from tests.test_states import item, ln, remit
+    _production_covers(sstore)
     tk = remit(sstore, trace=F.check_no(1), paid_on="2026-03-28",
                claims=[{"pcn": F.claim_id(1), "received": "2026-03-05", "lines": [ln("99213", 150, 0, [("PR", "204", 100), ("CO", "45", 50)])]}])
     item(sstore, finding_id="F1", signal="DENIED_PLAN_EXCLUSION", carc="204", line_key=f"{tk}-0-0", claim_key=f"{tk}-0", transaction_key=tk,
@@ -439,6 +451,7 @@ def _crossed_over(s, later_status, payer, cfi, adj):
     answered it on April 6 with nothing paid: `adj` its adjustment on the whole $150.00."""
     from tests import ema_fixtures as F
     from tests.test_states import item, ln, remit
+    _production_covers(s)
     tk = remit(s, trace=F.check_no(1), paid_on="2026-03-28", payer="MEDICARE TEST",
                claims=[{"pcn": F.claim_id(1), "received": "2026-03-05", "status": "19", "cfi": "MB",
                         "lines": [ln("99213", 150, 0, [("PR", "49", 150)])]}])
@@ -567,10 +580,12 @@ def test_d2_a_run_never_undoes_billed_the_patient_or_done(tmp_path, kind):
     the $223.65 the payer put on them. A biller marks one Billed the patient and another Done; the next runs keep both (the
     first waits for the patient's payment, then is work again when nothing came; the second stays done with $0), and the
     third is still Work now."""
-    from remitwatch import actions
+    from remitwatch import actions, ema_reports as er
     from remitwatch.detect import Detector
     from tests.test_settled_elsewhere import ANTHEM, _add, _clp, _line, _store, _usual
     s = _store(tmp_path, kind)
+    er.ensure_schema(s.conn)
+    _production_covers(s, "2026-01-01", "2026-10-15")       # EMA's Production report covers the visits' dates
     pcns = [f"CB0000R0{i}C017" for i in (1, 2, 3)]
     _add(s, tmp_path, _usual("12", "117.60") + [_clp(p, "1", _line("0.00", "CAS*PR*204*223.65~")) for p in pcns], "20261001", **ANTHEM)
     Detector(s, run_id="t1", today="2026-10-20").run()

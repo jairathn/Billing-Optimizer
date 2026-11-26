@@ -2866,6 +2866,17 @@ def _decide(fx: dict, today: str) -> dict:
                 return put("done", "patient_paid", text, [{"source": "production", "kind": "proof", "text": text}])
             res["appeal_block"] = "bill"
             words = ", ".join(f"{g}-{c}" for g, c, _a in share["pr"]) or f"PR-{f.get('carc')}"
+            if not _ema_line_totals(fx)["n"] and not _covered(ctx, f.get("service_date")):
+                # RemitWatch sees the patient's side of a service only on EMA's line for it. With no line and no Production
+                # report covering the date of service it cannot tell whether the patient paid, was billed or had the share
+                # written off: a can't-check with its dollars (the owner's rule 3), never a bill on a guess. A person checks
+                # the patient's account in EMA, then presses Billed the patient or Done. Its age is not decided here: the
+                # payer's windows never close a patient's share, and an age limit is the owner's call
+                why = ("EMA's Production reports do not cover this date of service" if ctx.get("prod_as_of") else
+                       "no EMA Production report is on file")
+                return put("cant_check", "cant_check_patient", f"{f.get('payer_group') or 'The payer'} put this service on the patient "
+                           f"({words}, {usd(share['cents'])}), but {why}, so RemitWatch cannot see whether the patient paid it, was "
+                           "billed or had it written off: check the patient's account in EMA before billing")
             ask = (f"the {usd(share['left'])} left (EMA shows {usd(share['patient_paid'])} of {usd(share['cents'])} paid by the patient)"
                    if share["patient_paid"] > 0 else usd(share["cents"]))
             return put("work_now", "bill_patient_denial", f"{f.get('payer_group') or 'The payer'} put this service on the patient "
@@ -2957,6 +2968,10 @@ def _billed_patient(res: dict, fx: dict, billed: dict, who: str, today: str, put
         return put("waiting", "billed_patient", f"{lead}; it waits for the patient's payment in EMA, checked again on {day(follow)}{so_far}",
                    rows, follow=follow)
     res["appeal_block"] = "bill"
+    if not tot["n"]:
+        # the patient's payment cannot be seen here: never "nothing paid", and never another statement on a guess
+        return put("work_now", "patient_unpaid", f"{lead}; no payment from the patient can be seen by {day(follow)}{so_far}: check the "
+                   "patient's account in EMA, then send another statement or mark it Done", rows, follow=follow)
     short = "not all of it paid" if paid > 0 else "nothing paid by the patient"
     return put("work_now", "patient_unpaid", f"{lead}; {short} by {day(follow)}{so_far}: send another statement, or mark it Done",
                rows, follow=follow)

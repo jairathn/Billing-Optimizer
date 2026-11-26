@@ -2053,6 +2053,14 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         buttons += ["copy_instructions", "log_outcome"]
         if rule == "person_billed_paid":
             buttons = ["log_outcome", "copy_instructions"]
+        if rule == "cant_check_patient":
+            # the share the payer put on the patient, which RemitWatch cannot see paid or not: its dollars are the can't-check
+            # money, and the two ways out are a person's (Billed the patient after checking EMA, or Done)
+            sh = st.get("patient_share") or S.patient_share(fx)
+            buttons = _patient_denial_buttons(str(f.get("carc") or ""))
+            expected, expected_basis = int(sh.get("cents") or 0), ("what the payer put on the patient on its 835; RemitWatch cannot see "
+                                                                   "whether the patient paid it")
+            deadline, basis = None, "the next statement cycle, once EMA shows the share still open"
         if rule in ("follow_up_due", "work_stale"):
             deadline, basis = (st.get("follow_up_on") if (st.get("follow_up_on") or "") >= t else t), "the follow-up is due"
         elif rule == "work_answered" and (st.get("answer_window") or {}).get("date"):
@@ -2387,7 +2395,10 @@ def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: 
     carc = str(f.get("carc") or "")
     pr = ", ".join(f"{g}-{c} {usd(a)}" for g, c, a in share.get("pr") or []) or f"PR-{carc}"
     why = PATIENT_DENIAL_WORDS.get(carc, "not the payer's to pay")
-    if st.get("rule") == "patient_unpaid":
+    if st.get("rule") == "patient_unpaid" and not tot["n"]:
+        action = (f"Check the patient's account in EMA, then send the patient another statement for {usd(owed)} or mark it Done: "
+                  f"{_lower(st.get('state_basis') or '')}.")
+    elif st.get("rule") == "patient_unpaid":
         action = f"Send the patient another statement for {usd(owed)}, or mark it Done: {_lower(st.get('state_basis') or '')}."
     else:
         action = f"Bill the patient {usd(owed)}{so_far}: {grp} put this service on the patient ({pr}: {why})."
@@ -2418,21 +2429,54 @@ def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: 
                      "patient's next statement.")
     else:
         steps.append(f"Put {usd(owed)} on the patient's next statement in EMA (EMA shows no line for this service here).")
-    open_window = bool(deadline) and str(deadline) >= today
-    if carc in ("27", "26", "200"):
-        steps.append("Ask the patient for their current insurance: a plan that covered that day pays more than the patient does. If they "
-                     "have one, update it in EMA and send the claim to that plan within its filing window, then mark it sent.")
-    elif carc == "288":
-        steps.append("Or get a retroactive referral from the patient's primary care office and send a corrected claim with the referral "
-                     "number" + (f" by {day(deadline)}" if open_window else "") + ", then mark it sent.")
-    elif carc == "49":
-        steps.append("If the visit treated a problem rather than a routine check, correct the diagnosis and send a corrected claim instead.")
-    elif carc == "204":
-        steps.append("If a covered code or diagnosis applies, send a corrected claim instead.")
+    alt = _patient_denial_other_way(carc, deadline, today)
+    if alt:
+        steps.append(alt)
     steps.append("Once the patient is billed, press Billed the patient: the item waits for the patient's payment in EMA and closes when "
                  "EMA shows it. Or press Done to close it yourself.")
-    extra = ["billed_patient", "mark_done", "copy_instructions"] + (["mark_sent"] if carc in ("288", "27", "26", "200") else [])
-    return action, steps, "Patient accounts", owed, extra
+    return action, steps, "Patient accounts", owed, _patient_denial_buttons(carc)
+
+
+def _patient_denial_other_way(carc: str, deadline: str | None, today: str) -> str | None:
+    """The other way out of a patient-group denial, by its reason: a plan that covered the day, a retroactive referral, a
+    corrected diagnosis or code."""
+    if carc in ("27", "26", "200"):
+        return ("Ask the patient for their current insurance: a plan that covered that day pays more than the patient does. If they "
+                "have one, update it in EMA and send the claim to that plan within its filing window, then mark it sent.")
+    if carc == "288":
+        open_window = bool(deadline) and str(deadline) >= today
+        return ("Or get a retroactive referral from the patient's primary care office and send a corrected claim with the referral "
+                "number" + (f" by {day(deadline)}" if open_window else "") + ", then mark it sent.")
+    if carc == "49":
+        return "If the visit treated a problem rather than a routine check, correct the diagnosis and send a corrected claim instead."
+    if carc == "204":
+        return "If a covered code or diagnosis applies, send a corrected claim instead."
+    return None
+
+
+def _patient_denial_buttons(carc: str) -> list[str]:
+    return ["billed_patient", "mark_done", "copy_instructions"] + (["mark_sent"] if carc in ("288", "27", "26", "200") else [])
+
+
+def _cant_check_patient_step(f: dict, fx: dict, st: dict, facts: str, today: str) -> tuple[str, list[str], str]:
+    """A patient-group denial RemitWatch cannot see the patient's side of (states: cant_check_patient, no EMA line and no
+    Production report covering its date of service): check the patient's account in EMA first, never a bill on a guess."""
+    grp = f.get("payer_group") or "the payer"
+    share = st.get("patient_share") or S.patient_share(fx)
+    owed = usd(share.get("cents"))
+    carc = str(f.get("carc") or "")
+    pr = ", ".join(f"{g}-{c} {usd(a)}" for g, c, a in share.get("pr") or []) or f"PR-{carc}"
+    why = PATIENT_DENIAL_WORDS.get(carc, "not the payer's to pay")
+    action = (f"Check the patient's account in EMA before billing {owed}: {grp} put this service on the patient ({pr}: {why}), but "
+              "RemitWatch cannot see that account for this date of service.")
+    steps = [f"If EMA shows the {owed} still open on the patient, put it on the patient's next statement and press Billed the patient: "
+             "the item then waits for the patient's payment.",
+             "If the patient paid it, or the share was settled or written off, press Done and say what EMA shows."]
+    alt = _patient_denial_other_way(carc, st.get("deadline"), today)
+    if alt:
+        steps.append(alt)
+    steps.append(facts)
+    return action, steps, "Patient accounts"
 
 
 def _policy_step(f: dict):
@@ -2476,6 +2520,8 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
     when = day(work.get("date")) if work.get("dated_by") not in ("first_report",) and work.get("date") else "on a date nobody recorded"
     fallback = _work_fallback(conn, f, fx, st)
     if st.get("work_state") == "cant_check":
+        if rule == "cant_check_patient":
+            return _cant_check_patient_step(f, fx, st, facts, today)
         return _cant_check_step(f, fx, st, facts)
     if rule == "payment_never_arrived":
         paid = f.get("paid_cents") or f.get("shortfall_cents")
