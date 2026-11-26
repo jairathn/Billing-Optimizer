@@ -149,29 +149,22 @@ checking out the branch and continuing from its state below):
    It must agree with the two hand-checked samples (31 underpayments, 76 dropped never-answered claims; their verdicts
    are summarised in `plans/next_fixes_2026-11-24.md` and section 3 below). Keep its 182 self-checks.
 
-**Then, in order:**
-1. Merge `wip/fix7d`, `wip/hook` and `wip/fix7c` as each finishes. Run the full suite on each merge, from a frozen
-   worktree of the merge commit. Check `git status` before every merge commit: the fix4 merge once committed a file
-   staged before its last edit.
-2. A17.
-3. **fix7e, the residuals.** These were measured on m9 = 0efcb74 (section 3, "m9"; `plans/next_fixes_2026-11-24.md`
-   sections 2, 4, 5 and 7):
-   - denials paid on an 835 but routed to note or check-first;
-   - $0 lines, voided claims, short-paid denials;
-   - late resends routed to 'call' (judge them by hand);
-   - C6's copay and the Medicaid catch-all;
-   - takebacks seen by paid_proof;
-   - the bare-$0 reading left in selfcheck, the turnaround, status_class and SECONDARY_NOT_BILLED.
-4. The owner's four decisions (section 3b). Until they come, rule 8 and rule 4.2 items stay pursued.
-5. The final measurement on world2 (the full 837 history) with A17, and a fresh hand-trace sample per class (at least
-   95% agreement).
-6. The release gates:
-   - the four environments and the node checks;
-   - the catch-up harness on a fresh live copy;
-   - the PHI scan;
-   - the docs (stale OPERATIONS.md lines, the README table, the runbook's ledger backup, .env.example).
-
-   Then push to main and check `/api/health` on both sites.
+**Then, in order** (rewritten 2026-11-26 21:50 UTC; the list written on 11-25 is superseded):
+1. Merge the 11-26 units as each finishes its fix round: fix7d, fix7c, decisions, hook, deadlines, then a17's tool
+   (`$S/tk/tools/integ_merge.sh <unit>` merges in a dedicated worktree; then the full suite from a frozen worktree of the
+   merge commit; push to both branch names). Check `git status` before every merge commit. At the hook merge, the
+   integrator's notes at the top of this file list what to check and change (CLAUDE.md's daily-cycle paragraph).
+2. The fix wave, `plans/briefs/2026-11-26_fixwave.md`: seven fixers with the functions each owns. F1 (ledger), F3a (the
+   837 pass) and F3b (the exports) may start once fix7d is merged, since no other open unit edits their functions; F2,
+   F4, F5 and F6 start once decisions, hook and deadlines are merged. Each fixer is a workflow: build, two reviews, one
+   fix round. Then F7 (every except block logs).
+3. A17 scores the merged code again; then the final stage, `plans/briefs/2026-11-26_final.md`: every claim since
+   2026-01-01 scored, at least 30 blind hand-traces per verdict class, 100% agreement on the owner's three failure kinds
+   (already worked or paid but listed, owed but not listed, closed wrongly), every disagreement catalogued in
+   `plans/final_trace_<date>.md` and fixed with a failing test, the stage run again; the 1,892 vanished items explained by
+   rule before the owner presses Accept.
+4. The release gates (the four environments and the node checks on a clean checkout, the catch-up harness on a fresh
+   live copy, the PHI scan, the docs, the release note), then push to main and check `/api/health` on both sites.
 
 **Rebuilding the private data** (a new session has none of it): see `plans/tools/world/README.md`. The store image is in
 the Dropbox state folder, and EMA's four reports are in Dropbox. Build world.sqlite with `world_ingest.py`, and world2
