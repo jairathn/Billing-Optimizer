@@ -42,6 +42,14 @@ the Medicare 77600 payments. Until you say so, every one of them stays on Work n
 - The Vercel site grows toward a hard memory ceiling of about 1 GB for its store; at today's growth it reaches it in
   about a year. With your decision 1 (Vercel analyses only when someone presses Run, AWS runs every day) the AWS site
   is the one the billers use.
+- Built for decision 1: the Vercel site has no daily run any more (its fax follow-up run stays); the Data tab has a
+  "Run the analysis now" button, and every page says the site analyses only on a press. Measured on a copy of Vercel's
+  own store: a press takes about 3.5 minutes of the 5 a run may take.
+- One call I made so that it fits: the Vercel site reads EMA's A/R report only, not the Production report. With
+  Production in its store, an analysis did not fit one Vercel run in time or memory (5 tries, all out of time). The AWS
+  server reads both, so its lists are the complete ones; the Vercel pages will say that they show the A/R only and can
+  differ from the server's. Tell me if you want Production on Vercel too: it would need the settled EMA lines kept off
+  that site's store first.
 
 ## 3. Found by the review of every change since 11-23 (being verified, then fixed before the release)
 - Indiana Medicaid's first-filing limit is set to 365 days; the program publishes 180 days from the date of service.

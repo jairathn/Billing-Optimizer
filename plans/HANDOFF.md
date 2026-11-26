@@ -149,7 +149,7 @@ checking out the branch and continuing from its state below):
    It must agree with the two hand-checked samples (31 underpayments, 76 dropped never-answered claims; their verdicts
    are summarised in `plans/next_fixes_2026-11-24.md` and section 3 below). Keep its 182 self-checks.
 
-**Then, in order** (rewritten 2026-11-26 21:50 UTC; the list written on 11-25 is superseded):
+**Then, in order** (rewritten 2026-11-26 21:30 UTC; the list written on 11-25 is superseded):
 1. Merge the 11-26 units as each finishes its fix round: fix7d, fix7c, decisions, hook, deadlines, then a17's tool
    (`$S/tk/tools/integ_merge.sh <unit>` merges in a dedicated worktree; then the full suite from a frozen worktree of the
    merge commit; push to both branch names). Check `git status` before every merge commit. At the hook merge, the
