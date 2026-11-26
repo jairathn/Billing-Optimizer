@@ -81,7 +81,7 @@ is set; a different key afterwards stops the connection before the password is s
 fingerprint that can be read stops the feed before it connects. A server offers its favourite key type first: when that
 is not the type listed or kept, its other key types are asked for before the key is called wrong. Every SFTP call has a
 30-second limit, and a watchdog closes the connection at the run's deadline: the files read by then are kept, and the
-next run reads the rest. The server has a fixed address (3.128.37.47), so an address TriZetto has to allow is no
+next run reads the rest. The server has a fixed address (written in the runbook kept outside the repository), so an address TriZetto has to allow is no
 obstacle.
 
 The password. The feed signs in with the login TriZetto issued for RemitWatch. TriZetto's own SFTP login is usually the
