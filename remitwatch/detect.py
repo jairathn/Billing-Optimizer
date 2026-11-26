@@ -4978,11 +4978,12 @@ class Detector:
                 return False
             return bool(EMA_REJECTED.search(st)) or not EMA_NOT_SENT.search(st)
 
-        def live_items(k: dict) -> list[tuple]:
+        def live_items(k: dict, token: bool = False) -> list[tuple]:
             """One charge for each, though two export layouts list it (with and without its bill item id), less the voids:
             (code, date, charge, units, item id or None, modifiers as EMA gives them). A line billed at $0, or at a token
             charge under $1 (a post-operative visit EMA bills at a penny so the line goes out), is nothing owed, as in the
-            837 pass (answers-3); a line whose charge is not known is not such a line."""
+            837 pass (answers-3); a line whose charge is not known is not such a line. token: the lines billed above $0 and
+            under $1 instead, which are part of the claim's content all the same (_claim_content)."""
             groups: dict[tuple, list] = {}
             for v in k["charges"].values():
                 sig = (v[0], v[1], v[4], abs(v[5]) if v[5] is not None else None, v[2])
@@ -4994,7 +4995,8 @@ class Detector:
             unknown = k.get("no_charge") or ()
             out = []
             for sig, (ids, loose) in groups.items():
-                if sig[4] < 100 and sig not in unknown:
+                small = sig[4] < 100 and sig not in unknown
+                if (not small or not sig[4]) if token else small:
                     continue
                 keep = sorted(ids - k["void_ids"]) if ids else ([None] if loose else [])
                 if sig in k["void_sigs"]:   # a void with no bill item id cancels one, unless a void by id already did
@@ -5002,7 +5004,7 @@ class Detector:
                 out += [(sig[0], sig[1], sig[4], sig[3], item, sig[2]) for item in keep]
             if not out and not k["charges"]:
                 out = [(v[0], v[1], v[2], v[5], None, v[4]) for v in k["status_items"].values()
-                       if v[2] >= 100 or (v[0], v[1]) in unknown]
+                       if ((0 < v[2] < 100 and (v[0], v[1]) not in unknown) if token else (v[2] >= 100 or (v[0], v[1]) in unknown))]
             return out
 
         def billed_nothing(k: dict) -> bool:
@@ -5102,13 +5104,14 @@ class Detector:
             batched = not rejected and not k["sent"] and bool(EMA_PRINT_BATCH.search(status))
             unsent = batched and r8 is None
             gave_up = bool(EMA_GAVE_UP.search(status))
-            items = live_items(k)
+            items, tokens = live_items(k), live_items(k, token=True)
             if not items and billed_nothing(k):
                 self.ema_counts["export_billed_nothing"] += 1
                 continue                    # every line billed at $0 or a token charge: nothing is owed (answers-3)
             if not items and r8 is not None:    # EMA lists no line of it: the lines its 837 billed, as the 837 pass reads them
-                items = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods
-                         in self._lines_837({r8[7]: pcn}).get(r8[7], []) if (chg or 0) >= 100]
+                l8 = self._lines_837({r8[7]: pcn}).get(r8[7], [])
+                items = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in l8 if (chg or 0) >= 100]
+                tokens = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in l8 if 0 < (chg or 0) < 100]
             patient = k["patients"].most_common(1)[0][0] if k["patients"] else None
             if patient:                     # a visit a payment still stands on under another bill is paid, for its own part
                 items = [x for x in items if not (x[1] and visit_paid(patient, x, b))]
@@ -5171,6 +5174,7 @@ class Detector:
                           "again_after": again_after, "rejected": rejected, "unsent": unsent, "gave_up": gave_up, "status": status,
                           "ema_payer": ema_payer, "group": (grp, kind), "grp": grp, "kind": kind, "through": through,
                           "payer_last": last, "s837": r8, "batched": batched, "cob": cob.get(b),
+                          "token_lines": [(x[0], x[1], x[2]) for x in tokens],
                           "secondary": second.get(pcn) or [x for xs in (cob.get(b) or {}).get("answers", {}).values() for x in xs],
                           "resent_837": bool(r8 is not None and k["sent"] and basis == SENT_837) or bool(again_837),
                           "bill_resent_837": again_837,
@@ -5744,10 +5748,13 @@ class Detector:
         {claim id: claim_answers' entry; 'twins' lists the twins when each twin is one of these claims}."""
         from . import ema_checks as ec
         claims, alt = [], {}
+        # the claim's content is every line it charged, a token charge included (_claim_content): EMA's claim carries it
+        content = self._ema_step(step + "_content", self._claim_content, cds) or {}
+        cds = [dict(cd, content=content.get(cd["pcn"]) or [(x[0], x[1], x[2]) for x in cd["items"]]) for cd in cds]
         for cd in cds:
             own = cd.get("match_group") or self._ema_group(cd.get("ema_payer")) or cd.get("grp")
             claims.append({"claim_id": cd["pcn"], "sent": cd["sent"], "payer_group": own,
-                           "lines": [(x[1], x[0], x[2]) for x in cd["items"] if x[1]]})
+                           "lines": [(x[1], x[0], x[2]) for x in cd["content"] if x[1]]})
             old = (normalize_payer(cd["ema_payer"])[0] if cd.get("grp") == VA_GROUP[0] and cd.get("ema_payer") else cd.get("grp"))
             if old and old != own:
                 alt[cd["pcn"]] = old
@@ -5792,6 +5799,27 @@ class Detector:
                             "bridge": "unanswered_before_send"}
         return answers
 
+    def _claim_content(self, cds: list[dict]) -> dict[str, list[tuple]]:
+        """Each never-answered claim's charged lines as its EMA claim holds them, to find that claim by its content: the
+        lines it is listed for and the lines billed above $0 and under $1 (a token charge: a code EMA bills at a penny so
+        the line goes out). A token line is nothing owed, so it is never listed or priced (answers-3), but EMA's claim
+        carries it as a charge line: left out, the claim's content equals no EMA claim, and a claim EMA shows paid is listed
+        as never answered. The token lines are the claim's own (cd['token_lines'], from EMA's weekly exports), else those of
+        the 837 send its lines were read from (cd['s837']). {claim id: [(code, date, charge cents)]}."""
+        out: dict[str, list[tuple]] = {}
+        want: dict[str, str] = {}
+        for cd in cds:
+            out[cd["pcn"]] = [(x[0], x[1], int(x[2] or 0)) for x in cd["items"]]
+            r8 = cd.get("s837")
+            if cd.get("token_lines") is not None:
+                out[cd["pcn"]] += [(x[0], x[1], int(x[2] or 0)) for x in cd["token_lines"]]
+            elif r8 is not None and len(r8) > 7 and r8[7]:
+                want[r8[7]] = cd["pcn"]
+        if want:
+            for key, lines in self._lines_837(want).items():
+                out[want[key]] += [(code, dos, int(chg)) for code, dos, chg, _units, _mods in lines if 0 < (chg or 0) < 100]
+        return out
+
     def _unanswered_before_send(self, cds: list[dict], answers: dict, groups: dict) -> dict[str, int]:
         """The EMA claim of a never-answered claim that no bridge and no send-day twin found, when it is the only EMA claim
         of the claim's lines that no payer answered (answers-7): the same day, code and charge on every line and no other line
@@ -5814,7 +5842,7 @@ class Detector:
                 continue
             first = str((cd.get("s837") or [None, None])[1] or cd.get("first_sent") or "")[:10]
             agg: dict[tuple, int] = defaultdict(int)       # EMA keeps one line per date and code
-            for x in cd["items"]:
+            for x in cd.get("content") or cd["items"]:
                 if x[0] and x[1]:
                     agg[(x[1], x[0])] += int(x[2] or 0)
             if not first or not agg:
@@ -5969,7 +5997,7 @@ class Detector:
             first = str((cd.get("s837") or [None, None])[1] or cd.get("first_sent") or "")[:10]
             lo = _add_days(first, -SEND_DAY_SLACK) if first else None
             agg: dict[tuple, int] = defaultdict(int)       # EMA keeps one line per date and code
-            for x in cd["items"]:
+            for x in cd.get("content") or cd["items"]:
                 if x[0] and x[1]:
                     agg[(x[1], x[0])] += int(x[2] or 0)
             if not lo or not agg:

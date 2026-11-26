@@ -283,6 +283,65 @@ def test_a_line_billed_at_no_charge_is_nothing_owed_on_an_export_claim(tmp_path,
     s.close()
 
 
+def _token_world(tmp_path, kind, source):
+    """EMA's claims 96 and 97 (patients 1 and 2): a 99214, a 96372 and a J3590 billed at a token $0.01 (the line EMA bills
+    so a drug's code goes out), visit March 2, charges posted March 3. Blue Cross paid EMA claim 96 on April 10; EMA claim
+    97 is still open. Claims F.claim_id(96) and F.claim_id(97) carry the same lines as their EMA claims (96: 99214 at
+    $223.65; 97: 99214 at $200), sent to Blue Cross on March 20: known from the 837s only (source '837') or from EMA's
+    weekly exports only (source 'ema'). No 835 answers either; the A/R pairs neither; the remittances reach May 1.
+    Returns the open never-answered items of the two claims and of their EMA claims."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
+    from tests.test_workable import ema
+    s, lg = _ema_store(tmp_path, kind)
+    lines = {96: [("99214", 223.65), ("96372", 25.03), ("J3590", 0.01)], 97: [("99214", 200.00), ("96372", 25.03), ("J3590", 0.01)]}
+    rows = [charge(F.link_no(n), cpt=code, amount=amt, patient=n - 95, posted=D(2026, 3, 3)) for n, ls in lines.items() for code, amt in ls]
+    rows.append(pay(F.link_no(96), "PAPER-96", 117.60, cpt="99214", patient=1, posted=D(2026, 4, 10)))
+    denial_world(s, lg, tmp_path, rows)
+    for n in range(25):
+        raw_remit(s, trace=f"BC{n:05d}", paid_on="2026-05-01", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(200 + n), "status": "1", "member": f"MB{n:08d}", "last": "VOLUME", "first": f"B{n}",
+                           "lines": [("2026-04-20", "99214", 200, 110, [("CO", "45", 90)])]}])
+    bc = ("BLUE CROSS TEST", "BCT01")
+    if source == "837":
+        send(s, tmp_path, [clm837(F.claim_id(n), [(code, f"{amt:.2f}", "20260302") for code, amt in ls], payer=bc,
+                                  member=f"MEMBER0000{n}") for n, ls in lines.items()], "20260320")
+    else:
+        for n, ls in lines.items():
+            for code, amt in ls:
+                ema(s.conn, F.claim_id(n), cpt=code, charges_cents=round(amt * 100), service_date="2026-03-02",
+                    bill_created="2026-03-03", payer=bc[0], payer_id=bc[1])
+            ema(s.conn, F.claim_id(n), family="claim_status", cpt="99214", claim_status="Submitted",
+                claim_submission_date="2026-03-20", service_date="2026-03-02", payer=bc[0], payer_id=bc[1])
+        s.conn.commit()
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [dict(r) for r in s.query("SELECT patient_control_number, ema_link, source, evidence FROM findings "
+                                    "WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') AND status='open' AND COALESCE(stale,0)=0")]
+    s.close()
+    return got
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("source", ["ema", "837"])
+def test_a_line_billed_at_a_token_charge_still_tells_which_ema_claim_is_the_claims(tmp_path, kind, ema_env, source):
+    """(answers-3, what it must not break) A line billed at a token $0.01 is nothing owed, so it is never listed or priced;
+    but EMA's claim carries it as a charge line, and a claim's content is all its charged lines. Left out of the content, the
+    claim matched no EMA claim: F.claim_id(96), which Blue Cross paid in EMA after its send, was listed as never answered
+    (the measured world: 2 export claims and 15 claims of the 837s, all paid). Claim 96 is not listed; claim 97 is, once,
+    for its two lines that are owed, with its EMA claim (so Production's never-answered check leaves EMA claim 97)."""
+    from tests import ema_fixtures as F
+    got = _token_world(tmp_path, kind, source)
+    paid = [g for g in got if g["patient_control_number"] == F.claim_id(96) or g["ema_link"] == F.link_no(96)]
+    assert not paid, f"a claim EMA shows paid after its send is listed: {[(g['source'], g['ema_link']) for g in paid]}"
+    open_ = [g for g in got if g["patient_control_number"] == F.claim_id(97) or g["ema_link"] == F.link_no(97)]
+    assert len(open_) == 1, f"claim 97 is listed {len(open_)} times: {[(g['source'], g['ema_link']) for g in open_]}"
+    assert open_[0]["source"] == source and open_[0]["ema_link"] == F.link_no(97), open_
+    assert sorted(ln[0] for ln in json.loads(open_[0]["evidence"])["lines"]) == ["96372", "99214"], open_[0]["evidence"]
+
+
 # ----------------------------------------------------------------------------------------------- answers-5
 @pytest.mark.parametrize("kind", KINDS)
 def test_an_export_claim_whose_bill_went_out_again_stays_listed_when_nothing_else_chases_it(tmp_path, kind):
@@ -326,26 +385,31 @@ def test_an_export_claim_whose_bill_went_out_again_stays_listed_when_nothing_els
 
 # ----------------------------------------------------------------------------------------------- answers-7
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_claim_charged_days_before_its_837_went_out_is_listed_once(tmp_path, kind, ema_env):
+@pytest.mark.parametrize("token", [False, True])
+def test_a_claim_charged_days_before_its_837_went_out_is_listed_once(tmp_path, kind, ema_env, token):
     """(answers-7; the reviewer's test) Only the 837s know claim F.claim_id(91): a 99214 at $200, visit March 2, sent to
     Blue Cross on March 20; the practice posted the charge in EMA on March 3 and held the claim before sending it. No 835
     answers it; the remittances reach May 1 (due April 19). EMA's Production report holds it as EMA claim 91 (patient 1),
     nothing posted on it, and the A/R does not pair it with a claim id. Another patient's EMA claim 92 has the same day,
     code and charge and was paid April 10. EMA claim 91 is the only claim of those lines that no payer answered, charged
-    before the send: it is this claim's, and the claim is listed once (the 837 pass's item, which carries EMA claim 91)."""
+    before the send: it is this claim's, and the claim is listed once (the 837 pass's item, which carries EMA claim 91).
+    token: each claim also carries a J3590 billed at a token $0.01, nothing owed but part of its content."""
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
     s, lg = _ema_store(tmp_path, kind)
     rows = [charge(F.link_no(91), cpt="99214", amount=200, patient=1, posted=D(2026, 3, 3)),
             charge(F.link_no(92), cpt="99214", amount=200, patient=2, posted=D(2026, 3, 3)),
             pay(F.link_no(92), "PAPER-92", 110, cpt="99214", patient=2, posted=D(2026, 4, 10))]
+    if token:
+        rows += [charge(F.link_no(n), cpt="J3590", amount=0.01, patient=n - 90, posted=D(2026, 3, 3)) for n in (91, 92)]
     denial_world(s, lg, tmp_path, rows)
     for n in range(25):
         raw_remit(s, trace=f"BC{n:05d}", paid_on="2026-05-01", payer="BLUE CROSS TEST",
                   claims=[{"pcn": F.claim_id(200 + n), "status": "1", "member": f"MB{n:08d}", "last": "VOLUME", "first": f"B{n}",
                            "lines": [("2026-04-20", "99214", 200, 110, [("CO", "45", 90)])]}])
     bc = ("BLUE CROSS TEST", "BCT01")
-    send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")], payer=bc, member="MEMBER000091")], "20260320")
+    send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")] + ([("J3590", "0.01", "20260302")] if token else []),
+                              payer=bc, member="MEMBER000091")], "20260320")
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
@@ -480,18 +544,23 @@ def test_production_lists_one_service_once_and_prices_its_parts_at_their_own_rat
 
 # ----------------------------------------------------------------------------------------------- send-day twins (fix7b)
 @pytest.mark.parametrize("kind", KINDS)
-def test_send_day_twins_of_two_patients_are_told_apart_by_the_patients_name(tmp_path, kind, ema_env):
+@pytest.mark.parametrize("token", [False, True])
+def test_send_day_twins_of_two_patients_are_told_apart_by_the_patients_name(tmp_path, kind, ema_env, token):
     """(fix7b residual: the send-day twins) Two patients' claims of the same content (a 99214 at $200, visit March 2) went
     to Blue Cross the same day (March 20), and only the 837s know them. EMA charged each the send day: Annie's EMA claim
     61 was paid April 10, Bert's EMA claim 62 was not. Each member's earlier remittance names its patient. The twin rule
     alone cannot tell which twin is whose (both claims stayed listed, Annie's paid claim with them); the patient's name
-    tells it: Annie's claim is answered by EMA claim 61, and Bert's alone is listed, with EMA claim 62."""
+    tells it: Annie's claim is answered by EMA claim 61, and Bert's alone is listed, with EMA claim 62. token: each claim
+    also carries a J3590 billed at a token $0.01, nothing owed but part of its content."""
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
     s, lg = _ema_store(tmp_path, kind)
     rows = [charge(F.link_no(61), cpt="99214", amount=200, patient="Twintest, Annie", posted=D(2026, 3, 20)),
             charge(F.link_no(62), cpt="99214", amount=200, patient="Twintest, Bert", posted=D(2026, 3, 20)),
             pay(F.link_no(61), "PAPER-61", 110, cpt="99214", patient="Twintest, Annie", posted=D(2026, 4, 10))]
+    if token:
+        rows += [charge(F.link_no(n), cpt="J3590", amount=0.01, patient=f"Twintest, {who}", posted=D(2026, 3, 20))
+                 for n, who in ((61, "Annie"), (62, "Bert"))]
     denial_world(s, lg, tmp_path, rows)
     for n in range(25):
         raw_remit(s, trace=f"BC{n:05d}", paid_on="2026-05-01", payer="BLUE CROSS TEST",
@@ -502,8 +571,8 @@ def test_send_day_twins_of_two_patients_are_told_apart_by_the_patients_name(tmp_
                   claims=[{"pcn": F.claim_id(160 + n), "status": "1", "member": f"MEMBER0000{n}", "last": "TWINTEST", "first": first,
                            "lines": [("2026-02-02", "99213", 150, 80, [("CO", "45", 70)])]}])
     bc = ("BLUE CROSS TEST", "BCT01")
-    send(s, tmp_path, [clm837(F.claim_id(n), [("99214", "200.00", "20260302")], payer=bc, member=f"MEMBER0000{n}") for n in (61, 62)],
-         "20260320")
+    lines = [("99214", "200.00", "20260302")] + ([("J3590", "0.01", "20260302")] if token else [])
+    send(s, tmp_path, [clm837(F.claim_id(n), lines, payer=bc, member=f"MEMBER0000{n}") for n in (61, 62)], "20260320")
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
