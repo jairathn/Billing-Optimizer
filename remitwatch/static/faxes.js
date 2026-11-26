@@ -5,6 +5,8 @@
    render, openDetail, kindFor, pl). */
 
 const FAX_KINDS = new Set(['note','rule','rate']);
+// a stored moment's day where the practice is (today.js practiceDate), as the server says it; as written without it
+const faxDay = s => typeof practiceDate === 'function' ? practiceDate(s) : String(s || '').slice(0, 10);
 const FAX_PURPOSE = {appeal:'Appeal', second_request:'Request again', next_level:'Next level', records:'Records sent', payment:'Payment request'};
 const FAX_DOC = {appeal_decision:'Decision', records_request:'Records request', payment_notice:'Payment notice', denial:'Denial',
   acknowledgement:'Received notice', other:'Other', unread:'Not read'};
@@ -297,8 +299,8 @@ async function faxesTab(v){
   const numInput = (p, purpose) => { const n = (p.numbers||{})[purpose] || {}, cur = n.number || '';
     const when = s => esc(String(s||'').replace('T',' ').slice(0,16));
     return `<input data-pfax="${esc(p.payer_group)}" data-purpose="${purpose}" value="${esc(cur)}" placeholder="${purpose==='appeal'?'(800) 555-0100':'if different'}" inputmode="tel" style="width:140px"><button data-psave="${esc(p.payer_group)}" data-purpose="${purpose}">Save</button>`
-      + (cur ? `<div class="muted" title="${esc((n.history||[]).map(h => `${h.number} by ${h.by||'?'} on ${String(h.at||'').slice(0,10)}${h.confirmed ? ' (confirmed)' : ''}`).join('\n'))}">Saved by ${esc(n.by||'?')} on ${when(n.at).slice(0,10)}</div>` : '')
-      + (cur && n.confirmed === false ? `<div class="sev-medium">Changed${n.changed_at ? ' on ' + when(n.changed_at).slice(0,10) : ''}${n.previous ? ` (was ${esc(n.previous)})` : ''}. Retries and follow-ups wait until someone confirms it.
+      + (cur ? `<div class="muted" title="${esc((n.history||[]).map(h => `${h.number} by ${h.by||'?'} on ${faxDay(h.at)}${h.confirmed ? ' (confirmed)' : ''}`).join('\n'))}">Saved by ${esc(n.by||'?')} on ${esc(faxDay(n.at))}</div>` : '')
+      + (cur && n.confirmed === false ? `<div class="sev-medium">Changed${n.changed_at ? ' on ' + esc(faxDay(n.changed_at)) : ''}${n.previous ? ` (was ${esc(n.previous)})` : ''}. Retries and follow-ups wait until someone confirms it.
           <button data-pconfirm="${esc(p.payer_group)}" data-purpose="${purpose}" data-number="${esc(cur)}">Confirm ${esc(cur)}</button></div>` : ''); };
   const nth = k => { const r = [11,12,13].includes(k % 100) ? 0 : k % 10; return k + (r === 1 ? 'st' : r === 2 ? 'nd' : r === 3 ? 'rd' : 'th'); };
   const what = x => x.action === 'second_request' ? `Ask again (${nth(x.n + 1)} request)`
@@ -429,7 +431,7 @@ async function tieFaxHtml(d, id, seq){
     const order = [...all.filter(named), ...all.filter(x => !named(x) && !x.finding_id), ...all.filter(x => !named(x) && x.finding_id)];
     if(!order.length){ box.className = 'small muted'; box.textContent = 'No fax that came in is left to tie here.'; return; }
     box.className = 'small';
-    box.innerHTML = `<select id="fxTieSel">${order.map(x=>`<option value="${esc(x.fax_key)}">${named(x) ? 'Names this item · ' : x.finding_id ? 'Tied to another item · ' : ''}${esc(String(x.created_at||'').slice(0,10))} · ${esc(fax10(x.number))} · ${esc(FAX_DOC[x.purpose]||x.purpose||'')} · ${esc((x.summary||x.error||'').slice(0,80))}${(x.claim_numbers||[]).length ? ' · claim ' + esc(x.claim_numbers.join(', ')) : ''}${x.patient ? ' · ' + esc(x.patient) : ''}</option>`).join('')}</select>
+    box.innerHTML = `<select id="fxTieSel">${order.map(x=>`<option value="${esc(x.fax_key)}">${named(x) ? 'Names this item · ' : x.finding_id ? 'Tied to another item · ' : ''}${esc(faxDay(x.created_at))} · ${esc(fax10(x.number))} · ${esc(FAX_DOC[x.purpose]||x.purpose||'')} · ${esc((x.summary||x.error||'').slice(0,80))}${(x.claim_numbers||[]).length ? ' · claim ' + esc(x.claim_numbers.join(', ')) : ''}${x.patient ? ' · ' + esc(x.patient) : ''}</option>`).join('')}</select>
       <select id="fxTieSays"><option value="">What it says (when it was not read)</option>${FAX_SAYS.map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join('')}</select> <button id="fxTieGo">Tie to this item</button>`;
     box.querySelector('#fxTieGo').onclick = async () => {
       const says = box.querySelector('#fxTieSays').value;

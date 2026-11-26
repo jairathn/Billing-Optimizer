@@ -64,7 +64,7 @@ function alertCard(a){
   if(a.kind==='SWING'){ if(d.action) facts.push(d.action); if(Array.isArray(d.lines)) facts.push(...d.lines); }
   const can = a.family && a.family!=='feed' && a.family!=='rate' && a.family!=='reason_code' && a.family!=='swing';
   return `<div class="alert ${a.status}"><div class="row1"><span class="chip sev-${a.severity}">${a.severity}</span><span class="chip">${ALERT_KIND[a.kind]||a.kind}</span>
-    <span class="muted small">first seen ${String(a.first_seen).slice(0,10)} · last checked ${String(a.last_seen).slice(0,10)}${a.status==='acknowledged'?' · acknowledged':''}${a.status==='cleared'?' · cleared':''}</span></div>
+    <span class="muted small">first seen ${typeof practiceDate === 'function' ? practiceDate(a.first_seen) : String(a.first_seen).slice(0,10)} · last checked ${typeof practiceDate === 'function' ? practiceDate(a.last_seen) : String(a.last_seen).slice(0,10)}${a.status==='acknowledged'?' · acknowledged':''}${a.status==='cleared'?' · cleared':''}</span></div>
     <div class="ttl">${esc(a.title)}</div>${facts.length?`<div class="small muted">${facts.map(esc).join(' · ')}</div>`:''}
     <div class="actions" style="margin-top:6px">${can?`<button data-see="${a.alert_id}">See the lines</button>`:''}${a.status==='new'?`<button data-ack="${a.alert_id}">Acknowledge</button>`:''}</div></div>`;
 }
@@ -252,7 +252,7 @@ function drawerExtras(f, r){
     return `<div class="note"><b>EMA shows this line paid.</b> ${money2(e.paid_cents)} from insurance${e.date?' on '+esc(e.date):''} (${esc(e.source||'EMA')}), but no remittance in the files shows that payment. Check the payment in EMA; if it is real, mark this recovered. If the remittance for it is missing, put it in the Dropbox folder.</div>`;
   };
   const facts = [['Billed code', f.billed_code], ['Billed → paid', f.code_pair], ['Plan on the remit', f.plan], ['Place of service', f.pos_class], ['Location', f.location], ['Diagnosis', f.diagnosis],
-    ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? String(f.appealed_at).slice(0,10) : null]].filter(x=>x[1]!=null && x[1]!=='');
+    ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? (typeof practiceDate === 'function' ? practiceDate(f.appealed_at) : String(f.appealed_at).slice(0,10)) : null]].filter(x=>x[1]!=null && x[1]!=='');
   const ev = f.evidence || {};
   const why = f.signal==='SECOND_RATE' && ev.note ? `<div class="note"><b>Likely reason.</b> ${esc(ev.note)}</div>` : '';
   // today as the lists count it (siteDay: the practice's day, from the brief), else the reader's own: a window open until
@@ -291,7 +291,7 @@ function drawerExtras(f, r){
   const builder = f.claim_key ? `${ema ? `<div class="filters" style="margin-bottom:6px"><button id="noteEma">${byHand ? 'Use the note uploaded from EMA and build the packet' : 'Get the note from EMA and build the packet'}</button>${byHand ? ' <a class="small" href="/upload">Upload notes</a>' : ''}</div><div id="emaMsg" class="small muted"></div>` : ''}<div class="note">${ema ? 'Or attach' : 'Attach'} the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
       <div class="filters"><input type="file" id="noteFile" accept=".pdf,.docx,.txt,.rtf,.html,.htm"><label class="small"><input type="checkbox" id="noteAi" checked> review with Claude</label><button id="noteGo">Build packet</button></div>
       <textarea id="noteText" rows="4" placeholder="…or paste the note text here" style="width:100%"></textarea>
-      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
+      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${typeof practiceDate === 'function' ? practiceDate(p.created_at) : String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
   return {notes, facts: factsHtml, builder};
 }
 // One line of an item's history (its panel, and Activity on Progress): a status change, from → to, or what happened with
@@ -517,7 +517,7 @@ const XP_BY_STATUS = {waiting: ["Wait for the payer's answer. The next run dates
 function xpEffective(f, x){
   const ex = (x && x.explain) || {}, told = (ex.verdict || {}).state || (ex.state || {}).work_state;
   if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state]) return x;
-  const when = f.status_changed_at ? ` on ${longDate(String(f.status_changed_at).slice(0, 10))}` : '';
+  const when = f.status_changed_at ? ` on ${longDate(practiceDate(f.status_changed_at))}` : '';
   const [action, buttons] = XP_BY_STATUS[f.work_state];
   return Object.assign({}, x, {explain: Object.assign({}, ex, {
     verdict: {state: f.work_state, sentence: `${(typeof STATUS_WORDS !== 'undefined' && STATUS_WORDS[f.status]) || f.status} by a person${when}.`, rows: []},

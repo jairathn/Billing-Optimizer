@@ -963,7 +963,10 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
         return {"ready": False}
     newest = newest_payment(conn)
     feed = feed_day(conn, today)        # how far the remittances reach for most payers: the feed check and the warning line
-    return {"ready": True, "today": today, "newest_payment": newest, "feed_date": feed, "work": work(conn, today), "recovered": recovered(conn, today),
+    from . import runtime
+    # tz: the practice's zone, which the pages date a stored moment in (today.js practiceDate), as the server does
+    return {"ready": True, "today": today, "tz": runtime.practice_zone_name(), "newest_payment": newest, "feed_date": feed,
+            "work": work(conn, today), "recovered": recovered(conn, today),
             "batches": batches(conn, today), "decide": to_decide(conn, newest, today=today), "missed": missed(conn, today), "done": done(conn, today),
             "follow_ups": follow_ups(conn, newest, today=today), "contracts": contract_levers(conn, feed or newest), "fees": fee_levers(conn, feed or newest),
             "causes": denial_causes(conn, feed or newest), "health": data_health(conn, newest, today, feed), "work_types": WORK_TYPES,

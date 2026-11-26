@@ -25,6 +25,10 @@ function labelOf(b, sig){ return (b.labels||{})[sig] || {label: sig, next: '', w
 // is), so the page agrees with the lists on which windows are still open. Before the brief is read: the reader's own day.
 function localDay(){ const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; }
 function siteDay(){ return (state.brief && state.brief.today) || localDay(); }
+// the practice's date of a stored moment (an ISO time with its zone, as the server writes them): a send at 9:30 PM Eastern
+// is that day's, as the server dates it (runtime.practice_date), in the zone the brief names. A plain day, a time with no
+// zone, or a page with no brief yet (or a zone this browser does not know) say the day as written.
+function practiceDate(iso){ const s = String(iso || ''), tz = state.brief && state.brief.tz, t = /T\d\d:\d\d.*([zZ]|[+-]\d\d:?\d\d)$/.test(s) ? new Date(s) : null; if(!t || isNaN(t) || !tz) return s.slice(0, 10); try { const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(t).map(x => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}`; } catch(e){ return s.slice(0, 10); } }
 function daysUntil(d){ if(!d) return null; const t = new Date(d+'T00:00:00Z'), n = new Date(siteDay()+'T00:00:00Z'); return Math.round((t-n)/86400000); }
 function closesText(d){
   const n = daysUntil(d);
@@ -373,12 +377,12 @@ function whatToDoHtml(f, letter){
     : (f.shortfall_cents ? money2(f.shortfall_cents)+' at stake.' : 'The amount is not known: this payer has no usual rate for the code to compare with.');
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
   const more = i>=0 && (i < ids.length-1 || (!!state.wlNext && (state.wlTotal||0) > ids.length)), decide = kk === 'check' || !due;
-  const waiting = {appealed: f.faxed_at ? `Faxed on ${longDate(String(f.faxed_at).slice(0,10))}. It waits on the payer: once the payer's time to answer has passed, the follow-ups are faxed by themselves every week until it is paid or decided (Faxes page).`
-      : `Sent${f.appealed_at?' on '+longDate(String(f.appealed_at).slice(0,10)):''}. It waits on the payer: if it is still unpaid 30 days after sending, follow up by portal or phone.`,
+  const waiting = {appealed: f.faxed_at ? `Faxed on ${longDate(practiceDate(f.faxed_at))}. It waits on the payer: once the payer's time to answer has passed, the follow-ups are faxed by themselves every week until it is paid or decided (Faxes page).`
+      : `Sent${f.appealed_at?' on '+longDate(practiceDate(f.appealed_at)):''}. It waits on the payer: if it is still unpaid 30 days after sending, follow up by portal or phone.`,
     resolved:'Paid. Nothing more to do.', lost:'Lost: the payer upheld its decision.', dismissed:'Let go.'}[f.status];
   const shut = !waiting && !!due && due < today;        // a closed window: nothing to send, so no send button and no letter
   // an item already sent, paid or let go: its filing date is history, not an alarm
-  const head = waiting ? `<span class="muted">${esc(STATUS_WORDS[f.status]||f.status)}${f.status==='appealed' && f.appealed_at ? ' '+longDate(String(f.appealed_at).slice(0,10)) : ''}${due ? ` · filing date ${longDate(due)}` : ''}</span>`
+  const head = waiting ? `<span class="muted">${esc(STATUS_WORDS[f.status]||f.status)}${f.status==='appealed' && f.appealed_at ? ' '+longDate(practiceDate(f.appealed_at)) : ''}${due ? ` · filing date ${longDate(due)}` : ''}</span>`
     : `<span class="${c.cls}">${due ? `File by ${longDate(due)} (${esc(c.text)})${est?', estimated rule':''}${open.length>1?`; its last claim by ${longDate(f.appeal_deadline)}`:''}` : 'No filing date'}</span>`;
   return `<div class="todo-box"><div class="todo-top">${kindBadge(b, kk)}${head}
       ${i>=0 ? `<span class="muted small">Item ${i+1} of ${Number(Math.max(state.wlTotal||0, ids.length)).toLocaleString()}</span>` : ''}</div>

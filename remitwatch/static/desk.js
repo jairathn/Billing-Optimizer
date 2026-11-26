@@ -374,7 +374,7 @@ function rowHtml(b, r, o){
   const ws = r.work_state;
   const when = ws === 'waiting' && r.follow_up_on ? `<span class="${daysUntil(r.follow_up_on) <= 0 ? 'due-now' : 'muted'}" title="${esc('Waiting on the payer. Follow up on ' + r.follow_up_on + (r.state_basis ? ': ' + r.state_basis : ''))}">follow up ${esc(longDate(r.follow_up_on))}</span>`
     : live ? `<span class="${c.cls}" title="${esc(due ? 'File by '+due+(est?' (estimated rule: confirm it in the payer agreement)':'')+(r.next_deadline&&r.next_deadline!==r.appeal_deadline?'; the first of its claims':'')+limit : 'No filing date')}">${esc(c.text)}${est&&due?'<sup class="muted">*</sup>':''}</span>`
-    : `<span class="muted">${esc(r.status === 'appealed' && r.appealed_at ? 'sent ' + longDate(String(r.appealed_at).slice(0,10)) : String(STATUS_WORDS[r.status]||r.status).toLowerCase())}</span>`;
+    : `<span class="muted">${esc(r.status === 'appealed' && r.appealed_at ? 'sent ' + longDate(practiceDate(r.appealed_at)) : String(STATUS_WORDS[r.status]||r.status).toLowerCase())}</span>`;
   const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${pl(r.window_lines, 'line')} in range</div>`
     : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
   // a person's status, or for an item that needs no work its state (done, accepted, expired, can't be checked)
@@ -567,7 +567,7 @@ function feeListHtml(fp, older){
     <tbody>${fp.payers.map((p,i)=>`<tr class="row fee-row" tabindex="0" data-i="${i}"><td>${esc(p.payer_name)}${p.payer_group && p.payer_group !== p.payer_name ? `<div class="small muted">${esc(p.payer_group)}</div>` : ''}</td><td class="num">${p.cents12 ? money(p.cents12) : '–'}</td><td class="num">${money(p.cents)}</td><td class="num">${num(p.months)}</td><td>${esc(rwMonth(p.last_month))}</td><td><button class="ghost small fee-letter" data-i="${i}">Request letter</button></td></tr>`).join('')}</tbody></table></div>
     ${fp.payers.length ? '' : '<div class="empty">No payment fees to stop.</div>'}
     ${asked.length ? `<h3 class="small" style="margin-top:14px">Asked, waiting for the change: ${pl(asked.length, 'payer')} · ${money(asked.reduce((s,a)=>s+(a.cents12||0),0))} in the last 12 full months</h3>
-      <div class="scroll"><table class="fees"><tbody>${asked.map((a,i)=>`<tr><td>${esc(a.payer_name)}</td><td class="small muted">${a.asked ? 'asked '+esc(longDate(String(a.asked).slice(0,10))) : ''}</td><td class="num">${money(a.cents12||0)}</td>
+      <div class="scroll"><table class="fees"><tbody>${asked.map((a,i)=>`<tr><td>${esc(a.payer_name)}</td><td class="small muted">${a.asked ? 'asked '+esc(longDate(practiceDate(a.asked))) : ''}</td><td class="num">${money(a.cents12||0)}</td>
         <td><button class="ghost small fee-again" data-a="${i}">Letter again</button><button class="ghost small fee-undo" data-a="${i}">Not asked yet</button></td></tr>`).join('')}</tbody></table></div>` : ''}`;
 }
 // the request letter for one payer, and one filled button: Mark asked moves its fee months to Sent
@@ -576,7 +576,7 @@ async function openFeeLetter(p){
   let L; try { L = await api('/api/fees/letter?'+qs({payer: p.payer_name})); } catch(e){ alert('The letter did not come back: '+e.message); return; }
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Payment fees: ${esc(p.payer_name)}</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">${esc(L.evidence)} Send it through the payer's provider portal, by fax or by mail, then press Mark asked: its ${pl(p.ids.length, 'fee month')} move to Sent. Fees that keep arriving afterwards show here again.</div>
-    <div class="actions">${p.asked ? `<span class="small muted">Asked ${esc(longDate(String(p.asked).slice(0,10)))}.</span>` : '<button class="primary" id="feeAsked">Mark asked</button>'}<button id="copyL">Copy letter</button></div>
+    <div class="actions">${p.asked ? `<span class="small muted">Asked ${esc(longDate(practiceDate(p.asked)))}.</span>` : '<button class="primary" id="feeAsked">Mark asked</button>'}<button id="copyL">Copy letter</button></div>
     <div class="st-err sev-high small" role="alert"></div>
     <pre id="letter">${esc(L.letter)}</pre>`;
   $('#modal').classList.add('open');
@@ -692,7 +692,7 @@ function hiddenManage(rules){
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">Hidden for a payer</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">Each line keeps one reason off the lists for one payer: its items are under Let go with the note. Show again puts the ones it hid back on the lists.</div>
     <table class="small"><thead><tr><th>Payer</th><th>Reason</th><th>Why</th><th class="num">Items</th><th></th></tr></thead><tbody>
-    ${rules.map((r, i)=>`<tr><td>${esc(r.payer_group)}</td><td>${esc(r.label)}</td><td class="muted">${esc(r.note||'')}<div>${esc(r.actor||'')} · ${esc(String(r.at||'').slice(0,10))}</div></td><td class="num">${num(r.n)} · ${money(r.cents)}</td><td><button data-unhide="${i}">Show again</button></td></tr>`).join('')}</tbody></table>`;
+    ${rules.map((r, i)=>`<tr><td>${esc(r.payer_group)}</td><td>${esc(r.label)}</td><td class="muted">${esc(r.note||'')}<div>${esc(r.actor||'')} · ${esc(practiceDate(r.at))}</div></td><td class="num">${num(r.n)} · ${money(r.cents)}</td><td><button data-unhide="${i}">Show again</button></td></tr>`).join('')}</tbody></table>`;
   $('#modal').classList.add('open');
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
   $('#modalBox').querySelectorAll('[data-unhide]').forEach(b => b.onclick = async () => {

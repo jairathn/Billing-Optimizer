@@ -82,6 +82,12 @@ def practice_zone() -> tzinfo:
         return _UsEastern()
 
 
+def practice_zone_name() -> str:
+    """The IANA name of the zone practice_zone gives (the default's name when REMITWATCH_TZ is not a zone this host knows):
+    the pages date a stored moment in it, as the server does (practice_date)."""
+    return str(getattr(practice_zone(), "key", None) or DEFAULT_TZ)
+
+
 def practice_today(offset: int = 0) -> str:
     """Today where the practice is, plus `offset` days, as YYYY-MM-DD: the day every list, count, expiry check and follow-up
     compares with. A window whose last day this is stays open until midnight there."""

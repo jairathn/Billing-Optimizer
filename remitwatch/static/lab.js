@@ -388,7 +388,7 @@ function labScenarioRows(v){
     return `<td class="num" data-label="Collections">${moneyK(R.collections)}</td><td class="num" data-label="Costs">${R.cost ? moneyK(R.cost) + (open ? ' <span class="small sev-medium">some not entered</span>' : '') : '–'}</td><td class="num" data-label="After costs">${R.cost && !open ? moneyK(R.collections - R.cost) : '–'}</td><td class="num" data-label="Minutes a day">${R.minutesDay ? R.minutesDay.toFixed(0) : '–'}</td>`; };
   box.innerHTML = rows.length ? `<table class="calc-cards"><thead><tr><th>Scenario</th><th class="num">Collections</th><th class="num">Costs</th><th class="num">After costs</th><th class="num">Minutes a day</th><th></th></tr></thead><tbody>
       ${cur ? `<tr><td><i>Now on screen</i></td>${cells(cur)}</tr>` : ''}
-      ${rows.map(({s, r}, i) => `<tr><td>${esc(s.name)}<div class="small muted">${esc((s.saved_at || '').slice(0, 10))} · ${esc((s.x || {}).year || '')}</div></td>${cells(r)}
+      ${rows.map(({s, r}, i) => `<tr><td>${esc(s.name)}<div class="small muted">${esc(typeof practiceDate === 'function' ? practiceDate(s.saved_at) : (s.saved_at || '').slice(0, 10))} · ${esc((s.x || {}).year || '')}</div></td>${cells(r)}
         <td class="num" style="grid-column:1 / -1"><button data-lab-load="${i}">Open</button> <button class="ghost" data-lab-del="${i}" ${cs.Aok ? '' : 'disabled'}>Delete</button></td></tr>`).join('')}
       </tbody></table>` : '';
   const say = (text, cls) => { const m = v.querySelector('#labSaved'); if(m){ m.textContent = text; m.className = 'small ' + (cls || ''); } };

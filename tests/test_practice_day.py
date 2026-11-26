@@ -482,3 +482,92 @@ def test_a_payment_dated_the_day_after_an_evening_reopen_is_newer_than_the_reope
     remit(store, trace=F.check_no(3), paid_on="2026-11-25", claims=[{"pcn": F.claim_id(1, sub=3), "pccn": "PCN-C", "received": "2026-11-12",
           "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
     assert states.state_of(store.conn, f, today="2026-11-30")["work_state"] == "done"
+
+
+# ------------------------------------------------------------------------------------------- the words a page says
+def test_a_changed_fax_number_is_dated_the_practices_day(store, monkeypatch):
+    """A payer's fax number changed at 9:30 PM Eastern on Nov 24: a retry or a follow-up waits for a person, and the hold
+    says the number was changed on Nov 24 (the practice's day), not UTC's 25th. Both store kinds."""
+    from remitwatch import actions, fax
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    c = store.conn
+    actions.apply_payer_fax(c, {"payer_group": "Anthem / BCBS", "purpose": "appeal", "number": "8005550142", "actor": "Biller One",
+                                "at": "2026-11-20T15:00:00+00:00"})
+    actions.apply_payer_fax(c, {"payer_group": "Anthem / BCBS", "purpose": "appeal", "number": "8005550199", "actor": "Biller One",
+                                "at": NIGHT})
+    nb, hold = fax.number_hold(c, {"payer_group": "Anthem / BCBS", "payer_kind": "commercial"}, 1, [])
+    assert nb["number"] == "8005550199" and hold and "was changed on 2026-11-24 and nobody has confirmed it yet" in hold, hold
+
+
+def test_the_brief_names_the_practices_zone(store, monkeypatch):
+    """The pages date a stored moment the way the server does: in the practice's zone, which the brief names beside the
+    practice's day. A name this host does not know falls back to the default, as the server's own day does."""
+    from remitwatch import insights
+    for setting, want in ((None, "America/New_York"), ("America/Chicago", "America/Chicago"), ("Etc/GMT+12", "Etc/GMT+12"),
+                          ("Not/A_Zone", "America/New_York")):
+        if setting is None:
+            monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+        else:
+            monkeypatch.setenv(runtime.TZ_SETTING, setting)
+        assert runtime.practice_zone_name() == want, setting
+        b = insights.brief(store.conn)
+        assert (b["today"], b["tz"]) == (runtime.practice_today(), want), (setting, b.get("tz"))
+
+
+# The pages say a stored moment's day (a send, a fax number's change) on the practice's calendar: today.js practiceDate,
+# with the zone the brief names. Run in node with the page's own helpers, a brief and the drawer's facts line.
+MOMENT_JS = r"""
+const fs = require('fs'), vm = require('vm');
+const [todayPath, featuresPath, casesJson] = process.argv.slice(-3);
+const today = fs.readFileSync(todayPath, 'utf8'), features = fs.readFileSync(featuresPath, 'utf8');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helper = grab(today, /function practiceDate\([^\n]*\n/);
+const facts = grab(features, /const facts = \[\['Billed code'[\s\S]*?\.filter\(x=>x\[1\]!=null && x\[1\]!==''\);/);
+const out = [];
+for (const [brief, iso] of JSON.parse(casesJson)) {
+  const ctx = {state: {brief}, f: {appealed_at: iso}, money2: x => String(x), Intl, Object, String, Date, isNaN};
+  vm.runInNewContext(helper + facts + 'said = practiceDate(f.appealed_at); shown = (facts.find(x => x[0] === "Appealed") || [])[1];', ctx);
+  out.push([ctx.said, ctx.shown]);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def test_the_pages_say_a_moment_on_the_practices_day():
+    """Marked Sent at 9:30 PM Eastern on Nov 24: the drawer's Appealed says Nov 24, as the server dates it, where it said
+    UTC's 25th. A plain day, a time with no zone, and a page with no brief yet (or a zone the browser does not know) say
+    the day as written."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    static = os.path.join(root, "remitwatch", "static")
+    east = {"today": "2026-11-24", "tz": "America/New_York"}
+    cases = [[east, NIGHT], [east, "2026-11-25T02:30:00.123456+00:00"], [east, "2026-11-25T15:00:00Z"],
+             [{"today": "2026-11-25", "tz": "Etc/GMT-14"}, "2026-11-24T10:30:00+00:00"], [east, "2026-11-25"],
+             [east, "2026-11-25T02:30:00"], [None, NIGHT], [{"today": "2026-11-24", "tz": "Not/A_Zone"}, NIGHT]]
+    res = subprocess.run([node, "-e", MOMENT_JS, os.path.join(static, "today.js"), os.path.join(static, "features.js"), json.dumps(cases)],
+                         capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout) == [["2026-11-24"] * 2, ["2026-11-24"] * 2, ["2026-11-25"] * 2, ["2026-11-25"] * 2,
+                                      ["2026-11-25"] * 2, ["2026-11-25"] * 2, ["2026-11-25"] * 2, ["2026-11-25"] * 2]
+
+
+def test_no_page_cuts_a_stored_moment_to_its_utc_day():
+    """A stored moment (a send, a fax, a save, a decision, a run: a time with its zone) is said on the practice's day on
+    every page (today.js practiceDate), never cut to its first ten characters, which is UTC's day: from 7 PM Eastern the
+    next one. A line that cuts one does so only as practiceDate's fallback, on the same line."""
+    import re
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "remitwatch", "static")
+    moment = re.compile(r"(_at|\.at|first_seen|last_seen|\basked)\b[^\n]{0,40}?\.slice\(0, ?10\)")
+    bad = []
+    for name in sorted(os.listdir(root)):
+        if not name.endswith((".js", ".html")):
+            continue
+        with open(os.path.join(root, name), encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if moment.search(line) and "practiceDate" not in line:
+                    bad.append(f"{name}:{n}")
+    assert not bad, bad

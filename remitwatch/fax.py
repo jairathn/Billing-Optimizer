@@ -532,7 +532,8 @@ def number_hold(conn: sqlite3.Connection, f: dict, level: int, earlier: list[dic
         return nb, (f"{pg}'s {second}fax number changed since this item's last fax (was {pretty(was)}, now {pretty(nb['number'])}): "
                     "a person sends this one.")
     if not was and not nb["auto_ok"]:
-        return nb, (f"{pg}'s {second}fax number was changed" + (f" on {nb['changed_at'][:10]}" if nb.get("changed_at") else "")
+        # the day it changed where the practice is (the record keeps UTC): a change at 9 PM Eastern is that day's
+        return nb, (f"{pg}'s {second}fax number was changed" + (f" on {_day(nb['changed_at'])}" if nb.get("changed_at") else "")
                     + " and nobody has confirmed it yet: confirm it on the Faxes page.")
     return nb, None
 
