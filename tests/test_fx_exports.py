@@ -200,6 +200,12 @@ def test_an_export_claim_whose_bill_went_out_again_stays_listed_when_nothing_els
         got = [r for r in _open(s, bill + "%") if r["signal"] == "NO_ANSWER"]
         assert any("17110" in [ln[0] for ln in json.loads(r["evidence"])["lines"]] for r in got), (
             f"{bill}: the 17110 sent in the replacement was never answered, and no item chases it: {got}")
+    # L02's item is due from the newer send (the payer's answer to the bill is due from September 20, not September 1) and
+    # names the submission the 837s show, so the biller asks the payer about it
+    f = dict(s.query("SELECT title, hint, evidence FROM findings WHERE patient_control_number='CB0000L02C024'")[0])
+    ev = json.loads(f["evidence"])
+    assert ev["sent"] == "2026-09-20" and ev["bill_sent_again_837"] == {"day": "2026-09-20", "claim_id": "CB0000L02C031"}, ev
+    assert "CB0000L02C031" in (f["hint"] or "") and "2026-09-20" in f["title"], (f["title"], f["hint"])
     s.close()
 
 

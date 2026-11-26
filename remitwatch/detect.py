@@ -4908,8 +4908,12 @@ class Detector:
             if fam == "claim_status":
                 if cpt:     # a claim known from the status report alone is still a claim
                     k["status_items"][(cpt, dos)] = (cpt, dos, abs(charges or 0), None, mods, units)
+                    if charges is None:     # its charge is not known: never read as a line billed at $0 (answers-3)
+                        k.setdefault("no_charge", set()).add((cpt, dos))
                 continue
             sig = (cpt, dos, mods, abs(units) if units is not None else None, abs(charges or 0))
+            if charges is None and act == "charge":
+                k.setdefault("no_charge", set()).add(sig)
             if "void" in act and "payment" not in act and "adjust" not in act:     # a voided charge (not a voided payment)
                 if item_id:
                     k["void_ids"].add(item_id)
@@ -4976,7 +4980,9 @@ class Detector:
 
         def live_items(k: dict) -> list[tuple]:
             """One charge for each, though two export layouts list it (with and without its bill item id), less the voids:
-            (code, date, charge, units, item id or None, modifiers as EMA gives them)."""
+            (code, date, charge, units, item id or None, modifiers as EMA gives them). A line billed at $0, or at a token
+            charge under $1 (a post-operative visit EMA bills at a penny so the line goes out), is nothing owed, as in the
+            837 pass (answers-3); a line whose charge is not known is not such a line."""
             groups: dict[tuple, list] = {}
             for v in k["charges"].values():
                 sig = (v[0], v[1], v[4], abs(v[5]) if v[5] is not None else None, v[2])
@@ -4985,15 +4991,29 @@ class Detector:
                     g[0].add(v[3])
                 else:
                     g[1] = True
+            unknown = k.get("no_charge") or ()
             out = []
             for sig, (ids, loose) in groups.items():
+                if sig[4] < 100 and sig not in unknown:
+                    continue
                 keep = sorted(ids - k["void_ids"]) if ids else ([None] if loose else [])
                 if sig in k["void_sigs"]:   # a void with no bill item id cancels one, unless a void by id already did
                     keep = keep[:max(0, len(ids) - max(len(ids & k["void_ids"]), 1))] if ids else []
                 out += [(sig[0], sig[1], sig[4], sig[3], item, sig[2]) for item in keep]
             if not out and not k["charges"]:
-                out = [(v[0], v[1], v[2], v[5], None, v[4]) for v in k["status_items"].values()]
+                out = [(v[0], v[1], v[2], v[5], None, v[4]) for v in k["status_items"].values()
+                       if v[2] >= 100 or (v[0], v[1]) in unknown]
             return out
+
+        def billed_nothing(k: dict) -> bool:
+            """Every line EMA lists for the claim is billed at $0 or at a token charge under $1, and none has a charge that is
+            not known (answers-3): nothing is owed on it."""
+            unknown = k.get("no_charge") or ()
+            sigs = [(v[0], v[1], v[4], abs(v[5]) if v[5] is not None else None, v[2]) for v in k["charges"].values()]
+            if sigs:
+                return all(s[4] < 100 and s not in unknown for s in sigs)
+            st = list(k["status_items"].values())
+            return bool(st) and all(v[2] < 100 and (v[0], v[1]) not in unknown for v in st)
 
         def order(pcn: str, k: dict) -> tuple:
             # a bill's submissions in the order they went out: its suffix (C017, C024, ...) first. A bill's creation date
@@ -5015,12 +5035,21 @@ class Detector:
                 continue
             if b not in latest or order(pcn, k) > order(latest[b], claims[latest[b]]):
                 latest[b] = pcn
+        resent: dict[str, tuple[str, int]] = {}    # bill -> (day, number) of a newer submission nothing else chases
         for bx in list(latest):
             bi = bills837.get(bx)
-            if bi and (bi[0] > sub_no(latest[bx]) or (bi[2] and bi[2] > bi[1])):
-                # a newer submission went out (the 837s show it; it is chased or answered on its own), or the bill's newest
-                # send is a void (the practice cancelled it, T-N5): nothing on the exports' submission is left to chase
-                del latest[bx]
+            if not bi:
+                continue
+            if bi[2] and bi[2] > bi[1]:
+                del latest[bx]              # the bill's newest send is a void: the practice cancelled it (T-N5)
+            elif bi[0] > sub_no(latest[bx]):
+                if bx in s8["prim_bills"]:
+                    # a newer submission went out, but a payer answered an earlier one as its primary, so the 837 pass leaves
+                    # the bill: nothing else chases the newer submission. The exports' submission stays listed, dated by the
+                    # newer send (answers-5); a person's work follows to the newer one's item if one is listed later
+                    resent[bx] = (bi[1], bi[0])
+                else:
+                    del latest[bx]          # a newer submission went out: it is chased or answered on its own (the 837 pass)
         # each bill's first and last submission numbers seen, answered or not: a higher one is a submission sent again, and
         # an answered submission newer than every unanswered one supersedes them all (its answer is worked from its remittance)
         first_sub: dict[str, int] = {}
@@ -5074,9 +5103,12 @@ class Detector:
             unsent = batched and r8 is None
             gave_up = bool(EMA_GAVE_UP.search(status))
             items = live_items(k)
-            if not items and r8 is not None:    # EMA lists no line of it: the lines its 837 billed
+            if not items and billed_nothing(k):
+                self.ema_counts["export_billed_nothing"] += 1
+                continue                    # every line billed at $0 or a token charge: nothing is owed (answers-3)
+            if not items and r8 is not None:    # EMA lists no line of it: the lines its 837 billed, as the 837 pass reads them
                 items = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods
-                         in self._lines_837({r8[7]: pcn}).get(r8[7], [])]
+                         in self._lines_837({r8[7]: pcn}).get(r8[7], []) if (chg or 0) >= 100]
             patient = k["patients"].most_common(1)[0][0] if k["patients"] else None
             if patient:                     # a visit a payment still stands on under another bill is paid, for its own part
                 items = [x for x in items if not (x[1] and visit_paid(patient, x, b))]
@@ -5097,6 +5129,13 @@ class Detector:
             if r8 is not None and (not k["sent"] or r8[0] > k["sent"][:10]):
                 # the day its newest 837 went out: where EMA gives no date, or the claim was sent again since (T-I4)
                 sent, basis, again_after = r8[0], SENT_837, False
+            again_837 = resent.get(b)
+            if again_837 and again_837[0] > (sent or ""):
+                # the bill went out again as a newer submission (the 837s show it) that nothing else chases: the payer's answer
+                # is due from that send (answers-5)
+                sent, basis, again_after = again_837[0], SENT_837, False
+            else:
+                again_837 = None
             if not sent or (sent < recent and sent < (oldest or "")):
                 continue                    # sent before the remittances on file begin: nothing here can say it went unanswered
             grp, kind = self._open_claim_group(k, ema_payer, votes, va_names)
@@ -5133,7 +5172,8 @@ class Detector:
                           "ema_payer": ema_payer, "group": (grp, kind), "grp": grp, "kind": kind, "through": through,
                           "payer_last": last, "s837": r8, "batched": batched, "cob": cob.get(b),
                           "secondary": second.get(pcn) or [x for xs in (cob.get(b) or {}).get("answers", {}).values() for x in xs],
-                          "resent_837": bool(r8 is not None and k["sent"] and basis == SENT_837),
+                          "resent_837": bool(r8 is not None and k["sent"] and basis == SENT_837) or bool(again_837),
+                          "bill_resent_837": again_837,
                           "bill_answered": bill_answered.get(b) if (bill_answered.get(b) or "") >= sent else None})
         # one visit chased under two bills (a bill made again): only the newest carries it. The two parts of a service, the
         # reading (26) and the technical part (TC), billed on two bills are two services, each chased on its own
@@ -5154,10 +5194,31 @@ class Detector:
                 continue                    # chased under the newer bill made for the same visit
             final.append((cd, items))
         if self.ema_on and final:
-            final = self._ema_check_open_claims(final)
+            # dated by the same feed date as every other step of this pass (answers-2: never one stray newer remittance)
+            final = self._ema_check_open_claims(final, newest)
         for cd, items in final:
             self._emit_open_claim(cd, items, newest)
+            if cd.get("bill_resent_837"):
+                self._note_resent_bill(cd)
         self.payers_behind = sorted(behind.values(), key=lambda h: (-h["billed_cents"], h["payer"]))
+
+    def _note_resent_bill(self, cd: dict) -> None:
+        """An export claim kept because its bill went out again as a newer submission that nothing else chases (answers-5):
+        its item names that submission and the day it went out (evidence and hint), so the biller asks the payer about it."""
+        f = self.findings.get(_fid(cd.get("id_signal") or "EMA_OPEN_CLAIM", cd["pcn"]))
+        if f is None:
+            return
+        day, n = cd["bill_resent_837"]
+        newer = f"{cd['b']}C{n:03d}"
+        try:
+            ev = json.loads(f.get("evidence") or "{}")
+        except ValueError:
+            ev = {}
+        ev["bill_sent_again_837"] = {"day": day, "claim_id": newer}
+        f["evidence"] = json.dumps(ev, default=str)
+        note = (f"The 837s show this bill sent again on {day} as claim {newer}, after the payer answered an earlier submission of "
+                f"it. No remittance answers {newer} and nothing else chases it: ask the payer about {newer}")
+        f["hint"] = f"{f['hint']}. {note}" if f.get("hint") else note
 
     def price_unanswered_lines(self, grp: str | None, kind: str | None, year: str, lines) -> list[list]:
         """What each billed line of a claim no payer answered is worth at its payer, for NO_ANSWER and REJECTED_PRE_PAYER
@@ -6142,7 +6203,7 @@ class Detector:
             return VA_GROUP                 # the VA's network, though EMA names its administrator: the VA's limits apply
         return votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
 
-    def _ema_check_open_claims(self, final: list[tuple]) -> list[tuple]:
+    def _ema_check_open_claims(self, final: list[tuple], newest: str | None = None) -> list[tuple]:
         """The weekly exports' unanswered claims, checked against EMA's reports before one is listed: a newer status in the
         A/R or Production (denied, paid, settled, voided, answered: the payer answered; rejected: it never reached the payer;
         never sent: ema_checks.not_sent lists it), and the one answered rule every never-answered claim meets
@@ -6164,7 +6225,10 @@ class Detector:
                             ema_patients=set(k.get("patients") or ())))
         answers = self._ema_claims_found("claim_answers", cds)
         rule = self._answered_rule("answered_export", cds, answers)
-        newest = self.conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0] or ""
+        # the day the remittances on file reach, as run_ema_open_claims dated the claims (feed_date): one stray newer file, or
+        # one dated in the future, says nothing of whether this claim's payer answered it (answers-2)
+        newest = newest or feed_date(self.conn) or self.conn.execute(
+            "SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0] or ""
         out = []
         for cd in cds:
             a = answers.get(cd["pcn"]) or {}
@@ -6919,7 +6983,9 @@ class Detector:
                               (EMA_WIRING_KEY, json.dumps({"at": self.now, "on": self.ema_on, "counts": dict(self.ema_counts),
                                                            "errors": self.ema_errors[:20]}, sort_keys=True)))
             unseen = dict(self.__dict__.get("_unseen") or {"n": 0, "billed_cents": 0})
-            newest = self.conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+            # the day the never-answered passes judged these claims against: the feed date (answers-2), not one stray file
+            newest = feed_date(self.conn) or self.conn.execute(
+                "SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
             unseen.update(at=self.now, newest_835=newest,
                           why=("Due only by EMA's postings, and EMA's own claim for each cannot be told apart from others with the "
                                "same date, code and charge: no 835 since the newest remittance shows its answer. Check the payer "
