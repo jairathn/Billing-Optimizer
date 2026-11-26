@@ -571,3 +571,75 @@ def test_no_page_cuts_a_stored_moment_to_its_utc_day():
                 if moment.search(line) and "practiceDate" not in line:
                     bad.append(f"{name}:{n}")
     assert not bad, bad
+
+
+# ------------------------------------------------------------------------------------- the other days the site counts
+def test_the_weekly_reports_closed_this_week_starts_on_the_practices_day_a_week_ago(store, monkeypatch):
+    """The weekly report's "closed this week because EMA shows them paid" counts from the start of the practice's day a
+    week ago: an item closed half an hour after that start counts, one closed half an hour before it does not. SQL's
+    datetime('now') is UTC and written with a space, which a stored time (with its T) always passes on its own day.
+    Both store kinds."""
+    from remitwatch import report
+    pin_zone(monkeypatch)
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:wiring', ?)", (json.dumps({"on": True}),))
+    start = datetime.fromisoformat(runtime.practice_day_start(runtime.practice_today(-7)))
+    for fid, when in (("F-in", start + timedelta(minutes=30)), ("F-out", start - timedelta(minutes=30))):
+        _item(store.conn, fid, status="resolved", recovered_cents=2500, auto_note="EMA shows this line paid",
+              status_changed_at=when.isoformat(timespec="seconds"))
+    lines = report.ema_section(store)
+    assert "- Closed this week because EMA shows them paid: 1 items, $25" in lines, lines
+
+
+def test_a_second_upload_of_the_same_name_is_named_for_the_practices_day(store, monkeypatch):
+    """EMA names every download the same, so a second export of that name is kept as '<name> (uploaded <day>)': the day
+    it came where the practice is, as the Upload page dates it."""
+    from remitwatch import uploads
+    pin_zone(monkeypatch)
+    c = store.conn
+    c.execute("CREATE TABLE IF NOT EXISTS ema_sources (source_name TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS uploads (kind TEXT, path TEXT)")
+    c.execute("INSERT INTO ema_sources (source_name) VALUES ('charges.csv')")
+    c.commit()
+    assert uploads._free_name(c, "charges", ".csv") == f"charges (uploaded {runtime.practice_today()}).csv"
+
+
+def test_a_persons_work_counts_on_the_practices_day_in_the_results_and_the_self_check(store, monkeypatch):
+    """A Sent marked, a fax sent and a fix recorded at 9:30 PM Eastern on Nov 24 are Nov 24's work in the Results figures
+    (the week they count in), minutes the owner saved then are in force that day, and that Sent is not work after an
+    answer the payer dated Nov 25 (the self-check's worked and waiting). Both store kinds."""
+    from remitwatch import actions, results, selfcheck as sc
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    c = store.conn
+    actions.ensure_fax_tables(c)
+    _item(c, "F-sent", status="appealed", payment_date="2026-11-25")
+    c.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, actor) VALUES ('F-sent', ?, 'manual', 'open', "
+              "'appealed', 'Biller One')", (NIGHT,))
+    _item(c, "F-fax", payment_date="2026-11-20")
+    c.execute("""INSERT INTO faxes (fax_key, direction, finding_id, payer_group, number, purpose, level, status, created_at, sent_at)
+                 VALUES ('X1', 'out', 'F-fax', 'Anthem / BCBS', '8005550142', 'appeal', 1, 'sent', ?, ?)""", (NIGHT, NIGHT))
+    c.commit()
+    work = results.work_of(c, ["F-sent", "F-fax"])
+    assert [(w["kind"], w["date"]) for w in work["F-sent"]] == [("sent", "2026-11-24")], work
+    assert [(w["kind"], w["date"]) for w in work["F-fax"]] == [("fax", "2026-11-24")], work
+    # a fix recorded that evening is that day's fix, and minutes the owner saved that evening are in force that day
+    c.execute("INSERT INTO finding_events (finding_id, at, kind, note, actor) VALUES ('F-fax', ?, 'fix', 'credentialing fixed', 'Biller One')",
+              (NIGHT,))
+    c.commit()
+    assert [m["date"] for m in results._fix_markers(c)] == ["2026-11-24"]
+    saved = {"history": [{"at": NIGHT, "values": {"minutes": {"fax": 99}}}]}
+    assert results._minutes_at(saved, "2026-11-24")["fax"] == 99 and results._minutes_at(saved, "2026-11-23")["fax"] == 10
+    items = [dict(r) for r in c.execute("SELECT * FROM findings WHERE finding_id='F-sent'")]
+    assert sc._work_after(c, items, "2026-11-30") == set()
+    c.execute("UPDATE finding_events SET at='2026-11-25T15:00:00+00:00'")      # 10 AM on the 25th: after the answer
+    assert sc._work_after(c, items, "2026-11-30") == {"F-sent"}
+
+
+def test_a_held_trizetto_sign_in_is_dated_the_practices_day(store, monkeypatch):
+    """The Data tab says the day TriZetto refused the feed's sign-in where the practice is: Nov 24 for a refusal at 9:30 PM
+    Eastern, not UTC's 25th."""
+    from remitwatch import insights, trizetto
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (trizetto.REFUSED_META, json.dumps({"who": "h", "at": NIGHT})))
+    env = {"TRIZETTO_SFTP_USER": "SITE", "TRIZETTO_SFTP_PASSWORD": "x", "TRIZETTO_SFTP_PASSWORD_SET": "2026-10-01"}
+    [h] = insights.trizetto_health(store.conn, "2026-11-25", env)
+    assert h["at"] == "2026-11-24" and h["title"].endswith("on 2026-11-24"), h

@@ -3718,6 +3718,7 @@ def _earlier_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, 
 def _work_after(conn: sqlite3.Connection, items: list[dict], today: str | None = None) -> set[str]:
     """Items with dated work after their adverse answer, within 90 days of today (gate 2: worked and waiting): a person's
     status change or note in RemitWatch, EMA's claim action on the line, an A/R note about an appeal, call or resubmission."""
+    from .runtime import practice_date
     out: set[str] = set()
     t = today_of(today)
     fids = [it["finding_id"] for it in items]
@@ -3727,7 +3728,7 @@ def _work_after(conn: sqlite3.Connection, items: list[dict], today: str | None =
             part = fids[i:i + 500]
             for fid, at in conn.execute(f"""SELECT finding_id, MAX(at) FROM finding_events WHERE actor <> 'system' AND kind = 'manual'
                                             AND finding_id IN ({','.join('?' * len(part))}) GROUP BY finding_id""", part):
-                if at and str(at)[:10] >= on.get(fid, ""):
+                if at and practice_date(str(at)) >= on.get(fid, ""):     # the practice's day of the change, as the answer's
                     out.add(fid)
     if _has_table(conn, "ema_lines"):
         cols = set(_cols(conn, "ema_lines"))

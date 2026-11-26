@@ -1471,12 +1471,15 @@ def test_mark_billed_counts_once_and_a_logged_call_counts_as_a_call(store):
 
 
 def test_the_spot_checks_follow_the_practices_own_day(server_api):
+    """The day's spot checks are the practice's day's (results._today, REMITWATCH_TZ), the day every page counts from,
+    whatever the browser's own clock says: a page a day behind (a browser in another zone, or a page left open since
+    yesterday) is shown the practice's day and never picks a second set for its own; that day's picks are only read."""
     tc, api, _path = server_api
-    # the page sends its own date: a browser in the practice's time zone a day behind the server keeps its day's picks
     got = tc.get("/api/results", params={"day": "2026-06-29"}).json()
-    assert got["day"] == "2026-06-29" and {p["day"] for p in got["spot"]["today"]} == {"2026-06-29"}
-    assert tc.get("/api/results/spot", params={"day": "2026-06-29"}).json()["items"] == got["spot"]["today"]
-    # a date far from the server's is not a time zone: the server's own day is used
+    assert got["day"] == TODAY and {p["day"] for p in got["spot"]["today"]} == {TODAY}
+    assert tc.get("/api/results/spot").json()["items"] == got["spot"]["today"]
+    assert tc.get("/api/results/spot", params={"day": "2026-06-29"}).json()["items"] == []
+    assert tc.get("/api/results", params={"day": "2026-07-01"}).json()["day"] == TODAY
     assert tc.get("/api/results", params={"day": "2026-01-01"}).json()["day"] == TODAY
     sb = tc.get("/api/results/scoreboard", params={"day": "2026-06-29"}).json()
     assert sb["spot"] == {"picked": 5, "answered": 0, "due": 5}

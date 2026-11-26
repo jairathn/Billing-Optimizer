@@ -553,10 +553,13 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
     (as the work its note names), the work lines the item's buttons record (sent, call, posted, billed, fix) and every fax
     sent through RemitWatch (a fax counts once it went out: status 'sent'); the status line that only repeats a fax or a
     'billed' line is folded into it."""
+    from .runtime import practice_date
     ids = sorted(set(fids))
     out: dict[str, list[dict]] = {fid: [] for fid in ids}
     if not ids:
         return out
+    # 'date': the day of the work where the practice is (the records keep UTC: a Sent at 9 PM Eastern is that day's, and
+    # counts in that day's week); 'at' keeps the moment itself
     if _table(conn, "finding_events"):
         note = "e.note" if "note" in _cols(conn, "finding_events") else "NULL"
         for part in _chunks(ids):
@@ -566,7 +569,7 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
                                                                   ORDER BY e.at, e.id"""):
                 k = _work_kind(kind, to, actor, text)
                 if k and at:
-                    out[fid].append({"date": str(at)[:10], "at": str(at), "kind": k, "who": str(actor or "").strip()[:80] or "a person",
+                    out[fid].append({"date": practice_date(str(at)), "at": str(at), "kind": k, "who": str(actor or "").strip()[:80] or "a person",
                                      "pages": 0, "src": "status" if kind == "manual" else "event"})
         _drop(conn, "rs_w")
     if _table(conn, "faxes") and {"finding_id", "direction", "status"} <= _cols(conn, "faxes"):
@@ -579,7 +582,7 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
                 if status != "sent" or not when:
                     continue
                 who = str(_json(doc).get("actor") or "").strip()[:80] or "RemitWatch"
-                out[fid].append({"date": when[:10], "at": when, "kind": "fax", "who": who, "pages": int(pages or 0), "src": "fax"})
+                out[fid].append({"date": practice_date(when), "at": when, "kind": "fax", "who": who, "pages": int(pages or 0), "src": "fax"})
         _drop(conn, "rs_fx")
     for fid, v in out.items():
         v.sort(key=lambda w: (w["at"], w["kind"]))
@@ -1868,6 +1871,7 @@ def _fix_markers(conn: sqlite3.Connection) -> list[dict]:
     itself is not copied)."""
     if not (_table(conn, "finding_events") and _fx(conn)):
         return []
+    from .runtime import practice_date
     out, seen = [], set()
     for fid, at, kind, note, actor, grp, sig in conn.execute(
             """SELECT e.finding_id, e.at, e.kind, e.note, e.actor, f.payer_group, f.signal FROM finding_events e
@@ -1877,11 +1881,12 @@ def _fix_markers(conn: sqlite3.Connection) -> list[dict]:
         if kind != "fix" and not FIX_RE.search(text):
             continue
         what = next((k for k, rx in FIX_KINDS if rx.search(text)), "fix")
-        key = (grp, str(at)[:10], what)
+        day = practice_date(str(at or ""))           # the practice's day of the fix (the history keeps UTC times)
+        key = (grp, day, what)
         if key in seen:
             continue
         seen.add(key)
-        out.append({"date": str(at)[:10], "payer_group": grp or "", "kind": what, "finding_id": fid, "signal": sig})
+        out.append({"date": day, "payer_group": grp or "", "kind": what, "finding_id": fid, "signal": sig})
     return out[-40:]
 
 
@@ -2261,9 +2266,10 @@ def needs_compute(conn: sqlite3.Connection) -> bool:
 def _minutes_at(settings: dict | None, day: str) -> dict:
     """The minutes in force on a day: the newest version the owner saved on or before it (the history keeps each), the
     defaults before the first save."""
+    from .runtime import practice_date
     best = None
     for h in (settings or {}).get("history") or []:
-        at = str(h.get("at") or "")[:10]
+        at = practice_date(str(h.get("at") or ""))       # the practice's day of the save, as the weeks are counted
         if at and at <= day and (best is None or at >= best[0]):
             best = (at, h)
     got = ((best[1].get("values") or {}).get("minutes") if best else None) or {}

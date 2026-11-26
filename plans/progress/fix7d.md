@@ -21,9 +21,17 @@ Brief: `plans/briefs/2026-11-26_fix7d.md`. Branch `wip/fix7d`. Rules: `plans/bri
   test_the_pages_say_a_moment_on_the_practices_day (node), test_no_page_cuts_a_stored_moment_to_its_utc_day (guard).
   Each broken on purpose and restored. Page tests (435) and both node checks pass.
 
+- Brief item 4 (search, first batch): report.py "Closed this week" counts from the practice's day a week ago (was SQL
+  datetime('now','-7 days')); uploads._free_name's "(uploaded <day>)" is the practice's day; the Results spot checks are
+  the practice's day's (api_results._day no longer takes the browser's day; results.js rsDay uses siteDay); the swing
+  alarm's seven days count the run's practice day (alerts.swing_rule); results.work_of/_fix_markers/_minutes_at date a
+  person's work, a fax, a fix and a settings save on the practice's day; selfcheck._work_after compares the practice's
+  day of a person's change with the answer's day; insights.trizetto_health says the practice's day of a refused sign-in.
+  Tests in tests/test_practice_day.py, tests/test_results.py (spot day, rewritten to the new rule), tests/test_swing.py;
+  each fix broken on purpose and restored.
+
 ## In progress
-- Brief item 4: report.py "Closed this week" (SQL datetime('now','-7 days')), uploads._free_name's "(uploaded <UTC
-  day>)", results.js rsDay (the browser's day keys the spot checks; api_results._day accepts it within a day).
+- Brief item 4: the rest of the search (api*.py, cloud.py, pipeline.py, fax.py follow-ups, JS fallbacks).
 
 ## Left, in order
 4. Search the whole tree for other "today" reads (date('now'), utcnow().date(), date.today(), new Date() as a day).

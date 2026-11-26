@@ -401,6 +401,24 @@ def test_it_survives_quiet_runs_and_clears_seven_days_after_the_run_that_moved(k
     store.close()
 
 
+def test_a_run_in_the_evening_stays_seven_days_counted_where_the_practice_is(kind, tmp_path, monkeypatch):
+    """A run that moved at 9:30 PM Eastern on Nov 21 (UTC's 22nd) ran on Nov 21 where the practice is: its alert stays
+    seven days counting that day, through Nov 27, and clears on Nov 28, as a morning run's does. Counted by UTC's date
+    it stayed a day longer."""
+    monkeypatch.delenv("REMITWATCH_TZ", raising=False)          # the default: US Eastern
+    store = new_store(kind, tmp_path)
+    world(store, tmp_path)
+    read(store, write(tmp_path / "in", denials(10000, 1600), "flood"), READ2)
+    detect_at(store, "r2", "2026-11-22T02:30:00+00:00")
+    run_alerts(store.conn, today=DAY2)
+    [a] = swings(store.conn, "new")
+    run_alerts(store.conn, today="2026-11-27")
+    assert [x["alert_id"] for x in swings(store.conn, "new")] == [a["alert_id"]]
+    run_alerts(store.conn, today="2026-11-28")
+    assert swings(store.conn, "new") == [] and swings(store.conn, "cleared")[0]["alert_id"] == a["alert_id"]
+    store.close()
+
+
 def test_it_leaves_the_pages_only_when_a_person_acknowledges_it(kind, tmp_path):
     store = new_store(kind, tmp_path)
     world(store, tmp_path)

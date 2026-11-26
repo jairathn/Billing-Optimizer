@@ -457,11 +457,13 @@ class AlertEngine:
         have = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if not {"detection_runs", "progress_snapshots"} <= have:
             return
+        from .runtime import practice_date
         today = date.fromisoformat(self.today)
 
         def recent(iso) -> bool:
+            # the run's day where the practice is (a run at 9 PM Eastern ran that day, not UTC's next), as today is
             try:
-                return (today - date.fromisoformat(str(iso)[:10])).days < SWING_DAYS
+                return (today - date.fromisoformat(practice_date(str(iso or "")))).days < SWING_DAYS
             except ValueError:
                 return False
         runs = [dict(r) for r in self.conn.execute("""SELECT run_id, started_at, version FROM detection_runs WHERE started_at IS NOT NULL

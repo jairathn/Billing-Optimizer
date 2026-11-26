@@ -559,15 +559,18 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
              f"The new password goes by phone or in person, never by email, to {enters}; it is tried at once. If the feed uses "
              "the Site ID's own login (shared with ModMed), reset nothing: get the current password from whoever changed it, "
              "with ModMed.")
+    # the day of the refusal where the practice is (the hold keeps a UTC time): one at 9 PM Eastern is that day's
+    from .runtime import practice_date
+    day = practice_date(str((held or {}).get("at") or ""))
     if held and held.get("at") and held.get("unclear"):
-        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
-                    "title": f"TriZetto's sign-in did not finish twice in a row on {held['at'][:10]}",
+        out.append({"key": "trizetto_signin", "ok": False, "at": day,
+                    "title": f"TriZetto's sign-in did not finish twice in a row on {day}",
                     "detail": "The feed waits 6 hours before it tries again, so the login is never locked. TriZetto may have "
                               "been down. If it keeps happening, the password may be refused without a clear answer.",
                     "who": f"{test_once} If it says TriZetto refused the sign-in, {reset}"})
     elif held and held.get("at") and held.get("kind") == "method":
-        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
-                    "title": f"TriZetto would not take a password for the feed's login on {held['at'][:10]}",
+        out.append({"key": "trizetto_signin", "ok": False, "at": day,
+                    "title": f"TriZetto would not take a password for the feed's login on {day}",
                     "detail": "TriZetto's server asked for another way to sign in, so no remittances come straight from TriZetto. "
                               "The feed tries again once a day.",
                     "who": "TriZetto administrator: ask TriZetto in writing (the portal's Contact Us) for the RemitWatch login to "
@@ -575,8 +578,8 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
     elif held and held.get("at"):
         # "the password" only when TriZetto refused a password sent by the password method (trizetto.SignInRefused.kind)
         what = "password" if held.get("kind") == "password" else "sign-in"
-        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
-                    "title": f"TriZetto refused the feed's {what} on {held['at'][:10]}",
+        out.append({"key": "trizetto_signin", "ok": False, "at": day,
+                    "title": f"TriZetto refused the feed's {what} on {day}",
                     "detail": "No remittances come straight from TriZetto until it is fixed. The feed tries the same password only "
                               "once a day, so the login is never locked.",
                     "who": f"{test_once} If TriZetto still refuses it, {reset}"})

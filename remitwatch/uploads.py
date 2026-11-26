@@ -526,7 +526,8 @@ def _free_name(conn: sqlite3.Connection, stem: str, ext: str) -> str:
         conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ema_sources'").fetchone() else set()
     have |= {os.path.basename(r[0] or "") for r in conn.execute("SELECT path FROM uploads WHERE kind='ema' AND path IS NOT NULL")}
     name = f"{stem}{ext}"
-    day = datetime.now(timezone.utc).date().isoformat()
+    from .runtime import practice_today
+    day = practice_today()          # the day it came where the practice is, as the Upload page dates it
     n = 1
     while name in have:
         n += 1
