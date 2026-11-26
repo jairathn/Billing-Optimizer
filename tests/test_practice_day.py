@@ -8,6 +8,11 @@ self-check, the archive, the report readers), the calculator's open findings, th
 mails, the fax line's date ranges and a person's Paid. Each counted from the machine's day (UTC on both hosts), a day
 ahead of a US practice from 7 PM Eastern (8 PM in summer).
 
+A stored moment (a person's Sent, Started or Paid, a packet, a fax, a fax number's change, a refused sign-in, a fix, a
+saved setting) is dated on the practice's calendar too (runtime.practice_date): in the states and the story, on every
+page (today.js practiceDate, in the zone the brief names), in the Results figures and the self-check. The weekly report's
+week, the Results spot checks and the swing alarm's week count from the practice's day.
+
 pin_zone puts the practice a day off UTC whatever the hour a test runs, so each test fails on a UTC day at any hour.
 Both store kinds where the code runs on both: the server's file store and the compact in-memory store a serverless run
 works on (the serverless pages read the dashboard's copy made from it). Invented data only.

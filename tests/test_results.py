@@ -32,6 +32,9 @@ OWNER = "owner-secret-9876"
 def _env(monkeypatch):
     monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
     monkeypatch.setenv("REMITWATCH_MODE", "server")
+    # the practice is in US Eastern time: the moments these tests write at 08:00 to 12:00 UTC are that morning there, and
+    # a person's work counts on the practice's day (results.work_of), whatever zone the suite runs in
+    monkeypatch.setenv("REMITWATCH_TZ", "America/New_York")
     for k in ("VERCEL", "REMITWATCH_STATE_DIR", "REMITWATCH_EMA_REPORTS", "DROPBOX_APP_KEY", "DROPBOX_REFRESH_TOKEN"):
         monkeypatch.delenv(k, raising=False)
     states._RESPONSE_CACHE.clear()

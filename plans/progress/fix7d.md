@@ -56,7 +56,10 @@ Brief: `plans/briefs/2026-11-26_fix7d.md`. Branch `wip/fix7d`. Rules: `plans/bri
   REMITWATCH_TZ).
 
 ## Measured
-- (none yet this resume)
+- Full suite, python3, REMITWATCH_TZ=Etc/GMT-14, on cff80cf: 14 failed (all tests written for an Eastern practice that
+  the new practice-day dating moved: test_results x6 (fax/fix/settings moments at 08:00-12:00 UTC), test_swing x7 (runs at
+  10:17 UTC), test_uploads x1 (the UTC day in an upload's name)). Fixed in the tests (Eastern pinned in test_results' and
+  test_swing's module fixtures, the practice's day in test_uploads); both zones then pass those three files.
 
 ## Open questions
 - (none)

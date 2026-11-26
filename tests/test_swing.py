@@ -108,6 +108,13 @@ def kind(request):
     return request.param
 
 
+@pytest.fixture(autouse=True)
+def _eastern(monkeypatch):
+    # the practice is in US Eastern time: a run at 10:17 UTC ran that morning there, and its alert's seven days count from
+    # that day (alerts.swing_rule), whatever zone the suite runs in
+    monkeypatch.setenv("REMITWATCH_TZ", "America/New_York")
+
+
 # --------------------------------------------------------------------------- what raises it and what does not
 
 def test_a_flood_of_1600_new_items_in_one_run_raises_a_high_alert_with_its_numbers(kind, tmp_path):
@@ -401,11 +408,10 @@ def test_it_survives_quiet_runs_and_clears_seven_days_after_the_run_that_moved(k
     store.close()
 
 
-def test_a_run_in_the_evening_stays_seven_days_counted_where_the_practice_is(kind, tmp_path, monkeypatch):
+def test_a_run_in_the_evening_stays_seven_days_counted_where_the_practice_is(kind, tmp_path):
     """A run that moved at 9:30 PM Eastern on Nov 21 (UTC's 22nd) ran on Nov 21 where the practice is: its alert stays
     seven days counting that day, through Nov 27, and clears on Nov 28, as a morning run's does. Counted by UTC's date
     it stayed a day longer."""
-    monkeypatch.delenv("REMITWATCH_TZ", raising=False)          # the default: US Eastern
     store = new_store(kind, tmp_path)
     world(store, tmp_path)
     read(store, write(tmp_path / "in", denials(10000, 1600), "flood"), READ2)
