@@ -21,7 +21,10 @@ merge by hand, the edits are short and marked by their comments).
       fails at least one test; files restored byte for byte (`$S/tk/units/deadlines/tools/mutate.py`).
 - [x] Measured on a private world copy, the tip against the branch (numbers below); 85 moved items hand-traced from the
       raw 835 rows and EMA rows against the sources' words, all agree.
-- [ ] Full suite in python3 and in Python 3.11.1 with SQLite 3.40 (see the final report for the result).
+- [x] Full suite, python3 (SQLite 3.5x): 2,782 passed, 55 failed; the same 55 fail on the tip 98070b8 (test_fax 34,
+      test_hotfix2 9, test_no_fax_route 5, test_notes_bodies_cli 4, test_hotfix2c 2, test_bulk_pause 1). Python 3.11.1
+      with SQLite 3.40.0: 2,666 passed, 163 failed, 24 errors: the same 55, and 132 that fail the same way on the tip
+      (131 of them: no Connection.serialize in that build, as CLAUDE.md expects). None is caused by this branch.
 
 ## Decisions
 - Two dates per item: `appeal_deadline` is the safe date, `legal_deadline` the payer's own last day where later. A window
