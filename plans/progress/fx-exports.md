@@ -116,7 +116,12 @@ CORRECT|open 4,758 -> 4,757 (-$120.50: a Cigna claim EMA shows answered, see the
 
 Time and memory: detection 216.4 s on the tip, 279.5 s and 282.1 s on the branch runs, peak 1,055 MB in all three. The
 machine was busier during the branch runs (the unchanged ema_turnaround step took 5.9 s on the tip run, 9.8 s and 9.1 s
-on the branch runs).
+on the branch runs). A timed pair run back to back on a loaded machine (`time_run.py`: wall time per Detector method,
+nested calls inside their callers; tip 433.5 s, branch 486.2 s in all, the unchanged save step 89.2 s and 93.6 s) puts
+this branch's cost at about 5 s: the three passes it touches took 102.6 s on the tip and 107.4 s on the branch
+(run_ema_open_claims 25.0 -> 22.9, run_837_open_claims 63.6 -> 69.9, run_ema_report_claims 14.0 -> 14.6); the new steps
+themselves: _claim_content 1.8 s (two calls), _unanswered_before_send 0.5 s, _export_patients 0.2 s, _g8_one_service and
+_exports_yield_to_newer_bills under 0.1 s. Peak memory unchanged.
 
 ## Hand trace (27 moved items, raw rows: 835s, 837 sends and lines, EMA's export rows and report lines; ht.py, ht2.py)
 
