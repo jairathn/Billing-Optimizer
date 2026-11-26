@@ -69,23 +69,28 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     # the practice's day (runtime.practice_today): a window is open until midnight where the practice is
     from . import runtime
     today, horizon = runtime.practice_today(), runtime.practice_today(45)
-    due = q("""SELECT signal, payer_group, patient_control_number, service_date, procedure_code, shortfall_cents, appeal_deadline
+    # an item that stands for many claims (a routine-rate review, a repricing request: PATTERN_SQL) is counted by its
+    # claims' own windows below, never by the single date on its row
+    from .detect import PATTERN_SQL, pattern_windows
+    due = q(f"""SELECT signal, payer_group, patient_control_number, service_date, procedure_code, shortfall_cents, appeal_deadline
                FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline BETWEEN ? AND ?
+                 AND signal NOT IN {PATTERN_SQL}
                ORDER BY appeal_deadline, shortfall_cents DESC LIMIT 40""", (today, horizon))
-    # a payer's routine lower rate: one row with the claims whose own windows close in the period
-    from .detect import pattern_windows
+    # one row for each such item, with its claims whose own windows close in the period
+    sig_of = {r["finding_id"]: r["signal"] for r in q(f"SELECT finding_id, signal FROM findings WHERE signal IN {PATTERN_SQL}")}
     soon: dict[str, dict] = {}
     for fid, grp, code, d, n, cents in pattern_windows(store.conn):
         if d and today <= d <= horizon:
-            r = soon.setdefault(fid, {"signal": "SECOND_RATE", "payer_group": grp, "patient_control_number": "", "service_date": "",
-                                      "procedure_code": code, "shortfall_cents": 0, "appeal_deadline": d, "n": 0})
+            r = soon.setdefault(fid, {"signal": sig_of.get(fid) or "SECOND_RATE", "payer_group": grp, "patient_control_number": "",
+                                      "service_date": "", "procedure_code": code, "shortfall_cents": 0, "appeal_deadline": d, "n": 0})
             r["shortfall_cents"] += cents
             r["n"] += n
             r["appeal_deadline"] = min(r["appeal_deadline"], d)
     for r in soon.values():
-        r["patient_control_number"] = f"{r['n']} claim{'s' if r['n'] != 1 else ''} at the payer's routine lower rate"
-    due_n = q("""SELECT COUNT(*) n FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit')
-                  AND appeal_deadline BETWEEN ? AND ?""", (today, horizon))[0]["n"] + len(soon)
+        what = "paid on the payer's earlier fee schedule" if r["signal"] == "OLD_FEE_SCHEDULE" else "at the payer's routine lower rate"
+        r["patient_control_number"] = f"{r['n']} claim{'s' if r['n'] != 1 else ''} {what}"
+    due_n = q(f"""SELECT COUNT(*) n FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit')
+                  AND appeal_deadline BETWEEN ? AND ? AND signal NOT IN {PATTERN_SQL}""", (today, horizon))[0]["n"] + len(soon)
     due = sorted([dict(r) for r in due] + list(soon.values()), key=lambda r: (r["appeal_deadline"], -(r["shortfall_cents"] or 0)))
     lines.append("## Appeals due in the next 45 days")
     if due and not detail:
@@ -98,9 +103,9 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     else:
         lines.append("Nothing due.")
     lines.append("")
-    top = [dict(r) for r in q("""SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
+    top = [dict(r) for r in q(f"""SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
                WHERE status='open' AND COALESCE(stale,0)=0 AND category IN ('downcoding','bundling','denial','underpayment') AND appeal_deadline >= ?
-                 AND signal != 'SECOND_RATE' GROUP BY 1""", (today,))]
+                 AND signal NOT IN {PATTERN_SQL} GROUP BY 1""", (today,))]
     # a payer's routine lower rate: the claims whose own windows are still open
     by_payer = {r["payer_group"]: r for r in top}
     counted: set = set()

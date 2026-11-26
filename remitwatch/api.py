@@ -42,7 +42,7 @@ from contextvars import ContextVar
 from . import __version__, runtime
 from .actions import STATUSES, apply_alert_ack, apply_status
 from .codes import CARC, RARC, member_number
-from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema, pattern_windows
+from .detect import DOWNCODE_SIGNALS, EM_SQL, PATTERN_SQL, ensure_schema, pattern_windows
 
 DB_PATH = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
 PASSWORD = os.environ.get("REMITWATCH_PASSWORD", "")
@@ -532,9 +532,9 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
     out["by_handling"] = rows(f"SELECT COALESCE(ema_handling,'unknown') ema_handling, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY 1 ORDER BY shortfall_cents DESC", tuple(params))
     out["resolved_by_later_remit"] = one("SELECT COUNT(*) n, SUM(recovered_cents) shortfall_cents FROM findings WHERE status='resolved' AND auto_note IS NOT NULL")
     # an item the rules no longer find (stale: kept only for its notes and history) is in no total, so not in these either
-    out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < ? THEN 'expired' WHEN appeal_deadline < ? THEN 'due_30d' WHEN appeal_deadline < ? THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') GROUP BY 1",
-                            (_day(0), _day(30), _day(90)))
-    # a routine-rate finding counts by its claims' own deadlines, each finding once per bucket it touches
+    out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < ? THEN 'expired' WHEN appeal_deadline < ? THEN 'due_30d' WHEN appeal_deadline < ? THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') "
+                            f"AND signal NOT IN {PATTERN_SQL} GROUP BY 1", (_day(0), _day(30), _day(90)))
+    # a routine-rate review or a repricing request counts by its claims' own deadlines, each finding once per bucket it touches
     buckets = {r["bucket"]: r for r in out["deadlines"]}
     seen: dict[str, set] = {}
     for fid, _g, _c, d, _n, cents in _windows():
@@ -585,9 +585,10 @@ def _range(deadline: str) -> tuple[str, str | None]:
 
 
 def _pattern_cents(w: str, params: list, deadline: str | None) -> tuple[int, dict]:
-    """The routine-rate findings a filter holds, by their claims: how much their claims outside the date range take off
-    the total, and for each the cents and the first deadline of its claims in range (in window, without a range)."""
-    found = rows(f"SELECT finding_id, COALESCE(shortfall_cents,0) c FROM findings{w}{' AND' if w else ' WHERE'} signal='SECOND_RATE'", tuple(params))
+    """The findings a filter holds that stand for many claims (a routine-rate review, a repricing request: PATTERN_SQL), by
+    their claims: how much their claims outside the date range take off the total, and for each the cents and the first
+    deadline of its claims in range (in window, without a range)."""
+    found = rows(f"SELECT finding_id, COALESCE(shortfall_cents,0) c FROM findings{w}{' AND' if w else ' WHERE'} signal IN {PATTERN_SQL}", tuple(params))
     if not found:
         return 0, {}
     lo, hi = _range(deadline) if deadline in DEADLINE_RANGES else (_day(0), None)
@@ -922,7 +923,7 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and d >= lo and (hi is None or d < hi)})
         # the same day range as the claims above: from lo up to (not including) hi, the practice's days
         dated = "appeal_deadline >= ?" + ("" if hi is None else " AND appeal_deadline < ?")
-        where.append(f"((COALESCE(signal,'') != 'SECOND_RATE' AND {dated})" + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
+        where.append(f"((COALESCE(signal,'') NOT IN {PATTERN_SQL} AND {dated})" + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
         params.extend([lo] + ([] if hi is None else [hi]) + ids)
     elif deadline == "none":
         where.append("appeal_deadline IS NULL")
@@ -1145,11 +1146,13 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
     if view == "worklist":
         return _worklist_csv(data, deadline, w, params)
     # a routine-rate finding is about many claims: list them, each with its own filing deadline
-    pattern = {r["finding_id"]: r["evidence"] for r in rows("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'")} \
-        if any(r.get("signal") == "SECOND_RATE" for r in data) else {}
+    pattern = {r["finding_id"]: r["evidence"] for r in rows(f"SELECT finding_id, evidence FROM findings WHERE signal IN {PATTERN_SQL}")} \
+        if any(r.get("signal") in ("SECOND_RATE", "OLD_FEE_SCHEDULE") for r in data) else {}
     for r in data:
         ev = json.loads(pattern[r["finding_id"]]) if pattern.get(r.get("finding_id")) else {}
-        r["claims"] = "; ".join(f"{c[0]} ({c[1]}, file by {c[3] if len(c) > 3 and c[3] else 'unknown'})" for c in (ev.get("claims") or [])) or None
+        # each claim's filing date is its row's last field (a review's [claim, date, allowed, due], a repricing request's
+        # [claim, date, code, allowed, owed, due])
+        r["claims"] = "; ".join(f"{c[0]} ({c[1]}, file by {c[-1] if len(c) > 3 and c[-1] else 'unknown'})" for c in (ev.get("claims") or [])) or None
     if SHOW_PHI:
         _with_patient(data)     # with names hidden the file carries the claim ID only: initials beside a date and a clinician would point at a person
 
@@ -1901,16 +1904,20 @@ def _bill_extras(pcns: list[str], payer_numbers: set, line_keys: set) -> tuple[l
     plb.sort(key=lambda r: (r["payment_date"] or "", r["id"]))
     patterns = []
     if line_keys:
-        for f in rows("""SELECT finding_id, signal, category, status, shortfall_cents, appeal_deadline, procedure_code, stale, evidence
-                         FROM findings WHERE signal='SECOND_RATE' AND COALESCE(stale,0)=0"""):
+        for f in rows(f"""SELECT finding_id, signal, category, status, shortfall_cents, appeal_deadline, procedure_code, stale, evidence
+                          FROM findings WHERE signal IN {PATTERN_SQL} AND COALESCE(stale,0)=0"""):
             ev = json.loads(f.pop("evidence") or "{}")
             mine = set(ev.get("line_keys") or []) & line_keys
             if not mine:
                 continue
-            per = max((ev.get("usual_cents") or 0) - (ev.get("amount_cents") or 0), 0)
             own = [c for c in (ev.get("claims") or []) if isinstance(c, list) and c and str(c[0]).upper() in {p.upper() for p in pcns}]
-            patterns.append(dict(f, via="pattern", line_keys=sorted(mine), claim_cents=per * len(mine),
-                                 claim_deadline=(own[0][3] if own and len(own[0]) > 3 else None)))
+            if f["signal"] == "OLD_FEE_SCHEDULE":
+                # a repricing request's claim rows: [claim, date, code, allowed, owed, due]
+                cents = sum(max((c[4] or 0) - (c[3] or 0), 0) for c in own if len(c) > 5)
+            else:
+                cents = max((ev.get("usual_cents") or 0) - (ev.get("amount_cents") or 0), 0) * len(mine)
+            patterns.append(dict(f, via="pattern", line_keys=sorted(mine), claim_cents=cents,
+                                 claim_deadline=(own[0][-1] if own and len(own[0]) > 3 else None)))
     return plb, takebacks, patterns
 
 
@@ -2229,8 +2236,8 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
                            SUM(status IN ('open','in_progress','appealed')) open_n,
                            COALESCE(SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END),0) open_cents,
                            SUM(status='resolved') resolved_n, COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
-                           SUM(status='lost') lost_n, SUM(status IN ('open','in_progress') AND appeal_deadline >= ? AND signal != 'SECOND_RATE') live_n,
-                           COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= ? AND signal != 'SECOND_RATE' THEN shortfall_cents END),0) live_cents
+                           SUM(status='lost') lost_n, SUM(status IN ('open','in_progress') AND appeal_deadline >= ? AND signal NOT IN {PATTERN_SQL}) live_n,
+                           COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= ? AND signal NOT IN {PATTERN_SQL} THEN shortfall_cents END),0) live_cents
                     FROM findings WHERE {' AND '.join(fwhere)} GROUP BY {grp} ORDER BY cents DESC LIMIT ?""", (_day(0), _day(0)) + tuple(fparams) + (limit,))
     # denominators: for both dimensions when the exposure table carries them, otherwise for the first only
     exp_dims = [d for d in dims if DIMS[d][1]]
@@ -2250,7 +2257,7 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
             live_by[fid] += cents
     if live_by:
         at = {tuple(r[f"k{i+1}"] for i in range(len(dims))): r for r in data}
-        for pr in rows(f"SELECT finding_id, {fcols} FROM findings WHERE {' AND '.join(fwhere)} AND signal='SECOND_RATE' AND status IN ('open','in_progress')",
+        for pr in rows(f"SELECT finding_id, {fcols} FROM findings WHERE {' AND '.join(fwhere)} AND signal IN {PATTERN_SQL} AND status IN ('open','in_progress')",
                        tuple(fparams)):
             r = at.get(tuple(pr[f"k{i+1}"] for i in range(len(dims))))
             if r is not None and live_by.get(pr["finding_id"]):
@@ -2469,10 +2476,16 @@ def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None,
         sg = by_signal.setdefault(r["signal"] or "", {"signal": r["signal"], "n": 0, "cents": 0})
         sg["n"] += r["n"]
         sg["cents"] += r["cents"]
-    delta, _each = _pattern_cents(w, params, deadline)
-    out[work_type("SECOND_RATE", "appeal")]["cents"] += delta
-    if "SECOND_RATE" in by_signal:
-        by_signal["SECOND_RATE"]["cents"] += delta
+    delta, each = _pattern_cents(w, params, deadline)
+    if each and deadline in DEADLINE_RANGES:
+        # a routine-rate review and a repricing request count the cents of their claims in range, each in its own reason
+        for r in rows(f"SELECT finding_id, signal, actionable, carc, COALESCE(shortfall_cents,0) c FROM findings{w}{' AND' if w else ' WHERE'} "
+                      f"signal IN {PATTERN_SQL}", tuple(params)):
+            if r["finding_id"] in each:
+                d = each[r["finding_id"]][0] - r["c"]
+                out[work_type(r["signal"], r["actionable"], r["carc"])]["cents"] += d
+                if r["signal"] in by_signal:
+                    by_signal[r["signal"]]["cents"] += d
     kinds = list(out.values())
     return {"kinds": kinds, "n": sum(k["n"] for k in kinds), "cents": sum(k["cents"] for k in kinds),
             "signals": sorted(by_signal.values(), key=lambda x: -x["cents"])}
@@ -2539,12 +2552,13 @@ def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, p
     delta, each = _pattern_cents(w, params, deadline)
     if each and deadline in DEADLINE_RANGES:
         # a routine-rate pattern counts the cents of its claims in range, in its kind and in its payer's pile
-        full = {r["finding_id"]: (r["pg"], r["c"]) for r in rows(
-            f"SELECT finding_id, payer_group pg, COALESCE(shortfall_cents,0) c FROM findings{w}{' AND' if w else ' WHERE'} signal='SECOND_RATE'", tuple(params))}
-        rk = kinds[work_type("SECOND_RATE", "appeal")]
+        full = {r["finding_id"]: (r["pg"], r["c"], work_type(r["signal"], r["actionable"], r["carc"])) for r in rows(
+            f"SELECT finding_id, payer_group pg, signal, actionable, carc, COALESCE(shortfall_cents,0) c FROM findings{w}{' AND' if w else ' WHERE'} "
+            f"signal IN {PATTERN_SQL}", tuple(params))}
         for fid, (cents, _d, _n) in each.items():
             if fid in full:
-                g, c = full[fid]
+                g, c, wt = full[fid]
+                rk = kinds[wt]
                 rk["cents"] += cents - c
                 rk["payers"].setdefault(g, [0, 0])[1] += cents - c
     out = []

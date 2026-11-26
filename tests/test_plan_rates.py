@@ -603,6 +603,42 @@ def test_a_repricing_requests_claims_are_counted_by_their_own_windows(tmp_path, 
     w.store.close()
 
 
+def test_every_deadline_view_counts_a_repricing_requests_claims_once_by_their_own_windows(tmp_path, monkeypatch):
+    """fix7c-r2-2, the views: nine January visits paid on the 2025 schedule ($200.00 short each), three processed in
+    February (closed by May 2027) and six in May (closing 2027-05-20). On 2027-05-01 the deadline alert, the weekly
+    report's due list, the summary's deadline buckets and the worklist's 30-day filter each count the six claims due
+    ($1,200.00) once, by their own windows: never the item's row as well (its last date, its every claim)."""
+    from datetime import datetime, timezone
+    from remitwatch import report, runtime
+    from remitwatch.alerts import AlertEngine
+    from tests.test_review_rates import api_client
+    monkeypatch.setattr(runtime, "_utc_now", lambda: datetime(2027, 5, 1, 15, 0, tzinfo=timezone.utc))
+    w = World(tmp_path, "file")
+    types(w, (DOC, "127.80", DR, 1))
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(100, 25, "99215", "800.00", "400.00", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(200, 25, "99215", "800.00", "600.00", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit(many(900, 3, "99215", "800.00", "400.00", cfi="16", dos="20260112"), "20260210", **payer)
+    w.remit(many(910, 6, "99215", "800.00", "400.00", cfi="16", dos="20260113"), "20260520", **payer)
+    w.run(today="2027-05-01")
+    item = w.one("signal='OLD_FEE_SCHEDULE'")
+    assert item["shortfall_cents"] == 9 * 20000 and item["ev"]["lines_open"] == 6, (item["shortfall_cents"], item["ev"]["lines_open"])
+    eng = AlertEngine(w.store.conn, run_id="a", today="2027-05-01")
+    eng.deadline_rule()
+    [alert] = [a for a in eng.active.values() if a["kind"] == "DEADLINE"]
+    assert alert["cents_recent"] == 6 * 20000 and alert["n_recent"] == 1, (alert["cents_recent"], alert["n_recent"], alert["title"])
+    text = report.build_report(w.store, detail=True)
+    due = text.split("## Appeals due in the next 45 days")[1].split("##")[0]
+    assert due.count("|") and "6 claims paid on the payer's earlier fee schedule" in due and "$1,200" in due, due
+    assert "$1,800" not in due and due.count("OLD_FEE_SCHEDULE") == 1, due
+    w.store.close()
+    c = api_client(tmp_path, monkeypatch)
+    buckets = {d["bucket"]: d["shortfall_cents"] for d in c.get("/api/summary").json()["deadlines"]}
+    assert buckets.get("due_30d") == 6 * 20000 and buckets.get("expired") == 3 * 20000, buckets
+    month = c.get("/api/findings?category=underpayment&deadline=month").json()
+    assert month["shortfall_cents"] == 6 * 20000, (month.get("total"), month.get("shortfall_cents"))
+
+
 def test_a_sent_repricing_request_keeps_the_claims_it_was_sent_with(tmp_path, kind):
     """fix7c-r2-3. Ten January 2026 visits on the 2025 schedule are one repricing request; the biller sends it and marks it
     appealed. A late remittance then brings three more January visits at the old amounts. The request sent keeps the ten
@@ -739,6 +775,48 @@ def test_a_surgery_center_denial_is_never_sized_below_what_the_payer_pays_for_th
     got = {k: (r["signal"], r["expected_cents"], (r["ev"].get("basis") or "")[:120]) for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
     sizes = [v[1] for v in got.values()]
     assert sizes and all((s or 0) >= 0.9 * 93212 for s in sizes), got
+    w.store.close()
+
+
+def test_a_payers_own_few_amounts_in_a_setting_size_its_denials_before_another_payers(tmp_path, kind):
+    """fix7c-r1-4, both rules apart. At the surgery center (POS 24) one payer paid a 14301 $932.12 twice and $900.00 once:
+    too few lines for a rate of its own, but they agree, so its denial of a 14301 there is worth $932.12. Another payer paid
+    two 99214 visits there ($85.58 and $87.78: no agreement), while a third payer's twelve visits there ($61.26) are most of
+    the commercial plans' lines: its denial of a 99214 there is never sized below the least it has paid there itself,
+    $85.58 (another payer's amounts are not its own)."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    ant, aet, cig = dict(payer="ANTHEM", payer_id="ANTHM"), dict(payer="AETNA", payer_id="AETTEST"), dict(payer="CIGNA", payer_id="CIGTEST")
+    w.remit(many(300, 30, "99213", "157.66", "60.00") + many(100, 2, "14301", "1600.00", "932.12", pos="24")
+            + many(110, 1, "14301", "1600.00", "900.00", pos="24"), "20260310", **ant)
+    w.remit(many(400, 30, "99213", "157.66", "70.00") + many(200, 12, "99214", "223.65", "61.26", pos="24"), "20260310", **cig)
+    w.remit(many(500, 30, "99213", "157.66", "75.00") + [visit(210, "99214", "223.65", "85.58", pos="24"),
+                                                         visit(211, "99214", "223.65", "87.78", pos="24")], "20260310", **aet)
+    w.remit([claim(900, sv("14301", "1600.00", "0", None, "1", "CAS*CO*197*1600.00~", "20260402"), "1600.00", "0", pos="24",
+                   dos="20260402")], "20260420", **ant)
+    w.remit([claim(901, sv("99214", "223.65", "0", None, "1", "CAS*CO*197*223.65~", "20260402"), "223.65", "0", pos="24",
+                   dos="20260402")], "20260420", **aet)
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"]) for k, r in by_pcn(w, f"patient_control_number IN ('{pcn(900)}','{pcn(901)}')").items()}
+    assert got.get(pcn(900), (None, None))[1] == 93212, got
+    assert got.get(pcn(901), (None, None))[1] == 8558, got
+    w.store.close()
+
+
+def test_a_denial_no_rate_sizes_is_never_below_the_payers_own_amount_there(tmp_path, kind):
+    """fix7c-r1-4, the last resort: the payer paid one surgery-center 14301 ($932.12) and no other payer has enough lines for
+    a typical amount, so the denial is sized by the payer's share of charges (about 38 percent of $1,600.00, some $600):
+    below the one amount it has paid for the code there. The size is never below that amount."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    ant = dict(payer="ANTHEM", payer_id="ANTHM")
+    w.remit(many(300, 200, "99213", "157.66", "60.00", dos="20240305") + many(100, 1, "14301", "1600.00", "932.12", pos="24", dos="20240310"),
+            "20240401", **ant)
+    w.remit([claim(900, sv("14301", "1600.00", "0", None, "1", "CAS*CO*197*1600.00~", "20240802"), "1600.00", "0", pos="24",
+                   dos="20240802")], "20240901", **ant)
+    w.run(today="2024-10-15")
+    got = {k: (r["signal"], r["expected_cents"], (r["ev"].get("basis") or "")[:90]) for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
+    assert got and all(v[1] == 93212 for v in got.values()), got
     w.store.close()
 
 

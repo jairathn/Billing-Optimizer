@@ -597,12 +597,14 @@ class AlertEngine:
     def deadline_rule(self) -> None:
         week = date.fromisoformat(self.today).isocalendar()
         horizon = _shift(self.today, 30)
+        # an item that stands for many claims (a routine-rate review, a repricing request) counts for its claims whose own
+        # windows close in the period, never by the single date on its row
+        from .detect import PATTERN_SQL, pattern_windows
         rows = [dict(r) for r in self.conn.execute(
-            """SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents, MIN(appeal_deadline) first FROM findings
+            f"""SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents, MIN(appeal_deadline) first FROM findings
                WHERE status IN ('open','in_progress') AND COALESCE(stale,0) = 0 AND actionable IN ('appeal','correct_and_resubmit')
+                 AND signal NOT IN {PATTERN_SQL}
                  AND appeal_deadline >= ? AND appeal_deadline <= ? GROUP BY 1 ORDER BY cents DESC""", (self.today, horizon))]
-        # a payer's routine lower rate counts for its claims whose own windows close in the period
-        from .detect import pattern_windows
         by_payer = {r["payer_group"]: r for r in rows}
         counted: set = set()
         for fid, grp, _code, d, _n, cents in pattern_windows(self.conn, ("open", "in_progress")):
