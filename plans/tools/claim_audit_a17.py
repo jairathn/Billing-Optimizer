@@ -478,8 +478,10 @@ WINDOW_GROUP_RULES = (
     ("anthem_caid", {"fams": {"BCBS-ANTHEM"}, "names": _ANTHEM_NAMES, "prods": {"MC"}}),
     ("anthem", {"fams": {"BCBS-ANTHEM"}, "names": _ANTHEM_NAMES}),
     ("aetna_senior", {"names": r"\bAMERICAN CONTINENTAL\b|\bAETNA SENIOR SUPPLEMENTAL\b"}),
-    ("aetna", {"names": r"^AETNA\b", "not_prods": {"MC", "16"}}),   # its Medicaid and Medicare plans have no row
-    ("cigna", {"names": r"^CIGNA\b", "not_prods": {"MC", "16"}}),
+    # Aetna's and Cigna's Medicare, supplement and Medicaid plans have no row: their commercial windows are not theirs
+    ("aetna", {"names": r"^AETNA\b", "not_prods": {"MC", "16"},
+               "not_names": r"\b(MEDICARE|ADVANTAGE|SUPPLEMENT|SUPPLEMENTAL|MEDICAID|BETTER HEALTH)\b"}),
+    ("cigna", {"names": r"^CIGNA\b", "not_prods": {"MC", "16"}, "not_names": r"\b(MEDICARE|ADVANTAGE|SUPPLEMENT)\b"}),
     ("ambetter", {"names": r"\bAMBETTER\b"}),                      # Centene's marketplace plan, whatever CLP06 says
     ("wellcare_caid", {"names": r"\bWELLCARE\b", "prods": {"MC"}}),
     ("wellcare_ma", {"names": r"\bWELLCARE\b"}),
@@ -825,6 +827,7 @@ class PayerWindows:
             self.entries.append({"id": key, "kinds": by_key[key], "rule": {
                 "fams": set(rule.get("fams") or ()), "pat": re.compile(rule["names"]) if rule.get("names") else None,
                 "prods": set(rule.get("prods") or ()), "not_prods": set(rule.get("not_prods") or ()),
+                "not_pat": re.compile(rule["not_names"]) if rule.get("not_names") else None,
                 "fep": bool(rule.get("fep"))}})
         ruled = {k for k, r in WINDOW_GROUP_RULES}
         for key in sorted(set(by_key) - ruled):
@@ -856,6 +859,8 @@ class PayerWindows:
                     if r["fep"] and pr != "FI":
                         continue
                     if (r["prods"] and pr not in r["prods"]) or pr in r["not_prods"]:
+                        continue
+                    if r["not_pat"] is not None and any(r["not_pat"].search(n) for n in nms):
                         continue
                     return e
             return None
@@ -6726,6 +6731,8 @@ def window_direct_checks(path=None):
     chk("the group a payer is read into", "a plan named on the remittance of another payer's id",
         key("UMR", "12", "GEHA"), "geha")
     chk("the group a payer is read into", "TRICARE before Humana", key("HUMANA", "CH", "HUMANA MILITARY"), "tricare")
+    chk("the group a payer is read into", "a commercial payer's supplement plan is not its commercial plan",
+        key("NM:CIGNA MEDICARE SUPPLEMENT", "12", "CIGNA MEDICARE SUPPLEMENT"), "medsupp")
     w = end("NM:AETNA", "12", "AETNA", "appeal_1", {"remit": "2026-01-15"})
     chk("an extension it cannot check keeps a unit unverified", "Aetna 180 days, fully insured plans 2 years",
         (str(w), w.verified, w.ext), ("2026-07-14", True, "2028-01-15"))
