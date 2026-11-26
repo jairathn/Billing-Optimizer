@@ -1814,11 +1814,26 @@ def _last_detection(conn) -> dict | None:
     return {"at": r[1], "run_id": r[0], "trigger": None, "findings": r[2]} if r and r[1] else None
 
 
-def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | None, analysed: dict | None) -> dict | None:
+# why a run handed the analysis on, in the note's words (the self-regulation's worst pressure names its own)
+DEFER_REASONS = {
+    "time": "This run did not have the time left for it, so a fresh run does it.",
+    "files": "This run read a large batch of files, so a fresh run does it, with clean memory.",
+    "production": "This run read a Production report, so a fresh run does it, with clean memory.",
+    "waiting": "Files are still waiting to be read: the next run reads them first.",
+}
+SPREAD_REASONS = {"memory": "to keep within memory", "time": "to keep within the time a run has",
+                  "tmp": "to keep within the temporary disk", "image": "to keep the store within what a run saves in one piece",
+                  "killed": "after a run the platform stopped"}
+
+
+def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | None, analysed: dict | None,
+                   read_since: bool = True, why: str | None = None) -> dict | None:
     """What a run could not check (the owner's decision 1: a pressed run that sheds work says so in items and dollars):
     when it ends with the analysis still to come (handed to the next run of the chain, or files left to read), the open
-    items on the lists, and their dollars, were not checked against what was read since the last analysis; when the
-    self-regulation left the weekly self-audit for a calmer run, its last figures are named. None when nothing was left."""
+    items on the lists, and their dollars, were not checked against what was read since the last analysis, or, when
+    nothing was read since (a press alone asked for it), stand as that analysis left them; the reason the run handed it on
+    is named (`why`: spread, time, files, production, waiting). When the self-regulation left the weekly self-audit for a
+    calmer run, its last figures are named. None when nothing was left."""
     from . import selfcheck as sc
     skipped_audit = "audit" in ((plan or {}).get("skip") or [])
     if not (pending or waiting_files or skipped_audit):
@@ -1835,12 +1850,21 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
         runlog.caught(exc, "unchecked_note", level="warning")
     parts = []
     if pending or waiting_files:
-        since = f" (the last analysis: {_hhmm(analysed.get('at'))})" if (analysed or {}).get("at") else ""
-        why = (" The self-regulation handed the analysis on to keep within memory." if (plan or {}).get("level", 0) >= 1
-               else "")
-        parts.append(f"The analysis has not run on what this run read: {sc._n(int(n), 'open item')} ({sc.usd0(cents)}) on the "
-                     f"lists were not checked against the files read since the last analysis{since}.{why} The next run of "
-                     "the chain analyses them; if none follows, press Run the analysis now.")
+        since = f" ({_hhmm(analysed.get('at'))})" if (analysed or {}).get("at") else ""
+        items = f"{sc._n(int(n), 'open item')} ({sc.usd0(cents)})"
+        if read_since or waiting_files:
+            head = (f"The analysis has not run on what was read since the last analysis{since}: {items} on the lists were not "
+                    "checked against it.")
+        else:
+            head = (f"The analysis this press asked for has not run yet. Nothing new has been read since the last analysis"
+                    f"{since}, so the {items} on the lists stand as it left them.")
+        if why == "spread":
+            worst = ((plan or {}).get("pressure") or {}).get("worst")
+            reason = (f"The self-regulation handed it to a fresh run, {SPREAD_REASONS.get(worst, 'to keep within the limits of a run')}.")
+        else:
+            reason = DEFER_REASONS.get(why or "", "")
+        parts.append(" ".join(x for x in (head, reason, "The next run of the chain analyses them; if none follows, press Run the "
+                                          "analysis now.") if x))
     if skipped_audit:
         au = (sc.meta_get(conn, sc.K_AUDIT, {}) or {}).get("latest") or {}
         last = (f" The last one found {sc._n(int(au.get('gaps_n') or 0), 'line')} with money to recover and no item "
@@ -1848,7 +1872,7 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
         parts.append("The weekly self-audit (money on lines no item is working) was not checked in this run, to keep within "
                      f"memory: a calmer run does it, within a week.{last}")
     return {"n": int(n), "cents": int(cents), "pending": bool(pending or waiting_files), "audit_skipped": skipped_audit,
-            "text": " ".join(parts)}
+            "read_since": bool(read_since or waiting_files), "text": " ".join(parts)}
 
 
 def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger: str = "manual", full: bool = False,
@@ -2057,7 +2081,12 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             ingested = True             # the bills that came back are analysed in this run (or the deferred one)
             out["archive_back"] = {"asked": back[0].get("restored", 0), "new_data": back[1].get("restored", 0)}
 
-        pending = conn.execute("SELECT 1 FROM meta WHERE key='cloud:detect_pending'").fetchone() is not None
+        pend_row = conn.execute("SELECT value FROM meta WHERE key='cloud:detect_pending'").fetchone()
+        pending = pend_row is not None
+        # what an analysis still to come has to check: files read since the last one ('1'), or nothing new, when a press
+        # alone asked for it ('press'): the note of a run that hands it on says which (unchecked_note)
+        pending_read = pending and pend_row[0] != "press"
+        defer_why = None
         has_run = conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone() is not None
         has_lines = conn.execute("SELECT 1 FROM lines LIMIT 1").fetchone() is not None
         # a release that changed the rules re-analyses the archive once, even when no new file has arrived
@@ -2078,6 +2107,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             # (clean memory: this one held the ledger and the file)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
             out["deferred"] = "detection"
+            defer_why = "production"
         elif need_detect and not remaining:
             last = conn.execute("SELECT value FROM meta WHERE key='cloud:detect_seconds'").fetchone()
             estimate = float(last[0]) if last else 60.0
@@ -2088,8 +2118,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             # analysis with nothing new read (the owner's decision 1): it is handed on the same way, so a pressed run never
             # starts an analysis it has no time or memory left for.
             if (ingested or force_detect) and (plan["spread"] or left_s < estimate * 1.5 + 45 or n_ingested >= DEFER_DETECT_AFTER_FILES):
-                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', ?)",
+                             ("1" if ingested or pending_read else "press",))
                 out["deferred"] = "detection"
+                defer_why = ("spread" if plan["spread"] else "time" if left_s < estimate * 1.5 + 45 else "files")
             else:
                 t1 = time.time()
                 det = Detector(store, rl.run_id)    # the detection run and the run log share one id
@@ -2106,6 +2138,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 sc.mark(out, "detect")
         elif need_detect:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
+            defer_why = "waiting"
         conn.commit()
 
         # (E) retention in a run that did not analyse (its memory is free), with time left; the image is this host's memory
@@ -2319,9 +2352,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         else:
             out["analysed"] = prev_status.get("analysed") or _last_detection(conn)
         # what this run could not check, in items and dollars (the analysis still to come, an optional check shed)
-        still_pending = conn.execute("SELECT 1 FROM meta WHERE key='cloud:detect_pending'").fetchone() is not None
-        note = unchecked_note(conn, pending=still_pending and not ran_detect, waiting_files=bool(remaining),
-                              plan=plan, analysed=out.get("analysed"))
+        pend_row = conn.execute("SELECT value FROM meta WHERE key='cloud:detect_pending'").fetchone()
+        note = unchecked_note(conn, pending=pend_row is not None and not ran_detect, waiting_files=bool(remaining),
+                              plan=plan, analysed=out.get("analysed"), read_since=pend_row is None or pend_row[0] != "press",
+                              why=defer_why)
         if note:
             out["unchecked"] = note
         mem["peak"] = peak_mb()

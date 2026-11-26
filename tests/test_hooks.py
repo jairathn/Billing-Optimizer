@@ -1007,6 +1007,11 @@ def test_the_data_tabs_three_panels_draw_in_plain_words_at_a_desk_and_on_a_phone
     pipeline.run_cycle(db, sync=False, local=_feed(tmp_path), email=False, report=False, log=lambda *a: None)
     st = Store(db)
     fid, bill = st.conn.execute("SELECT finding_id, bill FROM archive_findings LIMIT 1").fetchone()
+    # a check the last run failed: the panel offers the owner "Accept what run ... found", which must do that and no more
+    last = json.loads(st.conn.execute("SELECT value FROM meta WHERE key='selfcheck:last'").fetchone()[0])
+    last["checks"][0].update(status="fail", n=1, cents=100)
+    st.conn.execute("UPDATE meta SET value=? WHERE key='selfcheck:last'", (json.dumps(last),))
+    st.conn.commit()
     st.close()
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -1040,6 +1045,8 @@ def test_the_data_tabs_three_panels_draw_in_plain_words_at_a_desk_and_on_a_phone
         assert w["store"].startswith("Store size and memory") and w["bundle"], width
         assert "—" not in w["running"] + w["logs"] + w["store"]
     assert out["widths"]["390"]["overflow"] <= 1, out["widths"]["390"]["overflow"]
+    # the server has no "Run the analysis now": the owner's Accept button starts nothing else (no request to /api/ops/run)
+    assert out["widths"]["1400"]["accept"] and out["press_requests"] == 0, (out["press_requests"], out["failed"])
     # an archived claim (Find a claim) and an archived item open from the archive, say so, and offer to bring them back
     for width, w in out["widths"].items():
         assert w["claim"].startswith("Claim ") and "In the archive since" in w["claim"] and "Bring it back to the lists" in w["claim"], (width, w["claim"][:400])
@@ -1292,6 +1299,37 @@ def test_a_pressed_run_short_of_time_hands_the_analysis_on_and_the_chain_continu
     assert "detect" in nxt and nxt["analysed"]["at"] == nxt["finished"]
 
 
+def test_a_deferred_press_with_nothing_new_says_so_and_names_the_reason(box):
+    """The note of a pressed run that hands the analysis on is true to what happened: with nothing read since the last
+    analysis, the lists stand as that analysis left them (no file went unchecked), and the reason named is the one that
+    held (the time left in this run, not memory)."""
+    from remitwatch import cloud
+    root, client, state = box
+    from datetime import date, timedelta
+
+    from tests.test_remitwatch import remit
+    recent = (date.today() - timedelta(days=20)).strftime("%Y%m%d")      # items whose windows are open: work to do
+    folder = root / DATA
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "r1.RMT").write_bytes(remit("".join(visits_with_downcodes()), "100.00", seg_count=99, isa_ctrl="000000001",
+                                          pay_date=recent))
+    first = _cloud(state, client)
+    assert "detect" in first
+    store, _ = cloud.load_raw(state)
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_seconds', '900')")
+    store.conn.commit()
+    cloud.save_raw(state, store, lambda *a: None)
+    store.close()
+    pressed = _cloud(state, client, trigger="press", force_detect=True)
+    assert pressed.get("deferred") == "detection" and pressed["plan"]["level"] == 0
+    un = pressed["unchecked"]
+    assert un["pending"] and un["n"] >= 1, un
+    assert "files read" not in un["text"] and "what this run read" not in un["text"], un["text"]
+    assert "Nothing new has been read since" in un["text"] and "as it left them" in un["text"], un["text"]
+    assert "time" in un["text"] and "memory" not in un["text"], un["text"]
+    assert "\u2014" not in un["text"]
+
+
 def test_a_run_that_sheds_work_says_what_it_could_not_check_in_items_and_dollars(box):
     """A run under the memory regulation that leaves the analysis waiting (the chain stopped) says in its status, and so on
     the page, how many open items and how many dollars were not checked against the files read since the last analysis;
@@ -1323,6 +1361,7 @@ def test_a_run_that_sheds_work_says_what_it_could_not_check_in_items_and_dollars
     assert read.get("deferred") == "detection" and read["plan"]["level"] >= 1
     un = read["unchecked"]
     assert un["n"] >= 1 and un["cents"] > 0 and "not checked" in un["text"] and "$" in un["text"], un
+    assert "read since the last analysis" in un["text"] and "memory" in un["text"], un["text"]
     assert json.loads(state.get(cloud.STATUS))["unchecked"] == un
     done = _cloud(state, client, trigger="continue")
     assert "detect" in done and not done.get("unchecked")
@@ -1388,3 +1427,28 @@ def test_the_vercel_pages_say_the_site_analyses_only_on_a_press_and_the_press_ru
     assert second.get("started") is False and "already going" in second.get("text", ""), second
     status = json.loads(state.get("status.json"))
     assert status["trigger"] == "press" and status.get("analysed", {}).get("trigger") == "press", {k: status.get(k) for k in ("trigger", "analysed")}
+    # while a run is going, every page still says when the site last analysed and that it analyses only on a press
+    from remitwatch import cloud
+    token = cloud.acquire(state)
+    assert token
+    srv = subprocess.Popen([sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port", str(port),
+                            "--log-level", "warning"], cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        going = subprocess.run(["node", os.path.join(repo, "tests", "press_page.js"), str(port), "oda", PW, str(tmp_path), "going"],
+                               capture_output=True, text=True, timeout=240)
+    finally:
+        srv.terminate()
+        srv.wait(timeout=20)
+        cloud.release(state, token)
+    assert going.returncode == 0, going.stderr[-2000:]
+    w = json.loads(going.stdout.strip().splitlines()[-1])["widths"]["390"]
+    assert "analysing now" in w["chip"] and "last analysed" in w["chip"], w["chip"]
+    assert "only when someone presses Run the analysis now" in w["chip"], w["chip"]
+    assert "A run is going" in w["panel"] and "This site last analysed" in w["panel"] and w["button_disabled"], w["panel"][:400]
+    assert "last analysed" in w["upload"] and "only when someone presses Run the analysis now" in w["upload"], w["upload"]

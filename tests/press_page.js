@@ -1,15 +1,16 @@
 // The owner's decision 1 on the Vercel site, in a browser: every page says when the site last analysed and that it
 // analyses only on a press; the Data tab's "Run the analysis now" starts the run chain and a second press says a run is
 // already going; at a phone's width nothing runs off the side.
-// Usage: node press_page.js <port> <user> <password> [screenshot folder]. Prints one JSON line.
+// Usage: node press_page.js <port> <user> <password> [screenshot folder] [going]. Prints one JSON line. With 'going' (a
+// run holds the lock): the pages at a phone's width only, no press.
 const { chromium } = require('playwright');
-const [port, user, pass, shots] = process.argv.slice(2);
+const [port, user, pass, shots, mode] = process.argv.slice(2);
 const base = `http://127.0.0.1:${port}`;
 
 (async () => {
   const browser = await chromium.launch();
   const out = { errors: [], failed: [], widths: {} };
-  for (const width of [1400, 390]) {
+  for (const width of (mode === 'going' ? [390] : [1400, 390])) {
     const ctx = await browser.newContext({ viewport: { width, height: 1000 }, httpCredentials: { username: user, password: pass } });
     const page = await ctx.newPage();
     page.on('pageerror', e => out.errors.push(`pageerror: ${e.message}`));
@@ -20,13 +21,14 @@ const base = `http://127.0.0.1:${port}`;
     await page.waitForFunction(() => /analys/.test((document.querySelector('#feedChip') || {}).innerText || ''), null, { timeout: 15000 }).catch(() => {});
     const got = { chip: await text('#feedChip'), panel: await text('#opAnalysis'), feed: await text('#feedPanel'),
                   overflow: await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth) };
-    if (width === 1400) {
-      await page.click('#opAnalysis [data-op-run]');
-      await page.waitForFunction(() => { const e = document.querySelector('#opAnalysis [data-op-run-said]'); return e && e.textContent && !/Asking/.test(e.textContent); }, null, { timeout: 20000 }).catch(() => {});
-      out.first = await text('#opAnalysis [data-op-run-said]');
+    got.button_disabled = await page.evaluate(() => { const b = document.querySelector('#opAnalysis [data-op-press]'); return !!(b && b.disabled); });
+    if (width === 1400 && mode !== 'going') {
+      await page.click('#opAnalysis [data-op-press]');
+      await page.waitForFunction(() => { const e = document.querySelector('#opAnalysis [data-op-press-said]'); return e && e.textContent && !/Asking/.test(e.textContent); }, null, { timeout: 20000 }).catch(() => {});
+      out.first = await text('#opAnalysis [data-op-press-said]');
       out.second = await page.evaluate(async () => { try { return await api('/api/ops/run', { method: 'POST' }); } catch (e) { return { error: e.message }; } });
     }
-    if (shots) await page.screenshot({ path: `${shots}/press-${width}.png`, fullPage: true });
+    if (shots) await page.screenshot({ path: `${shots}/press-${mode === 'going' ? 'going-' : ''}${width}.png`, fullPage: true });
     await page.goto(`${base}/upload`);
     await page.waitForFunction(() => !(document.querySelector('#pressLine') || {}).hidden, null, { timeout: 15000 }).catch(() => {});
     got.upload = await text('#pressLine');

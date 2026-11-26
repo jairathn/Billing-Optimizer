@@ -40,16 +40,17 @@ function opAnalysisHtml(a){
     <div class="small"><b>${last}</b></div>
     ${run ? `<div class="note small">A run is going (asked for or started ${opWhen(run.since)} UTC). It finishes by itself, and the lists change when it has.</div>` : ''}
     ${un && un.text ? `<div class="warnbox small"><b>What the last run could not check.</b> ${esc(un.text)}</div>` : ''}
-    <div style="margin-top:8px"><button class="primary" data-op-run="1" ${run ? 'disabled' : ''}>Run the analysis now</button>
-      <span class="small muted" data-op-run-said></span></div>
+    <div style="margin-top:8px"><button class="primary" data-op-press="1" ${run ? 'disabled' : ''}>Run the analysis now</button>
+      <span class="small muted" data-op-press-said></span></div>
   </div>`;
 }
 
+// (its own attribute: the owner's "Accept what run ... found" carries data-op-run, the id of the run it accepts)
 function opBindRun(el){
-  const b = el.querySelector('[data-op-run]');
+  const b = el.querySelector('#opAnalysis [data-op-press]');
   if(!b) return;
   b.addEventListener('click', async () => {
-    const said = el.querySelector('[data-op-run-said]');
+    const said = el.querySelector('#opAnalysis [data-op-press-said]');
     b.disabled = true; if(said) said.textContent = 'Asking…';
     try { const r = await api('/api/ops/run', {method: 'POST'}); if(said) said.textContent = r.text || (r.started ? 'Started.' : '');
       if(r.started && typeof refreshHeader === 'function') setTimeout(refreshHeader, 3000); }

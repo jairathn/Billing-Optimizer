@@ -32,8 +32,9 @@ async function refreshHeader(){
     // the Vercel site analyses only on a press (the owner's decision 1): every page says when it last did, and what its
     // last run could not check
     const an = st.analysed || {}, un = st.unchecked;
-    const press = st.press_only ? `${an.at ? 'analysed ' + esc(String(an.at).slice(0,16).replace('T',' ')) + ' UTC' : 'not analysed yet'} · analyses only when someone presses Run the analysis now (Data tab)${un && un.n ? ` · <span class="sev-medium">the last run could not check ${esc(String(un.n))} open item${un.n===1?'':'s'} (${money(un.cents)})</span>` : ''}` : '';
-    const how = st.running ? (st.press_only ? 'analysing now' : 'syncing now') : (st.press_only ? press : (st.dropbox_configured ? (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand') : 'Dropbox not connected'));
+    // (while a run is going too: it says so, and still when the site last analysed and that it analyses only on a press)
+    const press = st.press_only ? `${st.running ? 'analysing now · ' : ''}${an.at ? 'last analysed ' + esc(String(an.at).slice(0,16).replace('T',' ')) + ' UTC' : 'not analysed yet'} · analyses only when someone presses Run the analysis now (Data tab)${un && un.n && un.read_since !== false ? ` · <span class="sev-medium">the last run could not check ${esc(String(un.n))} open item${un.n===1?'':'s'} (${money(un.cents)})</span>` : ''}` : '';
+    const how = st.press_only ? press : (st.running ? 'syncing now' : (st.dropbox_configured ? (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand') : 'Dropbox not connected'));
     $('#feedChip').innerHTML = reach ? `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${reach}${behind!=null?` (${behind} days ago)`:''} · ${how}`
       : `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${behind!=null?` (${behind} days ago)`:''} · ${how}`;
   } catch(e){ /* older store without these tables */ }
