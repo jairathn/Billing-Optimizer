@@ -5877,7 +5877,9 @@ class Detector:
         c = self.conn
         if not prim or not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims_837'").fetchone():
             return {}
-        rows: dict[str, list] = {}
+        # one row a bill, to spare memory (a serverless run holds every answered bill here): its newest submission's newest
+        # send, in _load_837's shape, and the bill's newest void
+        rows: dict[str, list] = {}          # bill -> [claim id, send row]
         voided: dict[str, str] = {}
         for pcn, bht, freq, pid, pname, chg, key, member in c.execute(
                 """SELECT patient_control_number, bht_created, TRIM(COALESCE(frequency_code, '')), payer_id, payer_name,
@@ -5891,21 +5893,20 @@ class Detector:
             if freq == "8":
                 voided[b] = max(voided.get(b, ""), bht)
                 continue
-            r = rows.get(pcn)
-            if r is None:
-                rows[pcn] = [bht, bht, freq, False, pid, pname, chg, key, member, 1]
+            got = rows.get(b)
+            if got is None or sub_no(pcn) > sub_no(got[0]) or (sub_no(pcn) == sub_no(got[0]) and pcn > got[0]):
+                rows[b] = [pcn, [bht, bht, freq, False, pid, pname, chg, key, member, 1]]
                 continue
+            if pcn != got[0]:
+                continue                    # an older submission of the bill
+            r = got[1]
             r[9] += 1
             r[1] = min(r[1], bht)
             if bht > r[0] or (bht == r[0] and (key or "") > (r[7] or "")):
                 r[0], r[2], r[4], r[5], r[6], r[7], r[8] = bht, freq, pid, pname, chg, key, member
-        best: dict[str, str] = {}
-        for pcn, r in rows.items():
-            b = bill_of(pcn)
-            if b not in best or (sub_no(pcn), r[0], pcn) > (sub_no(best[b]), rows[best[b]][0], best[b]):
-                best[b] = pcn
-        best = {b: pcn for b, pcn in best.items() if pcn not in ema_ids and sub_no(pcn) >= ema_sub.get(b, 0)
-                and not (voided.get(b) and voided[b] >= rows[pcn][0])}
+        best = {b: pcn for b, (pcn, r) in rows.items() if pcn not in ema_ids and sub_no(pcn) >= ema_sub.get(b, 0)
+                and not (voided.get(b) and voided[b] >= r[0])}
+        rows = {pcn: rows[b][1] for b, pcn in best.items()}
         if not best:
             return {}
         first: dict[str, str] = {}
