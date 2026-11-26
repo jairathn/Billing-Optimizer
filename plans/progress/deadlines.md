@@ -27,7 +27,7 @@ comments).
 - [x] Integration tip merged again (bc29767, fix7d: the practice's day): no conflict.
 - [x] docs/RESEARCH_SUMMARY.md: every changed source; tests/test_docs.py 38 passed, 1 skipped (the private word list).
 - [x] Measured on a private world copy, tip bc29767 against the branch (numbers below), moved items hand-traced.
-- [ ] Full suite: see "Suites" below.
+- [x] Full suite in python3 and in Python 3.11.1 (SQLite 3.40.0): see "Suites" below.
 
 ## Review round: each finding's outcome
 - r1-1, r2-3 (high) FEP dated by the member's December 31: fixed. Anthem's manual ("Submission of Claims under the FEHBP
@@ -139,7 +139,15 @@ Aggregates only. Tools: `$S/tk/units/deadlines/tools/cycle_run.py`, `snap.py`, `
 - The files this round touched, python3: test_payer_windows, test_payer_windows_review, test_features, test_ema_wiring,
   test_states, test_story, test_ema_checks, review6, test_docs, test_837_sends, test_workable: all pass (542 and 108 cases
   in two runs; test_docs skips only the private word list).
-- Full suite: python3 and Python 3.11.1 with SQLite 3.40.0: running (see the next commit of this file)
+- Full suite, python3 (SQLite 3.5x), three shards on the merged branch: 2,964 passed, 29 skipped, 1 xfailed, 1 failed:
+  tests/test_results.py::test_the_server_store_and_the_compact_serverless_store_give_the_same_figures, which passed alone
+  three times, in its file (189 passed) and after the file before it in its shard (264 passed). Not this branch's: it
+  compares two stores' Results figures, and the weekly snapshots carry times taken while the run goes (the current week's
+  point 'at', a frozen week's 'frozen_at') that the test's _strip does not drop, so two runs a second apart on a loaded
+  machine differ; results.py and its test are not changed here.
+- Full suite, Python 3.11.1 with SQLite 3.40.0: 2,848 passed, 109 failed, 24 errors; every one of the 133 is a test that
+  serializes a store image (no Connection.serialize in that build, as CLAUDE.md expects). None in a file this branch
+  touched.
 
 ## Next command
 - Merge into the integration branch by hand (detect.py, states.py, story.py, ema_checks.py are edited by other units; this
@@ -166,7 +174,11 @@ Aggregates only. Tools: `$S/tk/units/deadlines/tools/cycle_run.py`, `snap.py`, `
 - An EMA name for Kentucky Medicaid fee-for-service that puts the state after the word Medicaid is read as 'Medicaid
   (other)', so the Kentucky fee-for-service rules (no appeal, 12 months, the crossover) do not reach EMA-only items with
   that name (the name rules match 'KY MEDICAID' and 'KENTUCKY MEDICAID' only).
-- Anthem's commercial row gives a clinical denial the two-year payment dispute; the manual sends clinical appeals to its
-  own process (180 days from receipt for a provider's clinical appeal). The FEP rows split them; the commercial row does not.
+- Found in this round, not changed (not a review finding; it needs its own failing test, measurement and trace): Anthem's
+  commercial row (codes.APPEAL_RULES, 'Anthem commercial: Claim Payment Reconsideration within two years') gives a clinical
+  denial (CARC 50, 55, 56, 150, 151, 152) the two-year payment dispute as a confirmed safe date. The 2026 Kentucky manual
+  (v2), Clinical Appeals: 'Providers and Facilities have one hundred eighty (180) calendar days to file a clinical appeal
+  from the date they receive notice of Anthem's initial decision', and its Claim Payment Dispute 'does not apply to appeals
+  regarding a clinical decision denial'. A window too long: the FEP rows split the two; the commercial row should too.
 - The handoff's open point (task 475): Humana Medicare Advantage's corrected-claim rule is marked verified without a found
   source.
