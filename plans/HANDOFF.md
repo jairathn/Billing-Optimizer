@@ -79,6 +79,10 @@ the release gates (section 0 below, "Then, in order").
   "fail" by design and are not leaks: ema_hosts.txt holds ModMed's public sign-in host (in test_docs's MODMED_PUBLIC)
   and removed_words.txt holds two generic words taken off the list. A17's report of hits in OPERATIONS.md,
   TRIZETTO_REQUEST.md and audit_pass1 came from its checkout before it merged 7ff4387; its branch has no such hit.
+- **At the deadlines merge (22:10 UTC).** A17's table has 34 rows that disagree with codes.py; the 28 items the deadlines
+  unit fixes cover all 34. One more point from A17 reached no unit: codes.py marks Humana Medicare Advantage's
+  corrected-claim rule verified, but the research could not find the tip sheet it cites. After the deadlines merge the
+  integrator marks it unverified (or finds the source), with a test, unless the deadlines fix round already did.
 - **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
   world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
   SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
