@@ -94,6 +94,13 @@ def pcn(i: int) -> str:
     return f"CB{i:07d}C017"
 
 
+def unproven(w: World) -> list[str]:
+    """Automatic closures with no proof of the payment that closed them (selfcheck.has_proof: the self-check that holds a
+    run in safe mode)."""
+    from remitwatch.selfcheck import has_proof
+    return [r["finding_id"] for r in w.rows("status='resolved' AND auto_note IS NOT NULL") if not has_proof(r["ev"])]
+
+
 # =============================================================================================== plans of one payer
 def test_an_employer_plan_with_a_schedule_of_its_own_is_measured_by_its_own_rate(tmp_path, kind):
     """UMR-like: most employer plans pay one network rate (a biopsy $112.74, a visit $76.15, a destruction $73.45, to
@@ -578,6 +585,7 @@ def test_a_repriced_claim_leaves_the_repricing_request(tmp_path, kind):
     got = w.store.conn.execute("SELECT SUM(recovered_cents) FROM findings WHERE category='underpayment' AND status='resolved' "
                                "AND COALESCE(stale,0)=0").fetchone()[0]
     assert got == 10 * (8236 - 7664), got
+    assert not unproven(w), unproven(w)
     w.store.close()
 
 
@@ -1023,6 +1031,7 @@ def test_a_cut_day_the_payer_fixes_as_asked_is_counted_recovered(tmp_path, kind,
                                (f["finding_id"],)).fetchone()
     assert row is not None and (row["recovered_cents"] or 0) > 0, dict(row) if row else None
     assert row["status"] == "resolved" and not row["stale"], dict(row)
+    assert not unproven(w), unproven(w)
     w.store.close()
 
 
@@ -1042,6 +1051,7 @@ def test_a_split_day_the_payer_fixes_by_paying_the_mohs_again_is_counted_recover
     row = w.store.conn.execute("SELECT status, recovered_cents FROM findings WHERE finding_id=?", (f["finding_id"],)).fetchone()
     assert row is not None and row["status"] == "resolved" and (row["recovered_cents"] or 0) >= 4674, dict(row) if row else None
     assert not w.rows("category='underpayment' AND status='open'"), [(r["signal"], r["title"]) for r in w.rows("category='underpayment' AND status='open'")]
+    assert not unproven(w), unproven(w)
     w.store.close()
 
 

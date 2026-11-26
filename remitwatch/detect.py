@@ -3069,7 +3069,9 @@ class Detector:
         again = [e for e in self.paid_cover(bill_of(l.get("patient_control_number")), l.get("procedure_code"), l.get("service_date"))
                  if e[0] and e[0] > mine]
         key = self.line_to_old.get(l["line_key"]) or (l["payer_group"], l["year"])
-        self.old_gone[key].append((l, r, sum(e[2] or 0 for e in again), max((e[0] for e in again), default=None)))
+        self.old_gone[key].append((l, r, sum(e[2] or 0 for e in again), max((e[0] for e in again), default=None),
+                                   [{"date": e[0], "amount_cents": e[2], "kind": "payment", "claim": e[4], "trace": e[1],
+                                     "code": l.get("procedure_code")} for e in again]))
         return again
 
     def _old_schedule_of(self, l, allowed: int, r: dict) -> int | None:
@@ -3154,9 +3156,16 @@ class Detector:
         since go to a request of their own. A claim the payer took back leaves the request (_note_gone): repriced, it is
         closed as recovered on its own line and named on the request; a request whose every claim was repriced is closed."""
         for fid, w in sorted(self.worked_old.items()):
+            # what each claim was owed when the request was sent: by its line, else by its claim row (a remittance delivered
+            # again has new line keys)
             rates = w.get("rates") or {}
-            group = [(l, None, {"mode": rates.get(l["line_key"])}, None) for l in self.old_worked_lines.get(fid, [])
-                     if rates.get(l["line_key"])]
+            by_claim = {(c[0], c[2], c[1], c[3]): c[4] for c in w.get("claims") or [] if isinstance(c, list) and len(c) >= 5}
+            group = []
+            for l in self.old_worked_lines.get(fid, []):
+                owed = rates.get(l["line_key"]) or by_claim.get((l.get("patient_control_number"), l.get("procedure_code"),
+                                                                 l.get("service_date"), l.get("allowed_cents")))
+                if owed:
+                    group.append((l, None, {"mode": owed}, None))
             kp = tuple(w["key_parts"])
             self._emit_old_schedule(kp, str(w.get("year") or kp[1]), group, w.get("effective"), self.old_gone.get(fid, []),
                                     w.get("continues"), worked=True)
@@ -3212,9 +3221,10 @@ class Detector:
             if new > (l.get("allowed_cents") or 0):
                 rows.append((l, new))
         rows.sort(key=lambda x: (x[0].get("service_date") or "", x[0].get("patient_control_number") or "", x[0]["line_key"]))
-        repriced = sorted(((l, r, again, when) for l, r, again, when in gone if again > 0),
+        repriced = sorted(((l, r, again, when) for l, r, again, when, _p in gone if again > 0),
                           key=lambda x: (x[0].get("service_date") or "", x[0].get("patient_control_number") or "", x[0]["line_key"]))
-        taken = [(l, r) for l, r, again, _w in gone if again <= 0]
+        proof = sorted((p for _l, _r, again, _w, ps in gone if again > 0 for p in ps), key=lambda p: (p["date"] or "", p["claim"] or ""))
+        taken = [(l, r) for l, r, again, _w, _p in gone if again <= 0]
         if not rows and not (repriced and fid in self.old_known):
             return
         prev_y = str(int(year) - 1) if year.isdigit() else "the previous"
@@ -3292,11 +3302,16 @@ class Detector:
             return
         if not rows:
             # every claim repriced: closed, its recovery counted on each claim's own line (never twice)
+            # the proof: the payer's payments of the claims since (dated, with their claims), each closed on its own line
             ev = json.loads(f["evidence"])
             ev["recovery_counted_elsewhere"] = True
+            last = proof[-1] if proof else {}
+            ev["paid_later"] = {"how": "every claim of the request was repriced", "proof": proof,
+                                "payment_date": last.get("date"), "claim": last.get("claim"), "trace": last.get("trace"),
+                                "paid_cents": sum(p["amount_cents"] or 0 for p in proof)}
             f["evidence"] = json.dumps(ev, default=str)
             f["auto_status"], f["auto_notes"] = "resolved", note
-            f["recovered_cents"], f["recovered_date"] = 0, max((w for *_x, w in repriced if w), default=None)
+            f["recovered_cents"], f["recovered_date"] = 0, last.get("date")
             return
         if deadlines:
             lo, hi = min(deadlines), max(deadlines)
@@ -4826,7 +4841,8 @@ class Detector:
                 rec += got
                 for e in later:
                     self.used_payments.add((e[0], e[1], e[4], x.get("procedure_code"), x.get("service_date")))
-                    paid.append({"claim": e[4], "code": x.get("procedure_code"), "payment_date": e[0], "trace": e[1], "paid_cents": e[2]})
+                    paid.append({"date": e[0], "amount_cents": e[2], "kind": "payment", "claim": e[4], "trace": e[1],
+                                 "code": x.get("procedure_code")})
                     when = max(when or "", e[0])
         if rec <= 0:
             return False
@@ -4838,7 +4854,9 @@ class Detector:
         got = min(rec, f.get("shortfall_cents") or rec)
         note = (f"{l.get('payer_group') or 'The payer'} reprocessed the day since: it took back and paid again "
                 + ", ".join(sorted({p["code"] for p in paid})) + f" ({_usd(rec)} more), so the day's missing half came in")
-        ev["paid_later"] = {"how": "the payer reprocessed the day", "payments": paid, "paid_cents": rec, "payment_date": when}
+        last = max(paid, key=lambda p: (p["date"] or "", p["claim"] or ""))
+        ev["paid_later"] = {"how": "the payer reprocessed the day", "proof": paid, "paid_cents": rec, "payment_date": when,
+                            "claim": last["claim"], "trace": last["trace"]}
         f["evidence"] = json.dumps(ev, default=str)
         f["auto_status"], f["auto_notes"] = "resolved", note
         f["recovered_cents"], f["recovered_date"] = got, when
