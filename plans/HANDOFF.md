@@ -85,7 +85,10 @@ the release gates (section 0 below, "Then, in order").
 - **At the deadlines merge (22:10 UTC).** A17's table has 34 rows that disagree with codes.py; the 28 items the deadlines
   unit fixes cover all 34. One more point from A17 reached no unit: codes.py marks Humana Medicare Advantage's
   corrected-claim rule verified, but the research could not find the tip sheet it cites. After the deadlines merge the
-  integrator marks it unverified (or finds the source), with a test, unless the deadlines fix round already did.
+  integrator marks it unverified (or finds the source), with a test, unless the deadlines fix round already did. Also
+  (A17 review a17-r1-3, 23:05 UTC): the VA Community Care claims go out under 837 payer id VACCN and every send is named
+  as Optum/UnitedHealthcare, so the name rules may give them UHC's windows; check the product's group and windows for
+  that payer id against the va_ccn rows of plans/tools/a17/payer_windows.json and fix by the payer id if they differ.
 - **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
   world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
   SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
