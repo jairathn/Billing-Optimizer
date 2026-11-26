@@ -489,6 +489,181 @@ def test_a_payment_dated_the_day_after_an_evening_reopen_is_newer_than_the_reope
     assert states.state_of(store.conn, f, today="2026-11-30")["work_state"] == "done"
 
 
+def _read_at(store, tk: str, at: str) -> None:
+    """The remittance file that carried payment `tk`, read by RemitWatch at `at` (every 835 in a store came in a file)."""
+    sha = f"file-of-{tk}"
+    store.conn.execute("INSERT OR REPLACE INTO files (sha256, source_path, source_name, kind, ingested_at, status) VALUES (?,?,?,?,?,?)",
+                       (sha, f"in/{tk}.835", f"{tk}.835", "835", at, "ok"))
+    store.conn.execute("UPDATE transactions SET file_sha256=? WHERE transaction_key=?", (sha, tk))
+    store.conn.commit()
+
+
+REOPENS = {"evening": "2026-11-25T02:30:00+00:00",       # 9:30 PM Eastern on Tuesday Nov 24 (UTC's day is the 25th)
+           "2359": "2026-11-25T04:59:00+00:00",          # 11:59 PM Eastern on Nov 24
+           "afternoon": "2026-11-24T20:00:00+00:00"}     # 3:00 PM Eastern on Nov 24
+
+
+def _reopened(store, reopen_at, *, rejected_on="2026-11-25", rejected_read="2026-11-24T15:00:00+00:00"):
+    """An item RemitWatch closed on a later 835 payment ($90, check 2) and a person set back to To do at `reopen_at` with
+    'not this line'. That payment's file was read at `rejected_read`; its payment date (BPR16, the EFT's) is `rejected_on`."""
+    from remitwatch import ema_reports as er, states
+    from tests import ema_fixtures as F
+    from tests.test_states import denied, event, item, line_key, ln, remit
+    states._RESPONSE_CACHE.clear()
+    states._RECOVERY_CACHE.clear()
+    er.ensure_schema(store.conn)
+    tk = denied(store, reason=("CO", "50"), paid_on="2026-11-02", received="2026-10-20")
+    _read_at(store, tk, "2026-11-03T15:00:00+00:00")
+    paid = remit(store, trace=F.check_no(2), paid_on=rejected_on, claims=[{"pcn": F.claim_id(1, sub=2), "pccn": "PCN-B",
+                 "received": "2026-11-03", "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    _read_at(store, paid, rejected_read)
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         payment_date="2026-11-02", status="open", status_changed_at=reopen_at)
+    event(store, "F1", "manual", at=reopen_at, frm="resolved", to="open", actor="Biller One", note="not this line")
+    return dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone())
+
+
+@pytest.mark.parametrize("when", sorted(REOPENS))
+def test_a_reopen_holds_against_the_payment_the_person_rejected(store, monkeypatch, when):
+    """RemitWatch closed an item on an 835 payment dated Nov 25 (the EFT's day) whose file came on Nov 24, a day before the
+    money settles, as 835s often do. A person read it, said it does not pay this line, and set the item back to To do on
+    Nov 24, in the afternoon, the evening or at 11:59 PM. Nothing came after. That payment was on file when they decided:
+    it is the one they rejected, never 'a payment after the reopen' that closes the item again (a person's decision is
+    never overwritten by an automatic one). Counted by its payer's date it was newer than any reopen on Nov 24."""
+    from remitwatch import states
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)          # the default: US Eastern
+    f = _reopened(store, REOPENS[when])
+    st = states.state_of(store.conn, f, today="2026-11-30")
+    assert (st["work_state"], st["rule"]) == ("work_now", "person_reopened"), (when, st["work_state"], st["rule"], st["state_basis"])
+
+
+def test_a_payment_read_after_an_evening_reopen_is_new_money_whatever_its_date(store, monkeypatch):
+    """The person reopened at 9:30 PM Eastern on Nov 24, rejecting a payment read on Nov 11. A new remittance file read on
+    Nov 25 pays the line with an EFT dated Nov 24, the reopen's own day: it came after the person decided, so the usual
+    rules close the item on it. By its payer's date alone it was not after the reopen."""
+    from remitwatch import states
+    from tests import ema_fixtures as F
+    from tests.test_states import ln, remit
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    f = _reopened(store, REOPENS["evening"], rejected_on="2026-11-10", rejected_read="2026-11-11T15:00:00+00:00")
+    assert states.state_of(store.conn, f, today="2026-11-30")["rule"] == "person_reopened"
+    new = remit(store, trace=F.check_no(3), paid_on="2026-11-24", claims=[{"pcn": F.claim_id(1, sub=3), "pccn": "PCN-C", "received": "2026-11-12",
+                "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    _read_at(store, new, "2026-11-25T15:00:00+00:00")
+    st = states.state_of(store.conn, f, today="2026-11-30")
+    assert st["work_state"] == "done", (st["rule"], st["state_basis"])
+
+
+# ------------------------------------------------------------------------------------------- when a fax went
+@pytest.mark.parametrize("sent_at", ["Nov/24/2026 21:31:00", "2026-11-24 21:31:00", "2026-11-25T02:31:00+00:00"],
+                         ids=["srfax_words", "no_zone", "with_zone"])
+def test_an_evening_fax_is_dated_and_followed_up_from_the_practices_day(store, monkeypatch, sent_at):
+    """An appeal faxed at 9:30 PM Eastern on Nov 24 (created_at, a UTC time with its zone). Its sent time may be stored as a
+    time with its zone (as the status check now writes it), or, in a record written before, as the fax line worded it:
+    SRFax's 'Nov/24/2026 21:31:00' in its account's zone, or a time with no zone. Whatever the record says, the fax is
+    dated Nov 24 and the follow-up counts 45 days from it (Jan 8): SRFax's words, cut to ten characters, were 'Nov/24/202',
+    which sorted after every real day, became the work's date and lost the follow-up."""
+    from remitwatch import actions, ema_reports as er, states
+    from tests import ema_fixtures as F
+    from tests.test_states import denied, item, line_key
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    states._RESPONSE_CACHE.clear()
+    states._RECOVERY_CACHE.clear()
+    er.ensure_schema(store.conn)
+    actions.ensure_fax_tables(store.conn)
+    c = store.conn
+    tk = denied(store, trace=F.check_no(1), pcn=F.claim_id(1), paid_on="2026-11-02", received="2026-10-20")
+    item(store, finding_id="F-fax", patient_control_number=F.claim_id(1), line_key=line_key(store, tk), claim_key=f"{tk}-0",
+         transaction_key=tk, payment_date="2026-11-02", status="appealed", appealed_at=NIGHT, status_changed_at=NIGHT)
+    c.execute("""INSERT INTO faxes (fax_key, direction, finding_id, payer_group, number, purpose, level, status, created_at, sent_at)
+                 VALUES ('X1', 'out', 'F-fax', 'Anthem / BCBS', '8005550142', 'appeal', 1, 'sent', ?, ?)""", (NIGHT, sent_at))
+    c.commit()
+    f = dict(c.execute("SELECT * FROM findings WHERE finding_id='F-fax'").fetchone())
+    ev = {e["kind"]: e for e in states.work_evidence(c, f, today="2026-11-30")}
+    st = states.state_of(c, f, today="2026-11-30")
+    assert (ev["fax"]["date"], st["work_state"], st["follow_up_on"]) == ("2026-11-24", "waiting", "2027-01-08"), \
+        (ev["fax"]["date"], st["work_state"], st["follow_up_on"], st["state_basis"])
+
+
+def test_a_fax_is_stored_as_sent_at_a_time_with_its_zone_never_before_it_was_queued():
+    """What the status check stores as a fax's sent time (fax.sent_moment): the line's time when it is one with its zone,
+    else the moment the status was read; never before the fax was queued, never after that moment."""
+    from remitwatch import fax
+    queued, now = "2026-11-25T02:30:00.000001+00:00", "2026-11-25T03:00:00.000000+00:00"
+    assert fax.sent_moment("2026-11-25T02:31:00+00:00", queued, now) == "2026-11-25T02:31:00.000000+00:00"
+    assert fax.sent_moment("2026-11-24T21:31:00-05:00", queued, now) == "2026-11-25T02:31:00.000000+00:00"   # moved to UTC
+    for words in ("Nov/24/2026 21:31:00", "2026-11-24 21:31:00", "", None):            # no time with its zone: read now
+        assert fax.sent_moment(words, queued, now) == now, words
+    # a time before the fax was queued (another zone's clock read as UTC, a placeholder): the queueing; one after now: now
+    assert fax.sent_moment("2026-11-24T21:31:00+00:00", queued, now) == queued
+    assert fax.sent_moment("0001-01-01T00:00:00Z", queued, now) == queued
+    assert fax.sent_moment("2026-11-26T09:00:00+00:00", queued, now) == now
+    assert runtime.practice_date(fax.sent_moment("2026-11-25T02:31:00+00:00", queued, now)) == "2026-11-24"
+
+
+def test_one_placeholder_moment_does_not_stop_every_items_state(store, monkeypatch):
+    """A service that words an empty time as the calendar's first moment ('0001-01-01T00:00:00Z', the placeholder of
+    services written on .NET) for one fax: no zone can move it, and the states of every item must still be worked out (the
+    day-cut never raised; moving it to the practice's zone raised OverflowError and stopped the whole batch). The fax is
+    dated the day it was queued."""
+    from remitwatch import actions, ema_reports as er, states
+    from tests import ema_fixtures as F
+    from tests.test_states import denied, item, line_key
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    states._RESPONSE_CACHE.clear()
+    states._RECOVERY_CACHE.clear()
+    er.ensure_schema(store.conn)
+    actions.ensure_fax_tables(store.conn)
+    c = store.conn
+    for n, fid in enumerate(("F-ok", "F-odd"), 1):
+        tk = denied(store, trace=F.check_no(n), pcn=F.claim_id(n), paid_on="2026-11-02", received="2026-10-20")
+        item(store, finding_id=fid, patient_control_number=F.claim_id(n), line_key=line_key(store, tk), claim_key=f"{tk}-0",
+             transaction_key=tk, payment_date="2026-11-02", status="appealed", appealed_at=NIGHT, status_changed_at=NIGHT)
+    c.execute("""INSERT INTO faxes (fax_key, direction, finding_id, payer_group, number, purpose, level, status, created_at, sent_at)
+                 VALUES ('X1', 'out', 'F-odd', 'Anthem / BCBS', '8005550142', 'appeal', 1, 'sent', ?, '0001-01-01T00:00:00Z')""", (NIGHT,))
+    c.commit()
+    for v in ("0001-01-01T00:00:00Z", "9999-12-31T23:59:59-05:00"):
+        assert runtime.practice_date(v) == v[:10]
+    items = [dict(r) for r in c.execute("SELECT * FROM findings ORDER BY finding_id")]
+    got = states.states_of(c, items, today="2026-11-30")
+    assert set(got) == {"F-ok", "F-odd"} and got["F-ok"]["work_state"] == "waiting", got
+    odd = dict(c.execute("SELECT * FROM findings WHERE finding_id='F-odd'").fetchone())
+    assert {e["kind"]: e["date"] for e in states.work_evidence(c, odd, today="2026-11-30")}["fax"] == "2026-11-24"
+
+
+def test_a_value_that_is_no_day_is_no_day():
+    """runtime.practice_date: a fax line's words for a time, or anything that is not a day, give '' (no day), never their
+    first ten characters, which sort after every real day."""
+    for v in ("Nov/24/2026 21:31:00", "Nov/24/202", "2026-13-45", "20261124", "soon", ""):
+        assert runtime.practice_date(v) == "", v
+    assert runtime.practice_date("2026-11-24 21:31:00") == "2026-11-24" and runtime.practice_date("2026-11-24") == "2026-11-24"
+
+
+# ------------------------------------------------------------------------------------ the day the last file came
+ARRIVALS = {"afternoon": "2026-11-13T20:30:00+00:00",   # 3:30 PM Eastern on Friday Nov 13 (UTC's day is the 13th too)
+            "evening": "2026-11-14T01:30:00+00:00"}     # 8:30 PM Eastern on Nov 13 (UTC's day is already the 14th)
+
+
+@pytest.mark.parametrize("when", sorted(ARRIVALS))
+def test_the_stale_feed_alarm_and_the_data_tab_date_the_last_file_on_the_practices_day(store, monkeypatch, when):
+    """The last remittance file came on Nov 13 where the practice is, in the afternoon or at 8:30 PM; today is Nov 24 and
+    the payments reach Nov 12 (12 days behind, under the 14-day line). Eleven practice days with no new file is more than
+    STALE_DAYS (10): the stale-feed alarm is due, and the Data tab says the file came on Nov 13. Read as UTC's day, the
+    evening file came on the 14th: ten days, no alarm, and the next day named."""
+    from remitwatch import alerts, insights
+    monkeypatch.delenv(runtime.TZ_SETTING, raising=False)
+    store.conn.execute("""INSERT INTO files (sha256, source_path, source_name, kind, ingested_at, status)
+                          VALUES ('a1b2', 'in/remit.835', 'remit.835', '835', ?, 'ok')""", (ARRIVALS[when],))
+    store.conn.commit()
+    eng = alerts.AlertEngine(store.conn, today="2026-11-24", asof="2026-11-12")
+    eng.stale_rule()
+    stale = [a for a in eng.active.values() if a["kind"] == "STALE_FEED"]
+    assert alerts.STALE_DAYS == 10 and stale, when
+    assert json.loads(stale[0]["detail"])["last_file_ingested"] == "2026-11-13", stale[0]["detail"]
+    [feed] = [h for h in insights.data_health(store.conn, "2026-11-12", "2026-11-24", feed="2026-11-12") if h["key"] == "feed"]
+    assert feed["last_file"] == "2026-11-13", feed["last_file"]
+
+
 # ------------------------------------------------------------------------------------------- the words a page says
 def test_a_changed_fax_number_is_dated_the_practices_day(store, monkeypatch):
     """A payer's fax number changed at 9:30 PM Eastern on Nov 24: a retry or a follow-up waits for a person, and the hold
@@ -558,6 +733,70 @@ def test_the_pages_say_a_moment_on_the_practices_day():
     assert res.returncode == 0, res.stderr
     assert json.loads(res.stdout) == [["2026-11-24"] * 2, ["2026-11-24"] * 2, ["2026-11-25"] * 2, ["2026-11-25"] * 2,
                                       ["2026-11-25"] * 2, ["2026-11-25"] * 2, ["2026-11-25"] * 2, ["2026-11-25"] * 2]
+
+
+# What the pages' own helpers say for a stored moment, run in node with the brief: the Data tab's day (data.js dtDay: a
+# held report's decision, a check, a file read, a run), the Results tab's day (results.js rsDate: a week frozen), and the
+# date and time the drawer's History, "Why did this change?", the Progress activity, the feed status and the fax lists show
+# (today.js practiceTime, through features.js atTime and faxes.js faxTime).
+HELPERS_JS = r"""
+const fs = require('fs'), vm = require('vm');
+const [dir, casesJson] = process.argv.slice(-2);
+const read = f => fs.readFileSync(dir + '/' + f, 'utf8');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const today = read('today.js');
+const code = [grab(today, /function practiceDate\([^\n]*\n/), grab(today, /function practiceTime\([^\n]*\n/), grab(today, /function longDate\([^\n]*\n/),
+              grab(read('data.js'), /function dtDay\([^\n]*\n/), grab(read('results.js'), /function rsDate\([^\n]*\n/),
+              grab(read('features.js'), /function atTime\([^\n]*\n/), grab(read('faxes.js'), /const faxTime = [^\n]*\n/)].join('');
+const out = [];
+for (const [brief, iso] of JSON.parse(casesJson)) {
+  const ctx = {state: {brief}, esc: s => String(s), Intl, Object, String, Date, isNaN, JSON};
+  vm.runInNewContext(code + 'r = {dtDay: dtDay(ISO), rsDate: rsDate(ISO) === rsDate(practiceDate(ISO)), atTime: atTime(ISO), faxTime: faxTime(ISO), time: practiceTime(ISO)};'
+                     .replace(/ISO/g, JSON.stringify(iso)), ctx);
+  out.push(ctx.r);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def test_the_pages_helpers_say_a_stored_moment_where_the_practice_is():
+    """A held report discarded, a fax sent or a status changed at 9:30 PM Eastern on Nov 24: the Data tab says Nov 24, the
+    History and the fax lists say '2026-11-24 21:30', the Results tab dates a moment on the practice's day. Before the brief
+    has loaded (no zone yet), a time is UTC's and says so; a plain day and a time with no zone are said as written."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    static = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "remitwatch", "static")
+    east = {"today": "2026-11-24", "tz": "America/New_York"}
+    cases = [[east, NIGHT], [None, NIGHT], [east, "2026-11-24"], [east, "2026-11-24 21:31:00"], [{"today": "2026-11-24", "tz": "Not/A_Zone"}, NIGHT]]
+    res = subprocess.run([node, "-e", HELPERS_JS, static, json.dumps(cases)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    got = json.loads(res.stdout)
+    assert got[0] == {"dtDay": "Nov 24, 2026", "rsDate": True, "atTime": "2026-11-24 21:30", "faxTime": "2026-11-24 21:30",
+                      "time": "2026-11-24 21:30"}, got[0]
+    assert got[1]["time"] == got[1]["atTime"] == got[1]["faxTime"] == "2026-11-25 02:30 UTC", got[1]
+    assert got[2]["dtDay"] == "Nov 24, 2026" and got[2]["time"] == "2026-11-24", got[2]
+    assert got[3]["time"] == "2026-11-24 21:31", got[3]
+    assert got[4]["time"] == "2026-11-25 02:30 UTC", got[4]          # a zone this browser does not know: UTC's, said so
+
+
+def test_no_page_shows_a_stored_moments_utc_date_and_time_without_saying_so():
+    """A stored moment cut to 'YYYY-MM-DD HH:MM' is UTC's date and time, the next day's evening from 7 PM Eastern. Each page
+    line that cuts one goes through today.js practiceTime (the practice's date and time) or says UTC on the same line."""
+    import re
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "remitwatch", "static")
+    cut = re.compile(r"replace\(\s*'T'\s*,\s*' '\s*\)\s*\.slice\(\s*0\s*,\s*16\s*\)")
+    bad = []
+    for name in sorted(os.listdir(root)):
+        if not name.endswith((".js", ".html")):
+            continue
+        with open(os.path.join(root, name), encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if cut.search(line) and "practiceTime" not in line and "UTC" not in line:
+                    bad.append(f"{name}:{n}")
+    assert not bad, bad
 
 
 def test_no_page_cuts_a_stored_moment_to_its_utc_day():
