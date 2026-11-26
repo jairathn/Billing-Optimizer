@@ -14,8 +14,17 @@ Branch `wip/decisions`, based on the integration tip 1867f60 (nothing to merge o
       ZERO_PAID_BLOCKS); results.py (attribution reads payment records, not recovered_cents).
 - [x] Baseline on a private world copy (`$S/tk/units/decisions/w/world.sqlite`, the base tree exported to
       `$S/tk/units/decisions/src_base`, `cycle_run.py 2026-11-24`, 216 s). Snapshot: `$S/tk/units/decisions/base_snap.sqlite`.
-- [ ] Decision 3 built with tests (both store kinds). In progress.
-- [ ] Decision 2 built with tests (both store kinds).
+- [x] Decision 3 built with tests (both store kinds): commit 61adb76. archive_rules.owed_in_second_role and
+      second_role_words; rule 3 (units_split) counts a later payment in the other role as recovered and keeps what is
+      left listed (reclass second_role_short, evidence second_role); detect.py _second_role_due/_second_role_short in
+      _close_by_answer; states._second_role_short (work now until the window to dispute that answer closes, route call);
+      story._call_step's step. Results already attributed the payment: test locks it.
+- [x] Decision 2 built with tests (both store kinds, both hosts): commit c432cd6. archive_rules PR_REASONS/_pr_words/
+      patient_share_of (size = the patient's share, payer rate kept as payer_rate_cents); states patient_denial,
+      patient_share, rules bill_patient_denial / billed_patient / patient_unpaid / patient_paid / person_done (before the
+      payer's windows expire anything); story _bill_patient_denial_step and the wait step; api /status 'done' (strict
+      true, DONE_ONLY for other items); features.js buttons billed_patient and mark_done; results STATUS_NOTE_KINDS and
+      closures done / patient_paid; docs/OPERATIONS.md daily routine step 3.
 - [ ] Measured after; 20+ moved items hand-traced from raw rows.
 - [ ] Suites (touched files, then the full suite in python3 and 3.11.1).
 
@@ -57,6 +66,18 @@ Baseline (base tree):
   rules limit billing a member (payment in full); the owner should confirm for PR-288 from a Medicaid plan.
 - The 93 expired PR items come back to Work now under "not expired by the payer's windows": confirm the owner wants them.
 
+## Tests so far
+
+- tests/test_decisions.py (35, both store kinds and both hosts) pass; test_archive_rules (3 rule 8 tests updated to the
+  decision), test_states, test_story, test_settled_elsewhere, test_837_sends, test_results, test_docs pass in python3.
+- test_hotfix2.py: 9 failures that fail the same way on the base tree (1867f60), so not this unit's: the three H6 note
+  tests, H5 json true, H3 list, and four H2 fax tests (all date-bound fixtures, it seems).
+- node tests/calc_model_check.js (79 ok) and tests/lab_review_check.js pass; features.js parses.
+
 ## Next command
 
-Write the decision 3 tests (tests/test_decisions.py), see them fail, then the code in archive_rules.py and detect.py.
+The after run: `cd $U && F5_SRC=$U/src_after P2_DIR=$U/w P2_DB=world.sqlite python3 -I -B $U/tools/cycle_run.py 2026-11-24`
+(U = $S/tk/units/decisions, src_after = the branch exported by git archive), then
+`python3 -I -B $U/tools/fullsnap.py $U/w/world.sqlite $U/after_snap.sqlite` and
+`python3 -I -B $U/tools/diff_ba.py $U/base_snap.sqlite $U/after_snap.sqlite $U/moved.json`, then hand-trace 20+ moved
+items with `$U/tools/one_item.py`.
