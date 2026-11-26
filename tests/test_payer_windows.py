@@ -526,3 +526,66 @@ def test_a_second_payer_past_its_own_limit_is_counted_not_dropped_silently(tmp_p
     got, counts = _second_payer_run(tmp_path, compact, "2025-10-01", "2026-05-07")
     assert got == [], got
     assert counts.get("snb_past_limit") == 1 and counts.get("snb_past_limit_cents") == 3000, counts
+
+
+# ================================================================ the items only EMA's reports raise (no 835 for them)
+def _ema_store(tmp_path, compact: bool):
+    """A store with EMA's tables and key salt, as tests/test_ema_checks.py sets one up; the server's file or the compact image."""
+    from remitwatch import ema_reports as er
+    from remitwatch.store import Store
+    from tests import test_ema_checks as TC
+    st = Store(":memory:", compact=True) if compact else Store(str(tmp_path / "store.sqlite"))
+    er.ensure_schema(st.conn)
+    st.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (TC.SALT_HEX,))
+    st.conn.commit()
+    return st
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["store_file", "compact_image"])
+def test_a_claim_ema_shows_medicare_never_answered_gets_the_regulations_last_day(tmp_path, ema_env, compact):
+    """EMA's Production report: a visit on Friday March 6, 2026 charged to Medicare, no answer posted. Its first filing
+    ends a calendar year after the service, on Saturday March 6, 2027; 42 CFR 424.44(c) moves the last day to Monday March
+    8. The safe date stays the 6th, the payer's own last day is shown beside it (it was not)."""
+    import datetime as dt
+    from remitwatch import ema_checks as ec, ema_ledger as el
+    from tests import ema_fixtures as F, test_ema_checks as TC
+    st = _ema_store(tmp_path, compact)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        mc = F.PAYERS["medicare"]
+        visit = dt.date(2026, 3, 6)
+        rows = [TC.charge(F.link_no(41), svc=visit, posted=dt.date(2026, 3, 9), status="Payment Pending", payer=mc, primary=mc),
+                TC.charge(F.link_no(98), cpt="99212", patient=3, payer=mc, primary=mc),
+                TC.pay(F.link_no(98), "PAPER-41", 20, cpt="99212", patient=3, posted=dt.date(2026, 4, 28), payer=mc, primary=mc),
+                TC.charge(F.link_no(99), cpt="99212", patient=3, svc=dt.date(2026, 3, 20), posted=dt.date(2026, 5, 1))]
+        TC.load(st, lg, tmp_path, rows)
+        items = {i["key_parts"]: i for i in ec.unanswered_claims(st.conn, today=TC.TODAY)}
+        it = items[(f"link:{F.link_no(41)}",)]
+        assert it["signal"] == "NO_ANSWER" and it["claim"]["payer_kind"] == "medicare", it
+        assert (it["appeal_deadline"], it["legal_deadline"]) == ("2027-03-06", "2027-03-08"), (it["appeal_deadline"], it["legal_deadline"])
+        assert "424.44(c)" in it["deadline_basis"]
+    finally:
+        lg.close()
+        st.close()
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["store_file", "compact_image"])
+def test_a_kentucky_medicaid_denial_only_ema_saw_is_dated_by_a_new_claim_within_12_months(tmp_path, ema_env, compact):
+    """EMA posted a CO-197 denial from Kentucky Medicaid on April 10, 2026 for a March 2, 2026 visit, with no 835 on file.
+    Kentucky Medicaid takes no appeal of an ordinary claim denial (907 KAR 1:671): the item is dated by a corrected or new
+    claim within 12 months of the service, March 2, 2027 (it was dated by a 90-day appeal from the posting)."""
+    from remitwatch import ema_checks as ec, ema_ledger as el
+    from tests import test_ema_checks as TC
+    st = _ema_store(tmp_path, compact)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        TC.denial_world(st, lg, tmp_path, TC.c5_rows(link=2, payer="Kentucky Medicaid"))
+        items = ec.ema_denials(st.conn, today=TC.TODAY)
+        assert len(items) == 1, items
+        it = items[0]
+        assert it["signal"] == "EMA_DENIED" and it["claim"]["payer_group"] == "Medicaid KY", it
+        assert it["appeal_deadline"] == "2027-03-02", it["appeal_deadline"]
+        assert "907 KAR 1:671" in it["deadline_basis"] and "twelve (12) months" in it["deadline_basis"], it["deadline_basis"]
+    finally:
+        lg.close()
+        st.close()
