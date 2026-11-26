@@ -22,7 +22,7 @@ const base = `http://127.0.0.1:${port}`;
   await page.goto(`${base}/#data`);
   await page.waitForSelector('#opRunning', { timeout: 30000 });
   out.offered = await page.evaluate(() => !!document.querySelector('[data-op-accept]'));
-  out.running = await page.evaluate(() => ((document.getElementById('opRunning') || {}).innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1500));
+  out.running = await page.evaluate(() => ((document.getElementById('opRunning') || {}).innerText || '').replace(/\s+/g, ' ').trim().slice(0, 8000));
   if ((mode || 'unlocked') === 'look' || !out.offered) { console.log(JSON.stringify(out)); await browser.close(); return; }
   if ((mode || 'unlocked') === 'unlocked') await page.evaluate(k => { state.ownerKey = k; }, ownerPw);
   out.button = await page.evaluate(() => document.querySelector('[data-op-accept]').innerText);
@@ -35,7 +35,7 @@ const base = `http://127.0.0.1:${port}`;
   await page.waitForTimeout(2000);
   out.after = await page.evaluate(() => ({
     accept_again: !!document.querySelector('[data-op-accept]'),
-    running: ((document.getElementById('opRunning') || {}).innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1500) }));
+    running: ((document.getElementById('opRunning') || {}).innerText || '').replace(/\s+/g, ' ').trim().slice(0, 8000) }));
   console.log(JSON.stringify(out));
   await browser.close();
 })().catch(e => { console.error(e); process.exit(1); });

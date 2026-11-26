@@ -1,7 +1,7 @@
 # Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
 
 Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
-Branch: wip/hook. Last updated: 2026-11-26 21:14 UTC.
+Branch: wip/hook. Last updated: 2026-11-26 22:45 UTC (fix round in progress).
 
 ## Done
 - 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
@@ -56,6 +56,43 @@ Branch: wip/hook. Last updated: 2026-11-26 21:14 UTC.
   unchecked (the header said "could not check 7,526 open items").
 - 2ace6ab: merged the integration tip 67cc3d2 (plans, the review, the privacy scan in test_docs): no conflict;
   tests/test_docs.py 38 passed, 1 skipped.
+
+## Fix round (2026-11-26 22:00 UTC on; reviews hook-r1 and hook-r2, 19 findings)
+- Merged the integration tip fad05c4 (plans only). Each reviewer's failing tests reproduced on this branch first
+  (r1: 14 failed, 2 passed; r2: 22 failed, 7 passed), copied to $S/tk/units/hook/rtests with runners pointed here.
+- Ported into tests/test_hook_review.py (invented data; node scripts tests/hook_accept_page.js, hook_pages.js,
+  hook_upload_buttons.js), plus tests/test_docs.py (settings), tests/test_ema_pages2.py (Today on the real meta).
+- Fixes, by finding (files, functions):
+  - r1-1 (high): cloud.tidy_due, cloud.next_run (used by api.cron_cycle and the tests), out['tidy'] after an analysis:
+    the press's chain ends with one run that does the archive (once a day, or when the regulation asks for the tighter
+    horizon), the provider tables and the weekly self-audit, analysing nothing new. Promises in selfcheck (level 2,
+    NEAR_CEILING) and VERCEL_SETUP hold again.
+  - r1-2: cloud.lock_state(named), cloud.run_killed, cloud.stopped_note (error, killed, halted), api_ops.analysis_status,
+    api._cloud_sync_status (last_failed, stalled_since only for a kill), features.js Feed lines, ops.js heading.
+  - r1-3: the lock names its run (cloud.acquire run_id; status.json run_id), cloud._takeover_kill, runlog.claim_killed
+    and started_near (a kill counted once, by its marker; a finished run's left lock is no kill).
+  - r1-4: selfcheck.plan_next keeps the last measured image size across a run that saved none (not stepping the level).
+  - r1-5: runtime.reset_peak / peak_mb (clear_refs; else the start's mark is not the run's), used by cloud, selfcheck,
+    archive and runlog.memory; run_cloud_cycle resets at its start.
+  - r2-1 (high): ops.js opOwnerPost sends X-Owner-Password and asks for it on a 403 (api_ops._owner wording for Accept).
+  - r2-2: index.html scBar (safe mode above every page), today.js reads meta.banner, selfcheck.banner['safe_mode'].
+  - r2-3: cloud.read_since_analysis (through transactions: the compact store has no file hash on lines), the note's
+    sentence and unchecked['read'], the header chip.
+  - r2-4: five settings named in both runbooks and .env.example; test_docs SETTING_READ widened; selfcheck.budgets reads
+    each budget setting by its own name; REMITWATCH_TODAY named as tests-only.
+  - r2-5: selfcheck.accept_findings text (accepted per check, or nothing accepted); ops.js offers Accept only for failing
+    critical checks not yet accepted for the run shown, and says what was accepted.
+  - r2-6, r1-7: cloud.trigger_cycle returns Asked (why, status); cloud.press says it; api_ops.press_run answers 502/503.
+  - r2-7: api_ops.ops_audit_now under the pipeline lock (409/503 with a sentence; busy_timeout 2 s).
+  - r2-8: api_ops.ops_accept refuses a stale run at once on Vercel (copy's run newer); selfcheck.apply_request keeps a
+    refusal at the fold in the acceptances (stale), cloud.apply_actions(results=) puts it in status.json
+    (selfcheck_requests); ops.js says "Not accepted". Also: the dashboard's copy no longer works out a journaled
+    self-audit on its partial data (apply_actions copy=True).
+  - r2-9: features.js halted/stalled lines name Run the analysis now. r2-10: VERCEL_SETUP presses, Time, Scheduler.
+  - r2-11: a run id of the runs' shape required at the route (400, both hosts) and in apply_request.
+  - r2-12: status analysed open/open_cents; analysis_status lists (the copy's open items); ops.js shows them.
+  - r1-6: runlog.panel on a serverless host: no stale flag, "nobody has pressed for N days".
+- Docs: VERCEL_SETUP.md, SERVER_RUNBOOK.md, .env.example, ARCHITECTURE.md.
 
 ## Real-data runs (2026-11-26, private copy in $S/tk/units/hook, deleted after; machine load 7 to 15 on 4 CPUs, so wall
 ## times are long: CPU seconds are given where they matter)
