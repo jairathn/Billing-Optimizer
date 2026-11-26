@@ -1739,6 +1739,14 @@ class Audit:
         # A17 rule 1: a rate product carries its plan after '#'; the class is the product's
         return PRODUCT_CLASS.get((prod or "").split("#")[0], "COM")
 
+    @classmethod
+    def tier_class(cls, prod):
+        # A17 rule 1: the class an NP/PA tier is learned and looked up under. A plan read apart keeps its own: the
+        # hand-check found the large employer plan that pays its own schedule paying PAs at 85.7% of it, while the
+        # payer's other plans pay the same PAs in full
+        prod = prod or ""
+        return cls.pclass(prod) + ("#" + prod.split("#", 1)[1] if "#" in prod else "")
+
     @staticmethod
     def is_unlisted(code):
         return bool(UNLISTED_RE.match(code or ""))
@@ -1865,8 +1873,8 @@ class Audit:
 
     def learn_state_tiers(self):
         """A17 rule 1 (the office-state PA/NP rule; the hand-check found a payer paying NPs and PAs in full in one state's
-        offices and at 85% in the other's). For each payer, product class, clinician and office state: the tier the payer
-        pays that clinician at there (100 or 85) when 5 or more of its clean answers there sit at the payer's full rate
+        offices and at 85% in the other's). For each payer, product class (a plan read apart has its own: tier_class),
+        clinician and office state: the tier the payer pays that clinician at there (100 or 85) when 5 or more of its clean answers there sit at the payer's full rate
         or at 85% of it, 60% of them at one. For each payer, product class and state: the tier it pays NP/PA clinicians at
         there, when every NP/PA clinician with a tier there has the same one (2 clinicians at least)."""
         st_obs = defaultdict(Counter)
@@ -1883,7 +1891,7 @@ class Audit:
             r = apu / full
             b = "100" if abs(r - 1) <= 0.015 else "85" if abs(r - 0.85) <= 0.015 else None
             if b:
-                st_obs[(p.fam, self.pclass(p.prod), A.npi, state)][b] += 1
+                st_obs[(p.fam, self.tier_class(p.rprod), A.npi, state)][b] += 1
         self.state_tier = {}
         for k, c in st_obs.items():
             n = sum(c.values())
@@ -1902,7 +1910,7 @@ class Audit:
         """The tier ('100' or '85') a payer pays this clinician at in this office's state, or None (A17 rule 1)."""
         if not npi or not state or "state" in self.disable:
             return None
-        cls = self.pclass(prod)
+        cls = self.tier_class(prod)
         t = getattr(self, "state_tier", {}).get((fam, cls, npi, state))
         if t is None and self.np_type.get(npi):
             t = getattr(self, "state_np_tier", {}).get((fam, cls, state))
@@ -2047,7 +2055,8 @@ class Audit:
         """A17 rule 3 (cross-claim multiple-procedure ranking; the hand-check found a payer ranking a patient's Mohs and a
         repair billed on a separate surgery-center claim by the order it processed the two claims). A payer reduces the
         second and later procedures of one patient's day by one clinician to half, across that day's claims: the procedure
-        worth most (the payer's own full rate for it, in its own setting and plan; never less than what it allowed) is owed
+        worth most (the payer's own full rate for it, in its own setting and plan, unreduced when its mode is a half;
+        never less than what it allowed) is owed
         in full, the others half. For a patient's same-day procedures with one payer and clinician (surgical, not add-on,
         one unit, paid, standing primary answers) on two claims or more:
         - a procedure that is not the one worth most: owed half (rightly reduced when paid about half; short below it);
@@ -2085,7 +2094,11 @@ class Audit:
                 if r is None:
                     break
                 alw = A.allowed - (A.paid - A.paid_tb)
-                vals.append((A, max(r[1], alw), r[0], alw))
+                # a code a payer mostly pays as a later procedure (a repair at the surgery center, cut to half on most
+                # of its days) has the half as its mode: the procedure is worth its unreduced amount
+                full = self.unreduced(p.fam, p.rprod, s.code, s.comp, s.dos[:4], self.pos_class(p), r[1])
+                exp = r[0] if full == r[1] else int(round(r[0] * full / r[1]))
+                vals.append((A, max(full, alw), exp, alw))
             if len(vals) != len(As):
                 n["groups_without_a_rate"] += 1
                 continue
@@ -2111,6 +2124,20 @@ class Audit:
                     n["top_balanced"] += 1
         for k, v in n.items():
             self.stats["cross_claim_" + k] = v
+
+    def unreduced(self, fam, prod, code, comp, year, pc, mode):
+        """A17 rule 3: the full amount of a code whose mode at this payer, product, setting and year is a multiple-
+        procedure half: an amount twice the mode (within 1.5%) the payer allowed on 2 clean answers or more; else the
+        mode. (A repair done at the surgery center is the second procedure of most of its days, so most of its answers
+        are halves; A16's mode keeps the half when the full amount holds fewer answers than it.)"""
+        c = self.rate_obs.get((fam, prod, code, comp, year, pc)) or {}
+        best = None
+        for a in sorted(c):
+            if c[a] >= 2 and abs(a - 2 * mode) <= 0.03 * mode and (best is None or c[a] > c[best]):
+                best = a
+        if best is not None:
+            self.stats["cross_claim_values_unreduced"] += 1
+        return best if best is not None else mode
 
     @staticmethod
     def mode_of(c, tiered=False):
@@ -5878,6 +5905,30 @@ def build_selftest_store():
     F.claim(F.tx(add_days(ky_days[9], 20), **TST), "ZZ71SKLASC017", "1", 15000, 8500,
             oneline("99213", 15000, 8500, ky_days[9], allowed=8500, cas=[("CO", "45", 6500)]), npi=NPR, **TST)
     F.exp("unit", ("ZZ71SKLAS", "99213", "G", ky_days[9]), "SHORT", guard=True)
+    # ---- rule 1: a plan read apart has its own NP/PA tier. The large employer plan above (GRPBIG, its own schedule) pays
+    # an NP at 85% of it; the payer's other plans pay the same NP in full in the same state's offices (more of them, so
+    # the tier read across the payer's plans is the full one)
+    F.fix = "A17 rule 1 (a plan read apart has its own NP/PA tier)"
+    NPB = "2000000003"
+    np_days = [add_days("2026-08-03", i) for i in range(20)]
+    for i, d in enumerate(np_days):
+        med("NB", i, d, "99213" if i % 2 == 0 else "99214", 8500 if i % 2 == 0 else 11900, NPB, MKY)
+    for i, d in enumerate(np_days[:6]):
+        F.claim(F.tx(add_days(d, 20), **TPL), "ZZ70NB%03dC017" % i, "1", 11800, 6800,
+                oneline("99213", 11800, 6800, d, allowed=6800, cas=[("CO", "45", 5000)]), group="GRPBIG", npi=NPB,
+                **TPL)
+    for i, d in enumerate(np_days[6:18]):
+        F.claim(F.tx(add_days(d, 20), **TPL), "ZZ70NS%03dC017" % i, "1", 15000, 10000,
+                oneline("99213", 15000, 10000, d, allowed=10000, cas=[("CO", "45", 5000)]),
+                group="GRPSMALL%02d" % (i % 25), npi=NPB, **TPL)
+    F.claim(F.tx(add_days(np_days[18], 20), **TPL), "ZZ70NBLASC017", "1", 11800, 6800,
+            oneline("99213", 11800, 6800, np_days[18], allowed=6800, cas=[("CO", "45", 5000)]), group="GRPBIG",
+            npi=NPB, **TPL)
+    F.exp("sub", ("ZZ70NBLAS", "99213", "G", np_days[18]), ("PAID", "full"))
+    F.claim(F.tx(add_days(np_days[19], 20), **TPL), "ZZ70NSLASC017", "1", 15000, 8500,
+            oneline("99213", 15000, 8500, np_days[19], allowed=8500, cas=[("CO", "45", 6500)]), group="GRPSMALL03",
+            npi=NPB, **TPL)
+    F.exp("unit", ("ZZ70NSLAS", "99213", "G", np_days[19]), "SHORT", guard=True)
     # ---- rule 2: a payer that leaves CLP08 empty; the claims of the surgery center (the 837's place of service 24)
     # are priced on the facility schedule, not short of the office rate
     F.fix = "A17 rule 2 (a separate surgical site's own schedule, CLP08 empty)"
@@ -5929,6 +5980,30 @@ def build_selftest_store():
             oneline("13132", 40000, 15000, "2026-06-02", allowed=15000, cas=[("CO", "45", 25000)]), pos="24",
             patient=PY, **THU)
     F.exp("sub", ("ZZ73REPY1", "13132", "G", "2026-06-02"), ("PAID", "half_rate_mppr_cross_claim"))
+    # ---- rule 3: a repair this payer mostly cuts to half (the second procedure of most of its surgery-center days) has
+    # the half as its mode; ranked against the Mohs it is worth its unreduced amount. W: the payer cut the Mohs (worth
+    # more) to half and paid the repair in full: half the difference is owed (read at the half, the day looked right)
+    F.fix = "A17 rule 3 (a procedure the payer mostly halves is worth its unreduced amount)"
+    THV = dict(payer="TESTPAY HV", pid="T0056", prod="16")
+    for i in range(6):
+        d = add_days("2026-04-06", i)
+        F.claim(F.tx(add_days(d, 21), payer=THV["payer"], pid=THV["pid"]), "ZZ73VM%03dC017" % i, "1", 80000, 60000,
+                oneline("17311", 80000, 60000, d, allowed=60000, cas=[("CO", "45", 20000)]), pos="11", **THV)
+        F.claim(F.tx(add_days(d, 22), payer=THV["payer"], pid=THV["pid"]), "ZZ73VR%03dC017" % i, "1", 50000, 20000,
+                oneline("13132", 50000, 20000, d, allowed=20000, cas=[("CO", "45", 30000)]), pos="24", **THV)
+    for i in range(2):
+        d = add_days("2026-04-20", i)
+        F.claim(F.tx(add_days(d, 21), payer=THV["payer"], pid=THV["pid"]), "ZZ73VF%03dC017" % i, "1", 50000, 40000,
+                oneline("13132", 50000, 40000, d, allowed=40000, cas=[("CO", "45", 10000)]), pos="24", **THV)
+    PW = ("TESTLASTW", "TESTFIRSTW")
+    F.claim(F.tx("2026-06-20", payer=THV["payer"], pid=THV["pid"]), "ZZ73REPW1C017", "1", 50000, 40000,
+            oneline("13132", 50000, 40000, "2026-06-04", allowed=40000, cas=[("CO", "45", 10000)]), pos="24",
+            patient=PW, **THV)
+    F.claim(F.tx("2026-06-22", payer=THV["payer"], pid=THV["pid"]), "ZZ73MOHW1C017", "1", 80000, 30000,
+            oneline("17311", 80000, 30000, "2026-06-04", allowed=30000, cas=[("CO", "45", 50000)]), pos="11",
+            patient=PW, **THV)
+    F.exp("sub", ("ZZ73MOHW1", "17311", "G", "2026-06-04"), ("SHORT", "misranked_cross_claim"))
+    F.exp("owed", ("ZZ73MOHW1", "17311", "G", "2026-06-04"), 10000)
     # ---- rule 4: the payer window table (an invented table: SELFTEST_WINDOWS). A correctable denial of a payer whose
     # table gives 60 days to appeal and 90 days to file from the date of service is past its window: not money left on
     # the table (A16's flat 180 days kept it inside); a window without a source is not used
