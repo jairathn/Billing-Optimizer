@@ -91,8 +91,8 @@ BASIS = {
     "c8": "EMA's A/R report: lines with a balance below zero.",
     "w4": "EMA's A/R report, each insurance line in one place.",
     "policy": "Estimate: the shortfall against the payer's usual rate for the code, from the remittances.",
-    "payer_policy": "Estimate: what the set-aside denials would bring at the payer's usual rate; the payer paid the code on few "
-                    "of the lines it answered (shown beside it).",
+    "payer_policy": "Estimate: what these denials would bring at the payer's usual rate; the payer paid the code on few of the "
+                    "lines it answered, or its published rule does not pay it (both shown beside it).",
     "contractual": "EMA's postings: what EMA wrote off as contractual for this reason. Not in any total.",
     "blind_835": "EMA's postings: insurance payments posted on checks no remittance on file explains.",
     "blind_work": "Estimate: the shortfall of the items in Work now, against the payer's usual rate.",
@@ -814,6 +814,30 @@ def _payer_policies(c: sqlite3.Connection, stored: dict) -> dict:
     return out
 
 
+def _why_of(key: str, ev: dict | None) -> dict:
+    """A code a payer almost never pays, in the owner's table: why the payer does not pay it (remitwatch.rarely_paid). The
+    research's verdict, rule, what the note or the claim must show and its sources, where it covers this payer group (or
+    another spelling of it, for a pair the run found rarely paid); the run's evidence in sentences; and the lines answered
+    and paid in the pattern's own period (a rule that changed on a date counts only its dates)."""
+    from . import rarely_paid as rp
+    parts = rp.parse_key(key)
+    period = parts.get("period") or {}
+    e = rp.entry_for(parts["group"], parts["code"], period.get("from") or period.get("to") or (ev or {}).get("from"))
+    if e is not None and not rp.applies(e, ev is not None):
+        e = None
+    out: dict = {"period": rp.period_words(period) or None, "why": rp.evidence_words(ev or {}, parts["group"] or "the payer")[:4] if ev else [],
+                 "research": None}
+    if e:
+        out["research"] = {"verdict": e["verdict"], "verdict_words": rp.VERDICT_WORDS.get(e["verdict"]), "rule": e.get("rule"),
+                           "what_to_show": e.get("what_to_show"), "condition": e.get("applies_when"),
+                           "sources": [{k: s.get(k) for k in ("title", "url", "date", "quote")} for s in (e.get("sources") or [])[:4]]}
+    if ev and ev.get("answered"):
+        out.update(paid=ev.get("paid"), answered=ev.get("answered"))
+    elif ev and (ev.get("ema") or {}).get("answered"):
+        out.update(paid=ev["ema"].get("paid"), answered=ev["ema"]["answered"])
+    return out
+
+
 def decide_totals(c: sqlite3.Connection) -> dict:
     """The codes a payer almost never pays that wait for the owner's decision (no person decided them): their count, the
     denials the run set aside and those denials' dollars. What the policy page's totals.decide says, from meta alone (so
@@ -875,13 +899,17 @@ def policy_table(c: sqlite3.Connection) -> dict:
                              appealable_cents=appealable_cents or 0, legal_only=legal_n or 0, legal_only_cents=legal_cents or 0,
                              auto=auto or 0, at_posting=at_posting or 0, rule_proven=proven or 0, by_policy=by_policy or 0,
                              open=open_n or 0, upper_n=upper_n or 0, upper_cents=upper or 0)
-    # the codes a payer almost never pays, as the run folded them
+    # the codes a payer almost never pays, as the run folded them, each with why (the owner's decision 4): the run's own
+    # evidence for the pattern's period (meta rarely_paid:why) and the payer's researched rule with its source
     folded = _payer_policies(c, stored)
+    why = _meta(c, "rarely_paid:why", {}) or {}
+    why_pairs = why.get("pairs") if isinstance(why, dict) and isinstance(why.get("pairs"), dict) else {}
     for key, pp in folded.items():
         n, cents = int(pp.get("n") or 0), int(pp.get("cents") or 0)
         pats[key] = dict(_blank(key), kind="payer_policy", items=n, cents=cents, appealable=None, appealable_cents=None,
                          legal_only=None, legal_only_cents=None, auto=None, at_posting=None, rule_proven=None, by_policy=None,
                          open=None, paid=pp.get("paid"), answered=pp.get("answered"))
+        pats[key].update(_why_of(key, why_pairs.get(key)))
     # the reasons EMA posts as contractual: one key per payer group and reason (the items are one per posted year)
     if "evidence" in fcols:
         for group, carc, ev_text, status in c.execute("""SELECT payer_group, carc, evidence, status FROM findings
@@ -996,8 +1024,9 @@ def policy_items(pattern: str = Query(..., max_length=200), page: int = Query(1,
     kind = kind_of(pattern)
     empty = {"pattern": pattern, "kind": kind, "count": 0, "cents": 0, "written_off_cents": 0, "rows": [], "page": page, "size": PAGE}
     if kind == "payer_policy":
-        return dict(empty, note=("The run sets these denials aside while the payer's policy is to not pay the code. Choose Pursue "
-                                 "and the next run lists every one in the Worklist, to appeal line by line."))
+        return dict(empty, note=("These denials are in the Worklist while the pattern is pursued (nothing is accepted by default): "
+                                 "each one's panel says why the payer does not pay the code. Accept takes them off Work now at the "
+                                 "next run; they stay counted here, and Pursue brings them back."))
     with _conn() as c:
         fcols = _cols(c, "findings")
         c7 = _c7_rows(c, pattern)

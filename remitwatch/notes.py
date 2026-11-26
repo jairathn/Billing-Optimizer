@@ -301,9 +301,31 @@ def dispute_context(detail: dict) -> dict:
     for ln in (detail.get("lines") or [])[:20]:
         mods = ",".join(json.loads(ln["modifiers"])) if ln.get("modifiers") else ""
         lines.append(f"{ln['procedure_code']}{'-' + mods if mods else ''}" + (f" (submitted as {ln['original_procedure_code']})" if ln.get("original_procedure_code") else ""))
+    # a code its payer almost never pays (the owner's decision 4): the payer's published rule and what the note or the claim
+    # must show, so the review checks the note against it (public text from remitwatch/data, no patient data)
+    from . import rarely_paid
+    rules = rarely_paid.review_input(f, detail.get("lines"), detail.get("payer_rules") if isinstance(detail.get("payer_rules"), list) else None)
     return {"mode": mode, "issue": issue, "billed_code": billed, "paid_code": code, "payer": f.get("payer_group") or f.get("payer_name"),
             "payer_reason": " ".join(x for x in [f.get("carc"), f.get("carc_text"), f.get("rarc"), f.get("rarc_text")] if x),
-            "claim_lines": lines}
+            "claim_lines": lines, "payer_rules": rules}
+
+
+def payer_rule_words(context: dict) -> str:
+    """The payer's researched rule for the disputed code, as the review is told it: the rule, what the note or the claim
+    must show, and the research's verdict (a rule no note can change is said so, for the recommendation)."""
+    out = []
+    for r in context.get("payer_rules") or []:
+        if not isinstance(r, dict) or not r.get("rule"):
+            continue
+        out.append(f"The payer's published rule for {r.get('code')} ({r.get('verdict_words') or r.get('verdict')}): {r['rule']}")
+        if r.get("what_to_show"):
+            out.append(f"What the note or the claim must show: {r['what_to_show']}")
+        if r.get("condition"):
+            out.append(f"For this claim: {r['condition']}")
+        if r.get("verdict") == "never_payable":
+            out.append("Under that rule no note makes this code payable. Unless the note shows exactly what the rule allows, "
+                       "recommend against the appeal and say why.")
+    return "\n".join(out)
 
 
 def review_note(context: dict, note_text: str | None, pdf_bytes: bytes | None = None, client: Any = None) -> dict:
@@ -311,7 +333,9 @@ def review_note(context: dict, note_text: str | None, pdf_bytes: bytes | None = 
     if client is None:
         import anthropic
         client = anthropic.Anthropic()
+    rule_words = payer_rule_words(context)
     ask = (f"Dispute: {context['issue']}\nPayer: {context['payer']}\nPayer's stated reason: {context['payer_reason'] or 'none given'}\n"
+           + (rule_words + "\n" if rule_words else "") +
            f"Lines on the claim: {', '.join(context['claim_lines']) or 'not available'}\n"
            f"Review type: {context['mode']} (em_level: does the note support the level billed; modifier_25: is the visit significant and "
            f"separately identifiable from the procedure; procedure: does the note document the disputed procedure as billed and, where "
@@ -505,6 +529,7 @@ def build_from_note(conn: sqlite3.Connection, detail: dict, raw_claim: dict | No
            "note_kind": kind, "deadline": packet.get("deadline"), "deadline_basis": packet.get("deadline_basis"),
            "corrected_claim_instructions": packet.get("corrected_claim_instructions")}
     pdf = render_pdf(out, note_text=text, note_pdf=data if kind in ("pdf", "pdf_scanned") else None)
+    out["checklist"] = packet.get("checklist") or []        # for the person, after the PDF: never in what goes to the payer
     conn.execute("""INSERT OR REPLACE INTO appeal_packets (packet_id, finding_id, created_at, mode, model, subject, letter, analysis, evidence, attachments,
                     note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                  (pid, out["finding_id"], out["created_at"], out["mode"], out["model"], out["subject"], out["letter"], json.dumps(analysis),

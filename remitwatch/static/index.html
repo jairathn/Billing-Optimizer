@@ -702,7 +702,7 @@ async function openDetail(id, opts){
   const ex = drawerExtras(f, r), plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : f.title;
   const letter = f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal) ? `<button id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>` : '';
   d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')} <span id="xpChips">${typeof xpChips === 'function' ? xpChips(f, f.work_state) : ''}</span></div></div><button id="closeD" aria-label="Close">✕</button></div>
-    <div id="xpSlot"><div class="todo-box"><span class="muted small">Working out what to do…</span></div></div>
+    <div id="xpSlot"><div class="todo-box"><span class="muted small">Working out what to do…</span></div></div><div id="xpRuleSlot"></div>
     ${letter ? `<div class="actions" id="letterRow">${letter}</div>` : ''}
     ${typeof faxDrawerHtml === 'function' ? faxDrawerHtml(f, r) : ''}
     ${typeof hideDrawerHtml === 'function' ? hideDrawerHtml(f) : ''}
@@ -775,6 +775,7 @@ async function openDetail(id, opts){
     $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">${esc(p.subject)}</h2><button id="closeM">✕</button></div>
       ${p.corrected_claim_instructions?`<div class="panel"><b>Correction instructions</b><div>${esc(p.corrected_claim_instructions)}</div></div>`:''}
       <div class="actions" style="margin-top:8px"><button class="primary" id="copyL">Copy letter</button><button id="copyE">Copy evidence</button><span class="small muted">file by ${esc(p.deadline||'–')} · payer ${esc(p.payer_contact.phone)} ${esc(p.payer_contact.url)}</span></div>
+      ${(p.checklist||[]).length ? `<div class="note sev-medium"><b>Before you send it</b>${p.checklist.map(c=>`<div>${esc(c)}</div>`).join('')}</div>` : ''}
       <div class="note">${esc(p.deadline_basis||'')} To have the clinical paragraphs written from the chart, close this and use "Build the appeal from the visit note" in the finding panel.</div>
       <pre id="letter">${esc(p.letter)}</pre>
       <b class="small">Attach</b><ul class="small">${p.attachments.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>
@@ -799,6 +800,8 @@ function xpFill(f, r, x, d, id, seq){
   } else {
     state.detailX = x;
     xpRedrawBox(id, d, seq);
+    const rs = d.querySelector('#xpRuleSlot');      // why the payer does not pay the code, where it almost never does
+    if(rs && typeof xpPayerRuleHtml === 'function') rs.innerHTML = xpPayerRuleHtml(x.explain.why_unpaid);
     d.querySelector('#xpStorySlot').innerHTML = xpStoryHtml(x.explain.story, (x.explain.verdict || {}).rows);
   }
   d.querySelector('#xpEmaSlot').innerHTML = xpEmaHtml(x.ema_block) + (x.ema_block_error ? `<div class="small muted">${esc(x.ema_block_error)}</div>` : '');

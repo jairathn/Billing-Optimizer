@@ -314,6 +314,7 @@ function packetHtml(p){
       ${(a.gaps||[]).length?`<div class="small"><b>Gaps:</b> ${a.gaps.map(esc).join(' · ')}</div>`:''}${(a.documentation_tips||[]).length?`<div class="small"><b>For next time:</b> ${a.documentation_tips.map(esc).join(' · ')}</div>`:''}`:''}
     <div class="actions" style="margin-top:8px"><a href="/api/packets/${p.packet_id}/pdf"><button class="primary">Download the packet (PDF)</button></a><button id="pkCopy">Copy letter</button>
       <input id="pkTo" placeholder="email the PDF to…" style="min-width:220px"><button id="pkSend">Send</button><span id="pkMsg" class="small muted"></span></div>
+    ${(p.checklist||[]).length ? `<div class="note sev-medium"><b>Before you send it</b>${p.checklist.map(c => `<div>${esc(c)}</div>`).join('')}</div>` : ''}
     <div class="note">The PDF contains the patient's name, member ID and the note. Email it only to a mailbox inside the practice or a payer address that accepts appeals.</div>
     ${p.corrected_claim_instructions?`<div class="small"><b>Correction instead of appeal:</b> ${esc(p.corrected_claim_instructions)}</div>`:''}
     <pre>${esc(p.letter)}</pre></div>`;
@@ -600,6 +601,29 @@ function xpEmaHtml(b){
     ${b.postings_note ? `<div class="note">${esc(b.postings_note)}</div>` : ''}
     <div class="small muted">EMA's claim status is context only: what happened to this line is in the story.</div></details>`;
 }
+// "Why <payer> does not pay <code>" (remitwatch.rarely_paid, the owner's decision 4): what the newest run found in the
+// remittances (lines answered and paid, the reasons, remarks, modifiers, places of service and codes billed with it), the
+// payer's published rule with its sources (each fetched twice), what the note or the claim must show, and the verdict in
+// plain words. Open when no note can change it; folded otherwise.
+const XP_RULE_CLS = {never_payable: 'sev-high', claim: 'sev-medium', note: 'ok', unclear: 'muted'};
+function xpRuleSources(list){
+  const by = [];
+  (list || []).forEach(s => { if(!s || !s.title) return; let g = by.find(x => x.title === s.title);
+    if(!g){ g = {title: s.title, url: s.url, date: s.date, quotes: []}; by.push(g); } if(s.quote && g.quotes.length < 2) g.quotes.push(s.quote); });
+  return by.map(g => `<div>${/^https:\/\//.test(String(g.url || '')) ? `<a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">${esc(g.title)}</a>` : esc(g.title)}${g.date ? ', ' + esc(g.date) : ''}${g.quotes.map(q => `<div class="muted"><i>“${esc(q)}”</i></div>`).join('')}</div>`).join('');
+}
+function xpPayerRuleHtml(blocks){
+  return (blocks || []).map(b => `<details class="dfold xp-rule"${b.verdict === 'never_payable' ? ' open' : ''}>
+    <summary>${esc(b.title || '')}${b.period ? ` <span class="muted small">(services ${esc(b.period)})</span>` : ''}</summary>
+    <div class="small ${XP_RULE_CLS[b.verdict] || 'muted'}"><b>${esc(b.verdict_text || '')}</b></div>
+    ${(b.evidence_text || []).length ? `<div class="small" style="margin-top:4px"><b>What the remittances show</b>${b.as_of ? ` <span class="muted">(the run of ${esc(longDate(String(b.as_of).slice(0,10)))})</span>` : ''}<ul>${b.evidence_text.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`
+      : (b.evidence_note ? `<div class="small muted">${esc(b.evidence_note)}</div>` : '')}
+    ${b.rule ? `<div class="small" style="margin-top:4px"><b>The payer's rule:</b> ${esc(b.rule)}</div>` : ''}
+    ${b.what_to_show ? `<div class="small" style="margin-top:4px"><b>What the note or the claim must show:</b> ${esc(b.what_to_show)}</div>` : ''}
+    ${b.condition ? `<div class="small sev-medium">${esc(b.condition)}</div>` : ''}
+    ${(b.sources || []).length ? `<div class="small" style="margin-top:4px"><b>Sources</b> <span class="muted">(each read twice${b.researched ? ', researched ' + esc(b.researched) : ''})</span>${xpRuleSources(b.sources)}</div>` : ''}
+  </details>`).join('');
+}
 // "Why did this change?": the run's decisions on this item (built later, GET /api/findings/{id}/decisions); hidden until it answers
 async function xpDecisions(id, el){
   if(!el) return;
@@ -706,7 +730,9 @@ function xpOutcome(f, d, status, err){
 async function xpAccept(f, nx, err, say){
   const pattern = nx.pattern;
   if(!pattern){ state.tab = 'policy'; location.hash = 'policy'; if(typeof closeDetail === 'function') closeDetail(); render(); return; }
-  if(!confirm(`Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
+  const pp = pattern.endsWith('|payer_policy') ? pattern.split('|') : null;
+  if(!confirm(pp ? `Accept that ${pp[0]} does not pay ${pp[1]}${pp[2] ? ' (services ' + pp[2] + ')' : ''}? Every such denial leaves Work now at the next run and stays counted on the Write-off policy page, with who decided, where Pursue brings them back.`
+                 : `Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
   const where = document.querySelector('#xpMsg');
   if(typeof faxOwnerPost === 'function') await faxOwnerPost('/api/ema/policy', {pattern, decision: 'accept'}, where);
   else await post('/api/ema/policy', {pattern, decision: 'accept'});

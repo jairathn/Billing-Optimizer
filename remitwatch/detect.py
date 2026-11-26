@@ -102,14 +102,15 @@ DETECT_RULES = "2.12"           # 2.12: push 2 (2.10, 2.11: EMA's reports, work 
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
 # the files whose rules a run applies: any change re-analyses the archive once (a module not in this release is left out)
 RULE_FILES = ("detect.py", "codes.py", "fees.py", "link.py", "pfs.py", "ema_reports.py", "ema_ledger.py", "ema_checks.py",
-              "states.py", "story.py", "archive_rules.py")
+              "states.py", "story.py", "archive_rules.py", "rarely_paid.py", os.path.join("data", "payer_code_rules.json"))
 
 
 def _rules_hash() -> str:
     """This file and the ones whose rules it applies: payer windows and reason codes (codes.py), CMS's global periods
     and multiple-procedure indicators (pfs.py), fee families (fees.py), how remittance lines are tied to EMA rows
     (link.py), EMA's reports and the checks on them (ema_reports.py, ema_ledger.py, ema_checks.py), the item states
-    (states.py), the item story (story.py) and the archive-only rules (archive_rules.py)."""
+    (states.py), the item story (story.py), the archive-only rules (archive_rules.py) and the researched rules of codes
+    a payer almost never pays (rarely_paid.py, data/payer_code_rules.json)."""
     h = hashlib.sha256()
     here = os.path.dirname(os.path.abspath(__file__))
     for name in RULE_FILES:
@@ -6111,35 +6112,108 @@ class Detector:
 
     def fold_payer_policy(self) -> None:
         """Denials from the remittances of a code the payer pays on 5% or less of at least 20 lines it answered as primary
-        since 2025 (UHC's G6001, PM case C18; the answer key's R9): the payer's policy, not an appeal per line. They fold
-        into one pattern per payer and code in the owner's table (meta ema:payer_policy), counted with their dollars, and
-        are listed line by line only once the owner chooses 'pursue' for the pattern. Only with EMA's reports on file
-        (the owner's table is built then)."""
+        since 2025 (UHC's G6001, PM case C18; the answer key's R9), or of a payer and code the research covers
+        (remitwatch.rarely_paid, the owner's decision 4: Anthem's 77600 with the 2026 surface radiation codes, whose 2025
+        lines it paid): the payer's policy, not an appeal per line. The code is the one the practice billed, so a 77600
+        the payer answered as 77436 and paid nothing on is one of them. They make one pattern per payer and code in the
+        owner's table (meta ema:payer_policy; one per period where the research splits the pair on a date), counted with
+        their dollars. Nothing is accepted by default: they stay listed, pursued, until the owner accepts the pattern.
+        Only with EMA's reports on file (the owner's table is built then)."""
         if not self.ema_on:
             return
         from . import ema_checks as ec
+        from . import rarely_paid as rp
         decisions = ec._meta(self.conn, ec.POLICY_KEY, {}) or {}
         folded: dict[str, dict] = {}
         for fid, f in list(self.findings.items()):
-            if not f.get("line_key") or f.get("category") not in ("denial", "bundling") or (f.get("paid_cents") or 0) > 0 \
-                    or f.get("signal") in ("FORWARDED_TO_CARRIER", "SECONDARY_NOT_BILLED") or f.get("auto_status"):
+            if not f.get("line_key") or f.get("auto_status"):
                 continue
-            share = self._paid_share(f.get("payer_group"), f.get("procedure_code"))
-            if not share or share[0] > ec.POLICY_MAX_PAID_SHARE * share[1]:
+            got = rp.item_codes(f)          # an unpaid denial line: its billed code and date
+            if not got:
                 continue
-            key = f"{f.get('payer_group')}|{f.get('procedure_code')}||payer_policy"
+            code, svc = got[0]
+            grp = f.get("payer_group")
+            share = self._paid_share(grp, code)
+            rare = bool(share) and share[0] <= ec.POLICY_MAX_PAID_SHARE * share[1]
+            entry = rp.entry_for(grp, code, svc)
+            if not (rare or rp.applies(entry, False)):
+                continue
+            key = rp.pattern_key(grp, code, svc)
             # nothing is accepted by default (PLAN decision 14), and a code a payer almost never pays is pursued in a batch per
             # payer until the owner accepts it (the owner's decision 16: appeal at any win rate when it beats the cost to send)
             decision = (decisions.get(key) or {}).get("decision") or "pursue"
-            pt = folded.setdefault(key, {"group": f.get("payer_group"), "code": f.get("procedure_code"), "paid": share[0],
-                                         "answered": share[1], "n": 0, "cents": 0, "decision": decision, "default": key not in decisions,
-                                         "source": "835"})
+            pt = folded.setdefault(key, {"group": grp, "code": code, "paid": share[0] if share else None,
+                                         "answered": share[1] if share else None, "n": 0, "cents": 0, "decision": decision,
+                                         "default": key not in decisions, "source": "835",
+                                         "researched": (entry or {}).get("verdict") if rp.applies(entry, rare) else None})
             pt["n"] += 1
             pt["cents"] += f.get("shortfall_cents") or 0
             if decision != "pursue":
                 del self.findings[fid]
                 self.ema_counts["payer_policy_835"] += 1
         self._policy_835 = folded
+
+    def _rarely_paid_step(self) -> None:
+        """explain_rarely_paid, contained: a failure is logged and counted, the old evidence is dropped (never shown as
+        today's), and the run goes on; with REMITWATCH_EMA_STRICT it is raised (the tests)."""
+        try:
+            self.explain_rarely_paid()
+        except MemoryError:
+            raise
+        except Exception as exc:        # noqa: BLE001  (logged; the items are not changed by this step)
+            if os.environ.get("REMITWATCH_EMA_STRICT") == "1":
+                raise
+            from .runlog import caught
+            caught(exc, "rarely_paid")
+            self.ema_counts["rarely_paid_failed"] += 1
+            try:
+                from .rarely_paid import WHY_META
+                self.conn.execute("DELETE FROM meta WHERE key=?", (WHY_META,))
+            except sqlite3.Error as exc2:
+                caught(exc2, "rarely_paid.drop")
+
+    def explain_rarely_paid(self) -> None:
+        """Why a payer does not pay a code it almost never pays (the owner's decision 4), from this store: for each pair an
+        item of this run is about that the research covers for its payer group, or that the payer pays on 5% or less of
+        the lines it answered (the remittances here, else EMA's books), and for each pattern in the owner's table, the
+        lines it answered as primary and paid by year, the reasons and remarks on the unpaid ones, their modifiers and
+        places of service, the codes billed with them, how often it paid another line of the claim, and the code it
+        answered instead (remitwatch.rarely_paid.evidence). Kept in meta rarely_paid:why for the item drawer, the policy
+        page, the appeal packet and the note review, on both hosts. Counts, codes and years only: no patient data."""
+        from . import ema_checks as ec
+        from . import rarely_paid as rp
+        wanted: dict[str, dict] = {}
+
+        def want(key: str, grp: str, code: str, svc: str | None) -> None:
+            if key not in wanted:
+                parts = rp.parse_key(key)
+                entry = rp.entry_for(grp, code, svc)
+                wanted[key] = rp.spec_for(grp, code, entry, parts.get("period"))
+        for f in self.findings.values():
+            grp = f.get("payer_group")
+            for code, svc in rp.item_codes(f):
+                entry = rp.entry_for(grp, code, svc)
+                share = self._paid_share(grp, code)
+                rare = bool(share) and share[0] <= ec.POLICY_MAX_PAID_SHARE * share[1]
+                if rare or rp.applies(entry, False):
+                    want(rp.pattern_key(grp, code, svc), grp, code, svc)
+        # every pattern of the owner's table this run made: the remittances' (fold_payer_policy) and EMA's own (C5)
+        keys = dict(self.__dict__.get("_policy_835") or {})
+        try:
+            lo = json.loads((self.conn.execute("SELECT value FROM meta WHERE key=?", (ec.C5_LEFT_OUT_KEY,)).fetchone() or ["{}"])[0])
+            keys.update(((lo.get("payer_policy") or {}).get("patterns") or {}) if isinstance(lo, dict) else {})
+        except (ValueError, TypeError, sqlite3.Error) as exc:
+            from .runlog import caught
+            caught(exc, "rarely_paid.patterns")      # the items' own pairs still get their evidence
+        for key, p in keys.items():
+            parts = rp.parse_key(key)
+            if parts["group"] and parts["code"]:
+                day = (parts.get("period") or {}).get("from") or (parts.get("period") or {}).get("to")
+                want(key, parts["group"], parts["code"], day)
+        pairs = rp.evidence(self.lines, adj=self.adj, rem=self.rem, claim_adj=self.claim_adj, claim_rem=self.claim_rem,
+                            standing=self.standing, by_claim=self.lines_by_claim, wanted=wanted, conn=self.conn)
+        rp.save(self.conn, pairs, at=self.now, run_id=self.run_id)
+        self.ema_counts["rarely_paid_pairs"] = len(pairs)
 
     def _has_835_finding(self, bill: str | None, svc: str | None, code: str | None) -> bool:
         """The run already holds an item from the remittances for this bill, date and code (or the whole claim that day)."""
@@ -7673,6 +7747,7 @@ class Detector:
         self.run_ema_unposted()         # 10: 835 payments EMA never posted (C4)
         self.run_ema_writeoffs()        # 11: written off in EMA (C2) and the overlays (W2)
         self.run_more_rules()           #    secondary never billed, credits, EMA-only short payments
+        self._rarely_paid_step()        #    why a payer does not pay a code it almost never pays (the owner's decision 4)
         self.hook_fold()
         out = self.save()               # 12: heirs, states
         self.run_ema_summaries()        # 13: W4, W3, the reconcile summary, the policy table

@@ -1818,11 +1818,33 @@ def volume(_: str = Depends(require_auth)):
 
 
 # --------------------------------------------------------------------------- appeal packet
+def _with_payer_rules(detail: dict) -> dict:
+    """The item's "Why <payer> does not pay <code>" blocks (remitwatch.rarely_paid, the owner's decision 4), as the drawer
+    shows them from the newest run, for the packet's checklist and the note review's input. Without them (a store that
+    cannot be read just now) the packet falls back on the rules that name the item's payer group, and the log says why."""
+    if "payer_rules" in detail:
+        return detail
+    try:
+        from . import rarely_paid
+        conn = db()
+        try:
+            blocks = rarely_paid.why(conn, detail.get("finding") or {})
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:        # noqa: BLE001  (logged; the packet is built with the rules at hand)
+        from .runlog import caught
+        caught(exc, "api.payer_rules")
+        return detail
+    return dict(detail, payer_rules=[{k: v for k, v in b.items() if k != "evidence"} for b in blocks])
+
+
 @app.get("/api/appeal/{finding_id}")
 def appeal(finding_id: str, _: str = Depends(require_auth)):
     from .appeals import build_packet
 
-    detail = finding_detail(finding_id, "ok")
+    detail = _with_payer_rules(finding_detail(finding_id, "ok"))
     f = detail["finding"]
     if not f.get("claim_key") and f.get("signal") not in ("TAKEBACK", "FEE_SKIM"):
         # context rows (sequestration, MIPS) and contract-level findings have no letter: there is nothing to reprocess
@@ -3351,6 +3373,7 @@ def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes |
     two identifiers; one uploaded or attached by a person ('upload', 'person') only by what its text shows."""
     from .notes import build_from_note, lesson
     ident = {"ok": True} if source == "ema" else _note_identity(detail, raw_claim, name, data, text)
+    detail = _with_payer_rules(detail)          # the payer's rule for the code goes to the review and the checklist
 
     def build(conn):
         out = build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
@@ -4752,7 +4775,8 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
         packet_id = pk["packet_id"]
     elif kind == "rate":
         from .notes import build_letter_only
-        packet_id = _keep_packet(lambda conn: build_letter_only(conn, detail, raw_claim, reveal=SHOW_PHI))["packet_id"]
+        rated = _with_payer_rules(detail)
+        packet_id = _keep_packet(lambda conn: build_letter_only(conn, rated, raw_claim, reveal=SHOW_PHI))["packet_id"]
     else:
         from . import modmed
         key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))

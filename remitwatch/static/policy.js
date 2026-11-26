@@ -2,8 +2,9 @@
 //  - write-off patterns (payer, code, modifier and reason of denials written off in EMA, by its posting rules or later by
 //    a person): Pursue (the default: they stay in the work queue) or Accept (the next run takes them off the queue as
 //    written off by the policy; they stay findable, and Pursue brings them back);
-//  - codes a payer almost never pays: the run keeps their denials out of Work now until the owner decides (nothing is
-//    accepted by default): Pursue lists every one in the Worklist at the next run, Accept leaves them written off;
+//  - codes a payer almost never pays, or that its published rule does not pay: their denials stay in the Worklist, pursued
+//    (nothing is accepted by default, the owner's decision 4); each row says why the payer does not pay the code (the run's
+//    evidence, the researched rule and its source); Accept takes them off Work now at the next run;
 //  - denial reasons EMA posts as contractual (the payer's reason on every code): Accept as policy, or Pursue (have EMA
 //    post the reason as non-contractual so its lines reach the denial queue).
 // Any signed-in person may decide, as with the hide rules; the name given and the date are kept. A decision changes its
@@ -32,7 +33,8 @@ function polWhen(p){
   if(!p.decided_by) return '';
   return `<div class="small muted">${esc(p.decision === 'accept' ? 'Accepted' : 'Set to pursue')} by ${esc(p.decided_by)} on ${esc(longDate(String(p.decided_at||'').slice(0,10)))}${p.pending ? '; the next run applies it' : ''}</div>`;
 }
-function polWho(p){ return `${p.payer_group}, ${p.code ? p.code + (p.modifier ? '-' + p.modifier : '') : 'every code'}${p.reason ? ', ' + p.reason : ''}`; }
+function polCode(p){ return p.kind === 'payer_policy' ? (p.code || '') + (p.modifier ? ` (services ${p.modifier})` : '') : (p.code ? p.code + (p.modifier ? '-' + p.modifier : '') : ''); }
+function polWho(p){ return `${p.payer_group}, ${p.code ? polCode(p) : 'every code'}${p.reason ? ', ' + p.reason : ''}`; }
 
 function polTotalsHtml(t, pats){
   const tot = t.totals || {}, dc = tot.decide || {}, c7 = tot.contractual || {};
@@ -62,7 +64,23 @@ async function policyTab(v){
 function polFindText(p){ return (p.payer_group + ' ' + p.code + ' ' + p.reason + ' ' + (p.reason_text||'') + ' ' + (POL_KIND[p.kind]||'')).toLowerCase(); }
 function polReason(p){
   const label = p.kind === 'payer_policy' ? 'Payer policy' : (p.reason || '–');
-  return `${esc(label)}${p.reason_text ? `<div class="small muted" title="${esc(p.reason_text)}">${esc(p.reason_text.length > 60 ? p.reason_text.slice(0, 57) + '...' : p.reason_text)}</div>` : ''}${p.kind === 'contractual' ? '<div class="small muted">posted by EMA as contractual</div>' : ''}`;
+  return `${esc(label)}${p.reason_text ? `<div class="small muted" title="${esc(p.reason_text)}">${esc(p.reason_text.length > 60 ? p.reason_text.slice(0, 57) + '...' : p.reason_text)}</div>` : ''}${p.kind === 'contractual' ? '<div class="small muted">posted by EMA as contractual</div>' : ''}${polWhy(p)}`;
+}
+// why the payer does not pay the code (the owner's decision 4): the researched verdict and rule with its sources, what the
+// note or the claim must show, and the run's evidence from the remittances, folded under the reason
+const POL_VERDICT_CLS = {never_payable: 'sev-high', claim: 'sev-medium', note: 'ok', unclear: 'muted'};
+function polWhy(p){
+  if(p.kind !== 'payer_policy') return '';
+  const r = p.research, why = p.why || [];
+  if(!r && !why.length) return '<div class="small muted">Not researched yet</div>';
+  const src = r ? (r.sources || []).filter((s, i, a) => s && s.title && a.findIndex(x => x && x.title === s.title) === i) : [];
+  return `${r ? `<div class="small ${POL_VERDICT_CLS[r.verdict] || 'muted'}">${esc(r.verdict_words || r.verdict)}</div>` : '<div class="small muted">Not researched yet</div>'}
+    <details class="small"><summary>Why</summary>
+      ${why.length ? `<ul>${why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+      ${r && r.rule ? `<div><b>The payer's rule:</b> ${esc(r.rule)}</div>` : ''}
+      ${r && r.what_to_show ? `<div><b>What the note or the claim must show:</b> ${esc(r.what_to_show)}</div>` : ''}
+      ${src.length ? `<div class="muted">${src.map(s => /^https:\/\//.test(String(s.url || '')) ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title)}</a>${s.date ? ', ' + esc(s.date) : ''}` : esc(s.title)).join(' · ')}</div>` : ''}
+    </details>`;
 }
 // the dollars of a row: a write-off pattern's shortfall (an estimate); a code the payer almost never pays, what its
 // set-aside denials would bring (an estimate); a reason posted as contractual, what EMA wrote off that way (in no total)
@@ -77,12 +95,12 @@ function polAppealable(p){
   return `<b title="${esc(p.basis || '')}">${money(p.appealable_cents)}</b><div class="small muted">${esc(pl(p.appealable, 'item'))}${p.legal_only ? `; ${esc(pl(p.legal_only, 'item'))} only by the payer's own limit, one at a time` : ''}</div>`;
 }
 function polItemsCell(p, i){
-  if(p.kind === 'payer_policy') return `<span title="Denials the run set aside: listed in the Worklist once you choose Pursue">${Number(p.items||0).toLocaleString()}</span>`;
+  if(p.kind === 'payer_policy') return `<span title="${p.decision === 'accept' ? 'Denials the run took off Work now as the accepted policy' : 'Denials in the Worklist while this is pursued (the default); Accept takes them off Work now at the next run'}">${Number(p.items||0).toLocaleString()}</span>`;
   return p.items ? `<a href="#" class="polItems" data-i="${i}" title="List these items">${Number(p.items).toLocaleString()}</a>` : '0';
 }
 function polRow(p, i){
   return `<tr data-i="${i}"${i >= POL_SHOW ? ' hidden' : ''} data-find="${esc(polFindText(p))}">
-    <td>${esc(p.payer_group || '–')}</td><td>${p.code ? esc(p.code) + (p.modifier ? '-' + esc(p.modifier) : '') : (p.kind === 'contractual' ? '<span class="muted">every code</span>' : '–')}</td><td>${polReason(p)}</td>
+    <td>${esc(p.payer_group || '–')}</td><td>${p.code ? esc(polCode(p)) : (p.kind === 'contractual' ? '<span class="muted">every code</span>' : '–')}</td><td>${polReason(p)}</td>
     <td class="num">${polItemsCell(p, i)}</td>
     <td class="num">${polMoney(p)}</td>
     <td class="num">${polAppealable(p)}</td>
@@ -114,18 +132,18 @@ function polWindow(x){
 
 function polSegs(p, i){
   const acc = p.decision === 'accept', pur = p.decision === 'pursue';
-  const tip = p.kind === 'payer_policy' ? ['Pursue: the next run lists every one of these denials in the Worklist', 'Accept: they stay written off, out of Work now']
+  const tip = p.kind === 'payer_policy' ? ['Pursue (the default): every one of these denials stays in the Worklist', 'Accept: the next run takes them off Work now; they stay counted here']
     : p.kind === 'contractual' ? ['Pursue: have EMA post this reason as non-contractual, so its lines reach the denial queue', 'Accept: EMA is right to post it as contractual']
     : ['Pursue: the items stay in the work queue', 'Accept: the next run takes the items off the work queue; they stay findable'];
   return `<div class="segs" role="group" aria-label="Decision"><button class="seg ${pur?'on':''}" data-dec="pursue" data-i="${i}" aria-pressed="${pur}" title="${esc(tip[0])}">Pursue</button><button class="seg ${acc?'on':''}" data-dec="accept" data-i="${i}" aria-pressed="${acc}" title="${esc(tip[1])}">Accept</button></div>${polWhen(p)}`;
 }
 function polCard(p, i){
   const what = p.kind === 'contractual' ? `${money(p.written_off_cents)} written off as contractual (in no total)${p.inside_cents ? ` · <b>${money(p.inside_cents)}</b> inside a window` : ''}`
-    : p.kind === 'payer_policy' ? `${esc(pl(p.items, 'denial'))} set aside, ${money(p.cents)} est.${p.answered ? ` · the payer paid ${Number(p.paid||0).toLocaleString()} of ${Number(p.answered).toLocaleString()} lines` : ''}`
+    : p.kind === 'payer_policy' ? `${esc(pl(p.items, 'denial'))} ${p.decision === 'accept' ? 'set aside' : 'in the Worklist'}, ${money(p.cents)} est.${p.answered ? ` · the payer paid ${Number(p.paid||0).toLocaleString()} of ${Number(p.answered).toLocaleString()} lines` : ''}`
     : `${esc(pl(p.items, 'item'))}, ${money(p.cents)} est.${p.upper_n ? ` (+ up to ${money(p.upper_cents)} not priced)` : ''}${p.appealable ? ` · <b>${money(p.appealable_cents)}</b> still appealable${p.legal_only ? ` (${esc(pl(p.legal_only, 'item'))} only by the payer's own limit)` : ''}` : ' · none still appealable'} · ${Number(p.auto||0).toLocaleString()} by EMA's rule${p.later_paid_share != null ? ` · ${Math.round(100*p.later_paid_share)}% paid later before` : ''}`;
   return `<div class="lab-card" data-i="${i}"${i >= POL_SHOW ? ' hidden' : ''} data-find="${esc(polFindText(p))}">
-    <div><b>${esc(p.payer_group || '–')}</b> · ${p.code ? esc(p.code) + (p.modifier ? '-' + esc(p.modifier) : '') : 'every code'}${p.reason ? ' · ' + esc(p.reason) : ''}</div>
-    ${p.reason_text ? `<div class="small muted">${esc(p.reason_text)}</div>` : ''}
+    <div><b>${esc(p.payer_group || '–')}</b> · ${p.code ? esc(polCode(p)) : 'every code'}${p.reason ? ' · ' + esc(p.reason) : ''}</div>
+    ${p.reason_text ? `<div class="small muted">${esc(p.reason_text)}</div>` : ''}${polWhy(p)}
     <div class="small" style="margin:4px 0">${what}</div>
     <div class="polDec" data-i="${i}">${polSegs(p, i)}</div>
     ${p.items && p.kind !== 'payer_policy' ? `<a href="#" class="polItems small" data-i="${i}">List the ${esc(pl(p.items, 'item'))}</a>` : ''}
@@ -175,7 +193,7 @@ function polBindSegs(v, el, pats, t){
 }
 function polAcceptWords(p){
   const who = polWho(p);
-  if(p.kind === 'payer_policy') return `Accept this payer's policy (${who})?\n\n${pl(p.items, 'denial')} worth ${money(p.cents)} (est.) stay written off and out of Work now. Pursue brings them back.`;
+  if(p.kind === 'payer_policy') return `Accept this payer's policy (${who})?${p.research && p.research.verdict !== 'never_payable' ? `\n\nThe research says this is ${String(p.research.verdict_words || '').toLowerCase()}: some of these may still be paid.` : ''}\n\n${pl(p.items, 'denial')} worth ${money(p.cents)} (est.) leave Work now at the next run and stay counted here. Pursue brings them back.`;
   if(p.kind === 'contractual') return `Accept that EMA posts ${p.reason || 'this reason'} as contractual for ${p.payer_group}?\n\n${money(p.written_off_cents)} was written off that way. The item about it is closed at the next run as the policy. Pursue brings it back.`;
   return `Accept this pattern (${who})?\n\n${pl(p.items, 'item')} worth ${money(p.cents)} (est.)${p.appealable ? `, ${money(p.appealable_cents)} of it still appealable,` : ''} leave the work queue at the next run, as written off by the policy. They stay findable, and Pursue brings them back.`;
 }

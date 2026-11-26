@@ -2935,4 +2935,71 @@ def explain(conn: sqlite3.Connection, finding_id: str, *, ledger: Any = None, to
     story = _story(conn, fx, ledger)
     verdict = _verdict(conn, fx, story, st, today)
     nxt = _next(conn, fx, story, st, verdict, today)
-    return {"story": story, "verdict": verdict, "next_step": nxt, "state": {k: v for k, v in st.items() if k != "evidence"}}
+    why = _why_unpaid(conn, f)
+    if why:
+        nxt = _with_payer_rule(nxt, why, f, st)
+    return {"story": story, "verdict": verdict, "next_step": nxt, "state": {k: v for k, v in st.items() if k != "evidence"},
+            "why_unpaid": why}
+
+
+def _why_unpaid(conn: sqlite3.Connection, f: dict) -> list[dict]:
+    """"Why <payer> does not pay <code>" (remitwatch.rarely_paid, the owner's decision 4): the store's evidence from the
+    newest run and the researched rule with its source, for an item of a code its payer almost never pays. A failure
+    leaves the rest of the panel as it is, and the log says so."""
+    try:
+        from . import rarely_paid
+        return rarely_paid.why(conn, f)
+    except Exception as exc:        # noqa: BLE001  (logged; the item's story, verdict and next step still show)
+        from .runlog import caught
+        caught(exc, "story.why_unpaid")
+        return []
+
+
+# the routes whose work a never-payable rule changes: an appeal, a correction, a call, a decision or a rate request
+PAYER_RULE_ROUTES = ("appeal", "corrected", "call", "decide", "rate")
+
+
+def _with_payer_rule(nxt: dict, blocks: list[dict], f: dict, st: dict) -> dict:
+    """The next step with the payer's researched rule in it. A rule no note can change (never payable) is said first and
+    plainly on an item still to work: check what the rule allows, else the owner accepts the pattern on the write-off
+    policy page (Accept this pattern; the item stays on Work now until then) or a person lets it go with the reason.
+    Otherwise what the note or the claim must show is a step. The state and the deadline are not changed here."""
+    out = dict(nxt)
+    steps = list(out.get("steps") or [])
+    buttons = list(out.get("buttons") or [])
+    working = st.get("work_state") == "work_now" and out.get("route") in PAYER_RULE_ROUTES
+    lead = next((b for b in blocks if b.get("verdict") == "never_payable" and b.get("single")), None)
+    if lead and working:
+        src = (lead.get("sources") or [{}])[0]
+        cite = f" ({src.get('title')})" if src.get("title") else ""
+        was = out.get("action") or ""
+        out["action"] = _clean(f"Not payable under {_poss(lead['payer_group'])} published rule{cite}: it does not pay {lead['code']} "
+                               "here, and no note changes that. Check what the rule still allows; if nothing, the owner accepts the "
+                               "pattern on the write-off policy page or a person lets it go with the reason.")
+        add = [s for s in [lead.get("what_to_show"),
+                           "Until the owner accepts the pattern it stays on Work now: Accept this pattern takes every such item off at the "
+                           "next run, and they stay counted on the write-off policy page.",
+                           ("Only if the check finds what the rule allows: " + was) if was else None] if s]
+        steps = add + steps
+        if lead.get("in_table") and "accept_pattern" not in buttons:
+            buttons.append("accept_pattern")            # the owner's table lists the pattern (the run made it)
+        out["pattern"] = lead["pattern"] if lead.get("in_table") else out.get("pattern")
+        out["payer_rule"] = "never_payable"
+    else:
+        for b in blocks:
+            if not b.get("researched_verdict") or not b.get("what_to_show"):
+                continue
+            src = (b.get("sources") or [{}])[0]
+            cite = f" ({src.get('title')}, {src.get('date')})" if src.get("title") else ""
+            if b.get("verdict") == "never_payable":
+                steps.insert(0, f"{_poss(b['payer_group'])} published rule{cite} does not pay {b['code']} here: {b['what_to_show']}")
+            elif b.get("verdict") == "unclear" and b.get("condition"):
+                steps.insert(0, f"{_poss(b['payer_group'])} rule for {b['code']}{cite}: {b['condition']}")
+            else:
+                steps.insert(0, f"What {b['payer_group']} needs to pay {b['code']}{cite}: {b['what_to_show']}")
+        out["payer_rule"] = next((b.get("verdict") for b in blocks if b.get("researched_verdict")), None)
+    out["steps"] = [_clean(s) for s in steps if s]
+    out["buttons"] = [b for b in buttons if b in BUTTONS]
+    out["instructions"] = _instructions(f, {}, out.get("action") or "", out["steps"], out.get("needs") or [], out.get("deadline"),
+                                        out.get("basis"))
+    return out
