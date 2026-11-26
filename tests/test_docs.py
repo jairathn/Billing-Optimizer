@@ -606,7 +606,7 @@ def test_the_note_matching_docs_follow_find_note():
 # the button and label words the docs quote, as the pages show them
 PAGE_WORDS = ["It went out as billed: fax it", "Still unpaid in EMA: fax it anyway", "Fax them anyway", "Needs a person to match",
               "Send it to", "For a person", "Test the TriZetto connection", "Test the fax line", "Appeal everything appealable",
-              "Appeal by fax", "Not tried now", "Tie a fax that came in to this item"]
+              "Appeal by fax", "Not tried now", "Tie a fax that came in to this item", "Before you send it"]
 
 
 def test_the_words_the_docs_quote_are_on_the_pages():

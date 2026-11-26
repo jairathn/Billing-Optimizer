@@ -378,3 +378,202 @@ def test_the_note_review_is_told_the_payers_rule_and_what_the_note_must_show():
     client = _Client(_review_answer())
     notes.review_note(ctx, "Visit note text.", client=client)
     assert "published rule" not in client.asked[0]["messages"][0]["content"][0]["text"]
+
+
+# ================================================================ the owner's table: pursued until the owner accepts it
+@pytest.fixture
+def ema_env(monkeypatch):
+    from remitwatch import ema_checks as ec, ema_reports as er
+    from tests import ema_fixtures as F
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setenv("REMITWATCH_EMA_STRICT", "1")
+    for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES", "REMITWATCH_EMA_LEDGER",
+              "REMITWATCH_EMA_REPORT_KEEP", "REMITWATCH_EMA_CLOSES"):
+        monkeypatch.delenv(k, raising=False)
+    ec._LAST_POST.clear()
+
+
+@pytest.fixture(params=KINDS)
+def estore(request, tmp_path, ema_env):
+    from remitwatch import ema_reports as er
+    from remitwatch.store import Store
+    from tests.test_ema_wiring import SALT_HEX
+    s = Store(str(tmp_path / "store.sqlite")) if request.param == "file" else Store(":memory:", compact=True)
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (SALT_HEX,))
+    s.conn.commit()
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def eledger(tmp_path):
+    from remitwatch import ema_ledger as el
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    yield lg
+    lg.close()
+
+
+KEY26 = "Anthem / BCBS|77600|from 2026-01-01|payer_policy"
+
+
+def _anthem_with_ema(store, ledger, tmp_path) -> None:
+    """Blue Cross paid 77600 on 25 visits in 2025. In 2026 it denies it on four claims as part of the surface radiation
+    code (CO-97) and answers two more as 77436, paying nothing. EMA's reports are on file (the owner's table is built)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import denial_world, remit as eremit
+    for n in range(25):
+        eremit(store, trace=f"8880{n:05d}", paid_on="2025-06-20",
+               claims=[{"pcn": F.claim_id(900 + n), "last": f"RAY{n}", "member": f"R{n:011d}",
+                        "lines": [("2025-06-02", "77600", 861, 322, [("CO", "45", 539)], {"allowed_cents": 32200})]}])
+    for n in range(4):
+        eremit(store, trace=f"8881{n:05d}", paid_on="2026-03-20",
+               claims=[{"pcn": F.claim_id(950 + n), "last": f"SUN{n}", "member": f"S{n:011d}",
+                        "lines": [("2026-03-02", "77436", 400, 150, [("CO", "45", 250)], {"allowed_cents": 15000}),
+                                  ("2026-03-02", "77600", 861, 0, [("CO", "97", 861)])]}])
+    for n in range(2):
+        eremit(store, trace=f"8882{n:05d}", paid_on="2026-03-20",
+               claims=[{"pcn": F.claim_id(970 + n), "last": f"MOON{n}", "member": f"T{n:011d}",
+                        "lines": [("2026-03-02", "77436", 861, 0, [("CO", "97", 861)], {"original_procedure_code": "77600"})]}])
+    denial_world(store, ledger, tmp_path)
+
+
+def test_a_never_payable_pattern_stays_pursued_until_the_owner_accepts_it(estore, eledger, tmp_path):
+    """Nothing is accepted by default: the six 2026 denials of Anthem's 77600 (four bundled, two answered as 77436, the
+    code-change items among them) are one pattern in the owner's table, pursued, every one on Work now, each panel
+    offering to accept the pattern. The owner accepts it: the next run takes all six off Work now and counts them; Pursue
+    brings them back. Anthem's 2025 lines (it paid them) are not the pattern."""
+    from remitwatch import api_ema, story
+    from remitwatch import ema_checks as ec
+    from tests.test_ema_wiring import items, run
+    _anthem_with_ema(estore, eledger, tmp_path)
+    run(estore)
+    mine = "payer_group='Anthem / BCBS' AND COALESCE(stale,0)=0 AND (procedure_code='77600' OR original_procedure_code='77600')"
+    got = items(estore, mine)
+    assert sorted(f["signal"] for f in got) == ["CODE_CHANGED"] * 2 + ["PROCEDURE_BUNDLED"] * 4, [f["signal"] for f in got]
+    assert {(f["status"], f["work_state"]) for f in got} == {("open", "work_now")}
+    pol = json.loads(estore.conn.execute("SELECT value FROM meta WHERE key='ema:payer_policy'").fetchone()[0])["patterns"]
+    p = pol[KEY26]
+    assert (p["n"], p["decision"], p["default"], p["researched"], p["source"]) == (6, "pursue", True, "never_payable", "835")
+    assert not [k for k in pol if k.startswith("Anthem / BCBS|77600||")]          # 2025: paid, no pattern
+    estore.conn.row_factory = None
+    row = next(r for r in api_ema.policy_table(estore.conn)["patterns"] if r["pattern"] == KEY26)
+    assert (row["kind"], row["decision"], row["modifier"], row["items"]) == ("payer_policy", "pursue", "from 2026-01-01", 6)
+    assert row["research"]["verdict"] == "never_payable" and "77436" in row["research"]["rule"]
+    assert (row["answered"], row["paid"]) == (6, 0) and row["why"][0].startswith("Anthem / BCBS answered 6 77600 lines")
+    nx = story.explain(estore.conn, got[0]["finding_id"], today="2026-05-03")["next_step"]
+    assert "accept_pattern" in nx["buttons"] and nx["pattern"] == KEY26
+    ec.set_policy(estore.conn, KEY26, "accept", "owner")
+    det = run(estore)
+    assert items(estore, mine) == [] and det.ema_counts["payer_policy_835"] == 6
+    row = next(r for r in api_ema.policy_table(estore.conn)["patterns"] if r["pattern"] == KEY26)
+    assert (row["decision"], row["items"]) == ("accept", 6)                    # still counted, by whom and when
+    ec.set_policy(estore.conn, KEY26, "pursue", "owner")
+    run(estore)
+    assert len(items(estore, mine)) == 6
+
+
+def test_ema_only_denials_of_a_rule_that_changed_on_a_date_are_one_pattern_per_period(estore, eledger, tmp_path):
+    """Optum's 77600, denied in EMA (no remittance on file): for 2026 services never payable, for 2025 fixable on the
+    claim (the VA referral). Too few lines for the payer-policy count, but the research covers the pair: two patterns,
+    both pursued; accepting the 2026 one leaves the 2025 denials on the list."""
+    from remitwatch import ema_checks as ec
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import D, P, adj, charge, denial_world, items, run
+    optum, rows = P["optum"], []
+    for n, (svc, posted) in enumerate([(D(2026, 2, 2), D(2026, 3, 10))] * 3 + [(D(2025, 9, 2), D(2025, 10, 6))] * 2):
+        kw = dict(patient=n % 4, payer=optum, primary=optum, svc=svc + dt_days(n))
+        rows += [charge(F.link_no(800 + n), cpt="77600", amount=300, **kw),
+                 adj(F.link_no(800 + n), "CO-96", 300, cpt="77600", posted=posted + dt_days(n), **kw)]
+    denial_world(estore, eledger, tmp_path, rows)
+    run(estore)
+    lo = json.loads(estore.conn.execute("SELECT value FROM meta WHERE key='ema:c5_left_out'").fetchone()[0])
+    pats = lo["payer_policy"]["patterns"]
+    k26, k25 = "Optum (UHC)|77600|from 2026-01-01|payer_policy", "Optum (UHC)|77600|to 2025-12-31|payer_policy"
+    assert (pats[k26]["n"], pats[k26]["researched"], pats[k26]["decision"]) == (3, "never_payable", "pursue")
+    assert (pats[k25]["n"], pats[k25]["researched"], pats[k25]["decision"]) == (2, "claim", "pursue")
+    assert pats[k26]["answered"] is None                     # the payer-policy count did not find it: the research did
+    assert len(items(estore, "signal='EMA_DENIED'")) == 5
+    ec.set_policy(estore.conn, k26, "accept", "owner")
+    run(estore)
+    left = items(estore, "signal='EMA_DENIED'")
+    assert len(left) == 2 and all(f["service_date"].startswith("2025") for f in left)
+
+
+def dt_days(n: int):
+    import datetime as dt
+    return dt.timedelta(days=n)
+
+
+# ========================================================================================= the panel on both hosts
+def test_the_server_panel_and_packet_say_why(tmp_path, monkeypatch):
+    """On a server: the item's panel (explain) carries the "Why" block from the newest run, and the appeal packet route
+    gives its checklist."""
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    from remitwatch.store import Store
+    db = str(tmp_path / "store.sqlite")
+    s = Store(db)
+    _anthem_radiation(s, tmp_path)
+    Detector(s, run_id="t1", today="2026-04-01").run()
+    fid = _items(s, "payer_group=? AND procedure_code='77600' AND service_date LIKE '2026%'", ANTHEM)[0]["finding_id"]
+    s.close()
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", "")
+    c = TestClient(api.app)
+    x = c.get(f"/api/findings/{fid}/explain").json()
+    (b,) = x["explain"]["why_unpaid"]
+    assert (b["verdict"], b["code"]) == ("never_payable", "77600") and b["evidence"]["answered"] == 28
+    p = c.get(f"/api/appeal/{fid}").json()
+    assert p["checklist"][0].startswith("Before sending: Anthem / BCBS does not pay 77600")
+
+
+def test_the_serverless_panel_reads_the_runs_evidence_from_its_copy(box, monkeypatch):
+    """On the serverless host the run works on the compact store image and the panel reads the dashboard's copy: the
+    evidence (meta rarely_paid:why) travels with the copy, and the block is the same."""
+    import base64
+    from datetime import date, timedelta
+
+    from fastapi.testclient import TestClient
+
+    from remitwatch import api, cloud
+    from tests.test_cloud import DATA, PW, cycle
+    from tests.test_fax import XHR
+    from tests.test_remitwatch import remit
+    root, client, state = box
+    (root / DATA).mkdir(parents=True, exist_ok=True)
+    day = date.today() - timedelta(days=20)
+    dos, pay = day.strftime("%Y%m%d"), (day + timedelta(days=12)).strftime("%Y%m%d")
+    claims = [claim(400 + i, svc("77436", "400.00", "150.00", "150.00", "CAS*CO*45*250.00~", dos=dos)
+                    + svc("77600", "861.00", "0.00", None, "CAS*CO*97*861.00~LQ*HE*N19~", dos=dos), dos=dos) for i in range(6)]
+    (root / DATA / "r000.RMT").write_bytes(remit("".join(claims), "100.00", seg_count=99, isa_ctrl="000000001", pay_date=pay))
+    cycle(state, client)
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.delenv("REMITWATCH_ALLOW_OPEN", raising=False)
+    monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "OWNER_PASSWORD", "")
+    monkeypatch.setattr(cloud, "SERVING_COPY", cloud.ServingCopy())
+    h = dict(XHR, Authorization="Basic " + base64.b64encode(f"oda:{PW}".encode()).decode())
+    c = TestClient(api.app)
+    fid = next(i["finding_id"] for i in c.get("/api/findings?status=all", headers=h).json()["items"] if i.get("procedure_code") == "77600")
+    (b,) = c.get(f"/api/findings/{fid}/explain", headers=h).json()["explain"]["why_unpaid"]
+    assert (b["verdict"], b["pattern"]) == ("never_payable", KEY26)
+    assert b["evidence"]["answered"] == 6 and b["evidence"]["other_line_paid"] == 6
+
+
+from tests.test_cloud import box  # noqa: E402,F401  (a fixture: the serverless state folder)
+
+
+def test_the_docs_say_what_the_panel_and_the_policy_page_do():
+    """OPERATIONS.md tells the billers and the owner what the code does: the words the panel uses, the data file, that
+    nothing is accepted by default and that the packet's list is never sent."""
+    from tests.test_docs import flat
+    ops = flat("docs/OPERATIONS.md")
+    assert rp.VERDICT_WORDS["never_payable"] in ops and "remitwatch/data/payer_code_rules.json" in ops
+    assert "nothing is accepted by default" in ops and "never sent to the payer" in ops and "two patterns there, one per period" in ops
+    assert "5% or less of the lines it answered since 2025" in ops and rp.SINCE == "2025-01-01" and rp.MAX_PAID_SHARE == 0.05
