@@ -1,7 +1,7 @@
 # Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
 
 Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
-Branch: wip/hook. Last updated: 2026-11-26 21:15 UTC (two earlier stamps here were written ahead of the clock).
+Branch: wip/hook. Last updated: 2026-11-26 21:14 UTC.
 
 ## Done
 - 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
@@ -117,8 +117,20 @@ Branch: wip/hook. Last updated: 2026-11-26 21:15 UTC (two earlier stamps here we
   diagnose, repair, upload_chunks, uploads, ema_pages, results, docs): 894 passed, 1 skipped.
 - node tests/calc_model_check.js (79 checks) and node tests/lab_review_check.js (143 checks): none failing.
 
+- Python 3.11.1 / SQLite 3.40.0 (venv_sqlite340), whole suite in 3 shards: 218 failing tests. 55 are the same as
+  python3's (above). 162 fail only for want of Connection.serialize in that build (allowed by CLAUDE.md). 1
+  (test_feed_and_day.py::test_the_pages_say_how_far_the_remittances_reach[server], a browser banner under load) passed
+  when run alone. No SQL error of any kind (no OperationalError in any log).
+
+## Left for others (not this unit's)
+- CLAUDE.md line 87 still says the daily cron calls /api/cron/cycle at 10:17 UTC; agents may not edit CLAUDE.md.
+- The 1,892 vanished open items ($203,702) wait for the final stage's explanation and the owner's Accept.
+- Vercel with EMA's Production in the image does not fit one run (orchestrator decision 6: the A/R only there); the
+  integrator checks 'ar' keeps Production rows out of the image (the img_ema test above put them in by hand).
+- Dated tests (hosts-5 and the fax files above) fail against the real clock on the tip too.
+
 ## Next
-1. The whole suite in venv_sqlite340 (running), then the final report.
+1. The integrator merges wip/hook (privacy-3 now has its test on this branch).
 
 ## Numbers measured so far
 - (from the earlier runs, see plans/HANDOFF.md section 0 item 2): three server cycles converge; five faults detected,
