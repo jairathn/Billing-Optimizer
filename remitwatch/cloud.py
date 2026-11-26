@@ -1841,8 +1841,10 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
     n = cents = 0
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
-        where = ("work_state IN ('work_now', 'waiting')" if "work_state" in cols
-                 else "status IN ('open', 'in_progress', 'appealed')")
+        # an item with no state yet (the first run of a release that adds it, before its analysis) counts by its status
+        by_status = "status IN ('open', 'in_progress', 'appealed')"
+        where = (f"(work_state IN ('work_now', 'waiting') OR (work_state IS NULL AND {by_status}))" if "work_state" in cols
+                 else by_status)
         n, cents = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE COALESCE(stale, 0) = 0 "
                                 f"AND {where}").fetchone()
     except sqlite3.Error as exc:        # a store with no items yet: said as such

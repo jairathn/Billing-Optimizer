@@ -1299,6 +1299,24 @@ def test_a_pressed_run_short_of_time_hands_the_analysis_on_and_the_chain_continu
     assert "detect" in nxt and nxt["analysed"]["at"] == nxt["finished"]
 
 
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_the_note_counts_open_items_a_release_has_not_given_a_state_yet(tmp_path, kind):
+    """The first run of a release that adds the items' state (work_state) loads items with none: when it hands the
+    analysis on, the note still counts the open ones by their status (not "0 open items ($0)"); items with a state are
+    counted by it. On both store kinds (the server's file and the compact image Vercel holds)."""
+    from remitwatch import cloud
+    from tests.test_runlog import make_store
+    st = make_store(kind, tmp_path)
+    st.conn.executemany("INSERT INTO findings (finding_id, status, work_state, stale, shortfall_cents) VALUES (?,?,?,?,?)", [
+        ("a" * 24, "open", None, 0, 12000), ("b" * 24, "appealed", None, 0, 3000), ("c" * 24, "resolved", None, 0, 500),
+        ("d" * 24, "open", "work_now", 0, 700), ("e" * 24, "open", "done", 0, 900), ("f" * 24, "open", None, 1, 800)])
+    st.conn.commit()
+    note = cloud.unchecked_note(st.conn, pending=True, waiting_files=False, plan={"level": 0}, analysed=None, why="time")
+    assert note["n"] == 3 and note["cents"] == 15700, note
+    assert "3 open items ($157)" in note["text"], note["text"]
+    st.close()
+
+
 def test_a_deferred_press_with_nothing_new_says_so_and_names_the_reason(box):
     """The note of a pressed run that hands the analysis on is true to what happened: with nothing read since the last
     analysis, the lists stand as that analysis left them (no file went unchecked), and the reason named is the one that
