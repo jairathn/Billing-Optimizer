@@ -1,0 +1,941 @@
+{
+ "about": "Public facts about payers and codes for owner rule 4.2 (codes a payer almost never pays). One entry per payer group and code: the verdict (note, claim, never_payable, unclear), the payer's published rule, what the note or claim must show, and the sources with the exact sentence quoted. Every source was fetched twice on 2026-11-26 and its title, date and quotes matched both times. No counts, dollars or practice data: the evidence from the store is computed live by the application. applies_when names a condition the application checks on the item's own claim before it shows the entry's verdict: em_with_modifier_25 (an office or outpatient E/M line of the same claim and date carries modifier 25). When the condition does not hold, or cannot be checked, the item shows the rule with the verdict unclear.",
+ "version": "2026-11-26",
+ "verdicts": {
+  "note": "fixable by what the visit note shows",
+  "claim": "fixable on the claim (modifier, code, diagnosis order, provider enrollment, a separate claim, the right payer)",
+  "never_payable": "not payable under the cited rule; the item stays pursued until the owner accepts the pattern",
+  "unclear": "no published rule found that explains the denial"
+ },
+ "rules": [
+  {
+   "payer_group": "UnitedHealthcare Medicare Advantage",
+   "payer_group_aliases": [
+    "UHC Medicare Advantage"
+   ],
+   "code": "G6001",
+   "verdict": "never_payable",
+   "service_dates": {
+    "to": "2025-12-31"
+   },
+   "rule": "UnitedHealthcare required prior authorization for G6001 (image-guided radiation therapy, IGRT) until 12/31/2025 in its Medicare Advantage, commercial, Community Plan and Individual Exchange plans; G6001 is a termed code from 2026. Its Medicare Advantage policy finds no Medicare NCD or LCD for IGRT and applies the commercial medical policy 'Radiation Therapy: Fractionation, Image-Guidance, and Special Services', whose versions before 03/01/2026 said IGRT is not medically necessary for superficial treatment of skin cancer, including superficial radiation therapy or electronic brachytherapy, when the policy's listed criteria are not met. For superficial radiation therapy of skin cancer with a service date before 2026, G6001 is not payable whatever the note shows. From 2026 ultrasound guidance for surface radiation therapy is CPT 77439, once per course, reported with 77437 or 77438.",
+   "what_to_show": "No note changes this. Before letting an item go, check whether an approved UnitedHealthcare authorization for the course listed G6001; if one did, resubmit with that authorization number. For 2026 dates, report 77439 (never G6001), once per course, with 77437 or 77438, and include it in the authorization request.",
+   "sources": [
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "On Jan. 1, 2026, the following codes will no longer require prior authorization:"
+    },
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "77014, G6001, G6002 and G6017"
+    },
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "This applies to UnitedHealthcare® Medicare Advantage Plans, UnitedHealthcare Community Plans, UnitedHealthcare commercial plans and UnitedHealthcare Individual Exchange plans."
+    },
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "We’re working to update all approved authorization for the termed IMRT, IGRT and Standard Radiation Therapy 2D/3D procedure codes with the updated radiation therapy procedure codes."
+    },
+    {
+     "source": "uhc_ma_radonc",
+     "quote": "Medicare does not have an NCD for IGRT. LCDs/LCAs do not exist."
+    },
+    {
+     "source": "uhc_ma_radonc",
+     "quote": "For coverage guidelines, refer to the UnitedHealthcare Commercial Medical Policy titled Radiation Therapy: Fractionation, Image-Guidance, and Special Services."
+    },
+    {
+     "source": "uhc_comm_rt_igrt",
+     "quote": "Removed language indicating image-guided radiation therapy (IGRT) is not medically necessary for superficial treatment of skin cancer including superficial radiation therapy or electronic brachytherapy when the [listed] criteria are not met"
+    },
+    {
+     "source": "ama_cpt2026_errata",
+     "quote": "superficial or orthovoltage, image guidance, ultrasound for placement of radiation therapy fields for treatment of cutaneous tumors, per course of treatment (List separately in addition to code for primary procedure)"
+    }
+   ]
+  },
+  {
+   "payer_group": "UnitedHealthcare",
+   "code": "G6001",
+   "verdict": "never_payable",
+   "service_dates": {
+    "to": "2025-12-31"
+   },
+   "rule": "UnitedHealthcare required prior authorization for G6001 (image-guided radiation therapy, IGRT) until 12/31/2025 in its Medicare Advantage, commercial, Community Plan and Individual Exchange plans; G6001 is a termed code from 2026. Its Medicare Advantage policy finds no Medicare NCD or LCD for IGRT and applies the commercial medical policy 'Radiation Therapy: Fractionation, Image-Guidance, and Special Services', whose versions before 03/01/2026 said IGRT is not medically necessary for superficial treatment of skin cancer, including superficial radiation therapy or electronic brachytherapy, when the policy's listed criteria are not met. For superficial radiation therapy of skin cancer with a service date before 2026, G6001 is not payable whatever the note shows. From 2026 ultrasound guidance for surface radiation therapy is CPT 77439, once per course, reported with 77437 or 77438.",
+   "what_to_show": "No note changes this. Before letting an item go, check whether an approved UnitedHealthcare authorization for the course listed G6001; if one did, resubmit with that authorization number. For 2026 dates, report 77439 (never G6001), once per course, with 77437 or 77438, and include it in the authorization request.",
+   "sources": [
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "On Jan. 1, 2026, the following codes will no longer require prior authorization:"
+    },
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "77014, G6001, G6002 and G6017"
+    },
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "This applies to UnitedHealthcare® Medicare Advantage Plans, UnitedHealthcare Community Plans, UnitedHealthcare commercial plans and UnitedHealthcare Individual Exchange plans."
+    },
+    {
+     "source": "uhc_rt_pa_2026",
+     "quote": "We’re working to update all approved authorization for the termed IMRT, IGRT and Standard Radiation Therapy 2D/3D procedure codes with the updated radiation therapy procedure codes."
+    },
+    {
+     "source": "uhc_ma_radonc",
+     "quote": "Medicare does not have an NCD for IGRT. LCDs/LCAs do not exist."
+    },
+    {
+     "source": "uhc_ma_radonc",
+     "quote": "For coverage guidelines, refer to the UnitedHealthcare Commercial Medical Policy titled Radiation Therapy: Fractionation, Image-Guidance, and Special Services."
+    },
+    {
+     "source": "uhc_comm_rt_igrt",
+     "quote": "Removed language indicating image-guided radiation therapy (IGRT) is not medically necessary for superficial treatment of skin cancer including superficial radiation therapy or electronic brachytherapy when the [listed] criteria are not met"
+    },
+    {
+     "source": "ama_cpt2026_errata",
+     "quote": "superficial or orthovoltage, image guidance, ultrasound for placement of radiation therapy fields for treatment of cutaneous tumors, per course of treatment (List separately in addition to code for primary procedure)"
+    }
+   ]
+  },
+  {
+   "payer_group": "Anthem / BCBS",
+   "code": "77600",
+   "verdict": "never_payable",
+   "service_dates": {
+    "from": "2026-01-01"
+   },
+   "rule": "CPT 2026 (effective 01/01/2026) says not to report the surface radiation therapy codes 77436, 77437, 77438 and 77439 together with hyperthermia 77600, and 77401 was deleted in favor of those codes. Hyperthermia given in the same course as surface radiation therapy is therefore not separately reportable for 2026 service dates, and a payer that edits by CPT instructions treats it as included in the radiation service. Medicare's national coverage of local hyperthermia with radiation for superficial skin malignancies (NCD 110.1) is a coverage rule and does not change the CPT coding instruction.",
+   "what_to_show": "No note changes this for a course of surface radiation therapy (77436-77439). Do not use modifier 59 or XS to get around a CPT 'do not report' instruction. 77600 can be reported only with a radiation service outside 77436-77439, and the note must name that service and its date.",
+   "sources": [
+    {
+     "source": "ama_cpt2026_errata",
+     "quote": "(Do not report 77436, 77437, 77438, 77439 in conjunction with 77261, 77262, 77263, 77280, 77285, 77290, 77295, 77300, 77306, 77307, 77316, 77317, 77318, 77331, 77332, 77333, 77334, 77387, 77402, 77407, 77412, 77427, 77431, 77432, 77435, 77469, 77470, 77499, 77600, 77605, 77610, 77615, 77620,"
+    },
+    {
+     "source": "ama_cpt2026_errata",
+     "quote": "(77401 has been deleted. For surface radiation therapy, see 77436, 77437, 77438, 77439)"
+    },
+    {
+     "source": "ncd_110_1",
+     "quote": "Local hyperthermia is covered under Medicare when used in connection with radiation therapy for the treatment of primary or metastatic cutaneous or subcutaneous superficial malignancies. It is not covered when used alone or in connection with chemotherapy."
+    }
+   ]
+  },
+  {
+   "payer_group": "Optum (UHC)",
+   "code": "77600",
+   "verdict": "never_payable",
+   "by_service_date": [
+    {
+     "from": "2026-01-01",
+     "verdict": "never_payable",
+     "rule": "CPT 2026 (effective 01/01/2026) says not to report the surface radiation therapy codes 77436, 77437, 77438 and 77439 together with hyperthermia 77600, and 77401 was deleted in favor of those codes. Hyperthermia given in the same course as surface radiation therapy is therefore not separately reportable for 2026 service dates, and a payer that edits by CPT instructions treats it as included in the radiation service. Medicare's national coverage of local hyperthermia with radiation for superficial skin malignancies (NCD 110.1) is a coverage rule and does not change the CPT coding instruction.",
+     "what_to_show": "No note changes this for a course of surface radiation therapy (77436-77439). Do not use modifier 59 or XS to get around a CPT 'do not report' instruction. 77600 can be reported only with a radiation service outside 77436-77439, and the note must name that service and its date."
+    },
+    {
+     "to": "2025-12-31",
+     "verdict": "claim",
+     "rule": "When the plan is VA community care, VA pays only for services within the authorized referral: services outside its scope need VA approval before care is given (the Request for Service process), and claims are processed with CMS's NCCI and MUE edits. Medicare's NCD 110.1 covers local hyperthermia with radiation for superficial skin malignancies, so the question is the referral's scope, not coverage.",
+     "what_to_show": "Check the referral (its standardized episode of care) for hyperthermia. If the referral or an approved Request for Service covered 77600 on that date, resubmit or appeal with the referral number and the approval. If not, it cannot be fixed after the fact; for future courses ask VA for approval before care (and, from 2026, do not report 77600 with 77436-77439 at all)."
+    }
+   ],
+   "rule": "CPT 2026 (effective 01/01/2026) says not to report the surface radiation therapy codes 77436, 77437, 77438 and 77439 together with hyperthermia 77600, and 77401 was deleted in favor of those codes. Hyperthermia given in the same course as surface radiation therapy is therefore not separately reportable for 2026 service dates, and a payer that edits by CPT instructions treats it as included in the radiation service. Medicare's national coverage of local hyperthermia with radiation for superficial skin malignancies (NCD 110.1) is a coverage rule and does not change the CPT coding instruction. Before 2026 the denials follow the plan's referral and coverage rules (see by_service_date).",
+   "what_to_show": "No note changes this for a course of surface radiation therapy (77436-77439). Do not use modifier 59 or XS to get around a CPT 'do not report' instruction. 77600 can be reported only with a radiation service outside 77436-77439, and the note must name that service and its date.",
+   "sources": [
+    {
+     "source": "ama_cpt2026_errata",
+     "quote": "(Do not report 77436, 77437, 77438, 77439 in conjunction with 77261, 77262, 77263, 77280, 77285, 77290, 77295, 77300, 77306, 77307, 77316, 77317, 77318, 77331, 77332, 77333, 77334, 77387, 77402, 77407, 77412, 77427, 77431, 77432, 77435, 77469, 77470, 77499, 77600, 77605, 77610, 77615, 77620,"
+    },
+    {
+     "source": "ama_cpt2026_errata",
+     "quote": "(77401 has been deleted. For surface radiation therapy, see 77436, 77437, 77438, 77439)"
+    },
+    {
+     "source": "ncd_110_1",
+     "quote": "Local hyperthermia is covered under Medicare when used in connection with radiation therapy for the treatment of primary or metastatic cutaneous or subcutaneous superficial malignancies. It is not covered when used alone or in connection with chemotherapy."
+    },
+    {
+     "source": "va_seoc",
+     "quote": "Services outside scope of the authorized referral require additional VA approval before care is provided."
+    },
+    {
+     "source": "va_seoc",
+     "quote": "Claims are processed in accordance with CMS National Correct Coding Initiative (NCCI), Medically Unlikely Edits (MUE), and other related payment edits."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "payer_group_aliases": [
+    "Medicaid KY",
+    "Medicaid IN"
+   ],
+   "code": "77600",
+   "verdict": "claim",
+   "by_service_date": [
+    {
+     "from": "2026-01-01",
+     "verdict": "never_payable",
+     "rule": "CPT 2026 (effective 01/01/2026) says not to report the surface radiation therapy codes 77436, 77437, 77438 and 77439 together with hyperthermia 77600, and 77401 was deleted in favor of those codes. Hyperthermia given in the same course as surface radiation therapy is therefore not separately reportable for 2026 service dates, and a payer that edits by CPT instructions treats it as included in the radiation service. Medicare's national coverage of local hyperthermia with radiation for superficial skin malignancies (NCD 110.1) is a coverage rule and does not change the CPT coding instruction.",
+     "what_to_show": "No note changes this for a course of surface radiation therapy (77436-77439). Do not use modifier 59 or XS to get around a CPT 'do not report' instruction. 77600 can be reported only with a radiation service outside 77436-77439, and the note must name that service and its date."
+    },
+    {
+     "to": "2025-12-31",
+     "verdict": "claim",
+     "rule": "State Medicaid pays only for services of enrolled providers. 42 CFR 455.410(b) makes the state require every ordering or referring physician or other professional providing services under the State plan to be enrolled, and 455.410(d) lets a Medicare-enrolled provider enroll so Medicaid can process the Medicare cost-sharing (crossover) claims. The remark codes N767 (provider not enrolled in the member's state Medicaid), N570 (credentialing data), N198 (rendering provider not affiliated with the pay-to provider), N288 and N255 (rendering and billing taxonomy) and reason B7 (provider not certified or eligible for this service on this date) name an enrollment problem, not a problem with the code. Reasons 24 and 109 mean the member's managed care plan, not fee-for-service Medicaid, must be billed.",
+     "what_to_show": "Fix the claim, not the note: confirm the rendering provider is enrolled with the member's state Medicaid and linked to the billing group, put the rendering and billing taxonomy codes on the claim, and resubmit within the filing limit. When the remittance says 24 or 109, send the claim to the member's Medicaid managed care plan. When it says 22, bill the primary payer first and send its remittance with the claim."
+    }
+   ],
+   "rule": "State Medicaid pays only for services of enrolled providers. 42 CFR 455.410(b) makes the state require every ordering or referring physician or other professional providing services under the State plan to be enrolled, and 455.410(d) lets a Medicare-enrolled provider enroll so Medicaid can process the Medicare cost-sharing (crossover) claims. The remark codes N767 (provider not enrolled in the member's state Medicaid), N570 (credentialing data), N198 (rendering provider not affiliated with the pay-to provider), N288 and N255 (rendering and billing taxonomy) and reason B7 (provider not certified or eligible for this service on this date) name an enrollment problem, not a problem with the code. Reasons 24 and 109 mean the member's managed care plan, not fee-for-service Medicaid, must be billed.",
+   "what_to_show": "Fix the claim, not the note: confirm the rendering provider is enrolled with the member's state Medicaid and linked to the billing group, put the rendering and billing taxonomy codes on the claim, and resubmit within the filing limit. When the remittance says 24 or 109, send the claim to the member's Medicaid managed care plan. When it says 22, bill the primary payer first and send its remittance with the claim.",
+   "sources": [
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must require all ordering or referring physicians or other professionals providing services under the State plan or under a waiver of the plan to be enrolled as participating providers."
+    },
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must allow enrollment of all Medicare-enrolled providers and suppliers for purposes of processing claims to determine Medicare cost-sharing"
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "The Medicaid state requires provider to be enrolled in the member's Medicaid state program prior to any claim benefits being processed."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid credentialing data."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Rendering provider must be affiliated with the pay-to provider."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid rendering provider taxonomy."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid billing provider taxonomy."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This provider was not certified/eligible to be paid for this procedure/service on this date of service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Charges are covered under a capitation agreement/managed care plan."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Claim/service not covered by this payer/contractor. You must send the claim/service to the correct payer/contractor."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This care may be covered by another payer per coordination of benefits."
+    },
+    {
+     "source": "ama_cpt2026_errata",
+     "quote": "(Do not report 77436, 77437, 77438, 77439 in conjunction with 77261, 77262, 77263, 77280, 77285, 77290, 77295, 77300, 77306, 77307, 77316, 77317, 77318, 77331, 77332, 77333, 77334, 77387, 77402, 77407, 77412, 77427, 77431, 77432, 77435, 77469, 77470, 77499, 77600, 77605, 77610, 77615, 77620,"
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "payer_group_aliases": [
+    "Medicaid KY",
+    "Medicaid IN"
+   ],
+   "code": "88305",
+   "verdict": "claim",
+   "rule": "State Medicaid pays only for services of enrolled providers. 42 CFR 455.410(b) makes the state require every ordering or referring physician or other professional providing services under the State plan to be enrolled, and 455.410(d) lets a Medicare-enrolled provider enroll so Medicaid can process the Medicare cost-sharing (crossover) claims. The remark codes N767 (provider not enrolled in the member's state Medicaid), N570 (credentialing data), N198 (rendering provider not affiliated with the pay-to provider), N288 and N255 (rendering and billing taxonomy) and reason B7 (provider not certified or eligible for this service on this date) name an enrollment problem, not a problem with the code. Reasons 24 and 109 mean the member's managed care plan, not fee-for-service Medicaid, must be billed.",
+   "what_to_show": "Fix the claim, not the note: confirm the rendering provider is enrolled with the member's state Medicaid and linked to the billing group, put the rendering and billing taxonomy codes on the claim, and resubmit within the filing limit. When the remittance says 24 or 109, send the claim to the member's Medicaid managed care plan. When it says 22, bill the primary payer first and send its remittance with the claim.",
+   "sources": [
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must require all ordering or referring physicians or other professionals providing services under the State plan or under a waiver of the plan to be enrolled as participating providers."
+    },
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must allow enrollment of all Medicare-enrolled providers and suppliers for purposes of processing claims to determine Medicare cost-sharing"
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "The Medicaid state requires provider to be enrolled in the member's Medicaid state program prior to any claim benefits being processed."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid credentialing data."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Rendering provider must be affiliated with the pay-to provider."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid rendering provider taxonomy."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid billing provider taxonomy."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This provider was not certified/eligible to be paid for this procedure/service on this date of service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Charges are covered under a capitation agreement/managed care plan."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Claim/service not covered by this payer/contractor. You must send the claim/service to the correct payer/contractor."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This care may be covered by another payer per coordination of benefits."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "payer_group_aliases": [
+    "Medicaid KY",
+    "Medicaid IN"
+   ],
+   "code": "11102",
+   "verdict": "claim",
+   "rule": "State Medicaid pays only for services of enrolled providers. 42 CFR 455.410(b) makes the state require every ordering or referring physician or other professional providing services under the State plan to be enrolled, and 455.410(d) lets a Medicare-enrolled provider enroll so Medicaid can process the Medicare cost-sharing (crossover) claims. The remark codes N767 (provider not enrolled in the member's state Medicaid), N570 (credentialing data), N198 (rendering provider not affiliated with the pay-to provider), N288 and N255 (rendering and billing taxonomy) and reason B7 (provider not certified or eligible for this service on this date) name an enrollment problem, not a problem with the code. Reasons 24 and 109 mean the member's managed care plan, not fee-for-service Medicaid, must be billed.",
+   "what_to_show": "Fix the claim, not the note: confirm the rendering provider is enrolled with the member's state Medicaid and linked to the billing group, put the rendering and billing taxonomy codes on the claim, and resubmit within the filing limit. When the remittance says 24 or 109, send the claim to the member's Medicaid managed care plan. When it says 22, bill the primary payer first and send its remittance with the claim.",
+   "sources": [
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must require all ordering or referring physicians or other professionals providing services under the State plan or under a waiver of the plan to be enrolled as participating providers."
+    },
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must allow enrollment of all Medicare-enrolled providers and suppliers for purposes of processing claims to determine Medicare cost-sharing"
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "The Medicaid state requires provider to be enrolled in the member's Medicaid state program prior to any claim benefits being processed."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid credentialing data."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Rendering provider must be affiliated with the pay-to provider."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid rendering provider taxonomy."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid billing provider taxonomy."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This provider was not certified/eligible to be paid for this procedure/service on this date of service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Charges are covered under a capitation agreement/managed care plan."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Claim/service not covered by this payer/contractor. You must send the claim/service to the correct payer/contractor."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This care may be covered by another payer per coordination of benefits."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "payer_group_aliases": [
+    "Medicaid KY",
+    "Medicaid IN"
+   ],
+   "code": "11103",
+   "verdict": "claim",
+   "rule": "State Medicaid pays only for services of enrolled providers. 42 CFR 455.410(b) makes the state require every ordering or referring physician or other professional providing services under the State plan to be enrolled, and 455.410(d) lets a Medicare-enrolled provider enroll so Medicaid can process the Medicare cost-sharing (crossover) claims. The remark codes N767 (provider not enrolled in the member's state Medicaid), N570 (credentialing data), N198 (rendering provider not affiliated with the pay-to provider), N288 and N255 (rendering and billing taxonomy) and reason B7 (provider not certified or eligible for this service on this date) name an enrollment problem, not a problem with the code. Reasons 24 and 109 mean the member's managed care plan, not fee-for-service Medicaid, must be billed.",
+   "what_to_show": "Fix the claim, not the note: confirm the rendering provider is enrolled with the member's state Medicaid and linked to the billing group, put the rendering and billing taxonomy codes on the claim, and resubmit within the filing limit. When the remittance says 24 or 109, send the claim to the member's Medicaid managed care plan. When it says 22, bill the primary payer first and send its remittance with the claim.",
+   "sources": [
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must require all ordering or referring physicians or other professionals providing services under the State plan or under a waiver of the plan to be enrolled as participating providers."
+    },
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must allow enrollment of all Medicare-enrolled providers and suppliers for purposes of processing claims to determine Medicare cost-sharing"
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "The Medicaid state requires provider to be enrolled in the member's Medicaid state program prior to any claim benefits being processed."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid credentialing data."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Rendering provider must be affiliated with the pay-to provider."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid rendering provider taxonomy."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid billing provider taxonomy."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This provider was not certified/eligible to be paid for this procedure/service on this date of service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Charges are covered under a capitation agreement/managed care plan."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Claim/service not covered by this payer/contractor. You must send the claim/service to the correct payer/contractor."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This care may be covered by another payer per coordination of benefits."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "payer_group_aliases": [
+    "Medicaid KY",
+    "Medicaid IN"
+   ],
+   "code": "99203",
+   "verdict": "claim",
+   "rule": "State Medicaid pays only for services of enrolled providers. 42 CFR 455.410(b) makes the state require every ordering or referring physician or other professional providing services under the State plan to be enrolled, and 455.410(d) lets a Medicare-enrolled provider enroll so Medicaid can process the Medicare cost-sharing (crossover) claims. The remark codes N767 (provider not enrolled in the member's state Medicaid), N570 (credentialing data), N198 (rendering provider not affiliated with the pay-to provider), N288 and N255 (rendering and billing taxonomy) and reason B7 (provider not certified or eligible for this service on this date) name an enrollment problem, not a problem with the code. Reasons 24 and 109 mean the member's managed care plan, not fee-for-service Medicaid, must be billed.",
+   "what_to_show": "Fix the claim, not the note: confirm the rendering provider is enrolled with the member's state Medicaid and linked to the billing group, put the rendering and billing taxonomy codes on the claim, and resubmit within the filing limit. When the remittance says 24 or 109, send the claim to the member's Medicaid managed care plan. When it says 22, bill the primary payer first and send its remittance with the claim.",
+   "sources": [
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must require all ordering or referring physicians or other professionals providing services under the State plan or under a waiver of the plan to be enrolled as participating providers."
+    },
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must allow enrollment of all Medicare-enrolled providers and suppliers for purposes of processing claims to determine Medicare cost-sharing"
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "The Medicaid state requires provider to be enrolled in the member's Medicaid state program prior to any claim benefits being processed."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid credentialing data."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Rendering provider must be affiliated with the pay-to provider."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid rendering provider taxonomy."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid billing provider taxonomy."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This provider was not certified/eligible to be paid for this procedure/service on this date of service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Charges are covered under a capitation agreement/managed care plan."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Claim/service not covered by this payer/contractor. You must send the claim/service to the correct payer/contractor."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This care may be covered by another payer per coordination of benefits."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "payer_group_aliases": [
+    "Medicaid KY",
+    "Medicaid IN"
+   ],
+   "code": "99213",
+   "verdict": "claim",
+   "rule": "State Medicaid pays only for services of enrolled providers. 42 CFR 455.410(b) makes the state require every ordering or referring physician or other professional providing services under the State plan to be enrolled, and 455.410(d) lets a Medicare-enrolled provider enroll so Medicaid can process the Medicare cost-sharing (crossover) claims. The remark codes N767 (provider not enrolled in the member's state Medicaid), N570 (credentialing data), N198 (rendering provider not affiliated with the pay-to provider), N288 and N255 (rendering and billing taxonomy) and reason B7 (provider not certified or eligible for this service on this date) name an enrollment problem, not a problem with the code. Reasons 24 and 109 mean the member's managed care plan, not fee-for-service Medicaid, must be billed.",
+   "what_to_show": "Fix the claim, not the note: confirm the rendering provider is enrolled with the member's state Medicaid and linked to the billing group, put the rendering and billing taxonomy codes on the claim, and resubmit within the filing limit. When the remittance says 24 or 109, send the claim to the member's Medicaid managed care plan. When it says 22, bill the primary payer first and send its remittance with the claim.",
+   "sources": [
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must require all ordering or referring physicians or other professionals providing services under the State plan or under a waiver of the plan to be enrolled as participating providers."
+    },
+    {
+     "source": "ecfr_455_410",
+     "quote": "The State Medicaid agency must allow enrollment of all Medicare-enrolled providers and suppliers for purposes of processing claims to determine Medicare cost-sharing"
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "The Medicaid state requires provider to be enrolled in the member's Medicaid state program prior to any claim benefits being processed."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid credentialing data."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Rendering provider must be affiliated with the pay-to provider."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid rendering provider taxonomy."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid billing provider taxonomy."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This provider was not certified/eligible to be paid for this procedure/service on this date of service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Charges are covered under a capitation agreement/managed care plan."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Claim/service not covered by this payer/contractor. You must send the claim/service to the correct payer/contractor."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This care may be covered by another payer per coordination of benefits."
+    }
+   ]
+  },
+  {
+   "payer_group": "Anthem / BCBS",
+   "code": "G2211",
+   "verdict": "never_payable",
+   "rule": "Anthem's commercial reimbursement policy 'Bundled Services and Supplies - Professional' (C-08003) lists G2211 in Section 1, services and supplies not eligible for separate reimbursement, and says modifiers do not override that denial. Checked on the Virginia plan's copy of the policy and its Section 1 coding grid; the Kentucky copy was not found online, so confirm it with Anthem Kentucky.",
+   "what_to_show": "No note changes this. Stop reporting G2211 to Anthem commercial plans unless the contract says Anthem pays it; ask Anthem Kentucky for its own C-08003 Section 1 list to confirm.",
+   "sources": [
+    {
+     "source": "anthem_c08003",
+     "quote": "The health plan considers certain services and supplies to be ineligible for separate reimbursement when reported by a professional provider, unless provider, state, or federal contracts and/or requirements indicate otherwise."
+    },
+    {
+     "source": "anthem_c08003",
+     "quote": "In addition, modifiers will not override the denial for the always bundled services and/or supplies listed in the embedded document."
+    },
+    {
+     "source": "anthem_bundled_sec1",
+     "quote": "G2211 Visit complexity inherent to evaluation and management associated with medical care services that serve as the continuing focal point for all needed health care services"
+    },
+    {
+     "source": "anthem_bundled_sec1",
+     "quote": "Services considered always bundled will not be allowed for separate reimbursement when billed by a professional provider."
+    }
+   ]
+  },
+  {
+   "payer_group": "UnitedHealthcare",
+   "code": "G2211",
+   "verdict": "never_payable",
+   "rule": "UnitedHealthcare's commercial and Individual Exchange 'Rebundling Policy, Professional' (Q&A 13, added 09/01/2024) says G2211 and G0545 are part of the payment for the evaluation and management service and are not paid separately.",
+   "what_to_show": "No note changes this. Stop reporting G2211 to UnitedHealthcare commercial and Individual Exchange plans.",
+   "sources": [
+    {
+     "source": "uhc_comm_rebundling",
+     "quote": "Q: Will UnitedHealthcare Commercial and Individual Exchange allow separate reimbursement for codes G2211 and G0545 for visit complexity when billed on the same date of service for the same patient by the same physician or Other QHP with an Evaluation and Management Service?"
+    },
+    {
+     "source": "uhc_comm_rebundling",
+     "quote": "A: No, visit complexity for services G2211 and G0545 are structured in the reimbursement for evaluation and management services and not paid separately."
+    }
+   ]
+  },
+  {
+   "payer_group": "UMR",
+   "code": "G2211",
+   "verdict": "unclear",
+   "rule": "No UMR rule on G2211 was found published. UnitedHealthcare's commercial Rebundling Policy says G2211 is not paid separately, but it names UnitedHealthcare commercial and Individual Exchange plans, not plans UMR administers.",
+   "what_to_show": "Ask UMR for its written G2211 rule for the plan. No change to the note is known to help.",
+   "sources": [
+    {
+     "source": "uhc_comm_rebundling",
+     "quote": "A: No, visit complexity for services G2211 and G0545 are structured in the reimbursement for evaluation and management services and not paid separately."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This procedure is not paid separately."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Not covered when performed during the same session/date as a previously processed service for the patient."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Allowed amount has been reduced because a component of the basic procedure/test was paid."
+    }
+   ]
+  },
+  {
+   "payer_group": "UHC Integrated Services (Wausau)",
+   "code": "G2211",
+   "verdict": "unclear",
+   "rule": "No published rule from this administrator on G2211 was found. Remark N448 means the code is not in the plan's fee schedule or contract.",
+   "what_to_show": "Ask the administrator for its written G2211 rule for the plan. No change to the note is known to help.",
+   "sources": [
+    {
+     "source": "x12_rarc",
+     "quote": "This drug/service/supply is not included in the fee schedule or contracted/legislated fee arrangement."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This procedure is not paid separately."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicare KY (CGS J15)",
+   "code": "G2211",
+   "verdict": "never_payable",
+   "rule": "Medicare does not pay G2211 when the office or outpatient E/M visit it is added to is reported with modifier 25, except, from 01/01/2025, when the service that required modifier 25 is an allowed Part B preventive service, an immunization administration or an annual wellness visit. A minor procedure on the same day (for example a destruction or a biopsy) is not such a service, so G2211 on that visit is not payable. Medicare Advantage plans that follow Medicare apply the same edit. A G2211 line also fails when its E/M line is not paid (reason B15, remark N122).",
+   "what_to_show": "No note changes this when the E/M carries modifier 25 for a procedure. Report G2211 only on an E/M without modifier 25, or with modifier 25 only for an allowed preventive service, immunization or annual wellness visit. When the E/M itself was denied, work the E/M first; G2211 follows it.",
+   "sources": [
+    {
+     "source": "cms_mm13473",
+     "quote": "G2211 isn’t payable when you report the associated office and outpatient E/M visit with modifier 25, except in certain cases starting January 1, 2025."
+    },
+    {
+     "source": "cms_mm13473",
+     "quote": "G2211 is payable even if you report the base code with modifier 25 only when the service or other procedure requiring the reporting of modifier 25 is an allowed Part B service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This service/procedure requires that a qualifying service/procedure be received and covered. The qualifying other service/procedure has not been received/adjudicated."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Add-on code cannot be billed by itself."
+    }
+   ],
+   "applies_when": "em_with_modifier_25"
+  },
+  {
+   "payer_group": "UnitedHealthcare Medicare Advantage",
+   "payer_group_aliases": [
+    "UHC Medicare Advantage"
+   ],
+   "code": "G2211",
+   "verdict": "never_payable",
+   "rule": "Medicare does not pay G2211 when the office or outpatient E/M visit it is added to is reported with modifier 25, except, from 01/01/2025, when the service that required modifier 25 is an allowed Part B preventive service, an immunization administration or an annual wellness visit. A minor procedure on the same day (for example a destruction or a biopsy) is not such a service, so G2211 on that visit is not payable. Medicare Advantage plans that follow Medicare apply the same edit. A G2211 line also fails when its E/M line is not paid (reason B15, remark N122).",
+   "what_to_show": "No note changes this when the E/M carries modifier 25 for a procedure. Report G2211 only on an E/M without modifier 25, or with modifier 25 only for an allowed preventive service, immunization or annual wellness visit. When the E/M itself was denied, work the E/M first; G2211 follows it.",
+   "sources": [
+    {
+     "source": "cms_mm13473",
+     "quote": "G2211 isn’t payable when you report the associated office and outpatient E/M visit with modifier 25, except in certain cases starting January 1, 2025."
+    },
+    {
+     "source": "cms_mm13473",
+     "quote": "G2211 is payable even if you report the base code with modifier 25 only when the service or other procedure requiring the reporting of modifier 25 is an allowed Part B service."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "This service/procedure requires that a qualifying service/procedure be received and covered. The qualifying other service/procedure has not been received/adjudicated."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Add-on code cannot be billed by itself."
+    }
+   ],
+   "applies_when": "em_with_modifier_25"
+  },
+  {
+   "payer_group": "Aetna",
+   "code": "G2211",
+   "verdict": "unclear",
+   "rule": "Aetna's own G2211 rule for commercial plans could not be retrieved. For Aetna Medicare plans Medicare's rule applies: G2211 is not paid when its E/M carries modifier 25, except for an allowed preventive service, immunization or annual wellness visit.",
+   "what_to_show": "Ask Aetna for its written G2211 rule for commercial plans; for Medicare plans see the modifier 25 rule.",
+   "sources": [
+    {
+     "source": "cms_mm13473",
+     "quote": "G2211 isn’t payable when you report the associated office and outpatient E/M visit with modifier 25, except in certain cases starting January 1, 2025."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "The benefit for this service is included in the payment/allowance for another service/procedure that has already been adjudicated."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid KY",
+   "code": "G2211",
+   "verdict": "unclear",
+   "rule": "No Kentucky Medicaid statement on G2211 was found. Remarks N95 (this provider type or specialty may not bill this service) and N216 (the plan does not cover this type of service) and the enrollment remarks are the payer's only stated reasons.",
+   "what_to_show": "Ask Kentucky Medicaid (and the member's managed care plan) whether G2211 is covered for the provider type.",
+   "sources": [
+    {
+     "source": "x12_rarc",
+     "quote": "This provider type/provider specialty may not bill this service."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "We do not offer coverage for this type of service or the patient is not enrolled in this portion of our benefit package."
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Payment is denied when performed/billed by this type of provider."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicaid IN",
+   "code": "G2211",
+   "verdict": "unclear",
+   "rule": "No Indiana Medicaid statement on G2211 was found in the published bulletins searched.",
+   "what_to_show": "Check the Indiana Medicaid professional fee schedule for G2211 before billing it.",
+   "sources": [
+    {
+     "source": "x12_carc",
+     "quote": "This service/equipment/drug is not covered under the patient's current benefit plan"
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Consult plan benefit documents/guidelines for information about restrictions for this service."
+    }
+   ]
+  },
+  {
+   "payer_group": "Self-funded plan TPAs",
+   "code": "G2211",
+   "verdict": "unclear",
+   "rule": "Each self-funded plan's own documents decide; no common published rule exists for this group of administrators.",
+   "what_to_show": "Ask the plan's administrator for its written G2211 rule.",
+   "sources": [
+    {
+     "source": "x12_carc",
+     "quote": "This procedure is not paid separately."
+    }
+   ]
+  },
+  {
+   "payer_group": "Humana Medicare Advantage",
+   "code": "G0127",
+   "verdict": "claim",
+   "rule": "Medicare does not cover routine foot care, which includes trimming, cutting, clipping or debriding nails, except in the presence of a systemic condition with class findings (one Class A finding, two Class B findings, or one Class B and two Class C findings) or for mycotic nails with pain, secondary infection or marked limitation of ambulation. The Medicare Administrative Contractors' billing articles require modifier Q7, Q8 or Q9 on claims based on a systemic condition. A Medicare Advantage plan covers what Medicare covers.",
+   "what_to_show": "The note must name the systemic condition and the class findings found on that day (or the mycotic nail findings with pain, infection or limited walking), and, for conditions that need it, the doctor of medicine or osteopathy actively managing it and the date the patient was last seen. The claim must carry Q7, Q8 or Q9 matching the class findings, with the systemic condition's diagnosis.",
+   "sources": [
+    {
+     "source": "cms_mln_podiatry",
+     "quote": "Trimming, cutting, clipping, or debriding nails"
+    },
+    {
+     "source": "cms_mln_podiatry",
+     "quote": "We may apply the coverage presumption when the physician providing the routine foot care has identified 1 of the following:"
+    },
+    {
+     "source": "wps_a56232",
+     "quote": "All claims for routine foot care based on the presence of a systemic condition must have a billing modifier of Q7, Q8, or Q9 to be considered for payment."
+    }
+   ]
+  },
+  {
+   "payer_group": "Anthem / BCBS",
+   "code": "J2327",
+   "verdict": "unclear",
+   "rule": "The denials are for authorization timing and missing drug information, not for the code itself; no Anthem rule specific to this drug code was looked up.",
+   "what_to_show": "Get the drug's prior authorization before the dose and report the National Drug Code with the units.",
+   "sources": [
+    {
+     "source": "x12_carc",
+     "quote": "Payment adjusted because pre-certification/authorization not received in a timely fashion"
+    },
+    {
+     "source": "x12_carc",
+     "quote": "Precertification/authorization/notification/pre-treatment absent."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Missing/incomplete/invalid/ deactivated/withdrawn National Drug Code (NDC)."
+    }
+   ]
+  },
+  {
+   "payer_group": "Medicare KY (CGS J15)",
+   "code": "J3490",
+   "verdict": "claim",
+   "rule": "For an unclassified drug the claim must carry what the payer needs to price it; the payer's remark M23 asks for the invoice, and MA130 means the claim was unprocessable and must be sent again complete.",
+   "what_to_show": "Send a new claim with the drug's name, dose, National Drug Code and the invoice.",
+   "sources": [
+    {
+     "source": "x12_rarc",
+     "quote": "Missing invoice."
+    },
+    {
+     "source": "x12_rarc",
+     "quote": "Your claim contains incomplete and/or invalid information, and no appeal rights are afforded because the claim is unprocessable."
+    }
+   ]
+  },
+  {
+   "payer_group": "Anthem / BCBS Medicaid",
+   "code": "J3490",
+   "verdict": "unclear",
+   "rule": "No answers from this plan since 2025 and no published rule was found for it.",
+   "what_to_show": "Ask the plan for its rule on unclassified drugs before billing one again.",
+   "sources": []
+  }
+ ],
+ "sources": {
+  "uhc_rt_pa_2026": {
+   "title": "New simplified radiation therapy prior authorizations | UHCprovider.com",
+   "publisher": "UnitedHealthcare",
+   "url": "https://www.uhcprovider.com/en/resource-library/news/2026/simplified-radiation-therapy-pa.html",
+   "date": "December 23, 2025 (changes effective Jan. 1, 2026)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:43Z"
+  },
+  "uhc_ma_radonc": {
+   "title": "Radiation and Oncologic Procedures – Medicare Advantage Medical Policy",
+   "publisher": "UnitedHealthcare",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/policies/medadv-mp/radiation-oncologic-procedures.pdf",
+   "date": "Policy Number MMP077.17, effective September 1, 2026 (last committee approval February 11, 2026)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:42Z"
+  },
+  "uhc_comm_rt_igrt": {
+   "title": "Radiation Therapy: Fractionation, Image-Guidance, and Special Services – Commercial and Individual Exchange Medical Policy",
+   "publisher": "UnitedHealthcare",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/policies/comm-medical-drug/radiation-therapy-fractionation-image-special-services.pdf",
+   "date": "Policy Number 2026T0613L, effective March 1, 2026 (Policy History entry 03/01/2026)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:42Z"
+  },
+  "ama_cpt2026_errata": {
+   "title": "Errata and Technical Corrections – CPT® 2026",
+   "publisher": "American Medical Association",
+   "url": "https://www.ama-assn.org/system/files/2026-cpt-corrections-errata.pdf",
+   "date": "June 2, 2026 (Surface Radiation Therapy entries posted 12/12/25; effective January 1, 2026)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:41Z"
+  },
+  "ncd_110_1": {
+   "title": "NCD - Hyperthermia for Treatment of Cancer (110.1)",
+   "publisher": "Centers for Medicare & Medicaid Services",
+   "url": "https://www.cms.gov/medicare-coverage-database/view/ncd.aspx?NCDId=66",
+   "date": "Effective date of this version 12/31/1984 (only version)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:41Z"
+  },
+  "va_seoc": {
+   "title": "Standardized Episodes of Care - Community Care",
+   "publisher": "U.S. Department of Veterans Affairs",
+   "url": "https://department.va.gov/vha/community-care/care-coordination/standardized-episodes-of-care/",
+   "date": "Date last updated: September 9, 2026",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:43Z"
+  },
+  "ecfr_455_410": {
+   "title": "§ 455.410 Enrollment and screening of providers.",
+   "publisher": "Electronic Code of Federal Regulations (eCFR)",
+   "url": "https://www.ecfr.gov/api/versioner/v1/full/2026-11-20/title-42.xml?part=455&section=455.410",
+   "date": "Text as of 2026-11-20 (76 FR 5968, Feb. 2, 2011, as amended at 86 FR 45521, Aug. 13, 2021)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:46Z"
+  },
+  "x12_rarc": {
+   "title": "Remittance Advice Remark Codes | X12",
+   "publisher": "X12",
+   "url": "https://x12.org/codes/remittance-advice-remark-codes",
+   "date": "Code list as published by X12 (each code carries its own start date)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:48Z"
+  },
+  "x12_carc": {
+   "title": "Claim Adjustment Reason Codes | X12",
+   "publisher": "X12",
+   "url": "https://x12.org/codes/claim-adjustment-reason-codes",
+   "date": "Code list as published by X12 (each code carries its own start date)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:47Z"
+  },
+  "anthem_c08003": {
+   "title": "Bundled Services and Supplies - Professional (Commercial Reimbursement Policy C-08003)",
+   "publisher": "Anthem Blue Cross and Blue Shield",
+   "url": "https://www.anthembluecross.com/content/dam/digital/docs/provider/commercial/policy/reimb/C-08003VA.pdf",
+   "date": "Last approval 09/03/2025, effective 12/01/2025",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:45Z"
+  },
+  "anthem_bundled_sec1": {
+   "title": "Bundled Services and Supplies – Section 1: Services and Supplies not eligible for separate reimbursement",
+   "publisher": "Anthem Blue Cross and Blue Shield",
+   "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/bundled_services_section1_va.pdf",
+   "date": "Coding grid file dated June 22, 2026 (PDF creation date)",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:45Z"
+  },
+  "uhc_comm_rebundling": {
+   "title": "Rebundling Policy, Professional - Reimbursement Policy - UnitedHealthcare Commercial Plans and Individual Exchange",
+   "publisher": "UnitedHealthcare",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/policies/comm-reimbursement/COMM-Rebundling-Policy.pdf",
+   "date": "Policy Number 2026R0056A (version of 1/1/2026); Q&A #13 on G2211 added 9/1/2024",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:44Z"
+  },
+  "cms_mm13473": {
+   "title": "MM13473 - How to Use the Office & Outpatient Evaluation and Management Visit Complexity Add-on Code G2211",
+   "publisher": "Centers for Medicare & Medicaid Services (MLN Matters)",
+   "url": "https://www.cms.gov/files/document/mm13473-how-use-office-and-outpatient-evaluation-and-management-visit-complexity-add-code-G2211.pdf",
+   "date": "Related CR release January 18, 2024; revised April 29, 2025; effective January 1, 2024 and January 1, 2025",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:45Z"
+  },
+  "cms_mln_podiatry": {
+   "title": "Podiatry Care | CMS",
+   "publisher": "Centers for Medicare & Medicaid Services (MLN Provider Compliance Tips)",
+   "url": "https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/podiatry-care",
+   "date": "Page last modified 02/11/2026",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:46Z"
+  },
+  "wps_a56232": {
+   "title": "Article - Billing and Coding: Foot Care (A56232)",
+   "publisher": "Wisconsin Physicians Service (Medicare Administrative Contractor), CMS Medicare Coverage Database",
+   "url": "https://www.cms.gov/medicare-coverage-database/view/article.aspx?articleid=56232",
+   "date": "Revision effective date 10/01/2025",
+   "checked_twice": true,
+   "first_fetch": "2026-11-26",
+   "second_fetch": "2026-11-26T19:03:46Z"
+  }
+ }
+}
