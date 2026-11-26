@@ -149,7 +149,8 @@ then `fullsnap.py`, `diff_ba.py <base snap> <after snap> moved.json`, `pick.py m
   claim must show, the sources (each read twice). A rule shared by several codes is shown once. A never-payable verdict on
   a one-line item still to work (routes appeal, corrected, call, decide, rate) leads the next step: "Not payable under
   (payer)'s published rule ...: check what the rule still allows; if nothing, the owner accepts the pattern on the
-  write-off policy page or a person lets it go with the reason"; Accept this pattern only when the owner's table lists it.
+  write-off policy page or a person lets it go with the reason"; Accept this pattern and the owner's page only when the
+  owner's table lists the pattern (without EMA's reports there is no table: the step then says a person lets it go).
   States, deadlines and closures are not changed by any of it.
 - Packet: a "Before you send it" checklist (never in the PDF, never faxed), one line per rule; the payer's published rule
   is enclosed only with a note or claim verdict (never a rule against the appeal). Note review: the rule, what to show
@@ -197,12 +198,12 @@ then `fullsnap.py`, `diff_ba.py <base snap> <after snap> moved.json`, `pick.py m
 
 ## Tests
 
-- tests/test_payer_code_rules.py (24 tests; both store kinds where a run is made, both hosts for the panel): the data
+- tests/test_payer_code_rules.py (20 tests, 24 runs with the two store kinds; both hosts for the panel): the data
   file holds public facts only; RULE_FILES; dates to the day (leap day, year end); split keys; alias needs rarity;
   item codes; the run's evidence, drawer and next step; a failing step contained; G2211 and modifier 25; the packet's
   checklist, enclosures and PDF; the note review's prompt; the EMA fold pursued until accepted; C5 periods with EMA's
   evidence; the server panel and packet; the serverless panel from the copy; one rule for several codes; EMA's books in
-  words; the page's renderer in node; the docs' words. Each change was broken on purpose (13 breaks) and its test failed;
+  words; the page's renderer in node; the docs' words. Each change was broken on purpose (15 breaks) and its test failed;
   restored (`git diff` empty).
 - Related suites (story, ema pages, decisions, docs, ema wiring, notes): 430 passed, 1 skipped, 4 failed in python3; the
   4 are test_notes_bodies_cli.py's date-bound failures, which fail the same way with this change stashed.

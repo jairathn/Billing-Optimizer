@@ -214,6 +214,8 @@ def test_the_run_works_out_why_the_payer_does_not_pay_from_the_remittances(tmp_p
     assert nx["action"].startswith("Not payable under Anthem / BCBS's published rule") and nx["payer_rule"] == "never_payable"
     assert any(st.startswith("No note changes this") for st in nx["steps"]) and x["state"]["work_state"] == "work_now"
     assert "accept_pattern" not in nx["buttons"]          # no owner's table without EMA's reports: nothing to accept yet
+    assert "write-off policy page" not in nx["action"] and nx["action"].endswith("a person lets it go with the reason.")
+    assert any("only a person can let it go" in st for st in nx["steps"]) and not any("Accept this pattern" in st for st in nx["steps"])
     (bc,) = story.explain(s.conn, changed[0]["finding_id"], today="2026-04-01")["why_unpaid"]
     assert (bc["code"], bc["verdict"]) == ("77600", "never_payable")
     old = _items(s, "payer_group=? AND procedure_code='77600' AND service_date LIKE '2025%'", ANTHEM)
@@ -548,6 +550,8 @@ def test_a_never_payable_pattern_stays_pursued_until_the_owner_accepts_it(estore
     assert (row["answered"], row["paid"]) == (6, 0) and row["why"][0].startswith("Anthem / BCBS answered 6 77600 lines")
     nx = story.explain(estore.conn, got[0]["finding_id"], today="2026-05-03")["next_step"]
     assert "accept_pattern" in nx["buttons"] and nx["pattern"] == KEY26
+    assert "the owner accepts the pattern on the write-off policy page" in nx["action"]
+    assert any(st.startswith("Until the owner accepts the pattern it stays on Work now: Accept this pattern") for st in nx["steps"])
     ec.set_policy(estore.conn, KEY26, "accept", "owner")
     det = run(estore)
     assert items(estore, mine) == [] and det.ema_counts["payer_policy_835"] == 6

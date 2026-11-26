@@ -2973,12 +2973,18 @@ def _with_payer_rule(nxt: dict, blocks: list[dict], f: dict, st: dict) -> dict:
         src = (lead.get("sources") or [{}])[0]
         cite = f" ({src.get('title')})" if src.get("title") else ""
         was = out.get("action") or ""
+        # the owner can accept only a pattern the owner's table lists (an analysis with EMA's reports on file makes it):
+        # otherwise the step names no button and no page that does not offer it
+        listed = bool(lead.get("in_table"))
         out["action"] = _clean(f"Not payable under {_poss(lead['payer_group'])} published rule{cite}: it does not pay {lead['code']} "
-                               "here, and no note changes that. Check what the rule still allows; if nothing, the owner accepts the "
-                               "pattern on the write-off policy page or a person lets it go with the reason.")
-        add = [s for s in [lead.get("what_to_show"),
-                           "Until the owner accepts the pattern it stays on Work now: Accept this pattern takes every such item off at the "
-                           "next run, and they stay counted on the write-off policy page.",
+                               "here, and no note changes that. Check what the rule still allows; if nothing, "
+                               + ("the owner accepts the pattern on the write-off policy page or a person lets it go with the reason."
+                                  if listed else "a person lets it go with the reason."))
+        wait = ("Until the owner accepts the pattern it stays on Work now: Accept this pattern takes every such item off at the "
+                "next run, and they stay counted on the write-off policy page." if listed else
+                "It stays on Work now. The write-off policy page lists such patterns once an analysis runs with EMA's reports on "
+                "file; until then only a person can let it go, with the reason.")
+        add = [s for s in [lead.get("what_to_show"), wait,
                            ("Only if the check finds what the rule allows: " + was) if was else None] if s]
         steps = add + steps
         if lead.get("in_table") and "accept_pattern" not in buttons:
