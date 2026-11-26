@@ -52,6 +52,22 @@ mark, supersession after a stopped cycle, diagnose on a stopped state folder, th
 with fix7a's summaries) and privacy-5 (runlog.caught in 41 new except blocks). Then the review's
 confirmed findings, A17 (running already), fix7e, the final every-claim trace and the release gates (section 0 below, "Then, in order").
 
+### Integrator's notes on what the units found (2026-11-26 20:45 UTC)
+- **privacy-3 is a merge blocker for the hook.** Its verifier refuted it only because nothing runs the self-check at
+  fc73dec; with the hook's wiring, closure_proof holds the run in safe mode on a $0 'settled by the payer's answer'
+  closure (the verifier's test does exactly this). Before the hook merge is pushed: those closures get proof rows (the
+  settling answer, dated, reconciled to the charge) or has_proof accepts them; test on both store kinds.
+- **Vercel reads the A/R only, never Production (orchestrator decision, from the hook's real-data runs and hosts-6).**
+  On Vercel's own image (722 MB) a pressed analysis fits (first press 218 s here, peak 1,931 MB; the regulation hands the
+  analysis on when it must). With the Production summaries in the image (893 MB) no run fits (240 s, peak 2,317 MB with
+  a 900 s budget). Billers work on the server site, which reads everything; Vercel's pages say they show the A/R only.
+  The integrator checks the hook's 'ar' mode keeps Production out of the serverless image entirely.
+- **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
+  world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
+  SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
+  them by rule (A17 and hand-traces per group) and writes the explanation the owner reads before pressing Accept; none
+  is accepted unexplained.
+
 ## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
 
 **2026-11-26 12:10 UTC: taken over by the session working on `claude/ecstatic-fermi-orfcgo`.** That branch was
