@@ -37,19 +37,18 @@ Brief: `plans/briefs/2026-11-26_fix7d.md`. Branch `wip/fix7d`. Rules: `plans/bri
   brief has loaded, the scoreboard's frozen_at display (results.py, one display line), ema_checks' export status order
   (substr(recorded_at,1,10) only orders sources).
 
-## In progress
-- Brief item 5: the zone runs are green; left: the full suite as it is (python3), then $S/fix/venv_sqlite340/bin/python,
-  and the two node checks. Runs go from a
-  frozen worktree of the tip (`git worktree add --detach $S/tk/units/fix7d/frozen <tip>`), with
+- Brief item 5: every suite run (see Measured). The runs went from a frozen worktree of the tip (`git worktree add --detach $S/tk/units/fix7d/frozen <tip>`), with
   `RW_RUNS=$S/tk/units/fix7d/runs REMITWATCH_TZ=Etc/GMT-14 $S/tk/units/fix7d/shard_tz.sh $S/tk/units/fix7d/frozen python3 tz_minus14 3`
   (shard_tz.sh is plans/tools/shard.sh keeping REMITWATCH_TZ; copy it from this file's section "How to run" if the unit
   folder is gone: it is shard.sh with `[ "$v" = "REMITWATCH_TZ" ] ||` before `unset`).
+- Merged the integration tip again before the final runs (cefa3b2 and 7001513, plans only).
 
-## Left, in order
-4. Search the whole tree for other "today" reads (date('now'), utcnow().date(), date.today(), new Date() as a day).
-5. Full suite in python3 three times: as it is, `REMITWATCH_TZ=Etc/GMT-14`, `REMITWATCH_TZ=Etc/GMT+12`
-   (plans/tools/shard.sh unsets REMITWATCH_*: use the copy in the unit folder that keeps REMITWATCH_TZ, see below).
-   Then the final suites: python3 and `$S/fix/venv_sqlite340/bin/python`; node checks if static/ changed.
+## Left
+- Nothing of the brief. The unit is finished: ready to merge (merge order: fix7d first, per HANDOFF section 00).
+- Follow-ups noticed, not in the brief: the pages still show some stored times of day in UTC without saying so
+  (faxes.js fax lists, features.js history and "Why did this change?" tables, index.html's "last analysis"); a
+  practiceTime helper (the zone the brief names) would show them where the practice is. The 3.12 and newest-library
+  environments were not run by this unit (the common brief asks for python3 and 3.11.1).
 
 ## How to run
 - `S=/tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad`
@@ -64,6 +63,13 @@ Brief: `plans/briefs/2026-11-26_fix7d.md`. Branch `wip/fix7d`. Rules: `plans/bri
 - Full suite, python3, REMITWATCH_TZ=Etc/GMT+12, on 253d961: 2,839 passed, 29 skipped, 1 xfailed, 0 failed.
 - Full suite, python3, REMITWATCH_TZ=Etc/GMT-14, on 253d961 (again): 2,839 passed, 29 skipped, 1 xfailed, 0 failed.
 - Merged the integration tip again (cefa3b2/7001513: plans only, no code).
+- Full suite, python3 as it is (REMITWATCH_TZ unset), on b5202a0: 2,839 passed, 29 skipped, 1 xfailed, 0 failed
+  (19:19-19:31 UTC).
+- Node checks on b5202a0: calc_model_check.js 79 checks, lab_review_check.js 143 checks, none false.
+- Full suite, $S/fix/venv_sqlite340/bin/python (3.11.1, SQLite 3.40.0), on b5202a0: 2,722 passed, 13 skipped,
+  1 xfailed, 109 failed and 24 errors, every one of the 133 with "AttributeError: 'sqlite3.Connection' object has no
+  attribute 'serialize'" (the allowed class: tests that serialize a store image; that build has no
+  Connection.serialize). No other failure.
 
 ## Open questions
 - (none)
