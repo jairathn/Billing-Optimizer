@@ -1792,11 +1792,17 @@ class Detector:
             if share and 0 < share < 1:
                 self.comp_split[(year, code, comp)] = share
         self.class_typical: dict[tuple, dict] = {}
-        for key, cnt in by_class.items():
+        # and across settings ('any'), for a code whose lines are too few in each setting alone: the last resort of _rate
+        # (fix7c: once the 837 named the surgery center's claims, a code billed in both settings could have too few in each)
+        any_setting: dict[tuple, Counter] = defaultdict(Counter)
+        for (y_, code_, _pos, comp_, cls_), cnt in by_class.items():
+            any_setting[(y_, code_, "any", comp_, cls_)].update(cnt)
+        for key, cnt in list(by_class.items()) + list(any_setting.items()):
             n = sum(cnt.values())
             if n >= 10:
                 vals = sorted(cnt.elements())
                 self.class_typical[key] = {"median": vals[n // 2], "n": n}
+        del any_setting
         # what each payer allows of the practice's charge over the codes it pays (at least 20 lines): its own measure of a
         # code it has no rate for, the charge being the practice's fee for that code
         self.charge_ratio: dict[tuple, tuple[float, int]] = {k: (min(1.0, v[0] / v[1]), v[2]) for k, v in to_charge.items()
@@ -6618,10 +6624,11 @@ class Detector:
     def _rate(self, payer_group: str | None, code: str | None, year: str | None) -> int | None:
         """The payer's usual allowed amount for a code in a year (the office setting, any provider type); for a code it has
         paid only at a facility (a surgery center's claims, known as such from the 837 or the claim's location since fix7c),
-        its facility amount, so a claim with no remittance is never sized at nothing for want of office lines."""
+        its facility amount; else its product class's typical amount across settings. A claim with no remittance is never
+        sized at nothing (its charge, in EMA's checks) for want of one setting's lines."""
         if not code:
             return None
-        for pos in ("office", "facility"):
+        for pos in ("office", "facility", "any"):
             rate, _b, _r = self.usual_rate({"payer_group": payer_group, "year": str(year or ""), "provider_tier": "unknown",
                                             "pos_class": pos}, code)
             if rate is not None:

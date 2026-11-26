@@ -365,6 +365,23 @@ def test_the_payers_rate_for_a_code_paid_only_at_a_facility_is_its_facility_rate
     w.store.close()
 
 
+def test_a_codes_typical_amount_across_settings_sizes_a_claim_no_setting_can(tmp_path, kind):
+    """The last resort for a claim with no remittance (Detector._rate): the typical amount of the payer's product class for
+    the code, read across settings when neither the office's nor the facility's lines are enough alone (6 and 6 of 10 needed,
+    commercial plans with no rate of their own): never none, which would leave the claim sized at its charge."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 4, "14001", "1900.00", "700.00"), "20260301", payer="CIGNA", payer_id="CIGTEST")
+    w.remit(many(110, 2, "14001", "1900.00", "700.00"), "20260301", payer="AETNA", payer_id="AETTEST")
+    w.remit(many(120, 4, "14001", "1900.00", "600.00", pos="24"), "20260301", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(130, 2, "14001", "1900.00", "600.00", pos="24"), "20260301", payer="HUMANA", payer_id="HUMTEST")
+    det = Detector(w.store, run_id="r", today="2026-06-15")
+    det.load()
+    det.build_baselines()
+    assert det._rate("UMR", "14001", "2026") in (60000, 70000)
+    w.store.close()
+
+
 def test_separate_claims_that_bring_more_in_total_owe_nothing(tmp_path, kind):
     """A guard: the Mohs paid in full at the office and the surgery center's repair paid in full the same day (the payer
     did not reduce either): nothing is owed on either line."""
