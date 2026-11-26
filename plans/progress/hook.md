@@ -1,7 +1,7 @@
 # Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
 
 Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
-Branch: wip/hook. Last updated: 2026-11-26 19:58 UTC (the two earlier stamps here were written ahead of the clock).
+Branch: wip/hook. Last updated: 2026-11-26 20:47 UTC (two earlier stamps here were written ahead of the clock).
 
 ## Done
 - 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
@@ -47,35 +47,61 @@ Branch: wip/hook. Last updated: 2026-11-26 19:58 UTC (the two earlier stamps her
   "to keep within memory" whatever the reason; now the pending marker says whether files are behind it ('1') or a press
   alone ('press'), and the note names what happened and the reason (cloud.unchecked_note, DEFER_REASONS, SPREAD_REASONS).
 
-## Real-data runs (2026-11-26, private copy in $S/tk/units/hook, machine load 7 to 9 on 4 CPUs: times are slow)
-- Server, world copy (store 11-24 + EMA reports, live code of 11-24 before): cycle 1 (first run of this tree) 350 s,
-  peak 1,103 MB, outcome ok; items 17,281 -> 18,514 (2,867 added, 1,634 gone, all gone with a route except 8). Cycle 2
-  (nothing new, no analysis) 39 s, changed nothing. Cycle 3 (forced analysis) 556 s, peak 1,129 MB: 0 added, 0 gone,
-  0 changed (status, state, stale, shortfall, deadline): the cycles converge.
+- a08d8c3, 7620b56, b07466d: three more from the runs, each with a failing test first (both store kinds where the store
+  is read), broken on purpose and restored: the note counts open items a release has not given a state yet by their
+  status (it said "0 open items ($0)" on the first run after this release); a pressed run that stops before it finishes
+  (OutOfTime) is said on the Data tab's panel (why, the open items and dollars that stand as the last analysis left
+  them, what to do) and in the header (cloud.failed_note, cloud.open_items, api_ops.analysis_status(conn),
+  /api/sync/status last_failed); a run that only left the weekly self-audit no longer counts every open item as
+  unchecked (the header said "could not check 7,526 open items").
+- 2ace6ab: merged the integration tip 67cc3d2 (plans, the review, the privacy scan in test_docs): no conflict;
+  tests/test_docs.py 38 passed, 1 skipped.
+
+## Real-data runs (2026-11-26, private copy in $S/tk/units/hook, deleted after; machine load 7 to 15 on 4 CPUs, so wall
+## times are long: CPU seconds are given where they matter)
+- Server, world copy (store 11-24 + EMA reports; its items were made by the live code of 11-24): cycle 1 (first run of
+  this tree) 350 s, peak 1,103 MB, outcome ok; items 17,281 -> 18,514 (2,867 added, 1,634 gone; every gone item had a
+  route except 8). Cycle 2 (nothing new, no analysis) 39 s, changed nothing. Cycle 3 (forced analysis) 556 s, peak
+  1,129 MB: 0 added, 0 gone, 0 changed (status, state, stale, shortfall, deadline): the cycles converge.
 - Self-checks on cycle 1: vanished FAIL 1,892 open items ($203,702) the new rules no longer produce, kept on the
-  worklist (by signal: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73,
-  REJECTED_PRE_PAYER 72, SECOND_RATE 29, others 21); left_record WARN 8 record items ($4,594: TAKEBACK 7, G2211_DENIED 1);
-  line_balance WARN 37 of 8,050 A/R lines ($17,539) disagree with the postings (data, EMA's side). Cycle 3: vanished
-  still fails (the kept items wait for a person's Accept), left_record passes. Not this unit's: the rules changed
-  between the live code of 11-24 and the integration tip; the integrator decides (accept on the Data tab, or the rule
-  owners look at the signals above).
-- Serverless, Vercel's image (722 MB in memory, 70% of the 1,024 MB a run saves in one piece): press 218 s, peak
-  1,931 MB, analysis 170 s; idle run 76 s (no analysis; the archive moved 15,862 bills, 852 items; the weekly
-  self-audit ran); second press 15 s, analysis handed on (the regulation at "archive" after two runs near memory);
-  the next run analysed in 240 s of the 240 s budget, peak 1,995 MB. Near both limits on this loaded machine.
-- Serverless, the image with EMA's tables (893 MB in memory, 87% of the ceiling), EMA reports on: the first press ran
-  out of time (OutOfTime at 242 s, peak 1,876 MB, nothing saved). Chain continuing.
+  worklist (UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
+  SECOND_RATE 29, others 21); left_record 8 record items ($4,594: TAKEBACK 7, G2211_DENIED 1); line_balance 37 of
+  8,050 A/R lines ($17,539) disagree with the postings (EMA's data). Cycle 3: vanished still fails (kept items wait
+  for a person's Accept), left_record passes. Not this unit's: rules changed between the live code of 11-24 and the
+  integration tip; the integrator accepts on the Data tab or the rule owners look at the signals above.
+- Serverless, Vercel's image (722 MB in memory, 70% of the 1,024 MB a run saves in one piece): first press 218 s,
+  peak 1,931 MB, analysis 170 s; idle run 76 s (no analysis; the archive moved 15,862 bills and 852 settled items;
+  the weekly self-audit ran); second press 15 s, analysis handed on (the regulation at "archive" after two runs near
+  memory); the next run analysed in 240 s of the 240 s budget, peak 1,995 MB. With a long budget: 127.7 CPU seconds
+  for the whole run (analysis 179 s wall at load 12), peak 1,934 MB. On a CPU of its own the analysis fits the
+  budget; memory is within about 250 MB of the 2,188 MB budget.
+- Serverless, the image with EMA's A/R and Production tables (893 MB in memory, 87% of the ceiling): with EMA reports
+  'all', and again with 'ar' (Vercel's default), every analysis ran out of time at 240 s (5 runs; nothing saved; the
+  regulation went to "alert", NEAR_LIMIT raised). With a 900 s budget: 280 CPU seconds, peak 2,317 MB. It does not
+  fit one Vercel run (time or memory). NEAR_CEILING raised (high): 893 MB, 87%, 6,426 open items ($2,034,832). Agrees
+  with review hosts-6: a decision for the integrator (keep settled EMA lines off the serverless image, or the A/R
+  only there, orchestrator decision 6).
+- Forced memory (the last peak set to 2,150 MB before each run, on Vercel's image): level shed, then alert, and it
+  stays there; shed: provider tables, report email, export-time backfill, weekly self-audit; NEAR_LIMIT alert (high)
+  with the pressure in plain words; a press at "alert" hands the analysis on (more: true) with its note.
 - Faults on a copy of the converged store: stale_lock: the cycle with a fresh dead lock is skipped, the start-up rule
-  removes it, the next cycle is ok, no item changed. network: two dropped connections on the Dropbox listing are tried
-  again (repair log: 2 retrying, 1 repaired), outcome ok, no item changed.
+  removes it, the next cycle is ok, nothing changed. network: two dropped connections on the Dropbox listing tried
+  again (repair log: 2 retrying, 1 repaired), outcome ok, nothing changed. corrupt_production: a cut-short Production
+  file is held, outcome partial with 1 logged error, nothing changed. ledger (2% of the posting ledger's rows
+  removed): check ledger_store fails, the derived-table rebuild gave up once (repair log), safe mode on (16,627 items
+  held, 0 closures held). codebug (the 837 open-claims rule emits nothing, fresh copy): vanished catches 217 more open
+  items and keeps them on the list (kept 2,109), left_record counts 551 NO_ANSWER record items, CHECK_FAILED alert
+  (high); the open list grew by 101 items ($28,899) as other checks list claims the 837 pass covered.
+- PHI scan of every log, manifest, status file and bundle written (server copies, both state folders, four bundles
+  made by `python -m remitwatch.diagnose`): 135 files, 1.46 MB, against 11,043 name words and 425,191 ids from the
+  store: no patient identifier. Every match is explained: 155 inside the code's own identifiers (signal and alert
+  kinds), 4 in the bundle README's fixed text (code words), 1 numeric token inside the store's transaction keys (an
+  ST control number equal to a patient id by chance).
 
 ## Next
-1. Real-data runs on a private world copy ($S/tk/units/hook/, mode 700, one copy at a time, df -h / first): server
-   cycles twice (plans/tools/world/cycle_run.py with F5_SRC=this tree), the serverless image chain from
-   $S/tk/world/store_live_1124.sqlite (or $S/tk/data/store.sqlite.gz) until more is false plus an idle run, a pressed
-   run (force_detect) on it, the image with EMA tables (plans/tools/world/build_img_ema.py), the five faults, forced
-   memory, the PHI scan of every log, manifest and bundle written.
-2. Suites in 3.13, 3.12, 3.11.1 and the node checks.
+1. Suites: python3 full (plans/tools/shard.sh), venv_sqlite340 full, venv2_compat312 on the touched files; node checks
+   (passed at 20:27 UTC: calc 79 checks, lab 143, none failing).
+2. Final report (StructuredOutput).
 
 ## Numbers measured so far
 - (from the earlier runs, see plans/HANDOFF.md section 0 item 2): three server cycles converge; five faults detected,
