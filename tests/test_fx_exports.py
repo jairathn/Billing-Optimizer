@@ -67,24 +67,139 @@ def _open(s, like: str) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------------------------- answers-1
+def _salted(s) -> None:
+    """The store's key salt, as EMA's readers make it: patients' names are compared by their keyed hash only."""
+    from remitwatch import ema_reports as er
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", ("cd" * 32,))
+    s.conn.commit()
+
+
+def _member_visit(claim_id: str, member: str, last: str = "SAMPLE", first: str = "PAT", dos: str = "20260801") -> str:
+    """Anthem's answer to an earlier visit of the member (a 99214 paid in full): the remittance names the patient
+    (NM1*QC) with the member id, which is how a member id is tied to one person's name."""
+    from tests.test_features import NPI, svc
+    return (f"CLP*{claim_id}*1*223.65*117.60*0.00*12*P{claim_id[4:9]}*11~NM1*QC*1*{last}*{first}****MI*{member}~"
+            f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*{dos}~"
+            + svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos=dos))
+
+
+def _dependent_837(claim_id: str, lines: list[tuple], member: str, first: str) -> str:
+    """One dependent's 837P claim: the subscriber loop names the parent's member id (NM1*IL), the patient loop (HL 23,
+    NM1*QC) names the child. The 837 tables keep the subscriber's id only."""
+    out = (f"HL*2*1*22*1~SBR*P**GRP1******CI~NM1*IL*1*SAMPLE*PARENT****MI*{member}~NM1*PR*2*ANTHEM*****PI*00660~"
+           f"HL*3*2*23*0~PAT*19~NM1*QC*1*SAMPLE*{first}~"
+           f"CLM*{claim_id}*{sum(float(ln[1]) for ln in lines):.2f}***11:B:1*Y*A*Y*Y~")
+    for n, (code, charge, dos) in enumerate(lines, 1):
+        out += f"LX*{n}~SV1*HC:{code}*{charge}*UN*1***1~DTP*472*D8*{dos}~"
+    return out
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_visit_the_exports_chase_yields_to_a_newer_bill_only_the_837s_know(tmp_path, kind):
-    """(answers-1, the exports' side; the reviewer's and verifier's test) EMA's weekly exports list bill CB0000M31 (C017,
-    sent September 15, its 837 on file for member WDUP000002). The practice made the bill again as CB0000M32 and sent it
-    September 25; only the 837s know it yet. Neither is answered (remittances to November 10). One visit (the same
-    patient, day and code) is one unpaid service: only the newer bill carries it."""
+    """(answers-1, the exports' side; the reviewer's and the verifier's test) EMA's weekly exports list bill CB0000M31
+    (C017, sent September 15, its 837 on file for member WDUP000002). No payer answers it; a person starts working it.
+    The practice then makes the bill again as CB0000M32 and sends it September 25; only the 837s know it yet. Neither is
+    answered (remittances to November 10). One visit of one patient (the same day, code and part) is one unpaid service:
+    only the newer bill carries it, and the person's work on the older item follows it.
+
+    The patient is the same person by name, not by the subscriber's id alone: an earlier visit's remittance names the
+    member's patient (the review's identity: the member id plus the 835 name key for the member). The reviewer's own
+    scenario had no name anywhere; two people on one subscriber id are two services (the next test), so with nothing
+    naming the patient both items stay (see plans/progress/fx-exports.md: the 837's own patient loop, read by F3a, would
+    name it)."""
+    from remitwatch.actions import apply_status
+    from remitwatch.detect import _fid
     from tests.test_workable import ema
     s = _store(tmp_path, kind)
+    _salted(s)
     member = "WDUP000002"
-    _remits(s, tmp_path, _visits(), "20261110")
+    _remits(s, tmp_path, _visits() + [_member_visit("CB0000M30C017", member)], "20261110")
     ema(s.conn, "CB0000M31C017")
     ema(s.conn, "CB0000M31C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-15")
     s.conn.commit()
     send(s, tmp_path, [clm837("CB0000M31C017", V, member=member)], "20260915")
-    send(s, tmp_path, [clm837("CB0000M32C017", V, member=member)], "20260925")
     found = _chased(s, "t1")
+    assert set(found) == {"CB0000M31C017"}, sorted(found)
+    apply_status(s.conn, found["CB0000M31C017"]["finding_id"], "in_progress", "Called Anthem: no record of it", actor="biller")
+    s.conn.commit()
+    send(s, tmp_path, [clm837("CB0000M32C017", V, member=member)], "20260925")
+    found = _chased(s, "t2")
     assert set(found) == {"CB0000M32C017"}, (
-        f"listed {sorted(found)}: the same patient's one visit (member, day, code) sent under two bills is one unpaid service")
+        f"listed {sorted(found)}: the same patient's one visit (day, code) sent under two bills is one unpaid service")
+    f = found["CB0000M32C017"]
+    assert f["finding_id"] == _fid("837_OPEN_CLAIM", "CB0000M32C017")
+    assert f["status"] == "in_progress" and "no record of it" in (f["notes"] or ""), (f["status"], f["notes"])
+    assert "CB0000M31C017" in (f["hint"] or ""), f["hint"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_two_people_on_one_subscriber_id_seen_the_same_day_stay_two_services(tmp_path, kind):
+    """(answers-1, the verifier's family case) Two children on one parent's plan (subscriber id WFAM000002) were both seen
+    September 14 for a 99214. Child A's bill CB0000F41 is in EMA's weekly exports (sent September 15); child B's bill
+    CB0000F42 went out September 25 and only the 837s know it. The member's remittances name two people, so the member
+    id does not tell whose visit each bill is: both claims stay chased (never merged on the subscriber's id alone)."""
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    _salted(s)
+    member = "WFAM000002"
+    _remits(s, tmp_path, _visits() + [_member_visit("CB0000F30C017", member, first="CHILDA"),
+                                      _member_visit("CB0000F31C017", member, first="CHILDB", dos="20260802")], "20261110")
+    ema(s.conn, "CB0000F41C017")
+    ema(s.conn, "CB0000F41C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-15")
+    s.conn.commit()
+    send(s, tmp_path, [_dependent_837("CB0000F41C017", [("99214", "223.65", "20260914")], member, "CHILDA")], "20260915")
+    send(s, tmp_path, [_dependent_837("CB0000F42C017", [("99214", "223.65", "20260914")], member, "CHILDB")], "20260925")
+    found = _chased(s, "t1")
+    assert set(found) == {"CB0000F41C017", "CB0000F42C017"}, f"listed {sorted(found)}: child A's visit dropped for child B's"
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_export_claim_keeps_the_services_the_newer_bill_does_not_carry(tmp_path, kind):
+    """(answers-1) The exports' bill CB0000M51 (sent September 15) carries a 99214 and a 17110 of one visit; the newer bill
+    CB0000M52 (September 25, only the 837s know it) carries the 99214 alone. The 99214 is chased under the newer bill; the
+    17110 stays on the exports' item, sized at Anthem's $80 for it."""
+    from tests.test_features import claim, svc
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    _salted(s)
+    member = "WDUP000005"
+    rates = [claim(600 + i, svc("17110", "200.00", "80.00", "80.00", "CAS*CO*45*120.00~")) for i in range(25)]
+    _remits(s, tmp_path, rates + _visits() + [_member_visit("CB0000M50C017", member)], "20261110")
+    ema(s.conn, "CB0000M51C017")
+    ema(s.conn, "CB0000M51C017", cpt="17110", charges_cents=20000)
+    ema(s.conn, "CB0000M51C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-15")
+    s.conn.commit()
+    send(s, tmp_path, [clm837("CB0000M51C017", V + [("17110", "200.00", "20260914")], member=member)], "20260915")
+    send(s, tmp_path, [clm837("CB0000M52C017", V, member=member)], "20260925")
+    found = _chased(s, "t1")
+    assert set(found) == {"CB0000M51C017", "CB0000M52C017"}, sorted(found)
+    m51 = found["CB0000M51C017"]
+    assert [ln[0] for ln in json.loads(m51["evidence"])["lines"]] == ["17110"] and m51["shortfall_cents"] == 8000, (
+        json.loads(m51["evidence"])["lines"], m51["shortfall_cents"])
+    assert [ln[0] for ln in json.loads(found["CB0000M52C017"]["evidence"])["lines"]] == ["99214"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_two_parts_of_a_service_on_two_bills_are_two_services(tmp_path, kind):
+    """(answers-1) The exports' bill CB0000M61 (September 15) bills the reading of a biopsy (88305-26); the newer bill
+    CB0000M62 (September 25, only the 837s know it) bills its technical part (88305-TC) for the same patient and day. The
+    reading and the technical part are two services: both stay chased."""
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    _salted(s)
+    member = "WDUP000006"
+    _remits(s, tmp_path, _visits() + [_member_visit("CB0000M60C017", member)], "20261110")
+    ema(s.conn, "CB0000M61C017", cpt="88305", modifiers='["26"]', charges_cents=9000)
+    ema(s.conn, "CB0000M61C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-15")
+    s.conn.commit()
+    send(s, tmp_path, [clm837("CB0000M61C017", [("88305", "90.00", "20260914", "26")], member=member)], "20260915")
+    send(s, tmp_path, [clm837("CB0000M62C017", [("88305", "120.00", "20260914", "TC")], member=member)], "20260925")
+    found = _chased(s, "t1")
+    assert set(found) == {"CB0000M61C017", "CB0000M62C017"}, f"listed {sorted(found)}: the reading and the technical part merged"
     s.close()
 
 
@@ -240,4 +355,124 @@ def test_a_claim_charged_days_before_its_837_went_out_is_listed_once(tmp_path, k
     mine = [g for g in got if g["patient_control_number"] == F.claim_id(91) or g["ema_link"] == F.link_no(91)]
     assert len(mine) == 1, f"the one claim is listed {len(mine)} times: {[(g['source'], g['ema_link']) for g in mine]}"
     assert mine[0]["source"] == "837" and mine[0]["ema_link"] == F.link_no(91), mine
+    s.close()
+
+
+def _g8_world(tmp_path, kind, *, second_unanswered=False, member_name=None, other_bill=False):
+    """The answers-7 world: an 837-only claim (F.claim_id(91), 99214 at $200, visit March 2, sent March 20 to Blue Cross,
+    member MEMBER000091) that no 835 answers, EMA claim 91 charged March 3 with its lines (patient 'Sample, Bravo Q'), and
+    another patient's EMA claim 92 of the same lines, paid April 10 (or, second_unanswered, not paid). member_name: an
+    earlier visit's remittance naming the member's patient. other_bill: another bill with the same lines to Blue Cross,
+    sent April 25 (not due yet), that no EMA claim is tied to."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
+    s, lg = _ema_store(tmp_path, kind)
+    rows = [charge(F.link_no(91), cpt="99214", amount=200, patient=1, posted=D(2026, 3, 3)),
+            charge(F.link_no(92), cpt="99214", amount=200, patient=2, posted=D(2026, 3, 3))]
+    if not second_unanswered:
+        rows.append(pay(F.link_no(92), "PAPER-92", 110, cpt="99214", patient=2, posted=D(2026, 4, 10)))
+    else:       # Blue Cross still posts in EMA (Production's check needs a posting of the payer's in its last 30 days)
+        rows += [charge(F.link_no(94), cpt="99212", amount=100, patient=3, svc=D(2026, 3, 9), posted=D(2026, 3, 10)),
+                 pay(F.link_no(94), "PAPER-94", 60, cpt="99212", patient=3, svc=D(2026, 3, 9), posted=D(2026, 4, 20))]
+    denial_world(s, lg, tmp_path, rows)
+    for n in range(25):
+        raw_remit(s, trace=f"BC{n:05d}", paid_on="2026-05-01", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(200 + n), "status": "1", "member": f"MB{n:08d}", "last": "VOLUME", "first": f"B{n}",
+                           "lines": [("2026-04-20", "99214", 200, 110, [("CO", "45", 90)])]}])
+    if member_name:
+        raw_remit(s, trace="BCMEM01", paid_on="2026-02-20", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(95), "status": "1", "member": "MEMBER000091", "last": member_name[0], "first": member_name[1],
+                           "lines": [("2026-02-02", "99213", 150, 80, [("CO", "45", 70)])]}])
+    bc = ("BLUE CROSS TEST", "BCT01")
+    send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")], payer=bc, member="MEMBER000091")], "20260320")
+    if other_bill:
+        send(s, tmp_path, [clm837(F.claim_id(93), [("99214", "200.00", "20260302")], payer=bc, member="MEMBER000093")], "20260425")
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [dict(r) for r in s.query("SELECT patient_control_number, ema_link, source FROM findings WHERE signal='NO_ANSWER' "
+                                    "AND COALESCE(stale,0)=0")]
+    s.close()
+    own = [g for g in got if g["patient_control_number"] == F.claim_id(91)]
+    g8 = [g for g in got if g["ema_link"] == F.link_no(91) and g["source"] != "837"]
+    return own, g8
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_two_unanswered_ema_claims_could_be_takes_neither(tmp_path, kind, ema_env):
+    """(answers-7, one to one) As above, but another patient's EMA claim 92 of the same lines was not paid either: EMA's
+    claim for F.claim_id(91) cannot be told, so the claim keeps no EMA claim (never another patient's), and Production's
+    check lists EMA claim 91 on its own as before."""
+    from tests import ema_fixtures as F
+    own, g8 = _g8_world(tmp_path, kind, second_unanswered=True)
+    assert len(own) == 1 and own[0]["ema_link"] is None, own
+    assert len(g8) == 1, g8
+    assert F.link_no(91)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_with_another_bill_of_the_same_lines_on_file_takes_no_ema_claim(tmp_path, kind, ema_env):
+    """(answers-7, one to one) Another bill with the same lines to Blue Cross is on file (sent April 25, not due yet) and
+    no EMA claim is tied to it: EMA claim 91 may be that bill's, so F.claim_id(91) keeps no EMA claim."""
+    own, g8 = _g8_world(tmp_path, kind, other_bill=True)
+    assert len(own) == 1 and own[0]["ema_link"] is None, own
+    assert len(g8) == 1, g8
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_whose_patient_is_named_takes_only_that_patients_ema_claim(tmp_path, kind, ema_env):
+    """(answers-7, the patient) The member's earlier remittance names its patient. When that is EMA claim 91's patient
+    ('Sample, Bravo Q'), the claim takes EMA claim 91 and is listed once; when it names someone else, EMA claim 91 is not
+    this claim's and both stay listed (the claim with no EMA claim, Production's check with EMA claim 91)."""
+    from tests import ema_fixtures as F
+    own, g8 = _g8_world(tmp_path / "same", kind, member_name=("SAMPLE", "BRAVO"))
+    assert len(own) == 1 and own[0]["ema_link"] == F.link_no(91) and not g8, (own, g8)
+    own, g8 = _g8_world(tmp_path / "other", kind, member_name=("OTHERPERSON", "ZED"))
+    assert len(own) == 1 and own[0]["ema_link"] is None and len(g8) == 1, (own, g8)
+
+
+# ----------------------------------------------------------------------------------------------- G8 (fix7b residuals)
+@pytest.mark.parametrize("kind", KINDS)
+def test_production_lists_one_service_once_and_prices_its_parts_at_their_own_rates(tmp_path, kind, ema_env):
+    """(fix7b residuals: G8) EMA's Production report holds one patient's biopsy (88305, visit March 2) three times, none
+    answered: EMA claim 81 charged March 3 for the whole service ($120), then EMA claims 82 and 83 charged March 10 for its
+    reading (26, $45) and its technical part (TC, $75); EMA's weekly exports name the parts of 82 and 83 (submitted again
+    April 25, not due yet there). Blue Cross pays 88305 at $80 whole, $30 for the 26 and $50 for the TC.
+    One service is one item per part: the newer charges (the two parts) carry the whole service, so EMA claim 81 is not
+    listed; the 26 is priced at $30 and the TC at $50 (before: three items, each part priced at the whole service's $80,
+    $240 in all)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
+    from tests.test_workable import ema
+    s, lg = _ema_store(tmp_path, kind)
+    v = D(2026, 3, 2)
+    rows = [charge(F.link_no(81), cpt="88305", amount=120, patient=1, svc=v, posted=D(2026, 3, 3)),
+            charge(F.link_no(82), cpt="88305", amount=45, patient=1, svc=v, posted=D(2026, 3, 10)),
+            charge(F.link_no(83), cpt="88305", amount=75, patient=1, svc=v, posted=D(2026, 3, 10)),
+            charge(F.link_no(94), cpt="99212", amount=100, patient=3, svc=D(2026, 3, 9), posted=D(2026, 3, 10)),
+            pay(F.link_no(94), "PAPER-94", 60, cpt="99212", patient=3, svc=D(2026, 3, 9), posted=D(2026, 4, 20))]
+    ar = [F.ar_row(claim=F.claim_id(n), link=F.link_no(n), status="Payment Pending", current=amt, svc=v, patient=1, cpt="88305")
+          for n, amt in ((82, 45), (83, 75))]
+    denial_world(s, lg, tmp_path, rows, ar_rows=ar)
+    from tests.test_features import claim, svc
+    rates = [claim(700 + 3 * i + j, svc("88305", f"{chg:.2f}", f"{paid:.2f}", f"{paid:.2f}", f"CAS*CO*45*{chg - paid:.2f}~",
+                                         dos="20260420", mods=part), dos="20260420")
+             for i in range(25) for j, (part, chg, paid) in enumerate((("", 120, 80), ("26", 45, 30), ("TC", 75, 50)))]
+    _remits(s, tmp_path, rates, "20260501", payer="BLUE CROSS TEST", payer_id="BCT01")
+    for n, part, cents in ((82, "26", 4500), (83, "TC", 7500)):
+        ema(s.conn, F.claim_id(n), cpt="88305", modifiers=json.dumps([part]), service_date=v.isoformat(), bill_created="2026-03-10",
+            charges_cents=cents, payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA081")
+        ema(s.conn, F.claim_id(n), family="claim_status", claim_status="Submitted", claim_submission_date="2026-04-25",
+            service_date=v.isoformat(), payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA081")
+    s.conn.commit()
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = {(r["patient_control_number"] or f"link:{r['ema_link']}"): dict(r) for r in s.query(
+        "SELECT patient_control_number, ema_link, shortfall_cents, evidence FROM findings WHERE signal='NO_ANSWER' "
+        "AND COALESCE(stale,0)=0 AND ema_link IN (?, ?, ?)", (F.link_no(81), F.link_no(82), F.link_no(83)))}
+    sizes = {k: v["shortfall_cents"] for k, v in got.items()}
+    assert sizes == {F.claim_id(82): 3000, F.claim_id(83): 5000}, sizes
     s.close()
