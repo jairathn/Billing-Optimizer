@@ -437,6 +437,32 @@ def test_r1_7_a_secondary_that_paid_all_the_primary_left_owes_nothing_more(store
     assert (a["paid_cents"], a["counts_as_recovery"]) == (2000, True)
 
 
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_r1_7_the_run_settles_a_secondary_that_paid_all_the_primary_left(tmp_path, kind):
+    """The run's own closure (detect._second_role_due): the other plan paid the visit as primary (allowed $100.00, paid
+    $80.00, CO-45, PR-2 $20.00); Medicaid then denied it as primary (another payer covers it first) and later paid the
+    $20.00 the plan left, as secondary, with its own allowed amount of $120.00. Nothing more is owed: the item is settled
+    with Medicaid's $20.00 as what arrived, never listed at the $20.00 that Medicaid's own allowed amount would leave."""
+    from remitwatch.detect import Detector
+    from tests.test_settled_elsewhere import ANTHEM, COB, MEDICAID, _add, _clp, _line, _store, _usual
+    s = _store(tmp_path, kind)
+    _add(s, tmp_path, [_clp("CB0000Q71C017", "1", _line("80.00", "CAS*CO*45*123.65~CAS*PR*2*20.00~", "100.00"), paid="80.00")],
+         "20260920", **ANTHEM)
+    _add(s, tmp_path, _usual("MC", "70.00") + [_clp("CB0000Q71C017", "1", _line("0.00", COB), cfi="MC")], "20261001", **MEDICAID)
+    Detector(s, run_id="t1").run()
+    _add(s, tmp_path, [_clp("CB0000Q71C017", "2", _line("20.00", "CAS*OA*23*80.00~CAS*CO*45*123.65~", "120.00"), paid="20.00", cfi="MC")],
+         "20261110", **MEDICAID)
+    Detector(s, run_id="t2", today="2026-11-20").run()
+    got = [dict(r) for r in s.query("SELECT finding_id, status, shortfall_cents, recovered_cents, work_state, evidence FROM findings "
+                                    "WHERE patient_control_number='CB0000Q71C017' AND procedure_code='99214' AND COALESCE(stale,0)=0")]
+    s.close()
+    assert got, "the denial was raised"
+    open_ = [(g["status"], g["shortfall_cents"], g["work_state"]) for g in got if g["status"] not in ("resolved",)]
+    assert not open_, open_
+    assert [g["recovered_cents"] for g in got] == [2000], [(g["status"], g["recovered_cents"]) for g in got]
+    assert "second_role" not in json.loads(got[0]["evidence"] or "{}"), got[0]["evidence"][:300]
+
+
 def test_r1_7_the_cap_is_what_the_others_left_and_only_with_their_remittances_on_file():
     f = ar.owed_in_second_role
     line = {"allowed": 12000, "charge": 15000, "paid": 1000, "adj": [("OA", "23", 10000), ("CO", "45", 3000)]}
@@ -497,6 +523,258 @@ def test_r1_8_archive_rule_3_keeps_what_arrived_with_the_item_it_keeps_listed(st
     a = only(ar.units_split(store.conn, [item(store, lk, "DENIED_MISSING_PRIMARY", expected=9000)]))
     assert (a["reclass"], a["shortfall_cents"]) == ("second_role_short", 800)
     assert (a["second_role"]["arrived_cents"], a["second_role"]["date"]) == (1200, "2026-04-20")
+
+
+# =============================================================================================================
+# r2-2: right after Billed the patient, the panel waits on the patient and keeps Done, before the next run
+# =============================================================================================================
+def _stored_by_run(s, *, at="2026-11-19T08:00:00+00:00"):
+    """The item as the run of `at` stored it: Work now, bill the patient (the run's time is the item's last_seen)."""
+    s.conn.execute("UPDATE findings SET work_state='work_now', state_basis='The plan put this service on the patient: bill the patient', "
+                   "last_seen=? WHERE finding_id='F1'", (at,))
+    s.conn.commit()
+
+
+def test_r2_2_after_billed_the_patient_the_panel_waits_on_the_patient_and_keeps_done(sstore):
+    """The run stored Work now (bill the patient) on November 19; a person pressed Billed the patient on November 20. Until
+    the next run the panel follows the person's action: it waits on the patient's payment (never "follow up with the
+    payer", whose answer is in), and Done stays the other way out."""
+    from remitwatch import actions, story
+    _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
+    _stored_by_run(sstore)
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient: statement mailed", actor="Biller One",
+                         at="2026-11-20T15:00:00+00:00")
+    sstore.conn.commit()
+    x = story.explain(sstore.conn, "F1", today=TODAY2)
+    st, nx = x["state"], x["next_step"]
+    assert (st["work_state"], st["rule"], st.get("by_person")) == ("waiting", "billed_patient", True), (st["work_state"], st["rule"])
+    assert nx["action"].startswith("Wait for the patient's payment") and not nx["action"].startswith("Follow up with"), nx["action"]
+    assert "mark_done" in nx["buttons"], nx["buttons"]
+    assert x["verdict"]["state"] == "waiting"
+
+
+def test_r2_2_a_reopen_since_the_run_keeps_the_stored_state(sstore):
+    """Only the statuses a decision-2 action sets (Sent for Billed the patient, Paid with $0 for Done) give the state by
+    the person: a person's reopen since the run, on an item EMA shows the patient paid, keeps the run's stored state."""
+    from remitwatch import actions, story
+    _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
+    _ema_patient(sstore, balance=0, pat_paid=15000)
+    _stored_by_run(sstore)
+    actions.apply_status(sstore.conn, "F1", "open", "looking again", actor="Biller One", at="2026-11-20T15:00:00+00:00")
+    sstore.conn.commit()
+    st = story.explain(sstore.conn, "F1", today=TODAY2)["state"]
+    assert not st.get("by_person") and st["work_state"] == "work_now", (st["work_state"], st.get("rule"))
+
+
+def test_r2_2_a_status_older_than_the_run_keeps_the_stored_state(sstore):
+    """The narrow side: a person's status set before the run that stored the state is already in that state, which stands
+    (the drawer agrees with the lists)."""
+    from remitwatch import actions, story
+    _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-11-18T15:00:00+00:00")
+    _stored_by_run(sstore, at="2026-11-19T08:00:00+00:00")
+    st = story.explain(sstore.conn, "F1", today=TODAY2)["state"]
+    assert not st.get("by_person") and st["work_state"] == "work_now", (st["work_state"], st.get("rule"))
+
+
+@pytest.fixture
+def billed_site(tmp_path, monkeypatch):
+    """A server store: two patient-group denials (PR-204) raised by a detection run beside 25 visits the plan paid, with
+    EMA's Production report covering the visits; the API client and the two ids."""
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    from remitwatch import ema_reports as er
+    from remitwatch.detect import Detector
+    from remitwatch.store import Store
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import SALT_HEX, remit as eremit
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    db = str(tmp_path / "store.sqlite")
+    s = Store(db)
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (SALT_HEX,))
+    _production_covers(s, "2026-09-01", "2026-11-20")
+    for n in range(25):
+        eremit(s, trace=f"7770{n:05d}", paid_on="2026-10-10",
+               claims=[{"pcn": F.claim_id(600 + n), "last": f"PAID{n}", "member": f"P{n:011d}",
+                        "lines": [("2026-10-01", "99214", 223.65, 117.60, [("CO", "45", 106.05)], {"allowed_cents": 11760})]}])
+    for n in range(2):
+        eremit(s, trace=f"7771{n:05d}", paid_on="2026-10-10",
+               claims=[{"pcn": F.claim_id(700 + n), "last": f"OWES{n}", "member": f"Q{n:011d}",
+                        "lines": [("2026-10-01", "99214", 223.65, 0, [("PR", "204", 223.65)])]}])
+    Detector(s, run_id="r1", today="2026-11-20").run()
+    ids = sorted(r[0] for r in s.conn.execute("SELECT finding_id FROM findings WHERE signal='DENIED_PLAN_EXCLUSION' AND COALESCE(stale,0)=0"))
+    s.close()
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", "")
+    return type("Site", (), {"c": TestClient(api.app), "ids": ids, "db": db})
+
+
+XHR = {"X-Requested-With": "remitwatch"}
+
+
+def test_r2_2_the_panel_after_billed_the_patient_on_the_server(billed_site):
+    """The reviewer's case through the API: Billed the patient pressed after the run; the panel's next step waits on the
+    patient and keeps Done (before: "Follow up with <payer> on the work a person marked", and no Done)."""
+    c, fid = billed_site.c, billed_site.ids[0]
+    x = c.get(f"/api/findings/{fid}/explain").json()["explain"]
+    assert {"billed_patient", "mark_done"} <= set(x["next_step"]["buttons"]), x["next_step"]["buttons"]
+    r = c.post(f"/api/findings/{fid}/status", json={"status": "appealed", "seen_status": "open",
+                                                     "notes": "Billed the patient: statement mailed"}, headers=XHR)
+    assert r.status_code == 200, r.text
+    nx = c.get(f"/api/findings/{fid}/explain").json()["explain"]["next_step"]
+    assert not nx["action"].startswith("Follow up with") and "patient" in nx["action"].lower(), nx["action"]
+    assert "mark_done" in nx["buttons"], nx["buttons"]
+
+
+PANEL_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/].map(re => grab(html, re)).join('\n');
+const ctx = { console, state: { brief: { today: '2026-11-20', labels: {}, work_types: [] }, worklist: ['b'], wlTotal: 1, filt: {} }, $: () => null };
+vm.createContext(ctx);
+for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js')]) vm.runInContext(src, ctx);
+const f = { finding_id: 'b', payer_group: 'Plan A', signal: 'DENIED_PLAN_EXCLUSION', work_state: 'waiting', state_by_status: true,
+            status: 'appealed', status_changed_at: '2026-11-20T15:00:00+00:00' };
+const x = byPerson => ({ explain: { verdict: { state: 'work_now', sentence: 'The plan put it on the patient.', rows: [] },
+  next_step: { route: 'bill_patient', action: 'Send the patient another statement for $70.00.', who: 'Patient accounts',
+               buttons: ['billed_patient', 'mark_done', 'copy_instructions'], steps: [] },
+  state: Object.assign({ work_state: 'work_now', rule: 'patient_unpaid' }, byPerson ? { by_person: true } : {}), story: { rows: [] } } });
+process.stdout.write(JSON.stringify({ by_person: ctx.xpBoxHtml(f, x(true), { packets: [] }), by_status: ctx.xpBoxHtml(f, x(false), { packets: [] }) }));
+"""
+
+
+def test_r2_2_the_page_keeps_the_state_a_persons_newer_action_gave(tmp_path):
+    """The panel's own words for a status set since the run (XP_BY_STATUS: "Wait for the payer's answer") never replace a
+    state the server worked out from that person's newer action (by_person): an item that waits on the patient keeps its
+    Done. Without by_person the panel still follows the status (review C1)."""
+    import os
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    js = tmp_path / "panel.js"
+    js.write_text(PANEL_JS, encoding="utf-8")
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    res = subprocess.run([node, str(js), os.path.join(here, "remitwatch", "static")], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr[-2000:]
+    out = json.loads(res.stdout)
+    assert "Wait for the payer" not in out["by_person"] and 'data-xp="mark_done"' in out["by_person"], out["by_person"][:1500]
+    assert "Send the patient another statement" in out["by_person"]
+    assert "Wait for the payer" in out["by_status"]
+
+
+# =============================================================================================================
+# r2-3: of two marks on one day, the later is the item's newest work
+# =============================================================================================================
+def test_r2_3_billed_the_patient_after_a_same_day_sent_is_what_the_item_waits_on(sstore):
+    from remitwatch import actions
+    _patient_denial(sstore, "288", signal="DENIED_REFERRAL")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Sent from the next step", actor="Biller One", at="2026-11-18T14:00:00+00:00")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient: statement mailed", actor="Biller One",
+                         at="2026-11-18T16:30:00+00:00", seen="appealed")
+    sstore.conn.commit()
+    st = _state(sstore)
+    assert st["rule"] == "billed_patient", (st["rule"], st["state_basis"])
+
+
+def test_r2_3_a_corrected_claim_sent_after_a_same_day_billed_the_patient_waits_on_the_payer(sstore):
+    from remitwatch import actions
+    _patient_denial(sstore, "288", signal="DENIED_REFERRAL")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-11-18T14:00:00+00:00")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Corrected claim with the retro referral number", actor="Biller One",
+                         at="2026-11-18T16:30:00+00:00", seen="appealed")
+    sstore.conn.commit()
+    st = _state(sstore)
+    assert st["rule"] != "billed_patient" and st["work_state"] == "waiting", (st["rule"], st["state_basis"])
+
+
+def test_r2_3_an_evening_sent_after_an_evening_billed_the_patient_is_the_newer(sstore):
+    """Billed the patient at 8:30 PM Eastern, then a corrected claim sent at 9:00 PM (both November 18 where the practice
+    is, November 19 in UTC): the Sent is the newer, so the item waits on the payer. The billed mark is dated by the
+    practice's day like every other mark (UTC's day would make it look a day newer)."""
+    from remitwatch import actions
+    _patient_denial(sstore, "288", signal="DENIED_REFERRAL")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-11-19T01:30:00+00:00")
+    actions.apply_status(sstore.conn, "F1", "appealed", "Corrected claim with the retro referral number", actor="Biller One",
+                         at="2026-11-19T02:00:00+00:00", seen="appealed")
+    sstore.conn.commit()
+    st = _state(sstore)
+    assert st["rule"] != "billed_patient" and st["work_state"] == "waiting", (st["rule"], st["state_basis"])
+
+
+def test_r2_3_marks_of_one_evening_count_on_the_practices_day():
+    """A Sent at 9:00 PM Eastern (02:00 UTC the next day) after a Billed the patient at 8:30 PM Eastern is the newer of the
+    two: both are the practice's November 18, and the moment decides (the day alone, or UTC's day, would not)."""
+    from remitwatch import states
+    billed = {"date": states._pday("2026-11-19T01:30:00+00:00"), "at": "2026-11-19T01:30:00+00:00", "kind": "billed", "patient": True}
+    sent = {"date": states._pday("2026-11-19T02:00:00+00:00"), "at": "2026-11-19T02:00:00+00:00", "kind": "sent"}
+    assert billed["date"] == sent["date"] == "2026-11-18"
+    assert states._newest_work([billed, sent]) is sent and states._newest_work([sent, billed]) is sent
+    assert states._newest_work([]) is None
+
+
+# =============================================================================================================
+# r2-4: the Progress tab never counts a person's Done as paid
+# =============================================================================================================
+def test_r2_4_done_is_not_counted_as_paid_later_on_the_progress_tab(billed_site):
+    """Done (Paid with $0.00, nothing from the payer) leaves "Paid back", "Paid later", the days to payment and the share
+    recovered as they were, and shows as its own row; a Paid with the payer's money still counts."""
+    c, (fid, fid2) = billed_site.c, billed_site.ids
+    before = c.get("/api/progress").json()
+    r = c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "recovered_cents": 0, "done": True, "seen_status": "open",
+                                                     "notes": "on a payment plan"}, headers=XHR)
+    assert r.status_code == 200, r.text
+    after = c.get("/api/progress").json()
+    pipe = {x["status"]: x for x in after["pipeline"]}
+    assert sum(x["resolved_n"] or 0 for x in after["cohorts"]) == sum(x["resolved_n"] or 0 for x in before["cohorts"])
+    assert "resolved" not in pipe and pipe["done"]["n"] == 1 and pipe["done"]["recovered_cents"] == 0, pipe
+    assert sum(x["n"] for x in after["recovered_by_month"]) == sum(x["n"] for x in before["recovered_by_month"])
+    assert sum(x["resolved_n"] or 0 for x in after["family_trend"]) == sum(x["resolved_n"] or 0 for x in before["family_trend"])
+    r = c.post(f"/api/findings/{fid2}/status", json={"status": "resolved", "recovered_cents": 5000, "seen_status": "open",
+                                                      "notes": "the plan paid on appeal"}, headers=XHR)
+    assert r.status_code == 200, r.text
+    paid = c.get("/api/progress").json()
+    pipe = {x["status"]: x for x in paid["pipeline"]}
+    assert (pipe["resolved"]["n"], pipe["resolved"]["recovered_cents"], pipe["done"]["n"]) == (1, 5000, 1), pipe
+    assert sum(x["resolved_n"] or 0 for x in paid["cohorts"]) == sum(x["resolved_n"] or 0 for x in before["cohorts"]) + 1
+
+
+# =============================================================================================================
+# r2-5: a researched verdict says no more than its source
+# =============================================================================================================
+def test_r2_5_g6001_is_fixable_on_the_claim_as_its_source_says():
+    """UnitedHealthcare's G6001 (to 2025-12-31) rested on a revision note that excluded image guidance only "when the
+    [listed] criteria are not met", and on an authorization rule whose fix is on the claim: the verdict is claim, its words
+    never "whatever the note shows" or "no note changes this"."""
+    from remitwatch import rarely_paid as rp
+    d = json.load(open(rp.DATA_FILE, encoding="utf-8"))
+    g = [e for e in d["rules"] if e["code"] == "G6001"]
+    assert {e["payer_group"] for e in g} == {"UnitedHealthcare", "UnitedHealthcare Medicare Advantage"}
+    for e in g:
+        assert e["verdict"] == "claim", (e["payer_group"], e["verdict"])
+        assert "whatever the note shows" not in e["rule"] and "No note changes" not in e["what_to_show"], e["payer_group"]
+        assert "authorization number" in e["what_to_show"] and "listed criteria" in e["what_to_show"], e["what_to_show"]
+    for grp in ("UnitedHealthcare", "UnitedHealthcare Medicare Advantage"):
+        assert rp.entry_for(grp, "G6001", "2025-06-02")["verdict"] == "claim"
+
+
+def test_r2_5_no_never_payable_verdict_rests_on_a_conditional_exclusion():
+    """Every entry: a never-payable verdict never quotes, as its source, an exclusion that holds only when criteria are not
+    met (a note can meet them), and never says a note cannot help while its own what_to_show names a fix."""
+    from remitwatch import rarely_paid as rp
+    d = json.load(open(rp.DATA_FILE, encoding="utf-8"))
+    for e in d["rules"]:
+        if e["verdict"] != "never_payable":
+            continue
+        quotes = " ".join(q.get("quote") or "" for q in e.get("sources") or [])
+        assert "criteria are not met" not in quotes, (e["payer_group"], e["code"])
+        assert not ("resubmit" in e["what_to_show"] and "whatever the note shows" in e["rule"]), (e["payer_group"], e["code"])
 
 
 from remitwatch import archive_rules as ar  # noqa: E402

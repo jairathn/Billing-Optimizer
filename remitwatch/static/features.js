@@ -187,7 +187,8 @@ async function progressTab(v){
     ${kpi('Being worked', money(g('appealed').cents+g('in_progress').cents), (g('appealed').n+g('in_progress').n).toLocaleString()+' sent or started', 'working')}
     ${kpi('Window open', money(p.live.cents), p.live.n.toLocaleString()+' items you can still get back', 'open')}
     ${kpi('Window closed', money(p.expired.cents), p.expired.n.toLocaleString()+' items (filing rules partly estimated)', 'closed')}
-    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', '') : ''}</div>
+    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', '') : ''}
+    ${g('done').n ? kpi('Marked done', money(g('done').cents), g('done').n.toLocaleString()+' closed by a person with nothing from the payer (the patient billed, or given up)', '') : ''}</div>
     <div class="grid two">
       <div class="panel"><h2>Recovered by month</h2><div class="note">Money paid on a later remittance for lines that were first denied, bundled or cut. Counted automatically when the payment arrives.</div><canvas id="cRec"></canvas></div>
       <div class="panel"><h2>Share recovered, by month of the first payment</h2><div class="note">Of what went wrong in each month, how much has been won back so far. Recent months are still in play.</div><canvas id="cCoh"></canvas></div>
@@ -523,7 +524,9 @@ const XP_BY_STATUS = {waiting: ["Wait for the payer's answer. The next run dates
   work_now: ['Work it as its reason says; the next run gives its exact next step.', ['mark_sent', 'log_outcome', 'let_go']]};
 function xpEffective(f, x){
   const ex = (x && x.explain) || {}, told = (ex.verdict || {}).state || (ex.state || {}).work_state;
-  if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state]) return x;
+  // a state the server worked out from the person's own newer action (Billed the patient, Done: by_person) is newer than
+  // any status words here, and says whom the item waits on (the patient, never the payer)
+  if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state] || (ex.state || {}).by_person) return x;
   const when = f.status_changed_at ? ` on ${longDate(practiceDate(f.status_changed_at))}` : '';
   const [action, buttons] = XP_BY_STATUS[f.work_state];
   return Object.assign({}, x, {explain: Object.assign({}, ex, {

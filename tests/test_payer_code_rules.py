@@ -85,7 +85,9 @@ def test_an_entry_matches_its_payer_group_code_and_service_dates_to_the_day():
         e = rp.entry_for(ANTHEM, "77600", day)
         assert (e["verdict"], e["match"], e["period"]) == ("never_payable", "exact", {"from": "2026-01-01", "to": None})
         assert any("CPT" in s["title"] for s in e["sources"]) and all(s["url"].startswith("https://") for s in e["sources"])
-    assert rp.entry_for("UnitedHealthcare", "G6001", "2025-12-31")["verdict"] == "never_payable"
+    # fixable on the claim (an authorization that listed it), never "never payable": its source excluded it only when the
+    # policy's listed criteria were not met (review r2-5)
+    assert rp.entry_for("UnitedHealthcare", "G6001", "2025-12-31")["verdict"] == "claim"
     assert rp.entry_for("UnitedHealthcare", "G6001", "2026-01-01") is None
     assert rp.entry_for(ANTHEM, "77600", None) is None              # a rule bound to dates needs the service date
     assert rp.entry_for("Anthem / BCBS", "G2211", None)["verdict"] == "never_payable"      # one that is not, does not

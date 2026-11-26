@@ -225,3 +225,55 @@ then `fullsnap.py`, `diff_ba.py <base snap> <after snap> moved.json`, `pick.py m
 `plans/tools/decisions/` (README there): a cycle of the tree on a private world copy (`cycle_run.py 2026-11-24`), then
 `d4_measure.py <tree> <world>`, `d4_hand.py <world>`, `d4_trace.py <tree> <world>`, `d4_show.py <tree> <world>`.
 
+
+# Fix round of 2026-11-26: the two reviews of decisions 2, 3 and 4 (13 findings)
+
+Reviewers' tests: `$S/tk/review/decisions-r1-tests` (r1, money) and `$S/tk/review/decisions-r2-tests` (r2, pages and
+sources), run against the tree with `REVIEW_TREE` and `DECISIONS_R2_CHECKOUT`. Each finding was confirmed on the tree,
+its failing test ported into `tests/test_decisions_review.py` (invented data, both store kinds where the code runs on
+both, the API on the server), fixed, broken on purpose and restored (the breaks are counted under "Tests of this round").
+
+## State
+
+Commits on `wip/decisions`: 172b4ad (r1-1), 682521e (r1-2), aa121c9 (r1-3, r2-1), 9f76e86 (r1-4 to r1-8), then the
+lows r2-2 to r2-5 (this section's commit).
+
+| Finding | Outcome |
+|---|---|
+| r1-1 high: a patient denial billed blind when EMA cannot see the service | Fixed. No EMA line and no Production report covering the date of service: can't check (`cant_check_patient`), with the share in dollars: check the patient's account in EMA before billing. Billed the patient on such a visit is never followed by a bill on a guess. |
+| r1-2 high: decision 4's period keys drop the owner's earlier accepts | Fixed. `rarely_paid.decision_for`: the newer of the period row's and the whole row's decision holds (fold, C5, the policy page). |
+| r1-3 medium: EMA-only never-payable denials told to get the EOB and appeal | Fixed. `rarely_paid.LEAD_ROUTES` (one list, with `eob_first`) leads them by the rule; `d4_measure.py` counts an item as led only when its next step says so. |
+| r1-4 medium: payer work sized at the patient's share | Fixed. A patient-group denial whose work is with the payer (any rule outside `states.PATIENT_SIDE_RULES`) is sized and stored at the payer's rate for the service (`detect._payer_work_size`, `story._next`). |
+| r1-5 medium: the next payer's CO plus PR answer ignored | Fixed. `states.next_payer_answer`; the share is capped at the next payer's patient share (`states.patient_share`, archive rule 8's `patient_share_of`); the step says its contractual part first, and plainly when it paid and put nothing on the patient. |
+| r1-6 medium: Billed the patient closed as paid over a write-off | Fixed. The half clause of `patient_side_settled` is gone; a line EMA closed by a non-contractual write-off is Work now at what is left (a write-off with no owner). |
+| r1-7 medium: owed as secondary ignores the primary's contractual part | Fixed. `owed_in_second_role` is capped at what the other payers left on the line (their patient share), in archive rule 3 and in `detect._second_role_due`. |
+| r1-8 low: a partial payment as secondary not recorded as recovered | Fixed differently. What arrived is kept with the item as dated proof (`arrived_cents`) and the Results tab counts the payment as money returned on the item while the rest stays listed. `recovered_cents` stays a closure's amount: the save clears it on any item not resolved (detect.py, "if st != resolved") and the self-check replays it the same way (selfcheck.py, the person's marks). The reviewer's two tests that want `recovered_cents` on an open item stay failing by design. |
+| r2-1 medium: a never-payable item open to bulk appeal, the packet as main button, no checklist in the fax window | Fixed. The run stores `appeal_block='never_payable'`; the bulk list leaves it out with the reason; the panel's main button is Copy the steps; packets keep their checklist and the fax window shows it. |
+| r2-2 low: after Billed the patient the panel follows up with the payer and hides Done | Fixed. `story._state_of`: a person's decision-2 action at or after the run that stored the state gives the state (`by_person`); the page's status words never replace it. |
+| r2-3 low: a same-day Sent after Billed the patient ignored | Fixed. `states._newest_work`: the practice's day, then the moment; the billed mark is dated by the practice's day like every mark. |
+| r2-4 low: Progress counts Done as paid | Fixed. `api.DONE_SQL`/`PAID_SQL`: a Done is its own row (`done`) and never paid later, recovered, or in the days to payment; the page shows it apart ("Marked done"). |
+| r2-5 low: G6001 never payable beyond its source | Fixed. Both G6001 entries are `claim` (an authorization that listed it), with a denial for coverage guidelines appealed only with a note showing the listed criteria were met; the research report says so. |
+
+## Design decisions of this round
+
+- r1-1: a can't-check, never an age rule: how old a patient's share may be before it is given up is the owner's call
+  (F5 owns the bill-the-patient functions after the merge and the batch decision for services before 2025).
+- r1-5: a next payer that answered with a contractual adjustment only (nothing paid, nothing on the patient) keeps the
+  unit's caution and the bill by default; moving it to Done is F5's (its brief).
+- r1-7: the cap applies only when the other payers' remittances are on file; with only the payer's own OA-23 nothing
+  tells what they left, so the rule is as before.
+- r1-8: the scoreboard (Results) is where money returned is counted; an item's `recovered_cents` is what closed it.
+- r2-2: the person's newer action wins only for the decision-2 rules (`states.PATIENT_PERSON_RULES`), so the drawer
+  still agrees with the lists for every other stored state.
+- r2-5 for the integrator: `plans/owner_notes_2026-11-26.md` (kept by the integration) still lists G6001 among "not
+  payable" (550 items, $61,330; 115 on Work now, $13,966, research counts of the 11-24 world): they move to fixable on
+  the claim.
+
+## Tests of this round
+
+- `tests/test_decisions_review.py`: every finding's ported test (r1-1 to r1-8, r2-1 to r2-5), both store kinds where
+  the code runs on both; the panel in node (r2-1, r2-2); the API on the server (r2-1, r2-2, r2-4).
+- `tests/test_decisions.py`: the run test declares a Production box (r1-1); the write-off case expects Work now
+  (r1-6). `tests/test_payer_code_rules.py`: G6001 to 2025 is `claim` (r2-5).
+- Breaks: r1-1 2, r1-2 2, r1-3 and r2-1 6, r1-4 to r1-7 10, r2-2 to r2-5 9; each failed its tests and the restore left
+  `git status` clean.

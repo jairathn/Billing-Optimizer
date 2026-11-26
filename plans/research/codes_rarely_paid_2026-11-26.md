@@ -35,9 +35,11 @@ items, $209,966, of which 491 items and $154,318 sit on Work now. Four findings 
 2. **G6001 (ultrasound guidance) at UnitedHealthcare, 2024-2025.** UnitedHealthcare required prior authorization for
    G6001 until 12/31/2025, and its image-guidance policy (which its Medicare Advantage policy points to) said image
    guidance is not medically necessary for superficial treatment of skin cancer, including superficial radiation therapy,
-   until that language was removed on 03/01/2026. UnitedHealthcare paid the rest of each course and denied G6001.
-   550 open items, $61,330 (115 on Work now, $13,966). **Never payable for those dates.** G6001 no longer exists; from 2026
-   the ultrasound guidance is 77439, once per course.
+   when the policy's listed criteria are not met, until that language was removed on 03/01/2026. UnitedHealthcare paid
+   the rest of each course and denied G6001. 550 open items, $61,330 (115 on Work now, $13,966). **Fixable on the claim
+   when an approved authorization listed G6001; otherwise only a note that shows the listed criteria were met.**
+   (Corrected after review on 2026-11-26: the first version said never payable, which the source does not support.)
+   G6001 no longer exists; from 2026 the ultrasound guidance is 77439, once per course.
 3. **G2211 at commercial payers.** Anthem (23 paid of 5,790 lines answered), UnitedHealthcare (1 of 589), UMR (0 of 351),
    UHC Integrated Services (10 of 551). UnitedHealthcare's and Anthem's published policies say G2211 is never paid
    separately. Almost no money sits on the list (the denials are $0 items or parts of whole-claim items), but thousands of
@@ -56,6 +58,9 @@ class findings (fixable); the J-code pairs carry $0; a few G2211 pairs have no p
 | never payable (by the cited rule) | 8 (Optum 77600 for 2026 dates) | 867 | $184,505 | 432 | $137,141 |
 | claim (fixable on the claim) | 9 (Optum 77600 for 2025 dates) | 75 | $25,419 | 43 | $17,164 |
 | unclear (no published rule found) | 9 (4 with only auditor items) | 26 | $43 | 16 | $13 |
+
+Correction (review, 2026-11-26): the table above is the first version's. The two UnitedHealthcare G6001 pairs (550 items,
+$61,330; 115 on Work now, $13,966) move from never payable to claim (section 2).
 
 (The Optum 77600 pair is split by service date: its 2026 items are never payable, its 2025 items depend on the VA
 referral. The Medicaid 77600 pair's open items are all 2025 services, so it counts as fixable.) Nothing here changes what RemitWatch does with these items: all stay pursued until the owner accepts a
@@ -205,17 +210,24 @@ from 2026 (all payers, see "Related findings").
   fields for treatment of cutaneous tumors, per course of treatment (List separately in addition to code for primary
   procedure)".
 
-### Verdict: never payable (both pairs)
+### Verdict: fixable on the claim (both pairs; corrected 2026-11-26)
 
-For superficial radiation therapy of skin cancer with service dates before 2026, UnitedHealthcare's criteria made the
-guidance not medically necessary, and it needed an authorization the practice did not have. A note cannot change that.
-The one exception to check: if an approved authorization for the course listed G6001 (the 8 paid lines suggest some did),
-resubmit with the authorization number.
+The first version of this report called both pairs never payable, whatever the note shows. The source does not say that.
+UnitedHealthcare's revision note says the earlier policy called image guidance not medically necessary for superficial
+treatment of skin cancer "when the [listed] criteria are not met": a conditional exclusion, which a note can meet. And the
+authorization rule has its own fix on the claim. So:
+
+- Denied for no authorization (CO-197): check whether an approved authorization for the course listed G6001 (the 8 paid
+  lines suggest some did). If one did, resubmit with the authorization number. If none did, the denial stands.
+- Denied for coverage guidelines (CO-272): appeal only with a note that shows the policy's listed criteria for image
+  guidance were met. The earlier versions of the policy could not be fetched here, so read the criteria from the version
+  in force on the date of service before appealing.
 
 ### What the note or claim must show
 
-Nothing for past dates. For 2026: report 77439 (never G6001) once per course with 77437 or 77438, and include it in the
-authorization request.
+For past dates: the authorization number on the claim when an approved authorization listed G6001; for a denial for
+coverage guidelines, a note that shows the policy's listed criteria for image guidance were met. For 2026: report 77439
+(never G6001) once per course with 77437 or 77438, and include it in the authorization request.
 
 ## 3. G2211 (visit complexity add-on)
 

@@ -2943,12 +2943,18 @@ async def activity_assumptions_save(request: Request, user: str = Depends(requir
 
 # --------------------------------------------------------------------------- progress: are we winning
 MONEY = "category IN ('downcoding','bundling','denial','underpayment') AND COALESCE(stale,0)=0"
+# a person's Done (the owner's decision 2: Paid with $0.00, its note starting with Done, as states.py reads it): nothing came
+# back from the payer, so Progress never counts it as paid later or as money recovered (review r2-4)
+DONE_SQL = "(status='resolved' AND COALESCE(recovered_cents,0)=0 AND substr(COALESCE(notes,''),1,4)='Done')"
+PAID_SQL = f"(status='resolved' AND NOT {DONE_SQL})"
 
 
 @app.get("/api/progress")
 def progress(_: str = Depends(require_auth)):
     out: dict[str, Any] = {}
-    out["pipeline"] = rows(f"SELECT status, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, COALESCE(SUM(recovered_cents),0) recovered_cents FROM findings WHERE {MONEY} GROUP BY 1")
+    # a person's Done is its own row ('done'): "Paid back" counts what the payers paid, never a service the patient was billed for
+    out["pipeline"] = rows(f"SELECT CASE WHEN {DONE_SQL} THEN 'done' ELSE status END status, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, "
+                           f"COALESCE(SUM(recovered_cents),0) recovered_cents FROM findings WHERE {MONEY} GROUP BY 1")
     # window open and window closed, counted as the Worklist's tiles count them (a routine-rate pattern is open while one
     # of its claims is, with those claims' cents), so the figures here are the ones a click on those tiles lists
     token = _WINDOWS_MEMO.set({})
@@ -2958,22 +2964,22 @@ def progress(_: str = Depends(require_auth)):
     finally:
         _WINDOWS_MEMO.reset(token)
     out["recovered_by_month"] = rows(f"""SELECT substr(recovered_date,1,7) month, category, COUNT(*) n, COALESCE(SUM(recovered_cents),0) cents
-                                         FROM findings WHERE {MONEY} AND status='resolved' AND recovered_date >= '2023-01' GROUP BY 1,2 ORDER BY 1""")
-    out["cohorts"] = rows(f"""SELECT month, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n,
-                                     COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
+                                         FROM findings WHERE {MONEY} AND {PAID_SQL} AND recovered_date >= '2023-01' GROUP BY 1,2 ORDER BY 1""")
+    out["cohorts"] = rows(f"""SELECT month, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n,
+                                     COALESCE(SUM(CASE WHEN {PAID_SQL} THEN recovered_cents END),0) recovered_cents,
                                      SUM(status IN ('appealed','in_progress')) working_n, SUM(status='lost') lost_n
                               FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL AND month >= '2024-01' GROUP BY 1 ORDER BY 1""")
-    out["by_payer"] = rows(f"""SELECT payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n,
-                                      COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
+    out["by_payer"] = rows(f"""SELECT payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n,
+                                      COALESCE(SUM(CASE WHEN {PAID_SQL} THEN recovered_cents END),0) recovered_cents,
                                       SUM(status='lost') lost_n, SUM(status IN ('appealed','in_progress')) working_n,
                                       COALESCE(SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END),0) open_cents,
                                       COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= ? THEN shortfall_cents END),0) live_cents,
-                                      ROUND(AVG(CASE WHEN status='resolved' AND recovered_date IS NOT NULL THEN julianday(recovered_date) - julianday(payment_date) END)) avg_days
+                                      ROUND(AVG(CASE WHEN {PAID_SQL} AND recovered_date IS NOT NULL THEN julianday(recovered_date) - julianday(payment_date) END)) avg_days
                                FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL
                                GROUP BY 1 HAVING n >= 25 ORDER BY cents DESC LIMIT 30""", (_day(0),))
     out["downcode_trend"] = rows(f"SELECT month, payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {FAMILY['downcoding'][0]} AND status != 'dismissed' AND COALESCE(stale,0)=0 AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1")
     out["visit_lines"] = rows(f"SELECT month, payer_group, SUM(lines) lines FROM exposure WHERE code IN ({EM_LIST}) AND month >= '2024-01' GROUP BY 1,2") if has_table("exposure") else []
-    out["family_trend"] = rows(f"""SELECT month, category, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n
+    out["family_trend"] = rows(f"""SELECT month, category, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n
                                    FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1""")
     out["all_lines"] = rows("SELECT month, SUM(lines) lines FROM exposure WHERE month >= '2024-01' GROUP BY 1 ORDER BY 1") if has_table("exposure") else []
     out["snapshots"] = rows("SELECT at, status, SUM(n) n, SUM(cents) cents FROM progress_snapshots WHERE category IN ('downcoding','bundling','denial','underpayment') GROUP BY run_id, status ORDER BY at") if has_table("progress_snapshots") else []

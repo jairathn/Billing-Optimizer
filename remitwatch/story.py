@@ -996,6 +996,14 @@ def _state_of(conn: sqlite3.Connection, fx: dict, today: str | None) -> dict:
     stored = S.stored_state(f)
     if not stored:
         return live
+    if (live.get("rule") in S.PATIENT_PERSON_RULES and f.get("status") in ("appealed", "resolved")
+            and str(f.get("status_changed_at") or "") >= str(f.get("last_seen") or "~")):
+        # a person's Billed the patient (Sent) or Done (Paid with $0) since the run that stored the state (review r2-2):
+        # the payer answered already and the item waits on the patient (or is done), as the state of that action says.
+        # The stored state (Work now: bill the patient) is older than the person's decision, which an automatic state never
+        # overrides. A status of the run's own second counts as newer: the run read the statuses after it started, so the
+        # state of the person's action is the newest either way. Any other status (a reopen) keeps the stored state
+        return dict(live, by_person=True)
     if stored["work_state"] == live["work_state"]:
         return dict(live, stored=True, follow_up_on=stored.get("follow_up_on") or live.get("follow_up_on"),
                     state_basis=stored.get("state_basis") or live.get("state_basis"))

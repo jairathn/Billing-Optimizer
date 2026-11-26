@@ -120,6 +120,9 @@ PATIENT_WAIT_DAYS = 60
 # what the payer pays for the service (review r1-4)
 PATIENT_SIDE_RULES = frozenset({"bill_patient_denial", "patient_unpaid", "billed_patient", "cant_check_patient", "patient_paid",
                                 "moved_to_patient", "person_done"})
+# the rules a person's own decision-2 action leads to (Billed the patient, then the patient's payment or its absence; Done):
+# when that action is newer than the run that stored the item's state, the state it gives is the item's (story._state_of)
+PATIENT_PERSON_RULES = frozenset({"billed_patient", "patient_unpaid", "patient_paid", "person_done"})
 
 
 # ------------------------------------------------------------------------------------------------------------ helpers
@@ -163,6 +166,17 @@ def fax_day(sent_at: Any, created_at: Any) -> str:
     sent = sent if _d(sent) else ""
     made = made if _d(made) else ""
     return max(sent, made) if sent and made else (sent or made)
+
+
+def _newest_work(rows: list[dict]) -> dict | None:
+    """The newest of a person's work rows: by the practice's day, then by the moment it was recorded, so of two marks on
+    one day the later is the newest (review r2-3: Billed the patient after a Sent that morning is what the item waits on,
+    and a corrected claim sent after a Billed the patient that day waits on the payer). A row with no moment ranks
+    before one with a moment on its day."""
+    def key(e: dict) -> tuple:
+        m = _moment(e.get("at"))
+        return (e.get("date") or "", m.timestamp() if m else float("-inf"))
+    return max(rows, key=key, default=None)
 
 
 def _came_after(read: Any, day: Any, moment: datetime | None, reopen_day: str) -> bool:
@@ -1235,16 +1249,18 @@ def _evidence(fx: dict) -> list[dict]:
             if kind == "sent" and note.startswith(BILLED_PATIENT):
                 # "Billed the patient" (the owner's decision 2): the patient was billed for a patient-group denial
                 rest = note[len(BILLED_PATIENT):].lstrip(" :").strip()
-                out.append({"date": str(e["at"])[:10], "kind": "billed", "patient": True, "source": "remitwatch", "dated_by": "event",
-                            "confirmed": True, "text": f"Patient billed by {who} on {day(e['at'])}" + (f": {rest}" if rest else "")})
+                out.append({"date": _pday(e["at"]), "at": e["at"], "kind": "billed", "patient": True, "source": "remitwatch",
+                            "dated_by": "event", "confirmed": True,
+                            "text": f"Patient billed by {who} on {day(e['at'])}" + (f": {rest}" if rest else "")})
                 continue
             if kind == "sent" and note.startswith("Billed:"):
                 # the page's Mark billed: the claim went to the next payer (or the patient), not an appeal to this one
-                out.append({"date": _pday(e["at"]), "kind": "billed", "source": "remitwatch", "dated_by": "event", "confirmed": True,
+                out.append({"date": _pday(e["at"]), "at": e["at"], "kind": "billed", "source": "remitwatch", "dated_by": "event",
+                            "confirmed": True,
                             "text": f"Marked billed by {who} on {day(e['at'])}" + (f": {note[len('Billed:'):].strip()}" if note[7:].strip() else "")})
                 continue
             text = f"Marked {'Sent' if kind == 'sent' else 'Started'} by {who} on {day(e['at'])}" + (f": {e['note']}" if e.get("note") else "")
-            out.append({"date": _pday(e["at"]), "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
+            out.append({"date": _pday(e["at"]), "at": e["at"], "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
                         "confirmed": kind == "sent"})
         elif e["kind"] == "packet":
             out.append({"date": _pday(e["at"]), "kind": "packet", "source": "remitwatch", "dated_by": "event", "confirmed": False,
@@ -2647,7 +2663,7 @@ def _decide(fx: dict, today: str) -> dict:
         anchor = max((e["date"] for e in sent if e.get("date")), default=None) or _pday(f.get("appealed_at") or f.get("status_changed_at"))
         if sig == "SECONDARY_NOT_BILLED":
             return _billed_second(res, fx, ev, anchor, who, today, put)
-        newest = max(sent, key=lambda e: e.get("date") or "", default=None) if sent else None
+        newest = _newest_work(sent)
         if newest is not None and newest.get("patient") and patient_denial(f):
             return _billed_patient(res, fx, newest, who, today, put)
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
