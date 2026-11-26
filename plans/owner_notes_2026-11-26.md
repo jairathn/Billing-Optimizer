@@ -84,3 +84,18 @@ bill. Three groups need your call, and my recommendation for each:
 - UnitedHealthcare Kentucky paid PA and NP visits in full from January 2025 until late October 2026; since then some are
   paid at 85 percent. If UHC changed the contract, the rule needs that date; if it did not, those lines are underpaid.
   Worth one call to UHC provider relations.
+
+## 7. Payer deadlines, now from each payer's own manual or the law (deadlines unit)
+Every window the research found wrong now says what its source says, with the source's words on the item. On the 11-24
+data: 10 Kentucky Medicaid items came back from expired to Work now ($991: a new claim within 12 months of the service,
+since Kentucky's fee-for-service program takes no appeal of an ordinary denial); 19 items turned out to be past their
+payer's real last day ($1,140, mostly Anthem's Federal Employee Program); 158 items have an earlier due date, 195 a later
+one. Six things only you know, the dates assume the first answer:
+1. Is the practice contracted with every Medicare Advantage plan it bills, and a participating Ambetter provider?
+   (Non-contracted providers get far shorter appeal windows: 60 to 90 days.)
+2. What dispute period does the local Blue plan give providers for Federal Employee Program claims? (6 months is used.)
+3. Are the Humana Medicaid plans on the remittances Kentucky's or Indiana's? (Kentucky's 120 days is used.)
+4. A second payer's share past its deadline: listed as lost, or only counted? (Counted today: 131 shares, $4,449.)
+5. Kentucky Medicaid crossovers (6 months from Medicare's decision): worth computing? (Named, not computed.)
+6. Aetna's fully insured plans allow 2 years in Kentucky and Indiana, but the remittance cannot tell fully insured from
+   self-funded, so 180 days is used.
