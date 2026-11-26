@@ -1,4 +1,4 @@
-# Tools of the decisions unit (the owner's decisions 2 and 3)
+# Tools of the decisions unit (the owner's decisions 2, 3 and 4)
 
 Everything here opens a private copy of the real store: patient data. Run them only in a private folder (mode 700), with
 `python3 -I -B`; they print counts, dollars, codes, payer groups, finding ids and day offsets, never names, claim ids,
@@ -24,3 +24,14 @@ the world copy and `ema_ledger.sqlite`, `P2_DB` at the copy's file name; its arg
 - `d3_base.py`, `d3_detail.py`, `d3_owed.py`, `d3_owed_b.py`, `d3_r3_all.py`: decision 3 populations (rule 3 closures
   in another role, closures settled as secondary) and what each payer owed in that role by the formula.
 - `t.sh <python> <pytest args>`: the tests with every feed variable unset.
+
+Decision 4 (codes a payer almost never pays; run on a world after a cycle of the branch's tree):
+- `d4_measure.py <tree> <world>`: the run's evidence per pair (meta rarely_paid:why), the owner's table's payer-policy
+  patterns (count, dollars, decision, researched verdict), the items that carry a "Why" block by payer group, code,
+  verdict and period (dollars, work now), and the work-now items whose next step a never-payable rule leads, by signal.
+- `d4_hand.py <world>`: the evidence of the biggest pairs counted again from the raw 835 rows with plain SQL (no
+  remitwatch code): lines answered and paid, recoded, and the reasons on the unpaid lines.
+- `d4_trace.py <tree> <world>`: every work-now item a never-payable rule leads, checked against its own rows (the billed
+  code is the rule's, nothing paid on the line, the service date inside the rule's period, the payer group the rule's;
+  for a denial only EMA saw, one EMA line of that code with no insurance payment). Prints the checks and the failures.
+- `d4_show.py <tree> <world>`: what the drawer's "Why" block and the next step say for one item of a few kinds.
