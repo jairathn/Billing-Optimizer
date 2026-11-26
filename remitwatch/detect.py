@@ -7032,8 +7032,28 @@ class Detector:
                 continue
             r["work_state"], r["follow_up_on"] = st.get("work_state"), st.get("follow_up_on")
             r["state_basis"] = (st.get("state_basis") or "")[:300] or None
-            r["appeal_block"] = st.get("appeal_block")
+            r["appeal_block"] = st.get("appeal_block") or self._never_payable_block(r, st)
             self.ema_counts["state_" + str(st.get("work_state"))] += 1
+
+    def _never_payable_block(self, r: dict, st: dict) -> str | None:
+        """'never_payable' for an item to work now that a payer's published rule never pays (the owner's decision 4, the
+        rule that leads its next step: story._with_payer_rule): no appeal goes for it in bulk, and the bulk list's Left
+        out line says why. Its state is not changed. A failure is logged and blocks nothing."""
+        if st.get("work_state") != "work_now":
+            return None
+        try:
+            from . import rarely_paid as rp
+            if st.get("route") not in rp.LEAD_ROUTES:
+                return None
+            if rp.never_payable_lead(self.conn, r):
+                self.ema_counts["never_payable_block"] += 1
+                return "never_payable"
+        except Exception as exc:        # noqa: BLE001  (logged; the item keeps its state, and its panel still says the rule)
+            if os.environ.get("REMITWATCH_EMA_STRICT") == "1":
+                raise
+            from .runlog import caught
+            caught(exc, "rarely_paid.block")
+        return None
 
     def _save_ema_wiring(self) -> None:
         """What the run did with EMA's reports, for the Data tab and the maintainers: counts by step, and any step that failed;

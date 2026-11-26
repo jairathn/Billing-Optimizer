@@ -3002,20 +3002,24 @@ def _why_unpaid(conn: sqlite3.Connection, f: dict) -> list[dict]:
         return []
 
 
-# the routes whose work a never-payable rule changes: an appeal, a correction, a call, a decision or a rate request
-PAYER_RULE_ROUTES = ("appeal", "corrected", "call", "decide", "rate")
+# the routes whose work a never-payable rule changes: an appeal, a correction, a call, a decision, a rate request, and a
+# denial only EMA saw whose EOB comes first (remitwatch.rarely_paid.LEAD_ROUTES, the one list)
+from .rarely_paid import LEAD_ROUTES as PAYER_RULE_ROUTES  # noqa: E402
 
 
 def _with_payer_rule(nxt: dict, blocks: list[dict], f: dict, st: dict) -> dict:
     """The next step with the payer's researched rule in it. A rule no note can change (never payable) is said first and
     plainly on an item still to work: check what the rule allows, else the owner accepts the pattern on the write-off
-    policy page (Accept this pattern; the item stays on Work now until then) or a person lets it go with the reason.
-    Otherwise what the note or the claim must show is a step. The state and the deadline are not changed here."""
+    policy page (Accept this pattern; the item stays on Work now until then) or a person lets it go with the reason. Its
+    appeal is not offered: appeal_ok is false (so no bulk send takes it) and the panel has no packet or fax button; the
+    step keeps the old action in words, for what the rule still allows. Otherwise what the note or the claim must show is
+    a step. The state and the deadline are not changed here."""
+    from .rarely_paid import never_payable_lead
     out = dict(nxt)
     steps = list(out.get("steps") or [])
     buttons = list(out.get("buttons") or [])
     working = st.get("work_state") == "work_now" and out.get("route") in PAYER_RULE_ROUTES
-    lead = next((b for b in blocks if b.get("verdict") == "never_payable" and b.get("single")), None)
+    lead = never_payable_lead(None, f, blocks)
     if lead and working:
         src = (lead.get("sources") or [{}])[0]
         cite = f" ({src.get('title')})" if src.get("title") else ""
@@ -3036,6 +3040,10 @@ def _with_payer_rule(nxt: dict, blocks: list[dict], f: dict, st: dict) -> dict:
         steps = add + steps
         if lead.get("in_table") and "accept_pattern" not in buttons:
             buttons.append("accept_pattern")            # the owner's table lists the pattern (the run made it)
+        # no appeal for what no note changes (the research calls appealing a "do not report" pair a recoupment risk): no
+        # packet or fax button, and appeal_ok false with the reason, so neither the panel nor a bulk send offers one
+        buttons = [b for b in buttons if b not in ("build_packet", "fax_payer")]
+        out["appeal_ok"], out["appeal_block"] = False, "never_payable"
         out["pattern"] = lead["pattern"] if lead.get("in_table") else out.get("pattern")
         out["payer_rule"] = "never_payable"
     else:

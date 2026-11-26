@@ -21,6 +21,9 @@ for k, p in sorted(pp.items(), key=lambda kv: -(kv[1].get("cents") or 0)):
 rows = [dict(r) for r in c.execute("SELECT * FROM findings WHERE COALESCE(stale,0)=0")]
 agg = defaultdict(lambda: [0, 0, 0, 0])
 lead = Counter()
+not_led = Counter()          # a never-payable block on a work-now item whose next step does not lead with it, by signal and route
+led_appeal = Counter()       # the led ones by (appeal_ok, an appeal or fax button offered): review r2-1 wants (False, False) only
+stored_block = Counter()     # the appeal_block the run stored on them (review r2-1: 'never_payable' keeps them out of bulk)
 verdicts = Counter()
 per_item = Counter()
 for f in rows:
@@ -38,7 +41,14 @@ for f in rows:
             a[2] += 1; a[3] += f.get("shortfall_cents") or 0
         verdicts[(b["verdict"] or "not researched", f.get("work_state"))] += 1
     if any(b["verdict"] == "never_payable" and b["single"] for b in blocks) and f.get("work_state") == "work_now":
-        lead[f["signal"]] += 1
+        # led only when the next step itself leads with the rule (review r1-3: the block alone is not the step)
+        nx = story.explain(c, f["finding_id"])["next_step"]
+        if str(nx.get("action") or "").startswith("Not payable under"):
+            lead[f["signal"]] += 1
+            led_appeal[(nx.get("appeal_ok"), bool({"build_packet", "fax_payer"} & set(nx.get("buttons") or [])))] += 1
+        else:
+            not_led[(f["signal"], nx.get("route"))] += 1
+        stored_block[f.get("appeal_block")] += 1
 tot = [0, 0, 0, 0]
 print("items with a 'Why' block, by payer group, code, verdict, period:")
 for k, v in sorted(agg.items(), key=lambda kv: -kv[1][1]):
@@ -48,3 +58,6 @@ print("TOTAL blocks", tot[0], f"${tot[1]/100:,.2f}", "work now", tot[2], f"${tot
 print("items by number of blocks:", dict(per_item))
 print("verdict x state:", sorted(verdicts.items(), key=lambda kv: -kv[1]))
 print("work-now items whose next step a never-payable rule leads, by signal:", dict(lead), "total", sum(lead.values()))
+print("  with a block but not led, by signal and route:", dict(not_led), "total", sum(not_led.values()))
+print("  led, by (appeal_ok, packet or fax button):", dict(led_appeal))
+print("  stored appeal_block of the work-now items with a single never-payable block:", dict(stored_block))

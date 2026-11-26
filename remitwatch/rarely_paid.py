@@ -648,6 +648,23 @@ def block_for(f: dict, code: str, service_date: str | None, *, lines: list[dict]
     }
 
 
+# the routes whose work a never-payable rule leads (story._with_payer_rule): an appeal, a correction, a call, a decision, a
+# rate request, and a denial only EMA saw whose EOB is fetched first (its appeal is what the rule says no note changes)
+LEAD_ROUTES = ("appeal", "corrected", "call", "decide", "rate", "eob_first")
+
+
+def never_payable_lead(conn: sqlite3.Connection | None, f: dict, blocks: list[dict] | None = None) -> dict | None:
+    """The block that leads an item's next step, or None: a never-payable rule on a one-line item (no note changes it, so no
+    appeal goes for it in bulk, and its panel offers no appeal packet). With `blocks` (the drawer's), read from them;
+    else worked out from the store, cheaply for an item none of whose codes has a never-payable entry."""
+    if blocks is None:
+        grp = f.get("payer_group")
+        if not any((entry_for(grp, code, day) or {}).get("verdict") == "never_payable" for code, day in item_codes(f)):
+            return None
+        blocks = why(conn, f) if conn is not None else []
+    return next((b for b in blocks if b.get("verdict") == "never_payable" and b.get("single")), None)
+
+
 def why(conn: sqlite3.Connection, f: dict) -> list[dict]:
     """The item drawer's blocks, one per code of the item that is such a pair (most items: none or one)."""
     codes = item_codes(f)

@@ -161,3 +161,113 @@ def test_r1_2_a_later_decision_on_the_period_row_wins_and_a_later_one_on_the_who
     assert rp.decision_for({}, TO25) is None and rp.decision_for(None, TO25) is None
     assert rp.whole_key("Anthem / BCBS|77600|from 2026-01-01|payer_policy") == "Anthem / BCBS|77600||payer_policy"
     assert rp.whole_key("Anthem / BCBS|99213|25|CO-45") is None
+
+
+# =============================================================================================================
+# r1-3: a denial only EMA saw, of a pair the research calls never payable, is led by the rule, not told to appeal
+# =============================================================================================================
+def test_r1_3_an_ema_only_denial_of_a_never_payable_pair_is_led_by_the_rule(estore, eledger, tmp_path):
+    """Three 2026 Optum 77600 denials only EMA saw (CO-96, no remittance on file): their next step leads with "Not payable
+    under Optum (UHC)'s published rule", the EOB check kept after it as the only conditional way on; no appeal is
+    offered."""
+    from remitwatch import story
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import D, P, adj, charge, denial_world, items, run
+    optum, rows = P["optum"], []
+    for n in range(3):
+        kw = dict(patient=n % 4, payer=optum, primary=optum, svc=D(2026, 2, 2) + dt_days(n))
+        rows += [charge(F.link_no(800 + n), cpt="77600", amount=300, **kw),
+                 adj(F.link_no(800 + n), "CO-96", 300, cpt="77600", posted=D(2026, 3, 10) + dt_days(n), **kw)]
+    denial_world(estore, eledger, tmp_path, rows)
+    run(estore)
+    got = items(estore, "signal='EMA_DENIED'")
+    assert len(got) == 3
+    x = story.explain(estore.conn, got[0]["finding_id"], today="2026-05-03")
+    assert [b["verdict"] for b in x["why_unpaid"]] == ["never_payable"]
+    nx = x["next_step"]
+    assert (nx["route"], nx["payer_rule"]) == ("eob_first", "never_payable")
+    assert nx["action"].startswith("Not payable under Optum (UHC)'s published rule"), nx["action"]
+    assert any(s.startswith("Only if the check finds what the rule allows: Get the EOB") for s in nx["steps"]), nx["steps"]
+    assert nx["appeal_ok"] is False and not {"build_packet", "fax_payer"} & set(nx["buttons"])
+    assert got[0]["appeal_block"] in ("eob_first", "never_payable")      # a stored block: no bulk appeal takes it
+
+
+# =============================================================================================================
+# r2-1: a never-payable verdict closes every appeal path (bulk list, bulk send, the panel's main button) and the
+# checklist goes with the packet to where the fax goes out
+# =============================================================================================================
+XHR = {"X-Requested-With": "remitwatch"}
+ANTHEM26 = "payer_group='Anthem / BCBS' AND COALESCE(stale,0)=0 AND procedure_code='77600' AND service_date LIKE '2026%'"
+
+
+def test_r2_1_a_never_payable_item_is_left_out_of_the_bulk_appeal_and_its_send_held(estore, eledger, tmp_path, monkeypatch):
+    """Anthem's 2026 77600 denials (its rule never pays 77600 with the 2026 surface radiation codes): the run stores the
+    block, so "Appeal everything appealable" leaves them out and names them on its Left out line, and the bulk send's own
+    check of each item holds it. The panel offers no packet or fax button and its main button is Copy the steps."""
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    from remitwatch import story
+    from tests.test_ema_wiring import items, run
+    from tests.test_payer_code_rules import _anthem_with_ema
+    _anthem_with_ema(estore, eledger, tmp_path)
+    run(estore)
+    got = items(estore, ANTHEM26)
+    assert got and {f["appeal_block"] for f in got} == {"never_payable"}, [(f["signal"], f["appeal_block"]) for f in got]
+    x = story.explain(estore.conn, got[0]["finding_id"], today="2026-05-03")
+    nx = x["next_step"]
+    assert nx["payer_rule"] == "never_payable" and "no note changes that" in nx["action"]
+    assert nx["appeal_ok"] is False and nx["appeal_block"] == "never_payable"
+    assert not {"build_packet", "fax_payer"} & set(nx["buttons"]) and "copy_instructions" in nx["buttons"], nx["buttons"]
+    if estore.db_path == ":memory:":
+        return                                  # the API reads a store file: the compact kind is checked through story above
+    estore.conn.commit()
+    monkeypatch.setattr(api, "DB_PATH", estore.db_path)
+    monkeypatch.setattr(api, "PASSWORD", "")
+    monkeypatch.setenv("REMITWATCH_BULK_APPEAL", "1")
+    c = TestClient(api.app)
+    body = c.get("/api/appeals/appealable", headers=XHR).json()
+    listed = {i["finding_id"] for i in body["items"]}
+    never = {f["finding_id"] for f in got}
+    assert not (never & listed), sorted(never & listed)
+    left = body["left_out"]
+    assert left["never_payable"] == len(never) and "never payable under the payer's rule" in left["line"], left["line"]
+    assert {i["reason"] for i in left["items"] if i["finding_id"] in never} == {"never_payable"}
+    ok, why = api._appeal_ok_now(got[0]["finding_id"])
+    assert ok is False and "published rule does not pay this code" in why, why
+
+
+def test_r2_1_the_fax_window_and_a_stored_packet_carry_the_before_you_send_it_checklist(estore, eledger, tmp_path, monkeypatch):
+    """A letter-only packet keeps its checklist (returned, stored, read back) and the fax window shows it above Send the
+    fax; the PDF never carries it."""
+    import os
+    import sqlite3
+
+    import remitwatch.api as api
+    from remitwatch import notes
+    from tests.test_ema_wiring import items, run
+    from tests.test_payer_code_rules import _anthem_with_ema
+    _anthem_with_ema(estore, eledger, tmp_path)
+    run(estore)
+    if estore.db_path == ":memory:":
+        return                                  # the packet routes read a store file
+    estore.conn.commit()
+    monkeypatch.setattr(api, "DB_PATH", estore.db_path)
+    fid = items(estore, ANTHEM26)[0]["finding_id"]
+    detail = api._with_payer_rules(api.finding_detail(fid, "ok"))
+    conn = sqlite3.connect(estore.db_path)
+    try:
+        built = notes.build_letter_only(conn, detail, None)
+        stored = notes.get_packet(conn, built["packet_id"])
+        pdf = conn.execute("SELECT pdf FROM appeal_packets WHERE packet_id=?", (built["packet_id"],)).fetchone()[0]
+    finally:
+        conn.close()
+    assert built["checklist"] and stored["checklist"] == built["checklist"], (built.get("checklist"), stored.get("checklist"))
+    assert any("77600" in c for c in stored["checklist"])
+    assert b"Before you send it" not in pdf
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(here, "remitwatch", "static", "features.js"), encoding="utf-8").read()
+    i = src.index("async function xpFaxPreview")
+    preview = src[i:src.index("\nasync function ", i + 10) if "\nasync function " in src[i + 10:] else i + 4000]
+    assert "got.checklist" in preview and "Before you send it" in preview
+    assert preview.index("Before you send it") < preview.index("Send the fax")

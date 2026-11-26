@@ -498,6 +498,8 @@ XP_BUTTON.decide = 'Decide what to do';
 function xpPrimary(nx, hasPacket){
   const b = xpButtons(nx);
   if(b.includes('fax_payer') && hasPacket && !XP_CHECK_FIRST.has(nx.appeal_block)) return 'fax_payer';
+  // a payer's published rule that never pays the code leads: no appeal, and nothing to send first; the steps say what to check
+  if(nx.payer_rule === 'never_payable' && nx.appeal_ok === false) return b.includes('copy_instructions') ? 'copy_instructions' : null;
   // a correction made in EMA: read the steps, do it there, then mark it sent
   if(['corrected','eob_first'].includes(nx.route) && b.includes('mark_sent')) return 'mark_sent';
   // a decision first (fix, appeal or let go): the three choices, never "what did the payer do"
@@ -762,10 +764,14 @@ async function xpFaxPreview(f, packets, d){
     if(m){ m.className = 'small sev-medium'; m.textContent = text; } else alert(text);
     return;
   }
-  let letter = '';
-  try { letter = pk ? ((await api('/api/packets/' + encodeURIComponent(pk.packet_id))).letter || '') : ((await api('/api/appeal/' + encodeURIComponent(f.finding_id))).letter || ''); } catch(e){}
+  // the packet's "Before you send it" checklist (the payer's published rule for the code, the owner's decision 4): shown
+  // here, where the fax goes out, never in what is faxed
+  let letter = '', checklist = [];
+  try { const got = pk ? await api('/api/packets/' + encodeURIComponent(pk.packet_id)) : await api('/api/appeal/' + encodeURIComponent(f.finding_id));
+        letter = (got && got.letter) || ''; checklist = (got && Array.isArray(got.checklist)) ? got.checklist : []; } catch(e){}
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Fax to ${esc(f.payer_group || 'the payer')}</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">Read what goes, then send it. It goes as it is to the payer's confirmed appeal fax number, and the item is marked Sent.</div>
+    ${checklist.length ? `<div class="note sev-medium" id="xpFaxCheck"><b>Before you send it</b>${checklist.map(c => `<div>${esc(c)}</div>`).join('')}</div>` : ''}
     <div class="actions">${pk ? `<a href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf" target="_blank" rel="noopener"><button>Open the PDF</button></a>` : ''}<button class="primary" id="xpFaxGo">Send the fax</button></div>
     <div id="xpFaxMsg" class="small"></div><pre>${esc(letter)}</pre>`;
   $('#modal').classList.add('open');

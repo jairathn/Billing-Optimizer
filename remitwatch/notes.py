@@ -55,8 +55,14 @@ MAX_DOCX_XML_BYTES = 30 * 1024 * 1024
 
 def ensure_packets(conn: sqlite3.Connection) -> None:
     conn.executescript(PACKETS_DDL)
-    if "letter_redacted" not in {r[1] for r in conn.execute("PRAGMA table_info(appeal_packets)")}:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(appeal_packets)")}
+    if "letter_redacted" not in have:
         conn.execute("ALTER TABLE appeal_packets ADD COLUMN letter_redacted TEXT")
+        conn.commit()
+    if "checklist" not in have:
+        # "Before you send it" (the payer's published rule for the code, the owner's decision 4): kept with the packet so
+        # the fax window shows it where the fax goes out; never in the PDF, never faxed
+        conn.execute("ALTER TABLE appeal_packets ADD COLUMN checklist TEXT")
         conn.commit()
 
 
@@ -531,9 +537,9 @@ def build_from_note(conn: sqlite3.Connection, detail: dict, raw_claim: dict | No
     pdf = render_pdf(out, note_text=text, note_pdf=data if kind in ("pdf", "pdf_scanned") else None)
     out["checklist"] = packet.get("checklist") or []        # for the person, after the PDF: never in what goes to the payer
     conn.execute("""INSERT OR REPLACE INTO appeal_packets (packet_id, finding_id, created_at, mode, model, subject, letter, analysis, evidence, attachments,
-                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted, checklist) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                  (pid, out["finding_id"], out["created_at"], out["mode"], out["model"], out["subject"], out["letter"], json.dumps(analysis),
-                  out["evidence"], json.dumps(out["attachments"]), out["note_name"], sha, kind, data, pdf, redacted))
+                  out["evidence"], json.dumps(out["attachments"]), out["note_name"], sha, kind, data, pdf, redacted, json.dumps(out["checklist"])))
     conn.commit()
     if not reveal:
         out["letter"] = redacted
@@ -556,10 +562,11 @@ def build_letter_only(conn: sqlite3.Connection, detail: dict, raw_claim: dict | 
            "deadline": packet.get("deadline"), "deadline_basis": packet.get("deadline_basis"),
            "corrected_claim_instructions": packet.get("corrected_claim_instructions")}
     pdf = render_pdf(out)
+    out["checklist"] = packet.get("checklist") or []        # for the person, after the PDF: never in what goes to the payer
     conn.execute("""INSERT OR REPLACE INTO appeal_packets (packet_id, finding_id, created_at, mode, model, subject, letter, analysis, evidence, attachments,
-                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted, checklist) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                  (pid, out["finding_id"], out["created_at"], "letter", None, out["subject"], out["letter"], json.dumps(analysis),
-                  out["evidence"], json.dumps(out["attachments"]), "", None, "none", None, pdf, redacted))
+                  out["evidence"], json.dumps(out["attachments"]), "", None, "none", None, pdf, redacted, json.dumps(out["checklist"])))
     conn.commit()
     if not reveal:
         out["letter"] = redacted
@@ -675,7 +682,8 @@ def get_packet(conn: sqlite3.Connection, packet_id: str, with_pdf: bool = False,
     """One stored packet. The letter comes back with placeholders for the patient unless `reveal` is true."""
     ensure_packets(conn)
     conn.row_factory = sqlite3.Row
-    cols = "packet_id, finding_id, created_at, mode, model, subject, letter, letter_redacted, analysis, evidence, attachments, note_name, note_kind, emailed_to, emailed_at"
+    cols = ("packet_id, finding_id, created_at, mode, model, subject, letter, letter_redacted, analysis, evidence, attachments, note_name, "
+            "note_kind, emailed_to, emailed_at, checklist")
     r = conn.execute(f"SELECT {cols}{', pdf' if with_pdf else ''} FROM appeal_packets WHERE packet_id=?", (packet_id,)).fetchone()
     if not r:
         return None
@@ -685,6 +693,11 @@ def get_packet(conn: sqlite3.Connection, packet_id: str, with_pdf: bool = False,
         d["letter"] = redacted or "[The letter is in the PDF.]"
     d["analysis"] = json.loads(d["analysis"]) if d.get("analysis") else {}
     d["attachments"] = json.loads(d["attachments"]) if d.get("attachments") else []
+    try:
+        cl = json.loads(d.get("checklist") or "[]")
+    except ValueError:
+        cl = []
+    d["checklist"] = [str(x) for x in cl] if isinstance(cl, list) else []
     return d
 
 

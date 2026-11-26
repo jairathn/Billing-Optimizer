@@ -4521,7 +4521,8 @@ BULK_RULE = ("status='open' AND COALESCE(stale,0)=0 AND work_state='work_now' AN
 BLOCK_WORDS = {"paid": "it was paid or settled", "credit": "the line carries a credit (money owed back)",
                "reprocessed": "the payer reprocessed the line after this answer", "waiting": "it waits on the payer's answer to work already done",
                "settled_in_ema": "EMA shows the line settled: find which payer paid before appealing it",
-               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)"}
+               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)",
+               "never_payable": "the payer's published rule does not pay this code, and no appeal changes that (its panel says what to check)"}
 # never appealed, whoever asks and whatever the item's status: a line paid, credited or reprocessed (amendment 14); one EMA
 # shows settled, or the archive shows likely paid (orchestrator decision 4), goes only after a person checked it is unpaid
 NEVER_APPEALED = ("paid", "credit", "reprocessed")
@@ -4534,7 +4535,8 @@ CLOSED_STATES = {"done": "it was found paid or settled", "accepted": "it is acce
                  "expired": "every window to appeal it has closed"}
 # why an open item a letter settles is not on the bulk list, in the "Left out" line's words and order
 LEFT_OUT = (("paid", "paid"), ("waiting", "waiting"), ("credit", "credit"), ("reprocessed", "reprocessed"), ("settled", "settled in EMA"),
-            ("likely_paid", "likely paid"), ("no_date", "no filing date"), ("no_state", "state not worked out yet"), ("other", "other"))
+            ("likely_paid", "likely paid"), ("never_payable", "never payable under the payer's rule"), ("no_date", "no filing date"),
+            ("no_state", "state not worked out yet"), ("other", "other"))
 LEFT_OUT_WORDS = dict(BLOCK_WORDS, settled="EMA shows it settled: find which payer paid", no_date="no filing date on file: its panel says what to check",
                       no_state="the run has not worked out its state yet", other="not an item to appeal now")
 
@@ -4546,10 +4548,10 @@ def _bulk_ready(cols: set[str]) -> bool:
 
 def _left_out_reason(r: dict) -> str:
     """Why an open item an appeal letter would settle is not on the bulk list (LEFT_OUT): paid, waiting, credit,
-    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), no filing date,
-    no state worked out yet, or other."""
+    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), never payable
+    under the payer's published rule (the owner's decision 4), no filing date, no state worked out yet, or other."""
     block = r.get("appeal_block")
-    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid"):
+    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid", "never_payable"):
         return block
     if block in ("settled_in_ema", "patient_paid"):
         return "settled"
