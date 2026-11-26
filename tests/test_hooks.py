@@ -1263,6 +1263,36 @@ def test_every_vercel_page_says_when_the_site_last_analysed_and_that_it_analyses
     assert (up.get("cycle") or {}).get("press_only") is True and up["cycle"]["analysed"]["at"] == st["analysed"]["at"]
 
 
+def test_a_pressed_run_that_stops_before_it_finishes_says_so_with_what_stands(site, monkeypatch):
+    """A pressed run that runs out of time saves nothing (cloud.OutOfTime). The Data tab's panel then says the last run
+    stopped before it finished, why, and that the open items on the lists (how many, how many dollars) stand as the last
+    analysis left them, with what to do; the header's line says it too. A run that finishes clears it."""
+    from remitwatch import cloud, detect
+    from tests.test_cloud import cycle
+    tc, auth, _api, state = site
+    before = tc.get("/api/ops/panels", headers=auth).json()["analysis"]
+    assert not before.get("failed")
+
+    def out_of_time(self):
+        raise cloud.OutOfTime("Detection ran past the run's deadline and was stopped")
+    analyse = detect.Detector.run
+    monkeypatch.setattr(detect.Detector, "run", out_of_time)
+    with pytest.raises(cloud.OutOfTime):
+        cycle(state, None, trigger="press", force_detect=True)
+    cloud.SERVING_COPY._status = (0.0, None)        # the pages read the status the failed run wrote
+    an = tc.get("/api/ops/panels", headers=auth).json()["analysis"]
+    f = an.get("failed") or {}
+    assert "stopped before it finished" in f.get("text", "") and "ran out of time" in f["text"], an
+    assert "open item" in f["text"] and "$" in f["text"] and "stand as the analysis of" in f["text"], f["text"]
+    assert "Run the analysis now" in f["text"] and "\u2014" not in f["text"]
+    assert tc.get("/api/sync/status", headers=auth).json().get("last_failed") is True
+    monkeypatch.setattr(detect.Detector, "run", analyse)
+    cycle(state, None, trigger="press", force_detect=True)
+    cloud.SERVING_COPY._status = (0.0, None)
+    assert not tc.get("/api/ops/panels", headers=auth).json()["analysis"].get("failed")
+    assert not tc.get("/api/sync/status", headers=auth).json().get("last_failed")
+
+
 def test_a_pressed_run_analyses_with_nothing_new_and_an_idle_run_keeps_when(box):
     """A press forces the analysis (the lists move with the day even when no file arrived): its status says when the
     site last analysed, and a run that does not analyse carries that time on."""
@@ -1386,7 +1416,7 @@ def test_a_run_that_sheds_work_says_what_it_could_not_check_in_items_and_dollars
 
 
 @pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
-def test_the_vercel_pages_say_the_site_analyses_only_on_a_press_and_the_press_runs_the_chain(box, tmp_path):
+def test_the_vercel_pages_say_the_site_analyses_only_on_a_press_and_the_press_runs_the_chain(box, tmp_path, monkeypatch):
     """The Vercel site in a browser (serverless mode over a state folder): the header's line on every tab, the Data tab's
     "Analysis on this site" and the Feed, the Upload page and /setup each say when the site last analysed and that it
     analyses only on a press; "Run the analysis now" starts the run (the site calls its own /api/cron/cycle with the
@@ -1470,3 +1500,30 @@ def test_the_vercel_pages_say_the_site_analyses_only_on_a_press_and_the_press_ru
     assert "only when someone presses Run the analysis now" in w["chip"], w["chip"]
     assert "A run is going" in w["panel"] and "This site last analysed" in w["panel"] and w["button_disabled"], w["panel"][:400]
     assert "last analysed" in w["upload"] and "only when someone presses Run the analysis now" in w["upload"], w["upload"]
+    # a pressed run that ran out of time: the header and the Data tab say the last run stopped before it finished
+    from remitwatch import detect
+
+    def out_of_time(self):
+        raise cloud.OutOfTime("Detection ran past the run's deadline and was stopped")
+    monkeypatch.setattr(detect.Detector, "run", out_of_time)
+    with pytest.raises(cloud.OutOfTime):
+        cloud.run_cloud_cycle(state, None, budget_s=600, trigger="press", force_detect=True, email=False, log=lambda *a: None)
+    srv = subprocess.Popen([sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port", str(port),
+                            "--log-level", "warning"], cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        failed = subprocess.run(["node", os.path.join(repo, "tests", "press_page.js"), str(port), "oda", PW, str(tmp_path), "failed"],
+                                capture_output=True, text=True, timeout=240)
+    finally:
+        srv.terminate()
+        srv.wait(timeout=20)
+    assert failed.returncode == 0, failed.stderr[-2000:]
+    w = json.loads(failed.stdout.strip().splitlines()[-1])["widths"]["390"]
+    assert "the last run stopped before it finished" in w["chip"] and "last analysed" in w["chip"], w["chip"]
+    assert "The last run stopped before it finished" in w["panel"] and "ran out of time" in w["panel"], w["panel"][:600]
+    assert "open item" in w["panel"] and not w["button_disabled"] and "\u2014" not in w["panel"], w["panel"][:600]

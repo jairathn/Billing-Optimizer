@@ -3064,7 +3064,8 @@ def _cloud_sync_status() -> dict:
             "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
             "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY")),
             # the owner's decision 1: this site analyses only on a press; every page says when it last did
-            "press_only": True, "analysed": lc.get("analysed"), "unchecked": lc.get("unchecked")}
+            "press_only": True, "analysed": lc.get("analysed"), "unchecked": lc.get("unchecked"),
+            "last_failed": bool(lc.get("error")) and not st.get("running")}
 
 
 @app.get("/api/sync/status")

@@ -90,10 +90,11 @@ def archive_sink():
 
 
 # ----------------------------------------------------------------------- the owner's decision 1: analysis on a press
-def analysis_status() -> dict:
+def analysis_status(conn=None) -> dict:
     """What every page of the Vercel site says about its analysis: that it analyses only when someone presses Run the
     analysis now, when it last did ({at, run_id, trigger, findings} from the runs' status), a run going now, and what the
-    last run could not check (items and dollars). On a server: {'press_only': False} (it analyses on its own schedule)."""
+    last run could not check (items and dollars), and a last run that stopped before it finished (cloud.failed_note, with
+    the open items of the dashboard's copy `conn`). On a server: {'press_only': False} (it analyses on its own schedule)."""
     if not runtime.serverless():
         return {"press_only": False}
     from . import cloud
@@ -106,8 +107,8 @@ def analysis_status() -> dict:
         except Exception as exc:        # noqa: BLE001  (storage did not answer: the page says what it knows)
             runlog.caught(exc, "ops:run_going", level="warning")
     return {"press_only": True, "text": cloud.PRESS_ONLY_TEXT, "analysed": last.get("analysed"), "running": going,
-            "unchecked": last.get("unchecked"), "last_run": {k: last.get(k) for k in ("started", "finished", "trigger", "error",
-                                                                                        "more", "halted", "deferred")}}
+            "unchecked": last.get("unchecked"), "failed": None if going else cloud.failed_note(last, conn),
+            "last_run": {k: last.get(k) for k in ("started", "finished", "trigger", "error", "more", "halted", "deferred")}}
 
 
 @router.post("/api/ops/run")
@@ -141,7 +142,7 @@ def press_run(request: Request, user: str, trigger: str) -> dict:
 def ops_panels(_: str = Depends(_user)):
     from . import archive, selfcheck
     with _Conn() as c:
-        out: dict = {"selfcheck": selfcheck.panel(c), "archive": archive.panel(c), "analysis": analysis_status()}
+        out: dict = {"selfcheck": selfcheck.panel(c), "archive": archive.panel(c), "analysis": analysis_status(c)}
         try:
             out["logs"] = dict(runlog.panel(c, _logs()), bundle={"what": BUNDLE_WHAT})
         except Exception as exc:        # noqa: BLE001  (the logs folder could not be read: the other panels stand)

@@ -1839,14 +1839,8 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
     if not (pending or waiting_files or skipped_audit):
         return None
     n = cents = 0
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
-        # an item with no state yet (the first run of a release that adds it, before its analysis) counts by its status
-        by_status = "status IN ('open', 'in_progress', 'appealed')"
-        where = (f"(work_state IN ('work_now', 'waiting') OR (work_state IS NULL AND {by_status}))" if "work_state" in cols
-                 else by_status)
-        n, cents = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE COALESCE(stale, 0) = 0 "
-                                f"AND {where}").fetchone()
+    try:        # an item with no state yet (the first run of a release that adds it) counts by its status (open_items)
+        n, cents = open_items(conn)
     except sqlite3.Error as exc:        # a store with no items yet: said as such
         from . import runlog
         runlog.caught(exc, "unchecked_note", level="warning")
@@ -1875,6 +1869,46 @@ def unchecked_note(conn, *, pending: bool, waiting_files: bool, plan: dict | Non
                      f"memory: a calmer run does it, within a week.{last}")
     return {"n": int(n), "cents": int(cents), "pending": bool(pending or waiting_files), "audit_skipped": skipped_audit,
             "read_since": bool(read_since or waiting_files), "text": " ".join(parts)}
+
+
+def open_items(conn) -> tuple[int, int]:
+    """The open items on the lists (Work now and Waiting; an item with no state yet by its status) and their dollars."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    by_status = "status IN ('open', 'in_progress', 'appealed')"
+    where = (f"(work_state IN ('work_now', 'waiting') OR (work_state IS NULL AND {by_status}))" if "work_state" in cols
+             else by_status)
+    n, cents = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE COALESCE(stale, 0) = 0 "
+                            f"AND {where}").fetchone()
+    return int(n or 0), int(cents or 0)
+
+
+def failed_note(last: dict | None, conn=None) -> dict | None:
+    """The last run stopped before it finished (its status carries an error): nothing it did was saved (the store is
+    saved only at a run's end), so the lists stand as the analysis before it left them. What every page of the Vercel
+    site says then (the owner's decision 1: a press that did not get through is said, in items and dollars when the
+    dashboard's copy is at hand). None when the last run finished."""
+    last = last or {}
+    err = str(last.get("error") or "")
+    if not err:
+        return None
+    from . import selfcheck as sc
+    mins = max(1, int(last.get("budget_seconds") or runtime.max_seconds()) // 60)
+    why = (f"it ran out of time (a run here has {mins} minutes)" if err.startswith("OutOfTime")
+           else "it hit an error (the Logs and diagnostics panel below has it)")
+    an = (last.get("analysed") or {}).get("at")
+    items = ""
+    if conn is not None:
+        try:
+            n, cents = open_items(conn)
+            items = f" the {sc._n(n, 'open item')} ({sc.usd0(cents)}) on the lists"
+        except sqlite3.Error as exc:        # a copy with no items yet: the sentence goes without them
+            from . import runlog
+            runlog.caught(exc, "failed_note", level="warning")
+    stand = (f"Nothing it did was saved, so{items or ' the lists'} stand as the analysis of {_hhmm(an)} left them."
+             if an else f"Nothing it did was saved{(':' + items + ' are as they were') if items else ''}.")
+    text = (f"The last run (started {_hhmm(last.get('started'))}) stopped before it finished: {why}. {stand} Press Run the "
+            "analysis now to try again. If it stops again, make the file for Claude in Logs and diagnostics below.")
+    return {"at": last.get("finished") or last.get("started"), "out_of_time": err.startswith("OutOfTime"), "text": text}
 
 
 def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger: str = "manual", full: bool = False,

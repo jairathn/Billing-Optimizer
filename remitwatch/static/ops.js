@@ -39,6 +39,7 @@ function opAnalysisHtml(a){
       <span class="small muted">${esc(a.text || '')}</span></div>
     <div class="small"><b>${last}</b></div>
     ${run ? `<div class="note small">A run is going (asked for or started ${opWhen(run.since)} UTC). It finishes by itself, and the lists change when it has.</div>` : ''}
+    ${a.failed && a.failed.text ? `<div class="warnbox small"><b class="sev-high">The last run stopped before it finished.</b> ${esc(a.failed.text)}</div>` : ''}
     ${un && un.text ? `<div class="warnbox small"><b>What the last run could not check.</b> ${esc(un.text)}</div>` : ''}
     <div style="margin-top:8px"><button class="primary" data-op-press="1" ${run ? 'disabled' : ''}>Run the analysis now</button>
       <span class="small muted" data-op-press-said></span></div>
