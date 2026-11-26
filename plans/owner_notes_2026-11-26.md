@@ -76,3 +76,11 @@ bill. Three groups need your call, and my recommendation for each:
 - Age: 93 of the items had been expired and came back; their services go back to 2023 ($6,912 of patient share).
   Recommendation: bill the 2026 and 2025 services; for older ones, decide as a batch (many practices write those off
   rather than send a patient a two-year-old bill).
+
+## 6. Payer rates: what the plan-level rates found (fix7c)
+- UnitedHealthcare Medicare Advantage paid the January 2026 visits on its 2025 schedule and never reprocessed them: one
+  repricing item asks it to (18 lines, $110). Humana Medicare Advantage halves the Mohs when the repair goes on a
+  separate surgery-center claim: 49 days are listed now ($2,030 on the 7 days where both were cut).
+- UnitedHealthcare Kentucky paid PA and NP visits in full from January 2025 until late October 2026; since then some are
+  paid at 85 percent. If UHC changed the contract, the rule needs that date; if it did not, those lines are underpaid.
+  Worth one call to UHC provider relations.
