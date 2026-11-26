@@ -1809,7 +1809,9 @@ def _last_detection(conn) -> dict | None:
     """The newest analysis the store records (detection_runs), for a status written before runs kept 'analysed'."""
     try:
         r = conn.execute("SELECT run_id, finished_at, findings FROM detection_runs ORDER BY finished_at DESC, rowid DESC LIMIT 1").fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:        # a store that has never been analysed: the pages say "not analysed yet"
+        from . import runlog
+        runlog.caught(exc, "last_detection", level="warning")
         return None
     return {"at": r[1], "run_id": r[0], "trigger": None, "findings": r[2]} if r and r[1] else None
 

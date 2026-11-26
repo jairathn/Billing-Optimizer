@@ -1638,7 +1638,8 @@ def _input_position(conn: sqlite3.Connection) -> list:
                 "SELECT COUNT(*), MAX(applied_at) FROM ema_report_files WHERE applied_at IS NOT NULL"):
         try:
             pos.append(list(conn.execute(sql).fetchone()))
-        except sqlite3.Error:           # a store without that table (an old copy, a test's): nothing read of that kind
+        except sqlite3.Error as exc:    # a store without that table (an old copy, a test's): nothing read of that kind
+            _caught(exc, "input_position")
             pos.append(None)
     return pos
 

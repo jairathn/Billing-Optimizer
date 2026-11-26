@@ -3190,6 +3190,7 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
                 out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)
                 out["continued_for"] = late
         except Exception as exc:        # noqa: BLE001  (the next press reads them; the answer says why none was started)
+            runlog.caught(exc, "cron_cycle:continue", level="warning")
             out["continue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     return out
 
