@@ -624,3 +624,30 @@ def test_a_denials_story_shows_the_bill_sent_and_sent_again(tmp_path, kind):
     seq = [(r["date"], r["source"]) for r in rows if r["source"] in ("837", "835")]
     assert seq == [("2026-09-15", "837"), ("2026-10-01", "835"), ("2026-10-10", "837")]
     s.close()
+
+
+# ================================================================================================ the units residual
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_whole_charge_co45_on_several_units_is_sized_at_the_rate_times_its_units(tmp_path, kind):
+    """(Residual: a claim item sized without its units, $98 where the units say $196.) On the integration tip the only
+    items the A17 auditor still finds sized for one unit of several are whole charges taken as a contractual reduction
+    (CO-45, nothing allowed): detect._settle_co45_candidates sized them at the payer's rate for one unit. The payer pays
+    17003 at $15.70 a unit (25 clean answers). It takes C017's 17003, billed for 13 units at $246.35, as CO-45 for the
+    whole charge: the item is worth 13 x $15.70 = $204.10. Bill 501's 17003, 3 units billed at $40.00, is worth its
+    charge, $40.00 (3 x $15.70 is more: a payer allows the lesser of the two)."""
+    from tests.review3.r3helpers import WHO, clm, sv
+    from tests.test_features import clean_visits
+    from tests.test_takebacks_and_recoveries import World
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "17003", "18.95", "15.70"), "20260301")
+    w.remit([clm("CB0000500C017", "1", "246.35", "0.00", sv("17003", "246.35", "0.00", 13, "CAS*CO*45*246.35~"), payer_ctl="PC1"),
+             clm("CB0000501C017", "1", "40.00", "0.00", sv("17003", "40.00", "0.00", 3, "CAS*CO*45*40.00~", dos="20260402"),
+                 who=WHO.replace("ELM*BO", "OAK*CY").replace("W55500302", "W55500303"), payer_ctl="PC2", dos="20260402")],
+            "20260415")
+    w.run("r1")
+    got = sorted((r["patient_control_number"], r["procedure_code"], r["expected_cents"], r["shortfall_cents"])
+                 for r in w.rows("signal='DENIED_OTHER'") if json.loads(r["evidence"] or "{}").get("whole_charge_co45"))
+    print(got, [json.loads(r["evidence"])["basis"] for r in w.rows("signal='DENIED_OTHER'")])
+    assert got == [("CB0000500C017", "17003", 20410, 20410), ("CB0000501C017", "17003", 4000, 4000)]
+    w.store.close()

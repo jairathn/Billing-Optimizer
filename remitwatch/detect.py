@@ -3769,6 +3769,10 @@ class Detector:
                 continue
             code = l["procedure_code"]
             exp, basis = self.expected_allowed(l, code)
+            if exp is not None:
+                # what the line's denial is worth: the rate per unit times the units billed, never above the charge
+                # (line_expected), as every other denial is sized; one unit's rate for 13 units was a twelfth of it
+                exp, basis = self.line_expected(l, code)
             self._emit("DENIED_OTHER", "denial", "low", "review",
                        f"{code} paid $0: the whole charge was taken as a contractual reduction (CO-45), nothing allowed",
                        l, exp, exp, "45", rarc, {"basis": basis, "whole_charge_co45": True},
