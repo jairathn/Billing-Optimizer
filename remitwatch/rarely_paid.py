@@ -215,6 +215,31 @@ def parse_key(key: str) -> dict:
     return {"group": parts[0], "code": parts[1], "period": period or None, "reason": parts[3]}
 
 
+def whole_key(key: str) -> str | None:
+    """The key of the same payer and code at every date ('group|code||payer_policy', the only payer-policy key before the
+    owner's decision 4 split a pair by period) for a key that names a period; None for any other key."""
+    p = parse_key(key)
+    if p["reason"] != "payer_policy" or not p["period"]:
+        return None
+    return f"{p['group']}|{p['code']}||payer_policy"
+
+
+def decision_for(decisions: dict | None, key: str) -> dict | None:
+    """The owner's decision for a payer-policy pattern, or None when the owner never decided it. A key that names a period
+    also reads the decision made for the same payer and code at every date (the only key before decision 4: an owner's
+    accept or pursue made then covers every period) and the newer of the two wins, so that decision is never overwritten
+    by the change of key and a later decision of either row takes effect. The one read is marked 'from_key'."""
+    pol = decisions if isinstance(decisions, dict) else {}
+    own = pol.get(key)
+    own = dict(own, from_key=key) if isinstance(own, dict) and own.get("decision") else None
+    whole = whole_key(key)
+    old = pol.get(whole) if whole else None
+    old = dict(old, from_key=whole) if isinstance(old, dict) and old.get("decision") else None
+    if own and old:
+        return old if str(old.get("at") or "") > str(own.get("at") or "") else own
+    return own or old
+
+
 # ------------------------------------------------------------------------------------------------- which items count
 def _ev(f: dict) -> dict:
     ev = f.get("evidence")
@@ -559,8 +584,7 @@ def _claim_lines(conn: sqlite3.Connection, f: dict) -> list[dict]:
 def _decision(conn: sqlite3.Connection | None, key: str) -> dict:
     if conn is None:
         return {}
-    d = _meta(conn, "ema:writeoff_policy").get(key)
-    return d if isinstance(d, dict) else {}
+    return decision_for(_meta(conn, "ema:writeoff_policy"), key) or {}
 
 
 def _single(f: dict) -> bool:

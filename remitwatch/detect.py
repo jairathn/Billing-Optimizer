@@ -6143,11 +6143,13 @@ class Detector:
                 continue
             key = rp.pattern_key(grp, code, svc)
             # nothing is accepted by default (PLAN decision 14), and a code a payer almost never pays is pursued in a batch per
-            # payer until the owner accepts it (the owner's decision 16: appeal at any win rate when it beats the cost to send)
-            decision = (decisions.get(key) or {}).get("decision") or "pursue"
+            # payer until the owner accepts it (the owner's decision 16: appeal at any win rate when it beats the cost to send).
+            # A decision made for the pair at every date (before decision 4 named periods) covers each period
+            dec = rp.decision_for(decisions, key)
+            decision = (dec or {}).get("decision") or "pursue"
             pt = folded.setdefault(key, {"group": grp, "code": code, "paid": share[0] if share else None,
                                          "answered": share[1] if share else None, "n": 0, "cents": 0, "decision": decision,
-                                         "default": key not in decisions, "source": "835",
+                                         "default": dec is None, "source": "835",
                                          "researched": (entry or {}).get("verdict") if rp.applies(entry, rare) else None})
             pt["n"] += 1
             pt["cents"] += f.get("shortfall_cents") or 0

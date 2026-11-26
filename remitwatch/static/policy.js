@@ -31,7 +31,7 @@ function polShare(p){
 function polWhen(p){
   if(p.decision === 'decide') return `<div class="small sev-medium">Waits for your decision${p.kind === 'payer_policy' ? ': out of Work now until then' : ''}</div>`;
   if(!p.decided_by) return '';
-  return `<div class="small muted">${esc(p.decision === 'accept' ? 'Accepted' : 'Set to pursue')} by ${esc(p.decided_by)} on ${esc(longDate(practiceDate(p.decided_at)))}${p.pending ? '; the next run applies it' : ''}</div>`;
+  return `<div class="small muted">${esc(p.decision === 'accept' ? 'Accepted' : 'Set to pursue')} by ${esc(p.decided_by)} on ${esc(longDate(practiceDate(p.decided_at)))}${p.decided_on ? ` for ${esc(p.code || 'this code')} at every date` : ''}${p.pending ? '; the next run applies it' : ''}</div>`;
 }
 function polCode(p){ return p.kind === 'payer_policy' ? (p.code || '') + (p.modifier ? ` (services ${p.modifier})` : '') : (p.code ? p.code + (p.modifier ? '-' + p.modifier : '') : ''); }
 function polWho(p){ return `${p.payer_group}, ${p.code ? polCode(p) : 'every code'}${p.reason ? ', ' + p.reason : ''}`; }

@@ -100,3 +100,64 @@ def test_r1_1_a_covered_visit_is_billed_as_decided(sstore):
     _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
     st = _state(sstore)
     assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+
+
+# =============================================================================================================
+# r1-2: an owner's decision made under the key with no period (before decision 4) still holds for each period
+# =============================================================================================================
+from tests.test_payer_code_rules import dt_days, ema_env, eledger, estore  # noqa: E402,F401  (fixtures)
+
+S25 = "2025-10-02"
+WHOLE = "UnitedHealthcare|G6001||payer_policy"
+TO25 = "UnitedHealthcare|G6001|to 2025-12-31|payer_policy"
+
+
+def _g6001_world(estore, eledger, tmp_path):
+    """22 denials of G6001 as primary in 2025 (CO-197), and 6 payments of it as the second payer: a pair the research
+    splits by period (to 2025-12-31). Invented members and claims."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import denial_world, remit
+    for n in range(22):
+        remit(estore, trace=f"7776{n:05d}", paid_on="2025-11-10", payer="UNITEDHEALTHCARE TEST",
+              claims=[{"pcn": F.claim_id(800 + n), "last": f"RAD{n}", "first": "JULIET", "member": f"J{n:011d}",
+                       "lines": [(S25, "G6001", 260, 0, [("CO", "197", 260)])]}])
+    for n in range(6):
+        remit(estore, trace=f"7777{n:05d}", paid_on="2025-11-10", payer="UNITEDHEALTHCARE TEST", status="2",
+              claims=[{"pcn": F.claim_id(850 + n), "last": f"SEC{n}", "first": "KILO", "member": f"K{n:011d}",
+                       "lines": [(S25, "G6001", 260, 30, [("PR", "2", 0)])]}])
+    denial_world(estore, eledger, tmp_path)
+
+
+def test_r1_2_an_owners_accept_under_the_key_with_no_period_still_holds(estore, eledger, tmp_path):
+    """The owner accepted UnitedHealthcare G6001 on the policy page before decision 4 named periods (key
+    'UnitedHealthcare|G6001||payer_policy'). After the release the run keys the 2025 services 'to 2025-12-31': the
+    owner's accept still holds there (its 22 denials stay off Work now), and the policy page shows that row accepted,
+    by whom and when, made for the code at every date."""
+    from remitwatch import api_ema, ema_checks as ec
+    from tests.test_ema_wiring import items, run
+    _g6001_world(estore, eledger, tmp_path)
+    ec.set_policy(estore.conn, WHOLE, "accept", "Owner One")
+    estore.conn.commit()
+    run(estore)
+    left = items(estore, "payer_group='UnitedHealthcare' AND procedure_code='G6001' AND status='open'")
+    assert left == [], f"{len(left)} G6001 denials back on the list although the owner accepted the pattern"
+    rows = {p["pattern"]: p for p in api_ema.policy_table(estore.conn)["patterns"]}
+    assert TO25 in rows, sorted(rows)
+    row = rows[TO25]
+    assert (row["decision"], row["decided_by"], row["decided_on"], row["pending"]) == ("accept", "Owner One", WHOLE, False), row
+
+
+def test_r1_2_a_later_decision_on_the_period_row_wins_and_a_later_one_on_the_whole_row_wins_back():
+    """The newer decision of the two rows holds: a period decided later is decided there; the row for every date changed
+    later covers every period again. A key with no period never reads another row."""
+    from remitwatch import rarely_paid as rp
+    pol = {WHOLE: {"decision": "accept", "by": "Owner One", "at": "2026-10-01T10:00:00+00:00"}}
+    assert rp.decision_for(pol, TO25)["decision"] == "accept"
+    pol[TO25] = {"decision": "pursue", "by": "Owner One", "at": "2026-12-02T10:00:00+00:00"}
+    assert (rp.decision_for(pol, TO25)["decision"], rp.decision_for(pol, TO25)["from_key"]) == ("pursue", TO25)
+    pol[WHOLE] = {"decision": "accept", "by": "Owner One", "at": "2026-12-05T10:00:00+00:00"}
+    assert (rp.decision_for(pol, TO25)["decision"], rp.decision_for(pol, TO25)["from_key"]) == ("accept", WHOLE)
+    assert rp.decision_for(pol, "Aetna|G2211||payer_policy") is None
+    assert rp.decision_for({}, TO25) is None and rp.decision_for(None, TO25) is None
+    assert rp.whole_key("Anthem / BCBS|77600|from 2026-01-01|payer_policy") == "Anthem / BCBS|77600||payer_policy"
+    assert rp.whole_key("Anthem / BCBS|99213|25|CO-45") is None

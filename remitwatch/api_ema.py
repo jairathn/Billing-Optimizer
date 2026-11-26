@@ -940,10 +940,16 @@ def policy_table(c: sqlite3.Connection) -> dict:
         if key not in pats and isinstance(d, dict):
             pats[key] = dict(_blank(key), kind=kind_of(key))
     out = []
+    from . import rarely_paid as rp
     for key, p in pats.items():
         d = decided.get(key) if isinstance(decided.get(key), dict) else {}
         s = by_key.get(key) or {}
         kind = p["kind"]
+        if kind == "payer_policy":
+            # a period of a pair the owner decided at every date (before decision 4 named periods) shows that decision,
+            # and says which row it was made on
+            d = rp.decision_for(decided, key) or {}
+            p["decided_on"] = d.get("from_key") if d.get("from_key") not in (None, key) else None
         p.update(split_pattern(key))
         if kind == "payer_policy":
             p["reason"] = ""
