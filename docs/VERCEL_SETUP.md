@@ -113,9 +113,17 @@ be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
   keeps its own schedule.
 - **What a run could not check.** The memory regulation still applies to a pressed run (it hands the analysis to a fresh
   run, sheds optional steps, archives older claims sooner). When a run ends with the analysis still to come, its status
-  (`status.json`, `unchecked`) says how many open items and how many dollars were not checked against the files read since
-  the last analysis, and every page shows it until a run has analysed. `status.json` also keeps `analysed`: when this site
-  last analysed, by which run.
+  (`status.json`, `unchecked`) says why it was handed on (memory, time, a large batch, a Production file) and how many
+  open items and how many dollars were not checked against the files read since the last analysis, or, when nothing new
+  was read, that the lists stand as that analysis left them. Every page shows it until a run has analysed.
+  `status.json` also keeps `analysed`: when this site last analysed, by which run.
+- **A run that stops before it finishes.** A run that runs out of time or hits an error saves nothing (the store is
+  saved only at a run's end). The Data tab's panel then says so, why, and how many open items and dollars stand as the
+  last analysis left them; the header says it too. Press Run the analysis now to try again; if it stops again, make
+  the file for Claude in the Logs and diagnostics panel. Measured on 2026-11-26 on a copy of the live image (722 MB in
+  memory): the pressed analysis used about 128 CPU seconds and peaked near 1.9 GB, inside one run. With EMA's A/R and
+  Production tables in the image (893 MB) it needed about 280 CPU seconds and 2.3 GB, more than one run has: keep
+  `REMITWATCH_EMA_REPORTS` at its default here while the server reads Production.
 - Keep `"framework": null` in `vercel.json`. Under Vercel's FastAPI preset the function is given the rewritten path, so
   every request would arrive as `/api/index`.
 - Vercel refuses to build when `CRON_SECRET` has a space or a line break at either end.
