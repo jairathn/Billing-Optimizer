@@ -1367,6 +1367,43 @@ def test_a_run_that_only_left_the_self_audit_does_not_count_the_open_items_as_un
     st.close()
 
 
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_a_closure_settled_by_the_payers_own_zero_answer_carries_its_proof_and_holds_no_run(tmp_path, kind):
+    """Review privacy-3, a merge blocker for this unit: with the self-check wired in, an item closed by the payer's own
+    later answer that settled it for $0 (processed as secondary applying OA-23, or put on the patient's share) carries
+    that answer as its proof (dated, on its claim, how it settled), so the critical closure_proof check passes and the
+    run is not held in safe mode. The invented scenarios of tests/test_settled_elsewhere.py (S01, P01), both store kinds."""
+    import json
+
+    from remitwatch import selfcheck as sc
+    from remitwatch.detect import Detector
+    from tests.test_settled_elsewhere import (ANTHEM, COB, MEDICAID, _again, _clp, _items, _line, _second, _usual)
+    from tests.test_settled_elsewhere import _add, _store
+    s = _store(tmp_path, kind)
+    first = [_clp("CB0000S01C017", "4", _line("0.00", COB), cfi="MC")]
+    _add(s, tmp_path, _usual("MC", "70.00") + first, "20261001", **MEDICAID)
+    _add(s, tmp_path, _usual("12", "117.60")[:1] + [_clp("CB0000P01C017", "1", _line("0.00", "CAS*CO*16*223.65~LQ*HE*MA130~"))],
+         "20261001", **ANTHEM)
+    Detector(s, run_id="t1").run()
+    assert {p for p, r in _items(s).items() if r["status"] == "open"} >= {"CB0000S01C017", "CB0000P01C017"}
+    _add(s, tmp_path, [_clp("CB0000S01C017", "2", _second("0.00"), cfi="MC")], "20261110", **MEDICAID)
+    _add(s, tmp_path, [_again("CB0000P01C024", "CAS*PR*1*117.60~")], "20261110", **ANTHEM)
+    Detector(s, run_id="t2").run()
+    rows = _items(s)
+    for pcn in ("CB0000S01C017", "CB0000P01C017"):
+        r = rows[pcn]
+        assert r["status"] == "resolved" and (r["recovered_cents"] or 0) == 0 and r["auto_note"], (pcn, r["status"], r["auto_note"])
+        ev = json.loads(r["evidence"])
+        assert ev["settled_by"]["date"] == "2026-11-10" and ev["settled_by"]["claim"] and ev["settled_by"]["how"], ev["settled_by"]
+        assert sc.has_proof(ev), (pcn, ev.get("settled_by"), ev.get("paid_later"))
+    check = sc.check_closure_proof(s.conn, "2026-11-26")
+    assert check["status"] == "ok" and not check.get("n"), check
+    last = sc.meta_get(s.conn, sc.K_LAST, {}) or {}
+    assert not last.get("held") and not (sc.meta_get(s.conn, sc.K_SAFE, {}) or {}).get("on"), last.get("held")
+    assert "closure_proof" not in [c["id"] for c in last.get("checks") or [] if c.get("status") in ("fail", "error")]
+    s.close()
+
+
 def test_a_deferred_press_with_nothing_new_says_so_and_names_the_reason(box):
     """The note of a pressed run that hands the analysis on is true to what happened: with nothing read since the last
     analysis, the lists stand as that analysis left them (no file went unchecked), and the reason named is the one that
