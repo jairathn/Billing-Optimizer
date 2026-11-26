@@ -93,6 +93,9 @@ bill. Three groups need your call, and my recommendation for each:
 - UnitedHealthcare Kentucky paid PA and NP visits in full from January 2025 until late October 2026; since then some are
   paid at 85 percent. If UHC changed the contract, the rule needs that date; if it did not, those lines are underpaid.
   Worth one call to UHC provider relations.
+- One UMR employer plan paid a nurse practitioner's 99214s at 53 percent of the plan's full rate: listed as underpaid,
+  $312.80 against the full rate. The same plan pays PAs 85.7 percent; if it pays NPs the same way, the true gap is about
+  $217. The answer is in the plan's fee terms (one question to UMR).
 
 ## 7. Payer deadlines, now from each payer's own manual or the law (deadlines unit)
 Every window the research found wrong now says what its source says, with the source's words on the item. On the 11-24
