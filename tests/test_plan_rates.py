@@ -829,10 +829,11 @@ def test_a_denial_no_rate_sizes_is_never_below_the_payers_own_amount_there(tmp_p
 
 
 def test_a_line_priced_off_the_clinicians_contract_is_never_the_payers_own_amount(tmp_path, kind):
-    """A regression the world run of the fix round showed: a payer priced a clinician's 13132s off the contract (CO-147,
-    $229.20 where the commercial plans pay $250.00). Those lines agree with each other, but they are what the item
-    disputes, not the payer's rate: the denial-at-the-contract-rate item is sized by the commercial plans' typical amount,
-    $20.80 short, never by the off-contract amounts (which would leave it nothing to ask for and drop it)."""
+    """A payer priced a clinician's 13132s off the contract (CO-147, $229.20 where the commercial plans pay $250.00), on
+    three claims of one procedure each. Those lines agree with each other, but they are what the item disputes, not the
+    payer's rate: the denial-at-the-contract-rate item is sized by the commercial plans' typical amount, $20.80 short, never
+    by the off-contract amounts read as the payer's own few (fix7c-r1-4's rule would leave it nothing to ask for and drop
+    it)."""
     w = World(tmp_path, kind)
     types(w, (DOC, "127.80", DR, 1))
     w.remit(many(100, 4, "13132", "700.00", "250.00"), "20260310", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
@@ -844,6 +845,41 @@ def test_a_line_priced_off_the_clinicians_contract_is_never_the_payers_own_amoun
     w.run(today="2026-06-15")
     got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
     assert got == {pcn(900): ("DENIED_CONTRACT_RATE", 25000, 2080)}, got
+    w.store.close()
+
+
+def test_an_office_line_is_sized_by_the_offices_few_lines_before_every_settings_together(tmp_path, kind):
+    """The world run of the fix round (r1-2's fix): commercial plans paid a 13132 at the office on 6 claims ($580.00) and at
+    the surgery center on 8 ($236.69). Read across settings, the typical amount is the surgery center's (the median of 14),
+    so an office 13132 a payer priced off the clinician's contract (CO-147, $494.24) looked paid in full and its item was
+    dropped. The office's own few lines size it: $580.00, $85.76 short."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(100, 4, "13132", "900.00", "580.00"), "20260310", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(110, 2, "13132", "900.00", "580.00"), "20260310", payer="AETNA", payer_id="AETTEST")
+    w.remit(many(120, 8, "13132", "900.00", "236.69", pos="24"), "20260310", payer="HUMANA", payer_id="HUMTEST")
+    off = claim(900, sv("13132", "900.00", "494.24", "494.24", "1", "CAS*CO*147*405.76~", "20260402"), "900.00", "494.24",
+                dos="20260402")
+    w.remit([off], "20260420", payer="CIGNA", payer_id="CIGTEST")
+    w.run(today="2026-06-15")
+    got = {k: (r["signal"], r["expected_cents"], r["shortfall_cents"]) for k, r in by_pcn(w, f"patient_control_number='{pcn(900)}'").items()}
+    assert got == {pcn(900): ("DENIED_CONTRACT_RATE", 58000, 8576)}, got
+    w.store.close()
+
+
+def test_a_payers_own_facility_amount_sizes_a_claim_with_no_remittance_before_the_class_across_settings(tmp_path, kind):
+    """A claim with no remittance (an EMA-only denial, Detector._rate) is sized setting by setting: for a code the payer has
+    paid only at the surgery center ($491.64), that amount, never its class's typical amount across settings (another
+    Medicare Advantage plan's office lines at $700.00 make it $700.00), which the office pass took first once r1-2's fix
+    let a line of too few class lines in its setting read every setting together."""
+    w = World(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    w.remit(many(200, 6, "14040", "1500.00", "491.64", cfi="16", pos="24"), "20260301", payer="HUMANA", payer_id="HUMTEST")
+    w.remit(many(300, 6, "14040", "1500.00", "700.00", cfi="16"), "20260301", payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    det = Detector(w.store, run_id="r", today="2026-06-15")
+    det.load()
+    det.build_baselines()
+    assert det._rate("Humana Medicare Advantage", "14040", "2026") == 49164
     w.store.close()
 
 

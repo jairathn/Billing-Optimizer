@@ -628,6 +628,9 @@ PLAN_SEP = "#plan:"
 # A code raised later in the year than the payer's new schedule shows it by this many old-amount visits after the payer's
 # new rates took effect and this many paid at its own raised rate (emit_old_schedules)
 OLD_RUN_LINES = 5
+# A product class's typical amount for a code needs 10 lines in a setting; with fewer, this many of the line's own setting
+# size a denial before the class's lines of every setting together (a surgery center's amounts are not an office's)
+CLASS_FEW_MIN = 3
 COMPONENTS = ("26", "TC")
 RATE_COMPONENTS = ("",) + COMPONENTS          # _rate_lines keeps a line's component as its index here
 RATE_SIGNALS = ("UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS", "PROVIDER_RATE_GAP",      # items a baseline makes: never new past their window
@@ -983,6 +986,7 @@ class Detector:
         self.medicare_yard: dict[tuple, int] = {}
         self.comp_split: dict[tuple, float] = {}
         self.class_typical: dict[tuple, dict] = {}
+        self.class_few: dict[tuple, dict] = {}
         self.charge_ratio: dict[tuple, tuple] = {}
         self.schedule_ratio: dict[tuple, tuple] = {}
         self.kind_of_group: dict[str, str] = {}
@@ -1923,11 +1927,15 @@ class Detector:
         any_setting: dict[tuple, Counter] = defaultdict(Counter)
         for (y_, code_, _pos, comp_, cls_), cnt in by_class.items():
             any_setting[(y_, code_, "any", comp_, cls_)].update(cnt)
+        # a setting's own lines too few for a typical amount (CLASS_FEW_MIN to 9): what sizes a denial in that setting before
+        # the lines of every setting together, whose median mixes a surgery center's amounts with an office's (fix7c: the world
+        # run showed office lines of a code sized by a pool most of whose lines were the surgery center's lower amounts)
+        self.class_few: dict[tuple, dict] = {}
         for key, cnt in list(by_class.items()) + list(any_setting.items()):
             n = sum(cnt.values())
-            if n >= 10:
+            if n >= 10 or (n >= CLASS_FEW_MIN and key[2] != "any"):
                 vals = sorted(cnt.elements())
-                self.class_typical[key] = {"median": vals[n // 2], "n": n}
+                (self.class_typical if n >= 10 else self.class_few)[key] = {"median": vals[n // 2], "n": n}
         del any_setting
         # what each payer allows of the practice's charge over the codes it pays (at least 20 lines): its own measure of a
         # code it has no rate for, the charge being the practice's fee for that code
@@ -2050,7 +2058,7 @@ class Detector:
         rg = self._rate_group(l)
         kind = l.get("payer_kind") or self.kinds.get(grp) or self.kind_of_group.get(grp)
         tier = l.get("provider_tier") or "unknown"
-        where = "" if pos == "office" else ", facility setting"
+        where = {"office": "", "any": ", all settings"}.get(pos, ", facility setting")
         part = f"{code}-{comp}" if comp else code
         r, y, split = self._own_rate(rg, year, code, pos, comp)
         plan, plan_unknown = (rg != grp), False
@@ -2078,11 +2086,17 @@ class Detector:
                 return rate, (f"{grp}'s own {year} amount for {part} ({tier}{where}): {few[1]} of its {few[2]} lines, too few for a "
                               "rate of its own"), None
             # the typical amount of the payer's own product class (a payer of no known class: a commercial plan's, which most are);
-            # where the line's setting alone has too few lines, the class's typical amount across settings (fix7c-r1-2: once the
-            # 837 named the surgery center's claims, a code billed in both settings can have too few in each)
+            # where the line's setting alone has too few lines for it (fix7c-r1-2: once the 837 named the surgery center's claims,
+            # a code billed in both settings can have too few in each), the setting's own few lines (CLASS_FEW_MIN), then the
+            # class's typical amount across settings. A caller that tries one setting after another (_rate: l['pool'] False)
+            # takes neither until its last pass, so a payer's own rate in a later setting is never passed over for them.
             cls = kind if kind and kind != "other" else "commercial"
-            for p, how in ((pos, where), ("any", ", all settings")):
-                m = self.class_typical.get((year, code, p, comp, cls))
+            steps = [(self.class_typical, pos, where)]
+            if l.get("pool", True):
+                steps += [(self.__dict__.get("class_few") or {}, pos, f"{where}, the few lines of this setting"),
+                          (self.class_typical, "any", ", all settings")]
+            for table, p, how in steps:
+                m = table.get((year, code, p, comp, cls))
                 if m:
                     rate = int(round(m["median"] * NP_TIER)) if tier == "nonphysician" and professional_service(code) and np_q == NP_TIER else m["median"]
                     return rate, f"typical {year} allowed for {part} among {cls} plans ({tier}{how}, n={m['n']})", None
@@ -7137,12 +7151,14 @@ class Detector:
         """The payer's usual allowed amount for a code in a year (the office setting, any provider type); for a code it has
         paid only at a facility (a surgery center's claims, known as such from the 837 or the claim's location since fix7c),
         its facility amount; else its product class's typical amount across settings. A claim with no remittance is never
-        sized at nothing (its charge, in EMA's checks) for want of one setting's lines."""
+        sized at nothing (its charge, in EMA's checks) for want of one setting's lines. The class's lines of one setting too
+        few for a typical amount, or of every setting together, are read only in the last pass: the payer's own facility
+        amount comes first (fix7c)."""
         if not code:
             return None
         for pos in ("office", "facility", "any"):
             rate, _b, _r = self.usual_rate({"payer_group": payer_group, "year": str(year or ""), "provider_tier": "unknown",
-                                            "pos_class": pos}, code)
+                                            "pos_class": pos, "pool": pos == "any"}, code)
             if rate is not None:
                 return rate
         return None
