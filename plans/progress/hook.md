@@ -1,7 +1,7 @@
 # Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
 
 Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
-Branch: wip/hook. Last updated: 2026-11-26 20:47 UTC (two earlier stamps here were written ahead of the clock).
+Branch: wip/hook. Last updated: 2026-11-26 21:15 UTC (two earlier stamps here were written ahead of the clock).
 
 ## Done
 - 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
@@ -98,10 +98,27 @@ Branch: wip/hook. Last updated: 2026-11-26 20:47 UTC (two earlier stamps here we
   kinds), 4 in the bundle README's fixed text (code words), 1 numeric token inside the store's transaction keys (an
   ST control number equal to a patient id by chance).
 
+- 2982485, 1a6d92e, ff7f97c: three contained errors logged through the scrubber (cloud._last_detection, the cron
+  cycle's late-file continuation, the self-check's input position); VERCEL_SETUP says why a run hands the analysis on,
+  what a run that stops says, and the measured limits; review privacy-3 (the integrator's merge blocker) is covered on
+  this branch: selfcheck.has_proof accepts the payer's own dated answer that settled an item (settled_by), and
+  test_a_closure_settled_by_the_payers_own_zero_answer_carries_its_proof_and_holds_no_run runs the S01 and P01
+  scenarios on both store kinds (closure_proof passes, no hold); removing the clause holds the run (checked, restored).
+
+## Suites (2026-11-26, this branch)
+- python3 (3.13, SQLite 3.5x), whole suite in 3 shards: 2,823 passed, 55 failed, 29 skipped, 1 xfailed. The 55: 34 in
+  test_fax.py, 9 test_hotfix2.py, 5 test_no_fax_route.py, 4 test_notes_bodies_cli.py, 2 test_hotfix2c.py, 1
+  test_bulk_pause.py. Not this unit's: the same 44 of fax/no_fax_route/notes_bodies/bulk_pause fail on the integration
+  tip itself (35fc020, extracted with git archive), and hotfix2/hotfix2c are review hosts-5 (dated fixtures against the
+  real clock, the stale-feed hold). With the practice's clock pinned to 2026-11-20 (a pytest plugin outside the
+  repository) those six files give 139 passed, 1 failed on this branch; the one
+  (test_fax.py::test_a_decision_on_a_claim_reaches_the_lines_it_names) fails the same way on the tip with the pin.
+- Python 3.12 / SQLite 3.45 (venv2_compat312), the touched files (test_hooks, cloud, selfcheck, runlog, archive,
+  diagnose, repair, upload_chunks, uploads, ema_pages, results, docs): 894 passed, 1 skipped.
+- node tests/calc_model_check.js (79 checks) and node tests/lab_review_check.js (143 checks): none failing.
+
 ## Next
-1. Suites: python3 full (plans/tools/shard.sh), venv_sqlite340 full, venv2_compat312 on the touched files; node checks
-   (passed at 20:27 UTC: calc 79 checks, lab 143, none failing).
-2. Final report (StructuredOutput).
+1. The whole suite in venv_sqlite340 (running), then the final report.
 
 ## Numbers measured so far
 - (from the earlier runs, see plans/HANDOFF.md section 0 item 2): three server cycles converge; five faults detected,
