@@ -134,7 +134,7 @@ a failing test first (invented data, both store kinds where the code runs on bot
   three or more): the case r2-1 guards; the copy has no faxes table yet.
 
 - Review round, suites on ea8cceb (frozen worktree, 3 shards): python3 (3.13) as it is: 2,890 passed, 29 skipped,
-  1 xfailed, 0 failed (21:22 to 21:31 UTC). 3.11.1 with SQLite 3.40.0: 2,746 passed, 13 skipped, 1 xfailed, 109 failed
+  1 xfailed, 0 failed (21:22 to 21:31 UTC). 3.11.1 with SQLite 3.40.0: 2,773 passed, 13 skipped, 1 xfailed, 109 failed
   and 24 errors, every one of the 133 with "AttributeError: 'sqlite3.Connection' object has no attribute 'serialize'"
   (classified from each traceback: 0 other); the same count as before the round. Node checks: calc 79, lab 143, none
   false. The two zone runs (Etc/GMT-14, Etc/GMT+12) of the round: see below when done.
