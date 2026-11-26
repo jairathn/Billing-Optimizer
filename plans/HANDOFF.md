@@ -23,7 +23,7 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-26 19:05 UTC, session on `claude/ecstatic-fermi-orfcgo`)
+### Running now (updated 2026-11-26 18:40 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
 
 Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
 branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
@@ -31,11 +31,11 @@ a unit from its branch and progress file (the brief says what done means), or st
 
 | Unit | Branch | Brief | State |
 |---|---|---|---|
-| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | running (run wf_b849b3af-38e) |
-| fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | running (run wf_82efb0cc-738) |
-| hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb) |
-| the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b) |
-| review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b) |
+| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | running (run wf_b849b3af-38e); at 18:40 its last push was 394f960 (a person's marks dated on the practice's day) |
+| fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | running (run wf_82efb0cc-738); at 18:40: tip merged, cached-array change whole, base vs branch measurement started (b6592c8) |
+| hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
+| the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
+| review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b): areas answers and money first, then hosts, people, privacy. The orchestrator's own read of the whole diff is in `plans/review_notes_orchestrator_2026-11-26.md` (merge it into the review file) |
 
 Merge order when they finish: fix7d, fix7c, decisions, hook (each: merge into the integration commit, the full suite in
 the four environments from a frozen worktree of the merge commit, push to both branch names). Then the review's
