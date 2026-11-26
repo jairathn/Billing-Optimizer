@@ -2425,6 +2425,12 @@ class Detector:
             served = {(o.get("procedure_code"), o.get("service_date")) for o in rows}
             primary = any(not self._one_payer(o, itself) and o.get("claim_status_code") in ("1", "19", "4")
                           and (o.get("procedure_code"), o.get("service_date")) in served for o in answers)
+            # the owner's decision 3 (2026-11-26): what arrived is the recovery, and what the payer still owes for the
+            # service in that role stays listed with its proof, whatever its size (archive_rules.owed_in_second_role)
+            due = self._second_role_due(f, rows, paid_rows, answers, itself)
+            if due and due["left_cents"] > 0:
+                self._second_role_short(f, due, grp, day, primary)
+                return
             note = (f"{grp} processed this {what} as secondary on {day} (claim {other_id})"
                     + (f" and paid {_usd(paid)}, its share" if paid > 0 else ", applying the primary payer's answer (OA-23) and paying nothing more")
                     + ": its denial as the primary payer is settled"
@@ -2456,6 +2462,44 @@ class Detector:
         f["evidence"] = json.dumps(ev, default=str)
         f["hint"] = None
         self.ema_counts["settled_" + how] += 1
+
+    def _second_role_due(self, f: dict, rows: list, paid_rows: list | None, answers: list, itself: tuple) -> dict | None:
+        """What the payer that denied the item as primary owes for its services as secondary, and what is left after what
+        it paid (archive_rules.owed_in_second_role): its answer lines (the settling ones and the ones it paid since), their
+        claim's OA-23 where no line of that claim carries one, and what the other payers paid for those services (their
+        standing payments on the bill)."""
+        from .archive_rules import owed_in_second_role
+        mine = {o["line_key"]: o for o in list(rows) + list(paid_rows or [])}
+        with_line_oa23 = {o["claim_key"] for o in mine.values()
+                          if any(g == "OA" and rc == "23" for g, rc, _a in self.adj.get(o["line_key"], []))}
+        claim_done: set = set()
+        lines = []
+        for o in mine.values():
+            adj = list(self.adj.get(o["line_key"], []))
+            ck = o["claim_key"]
+            if ck not in with_line_oa23 and ck not in claim_done:
+                # the prior payer's answer applied once, on the claim (a line with no reason of its own)
+                adj += [(g, rc, a) for g, rc, a in self.claim_adj.get(ck, []) if g == "OA" and rc == "23"]
+                claim_done.add(ck)
+            lines.append({"allowed": o.get("allowed_cents"), "charge": o.get("charge_cents"), "paid": self.standing.get(o["line_key"], 0),
+                          "adj": adj})
+        served = {(o.get("procedure_code"), o.get("service_date")) for o in mine.values()}
+        others = sum(self.standing.get(o["line_key"], 0) for o in answers if not self._one_payer(o, itself)
+                     and (o.get("procedure_code"), o.get("service_date")) in served and o.get("claim_status_code") != "22")
+        return owed_in_second_role(lines, others, f.get("expected_cents"))
+
+    def _second_role_short(self, f: dict, due: dict, grp: str, day: str, primary: bool) -> None:
+        """The payer paid as secondary less than it owes for the service in that role: the item stays listed at what is
+        left (no dollar floor), its answer as the proof (evidence second_role), never closed by it."""
+        from .archive_rules import second_role_words
+        text = second_role_words(due, grp, "as secondary", day)
+        ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+        ev["second_role"] = dict(due, date=day, role="as secondary", text=text, size_before_cents=f.get("shortfall_cents"),
+                                 primary_remittance="on file" if primary else "not on file")
+        f["evidence"] = json.dumps(ev, default=str)
+        f["shortfall_cents"] = due["left_cents"]
+        f["hint"] = text
+        self.ema_counts["second_role_short"] += 1
 
     def _settle_unpaid_lines(self) -> None:
         """After the line rules: a line denial (or a bundled line) left unpaid that the payer which denied it has settled since

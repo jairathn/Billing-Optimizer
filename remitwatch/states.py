@@ -2345,7 +2345,7 @@ def route_of(fx: dict, st: dict, conn: sqlite3.Connection | None = None) -> str:
     if sig == "SECONDARY_NOT_BILLED" and rule in ("open", "open_late", "stored"):
         return "bill_secondary"         # a stored state on the dashboard's copy keeps the signal's own work
     if rule in ("work_answered", "work_stale", "follow_up_due", "forwarded_late", "person_billed_paid", "stored_person",
-                "payment_never_arrived"):
+                "payment_never_arrived", "second_role_short"):
         return "call"
     if rule in ("check_first", "settled_in_ema", "patient_paid_co", "decided_no_appeal", "note_unread"):
         return "decide"
@@ -2575,6 +2575,12 @@ def _decide(fx: dict, today: str) -> dict:
         if got:
             res["proof"] = got
             return put("done", got["rule"], got["text"], [{"source": got["source"], "kind": "proof", "date": got.get("date"), "text": got["text"]}])
+    # the payer that denied it as primary paid as secondary less than it owes for the service in that role (the owner's
+    # decision 3 of 2026-11-26): what is left stays listed, that answer as its proof, until the window to dispute the
+    # answer closes. The detection run works it out again each time, so a later payment of the rest closes it there
+    sr = _ev(f).get("second_role")
+    if isinstance(sr, dict) and int(sr.get("left_cents") or 0) > 0 and cat in MONEY:
+        return _second_role_short(res, f, sr, today, put)
     # the archive rules found the payer paid this line twice: a possible overpayment to settle, never more to ask for (C05)
     if hint and (hint.get("reclass") == "overpaid" or (hint.get("possible_overpayment_cents") or 0) > 0):
         res["appeal_block"] = "credit"
@@ -2765,6 +2771,23 @@ def _note_or_follow(res: dict, fx: dict, work_ev: list, today: str, put, expired
                    "EMA, then follow up", rows, follow=fu["follow_up"])
     res["appeal_block"] = "note"
     return put("work_now", "note_unread", f"{lead}: read it before working (RemitWatch cannot read what it says)", rows)
+
+
+def _second_role_short(res: dict, f: dict, sr: dict, today: str, put) -> dict:
+    """What the payer still owes as secondary (detect.py's settled-as-secondary closure or archive rule 3 measured it):
+    work now, to ask the payer for the rest, until its window to dispute that answer closes (counted from the answer)."""
+    from .codes import appeal_rule, legal_deadline
+    text = str(sr.get("text") or "The payer paid as secondary less than it owes for the service in that role")
+    row = {"source": "835", "kind": "proof", "date": sr.get("date"), "text": text}
+    ar_ = appeal_rule(f.get("payer_group"), f.get("payer_kind"))
+    closes = _later(_add(sr.get("date"), ar_["days"]), legal_deadline(sr.get("date"), ar_)) if sr.get("date") else None
+    if closes and today > closes:
+        res["closed_on"], res["closed_basis"] = closes, ar_["label"]
+        return put("expired", "expired", f"{text.rstrip('.')}. The window to dispute that answer closed on {day(closes)}, with no work "
+                   "pending", [row])
+    res["appeal_block"] = "call"
+    res["deadline"], res["deadline_basis"] = closes, f"{ar_['label']}, from the answer as secondary of {day(sr.get('date'))}"
+    return put("work_now", "second_role_short", text, [row])
 
 
 def _billed_second(res: dict, fx: dict, ev: list, anchor: str | None, who: str, today: str, put) -> dict:

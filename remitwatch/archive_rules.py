@@ -948,6 +948,47 @@ def _owed_once(allowed: int, expected: int, share: int) -> int:
     return max((allowed or expected or 0) - (share or 0), 0)
 
 
+def owed_in_second_role(lines: Sequence[Mapping], others_paid: int, expected: int | None) -> dict | None:
+    """What a payer owes for a service it answered in another role than the one it denied it in (as secondary after a
+    denial as primary), and what is left once its payment is counted (the owner's decision 3 of 2026-11-26: the recovery
+    is what arrived; what the payer still owes stays listed). lines: the payer's answer lines in that role, as
+    {'allowed', 'charge', 'paid', 'adj': [(group, reason, cents)]} ('paid' what still stands of each); others_paid: what
+    the other payers paid for the service, by their remittances on file (standing).
+    The rule: its allowed amount (else the item's expected amount, sized as the item is), never above the charge, less what
+    the other payers paid (their remittances on file; with none on file, the prior payer's answer as the payer itself
+    applied it, OA-23), less the patient's share it set (PR). With neither, nothing tells what the other payers paid and
+    the remainder cannot be sized: None, never a guess. Integer cents throughout."""
+    allowed = sum(max(int(x.get("allowed") or 0), 0) for x in lines)
+    charge = sum(max(int(x.get("charge") or 0), 0) for x in lines)
+    paid = sum(int(x.get("paid") or 0) for x in lines)
+    stated = sum(int(c or 0) for x in lines for g, r, c in (x.get("adj") or []) if g == "OA" and r == "23")
+    share = sum(int(c or 0) for x in lines for g, _r, c in (x.get("adj") or []) if g == "PR")
+    if (others_paid or 0) > 0:
+        prior, prior_from = int(others_paid), "on_file"
+    elif stated > 0:
+        prior, prior_from = stated, "stated"
+    else:
+        return None
+    base = allowed if allowed > 0 else max(int(expected or 0), 0)
+    if charge > 0:
+        base = min(base, charge)
+    owed = max(base - prior - share, 0)
+    return {"owed_cents": owed, "paid_cents": paid, "left_cents": max(owed - paid, 0), "allowed_cents": allowed or None,
+            "base_cents": base, "prior_cents": prior, "prior_from": prior_from, "patient_cents": share}
+
+
+def second_role_words(due: Mapping, who: str, role: str, day: str | None) -> str:
+    """One plain sentence for a payment in another role short of what the payer owes in it (owed_in_second_role)."""
+    prior = ("the other payers' payments on file" if due.get("prior_from") == "on_file"
+             else "the prior payer's answer as it applied it (OA-23)")
+    allowed = due.get("allowed_cents")
+    base = (f"its allowed amount {_usd(due['base_cents'])}" if allowed and allowed == due["base_cents"] else
+            f"the charge {_usd(due['base_cents'])}" if allowed else f"the expected {_usd(due['base_cents'])}")
+    share = f" and the patient's share {_usd(due['patient_cents'])}" if due.get("patient_cents") else ""
+    return (f"{who} paid {_usd(due['paid_cents'])} {role} on {day}; it owes {_usd(due['owed_cents'])} for the service in that role "
+            f"({base}, less {prior} {_usd(due['prior_cents'])}{share}), so {_usd(due['left_cents'])} is left to ask it for.")
+
+
 def same_payer_paid_before(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
                            standing: Mapping[str, int] | None = None) -> list[dict]:
     """A denial, or a short payment, on a line the same payer had already paid (a payment that still stands, dated before
@@ -1356,14 +1397,26 @@ def units_split(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: 
             p = later[0]
             amt = sum(x.standing for x in later)
             # the payer answering in another role (the claim it denied as primary, paid as secondary once the primary's
-            # answer came) is the usual course of the claim, not money recovered by working the denial
+            # answer came). The owner's decision 3 (2026-11-26): what arrived after the denial is the recovery, and what
+            # the payer still owes for the service in that role stays listed, with its proof
             switched = (p.status in PRIMARY_STATUSES) != (a.status in PRIMARY_STATUSES)
+            arrived_later = (p.paid_on or "") > (a.paid_on or "")
             others_unpaid = len(groups) > 1 and not any(tag[x.line_key] == "other" and x.standing > 0 for x in same)
+            role = "as secondary" if switched and p.status in SECONDARY_STATUSES else "as primary" if switched else ""
+            if switched and arrived_later:
+                others = sum(x.standing for x in ans if x.line_key != a.line_key and x.standing > 0 and x.status in PAYMENT_STATUSES
+                             and not _same_payer(x, a))
+                due = owed_in_second_role([{"allowed": x.allowed, "charge": x.charge, "paid": x.standing, "adj": x.adj} for x in later],
+                                          others, f.get("expected_cents"))
+                if due and due["left_cents"] > 0:
+                    hint = second_role_words(due, p.payer_name or "The payer", role, p.paid_on)
+                    out.append(_reclass(R_UNITS, f, "second_role_short", f"Paid in part {role}", hint, due["left_cents"], "work_now",
+                                        proof, "proven", second_role=dict(due, date=p.paid_on, role=role, text=hint)))
+                    continue
             note = (f"Paid on this line: {p.payer_name or 'the payer'} paid it {_usd(amt)}"
-                    + (" as secondary" if switched and p.status in SECONDARY_STATUSES else "") + f" on {p.paid_on}"
+                    + (f" {role}" if role == "as secondary" else "") + f" on {p.paid_on}"
                     + ("; the unit it denied was another line of the claim." if others_unpaid else "."))
-            out.append(_close(R_UNITS, f, p, amt, note, "paid on the item's own line",
-                              proof, recovery=(p.paid_on or "") > (a.paid_on or "") and not switched))
+            out.append(_close(R_UNITS, f, p, amt, note, "paid on the item's own line", proof, recovery=arrived_later))
             continue
         if any(tag[x.line_key] == "own" and _after(x, a) and x.to_patient_only() for x in same):
             continue                    # the payer answered this very line again, onto the patient's deductible: rule 5's
@@ -3043,6 +3096,10 @@ def apply_actions(det, actions: Iterable[Mapping]) -> dict:
                 else:
                     info["proposed_shortfall_cents"] = new      # a likely reading changes no dollars until a person confirms it
             _merge_evidence(f, "archive_rule", info)
+            if act.get("second_role"):
+                # what the payer owes in the role it paid in, and what is left (the owner's decision 3): the item's state
+                # and next step read it from here, as they read the settled-as-secondary closure's (detect.py)
+                _merge_evidence(f, "second_role", act["second_role"])
             n[kind] += 1
         elif kind == "fold_into" and f is not None:
             into = det.findings.get(act["into"])

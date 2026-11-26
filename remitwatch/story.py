@@ -2397,6 +2397,16 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
                 "issued, on what date, for how much, under what EFT trace or check number?",
                 [facts, "Issued: find it on the bank statement and post it in EMA under that trace. Not issued: ask them to send it.",
                  "Post nothing until the money arrives."], "A/R follow-up biller")
+    if rule == "second_role_short":
+        # the owner's decision 3: what the payer that denied it as primary still owes as secondary (states._second_role_short)
+        sr = ev.get("second_role") or {}
+        steps = [f"Open {_poss(grp)} answer as secondary of {day(sr.get('date'))}: it paid {usd(sr.get('paid_cents'))} and owes "
+                 f"{usd(sr.get('owed_cents'))} for the service in that role.",
+                 f"Ask {grp} to pay the {usd(sr.get('left_cents'))} left (a reconsideration of that answer), with the primary payer's "
+                 "remittance (its EOB) attached.", facts]
+        if sr.get("primary_remittance") == "not on file":
+            steps.insert(1, "The primary payer's remittance is not on file: get it from that payer's portal first.")
+        return (f"Ask {grp} for the rest: {_lower(str(sr.get('text') or st.get('state_basis') or ''))}", steps, "A/R follow-up biller")
     if rule == "person_billed_paid":
         p = st.get("proof") or {}
         return (f"Mark it Paid: {p.get('text') or 'the second payer paid'}. Log what happened > The payer paid, with that amount.", [facts],
