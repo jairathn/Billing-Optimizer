@@ -2391,6 +2391,22 @@ def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: 
     else:
         action = f"Bill the patient {usd(owed)}{so_far}: {grp} put this service on the patient ({pr}: {why})."
     steps: list[str] = []
+    # a payer that answered after it on the same service (the next payer) and put it on the practice (CO), paying nothing
+    # and putting nothing on the patient: billing the patient may break that payer's terms, so the step says so first. The
+    # owner's decision still bills the patient by default; a person who finds the terms forbid it presses Done
+    mine, svc, code = str(f.get("payment_date") or "")[:10], str(f.get("service_date") or "")[:10], f.get("procedure_code")
+    later = [x for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key") and x["line_key"] != f.get("line_key")
+             and x.get("status") != "22" and x.get("code") == code and str(x.get("svc") or "")[:10] == svc
+             and str(x.get("date") or "")[:10] > mine]
+    groups = {g for x in later for g, _c, a in x["adj"] if a}
+    if later and groups == {"CO"} and not any((x.get("paid") or 0) > 0 for x in later):
+        nxt = max(later, key=lambda x: (str(x.get("date") or ""), x.get("line_key") or ""))
+        name, kind = S.row_group(nxt)
+        name = name if name and name != "Unknown" else str(nxt.get("payer") or "the next payer")
+        codes = ", ".join(sorted({f"CO-{c}" for x in later for g, c, a in x["adj"] if g == "CO" and a}))
+        medicaid = " (a Medicaid member is not billed for what Medicaid puts on the practice)" if kind == "medicaid" else ""
+        steps.append(f"Before billing: {name} answered after it and put this service on the practice ({codes}), with nothing paid. If that "
+                     f"plan's terms forbid billing the patient for it{medicaid}, do not bill: press Done.")
     if tot["n"] and tot["balance"] >= owed:
         steps.append(f"EMA shows {usd(tot['balance'])} open on this line: put {usd(owed)} on the patient's next statement.")
     elif tot["n"] and (tot["noncontractual"] or 0) > 0:

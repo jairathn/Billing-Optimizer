@@ -381,6 +381,42 @@ def test_d2_billed_the_patient_is_not_closed_by_a_write_off_of_the_patients_shar
     assert (_state(sstore)["work_state"], _state(sstore)["rule"]) == ("done", "patient_paid")
 
 
+def _crossed_over(s, later_status, payer, cfi, adj):
+    """Medicare put a routine visit on the patient (PR-49 $150.00) and sent the claim on to the next payer (status 19), which
+    answered it on April 6 with nothing paid: `adj` its adjustment on the whole $150.00."""
+    from tests import ema_fixtures as F
+    from tests.test_states import item, ln, remit
+    tk = remit(s, trace=F.check_no(1), paid_on="2026-03-28", payer="MEDICARE TEST",
+               claims=[{"pcn": F.claim_id(1), "received": "2026-03-05", "status": "19", "cfi": "MB",
+                        "lines": [ln("99213", 150, 0, [("PR", "49", 150)])]}])
+    item(s, finding_id="F1", signal="DENIED_PLAN_EXCLUSION", carc="49", line_key=f"{tk}-0-0", claim_key=f"{tk}-0", transaction_key=tk,
+         expected_cents=15000, shortfall_cents=15000, appeal_deadline="2026-09-24", payer_kind="medicare", evidence={"carc_group": "PR"})
+    remit(s, trace=F.check_no(2), paid_on="2026-04-06", payer=payer,
+          claims=[{"pcn": F.claim_id(1), "status": later_status, "cfi": cfi, "lines": [ln("99213", 150, 0, [(adj[0], adj[1], 150)])]}])
+
+
+def test_d2_a_later_payer_that_put_the_service_on_the_practice_is_named_before_billing(sstore):
+    """Medicare put a routine visit on the patient (PR-49 $150.00) and sent it on; the patient's Medicaid plan answered
+    after it and put it on the practice (CO-45, nothing paid). The next step still bills the patient $150.00 (the owner's
+    decision), but says first that the later payer put it on the practice, so a person checks that payer's terms before
+    billing (a Medicaid member is not billed for what Medicaid puts on the practice) and presses Done when they forbid it."""
+    from remitwatch import story
+    _crossed_over(sstore, "4", "KENTUCKY MEDICAID", "MC", ("CO", "45"))
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Bill the patient $150.00:"), n["action"]
+    first = n["steps"][0]
+    assert first.startswith("Before billing: Medicaid KY answered after it and put this service on the practice (CO-45), with nothing paid"), first
+    assert "a Medicaid member is not billed for what Medicaid puts on the practice" in first and "press Done" in first, first
+
+
+def test_d2_a_later_payer_that_put_the_service_on_the_patient_too_adds_no_caution(sstore):
+    """The same visit, the next payer (a supplement) put it on the patient too (PR-96): no caution, the patient is billed."""
+    from remitwatch import story
+    _crossed_over(sstore, "2", "TESTCARE SUPPLEMENT", "CI", ("PR", "96"))
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Bill the patient $150.00:") and not any(x.startswith("Before billing") for x in n["steps"]), n
+
+
 def test_d2_done_is_a_persons_decision_with_who_and_when(sstore):
     from remitwatch import actions
     _patient_denial(sstore, "49", signal="DENIED_PLAN_EXCLUSION")
