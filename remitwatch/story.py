@@ -2062,6 +2062,10 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         buttons += ["copy_instructions", "log_outcome", "mark_billed"]
     elif route == "corrected":
         action = _corrected_change(f, fx) + "."
+        if S.no_appeal(f):
+            steps.append("Kentucky Medicaid takes no appeal of an ordinary claim denial (907 KAR 1:671): send a corrected or new claim with "
+                         "what the denial asks for within 12 months of the date of service (907 KAR 1:673), or within 6 months of "
+                         "Medicare's answer where Medicare answered it first and that is later (907 KAR 3:005).")
         medicare_fix = f.get("payer_kind") == "medicare" and sig not in ("REJECTED_PRE_PAYER", "NOT_SENT")
         if medicare_fix:
             from . import appeals
@@ -2780,7 +2784,7 @@ def _clerical_remark_step(f: dict, clocks: list[dict], st: dict) -> str | None:
 def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:
     """Every clock the item runs on (states.windows, the same windows its state expires by), and the window counted from
     the first denial of the same service where the payer counts from the original determination (a safe, earlier date)."""
-    from .codes import appeal_rule, filing_rule
+    from .codes import appeal_rule, filing_rule, rule_facts
     out = []
     for w in S.windows(f, st.get("deadline"), st.get("deadline_basis"), fx):
         what = {"the item's deadline": "the item's deadline", "the payer's own limit": "the payer's own limit",
@@ -2789,13 +2793,13 @@ def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:
         out.append({"what": what, "date": w["date"], "basis": w["basis"], "process": w["process"]})
     grp, kind = f.get("payer_group"), f.get("payer_kind")
     if f.get("payment_date") and f.get("signal") not in S.CLAIM_SIGNALS and f.get("category") in S.MONEY:
-        a = appeal_rule(grp, kind)
-        start = S.first_denial(fx, a)
+        a = appeal_rule(grp, kind, **rule_facts(f))
+        start = S.first_denial(fx, a) if not S.no_appeal(f) else None
         if start:
             out.append({"what": "first denial of this service", "date": S._add(start, a["days"]), "process": "appeal",
                         "basis": f"{_short(a['label'])}, counted from the first denial of this service ({day(start)}) to be safe"})
     if f.get("signal") in S.CLAIM_SIGNALS and f.get("service_date"):
-        r = filing_rule(grp, kind)
+        r = filing_rule(grp, kind, **rule_facts(f))
         if r.get("earliest"):
             out.append({"what": "first filing (shortest common limit)", "date": S._add(f["service_date"], r["earliest"]), "process": "first_filing",
                         "basis": "the shortest common first-filing limit for this kind of payer; send it by then where possible"})

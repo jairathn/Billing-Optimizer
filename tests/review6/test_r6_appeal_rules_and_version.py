@@ -40,7 +40,10 @@ def live_codes():
     return mod
 
 
-CHANGED_ON_PURPOSE = {("Humana Medicaid", "medicaid"): 120, ("Humana Medicare Advantage Medicaid", "medicaid"): 120}    # Kentucky 120 days, Indiana 60
+CHANGED_ON_PURPOSE = {("Humana Medicaid", "medicaid"): 120, ("Humana Medicare Advantage Medicaid", "medicaid"): 120,    # Kentucky 120 days, Indiana 60
+                      # the deadlines unit (2026-11-26), each window from its source (tests/test_payer_windows.py): a remittance that
+                      # does not say whether the plan is Anthem's Kentucky or Indiana Medicaid gets Indiana's 60-day dispute
+                      ("Anthem / BCBS Medicaid", "medicaid"): 60}
 
 
 def test_no_payer_that_matched_before_gets_a_different_appeal_window():

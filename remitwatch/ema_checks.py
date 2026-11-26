@@ -51,7 +51,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from . import ema_ledger as el
 from . import ema_reports as er
-from .codes import EM_CODES, UNKNOWN_PART, appeal_rule, component_of, filing_rule, part_fits
+from .codes import EM_CODES, UNKNOWN_PART, appeal_rule, component_of, corrected_rule, filing_rule, part_fits, window_end
 from .codes import legal_deadline as _legal_deadline
 from .ema_reports import status_class  # noqa: F401  (re-exported: the spec's ema_checks.status_class)
 
@@ -1344,10 +1344,10 @@ def _status_claims(conn: sqlite3.Connection, cls: str) -> dict[str, dict]:
     return claims
 
 
-def _filing(grp: str | None, kind: str | None, svc: str | None) -> tuple[str | None, str]:
-    rule = filing_rule(grp, kind)
+def _filing(grp: str | None, kind: str | None, svc: str | None, payer: str | None = None) -> tuple[str | None, str]:
+    rule = filing_rule(grp, kind, payer_name=payer)
     limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
-    return _add(svc, rule["days"]), limit
+    return (window_end(svc, rule) if svc else None) or _add(svc, rule["days"]), limit
 
 
 def _priced(rate: Callable | None, grp: str | None, lines: Iterable[tuple]) -> int | None:
@@ -1957,15 +1957,18 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
         codes = sorted({ln[1] for ln in ls if ln[1]})
         label = ", ".join(codes[:5]) + ("…" if len(codes) > 5 else "")
         grp, kind = c["group"], c["kind"]
-        file_by, limit = _filing(grp, kind, c["svc"])
+        file_by, limit = _filing(grp, kind, c["svc"], c["payer"])
         waited = _days(c["fc"], prod)
         expected = _priced(rate, grp, [(ln[1], ln[0], ln[3]) for ln in ls if (ln[2] or 0) > 0])
         # charged on time: past the first-filing limit the payer still owes a claim it has, and most take proof of timely
         # filing for one they have no record of (Medicare's year from the date of service is firm). As the weekly exports'
         # path does, the date runs the payer's appeal window past that limit, so the item never expires on it (PM case C45)
-        rule_f = filing_rule(grp, kind)
+        rule_f = filing_rule(grp, kind, payer_name=c["payer"])
         early = _add(c["svc"], rule_f["earliest"]) if rule_f.get("earliest") else None
-        deadline, legal, basis = file_by, None, f"If the payer has no record of the claim, it must reach the payer by this date: {limit}"
+        # the payer's own last day beside the first-filing date where later (Medicare's moves off a weekend or Federal holiday)
+        legal = _legal_deadline(c["svc"], rule_f)
+        legal = legal if legal and file_by and legal > file_by else None
+        deadline, basis = file_by, f"If the payer has no record of the claim, it must reach the payer by this date: {limit}"
         if kind != "medicare" and file_by and c["fc"] and c["fc"] <= (early or file_by):
             ap = appeal_rule(grp, kind)
             start = max(file_by, c["due"] or file_by)
@@ -3229,6 +3232,12 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         unconfirmed = "" if rule["verified"] else " (not confirmed against the payer's current manual)"
         dbasis = (f"{rule['label']}{unconfirmed}. Counted from EMA's posting ({it['first']}) less its usual delay of {lag} days; "
                   "the EOB's date can be earlier")
+        fix = corrected_rule(grp, kind) if rule.get("no_appeal") else None
+        if fix and ls and ls[0][1]:
+            # a payer that takes no appeal of an ordinary denial (Kentucky Medicaid, 907 KAR 1:671): a corrected or new claim
+            # within its filing limit from the date of service is the way, so the item is dated by it
+            deadline = window_end(ls[0][1], fix)
+            dbasis = fix["label"] + ". It takes no appeal of an ordinary claim denial (907 KAR 1:671 Sections 8 and 9)"
         soon = bool(deadline) and deadline <= (_add(t, HIGH_DAYS) or "") and deadline >= t
         codes = sorted({x[0] for x in ls})
         label = ", ".join(codes[:5]) + ("…" if len(codes) > 5 else "")

@@ -86,7 +86,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, DRUG_RE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, MPPR_CODES,
                     SKIN_SUBSTITUTE_RE, appeal_rule, carc_text, code_category, corrected_rule, filing_rule, is_unlisted, legal_deadline,
-                    normalize_payer, payer_group_kind, pos_class, rarc_text, window_end)
+                    normalize_payer, payer_group_kind, pos_class, rarc_text, rule_facts, window_end)
 from . import codes as _codes
 from .codes import part_fits
 from .fees import FeeTable, family_of, is_downcode
@@ -3103,20 +3103,26 @@ class Detector:
         grp = base.get("payer_group")
         pay_date = base.get("payment_date") or base.get("txn_payment_date")
         plan = base.get("plan") or (base.get("contract_class") or "").strip() or None
-        rule = appeal_rule(grp, kind, plan)
+        facts = rule_facts(base, carc=carc, plan=plan)   # which plan of the group: the plan's or payer's name, the reason, paid or not
+        rule = appeal_rule(grp, kind, **facts)
         deadline, deadline_basis, legal = None, None, None
         fix = None
-        if actionable == "correct_and_resubmit":
+        # a payer that takes no appeal of an ordinary claim denial (Kentucky Medicaid, 907 KAR 1:671) is worked by a corrected
+        # or new claim inside its filing limit, so the item is dated as one; a takeback is a determination it does hear
+        no_appeal = bool(rule.get("no_appeal")) and signal != "TAKEBACK" and actionable in ("appeal", "review", "correct_and_resubmit")
+        if actionable == "correct_and_resubmit" or no_appeal:
             # MA130 and other remarks can sit on the claim (MOA) as well as on the line
             rems = ",".join(x for x in [rarc or ""] + list(self.claim_rem.get(base.get("claim_key"), [])) if x)
-            fix = corrected_rule(grp, kind, rems, signal, carc)
+            fix = corrected_rule(grp, kind, rems, signal, carc, **facts)
         if fix:
             # a corrected claim (a reopening for Medicare Part B) runs on its own clock, from the remittance or the date of service
             start = pay_date if fix["clock"] == "remit" else (self._first_service_day(base) or pay_date)
             deadline = window_end(start, fix)
             legal = legal_deadline(start, fix)
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
-            if kind != "medicare" and pay_date:
+            if no_appeal:
+                deadline_basis += ". It takes no appeal of an ordinary claim denial (907 KAR 1:671 Sections 8 and 9)"
+            elif kind != "medicare" and pay_date:
                 # the payer's own dispute of the determination stays open beside the corrected claim (Humana's 18 months from
                 # the determination outlast its corrected-claim year): the later of the two routes is the payer's limit. Medicare
                 # Part B is left out: an unprocessable claim (MA130) has no appeal rights, and its other windows are its own.
@@ -3146,10 +3152,10 @@ class Detector:
                 # corrected claim inside the payer's corrected-claim limit, where its manual sets one (Anthem and Humana Medicare
                 # Advantage: a year from the date of service): the later date is the payer's limit
                 rems = ",".join(x for x in [rarc or ""] + list(self.claim_rem.get(base.get("claim_key"), [])) if x)
-                alt = corrected_rule(grp, kind, rems, signal, carc)
+                alt = corrected_rule(grp, kind, rems, signal, carc, **facts)
                 if alt:
                     start2 = pay_date if alt["clock"] == "remit" else (self._first_service_day(base) or pay_date)
-                    cdate = legal_deadline(start2, alt) or _add_days(start2, alt["days"])
+                    cdate = legal_deadline(start2, alt) or window_end(start2, alt)
                     if cdate and deadline and cdate > (legal or deadline):
                         legal = cdate
                         deadline_basis += (f". A corrected claim with what was missing (such as the authorization number) can still go "
@@ -5192,8 +5198,9 @@ class Detector:
         days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
         payer_id = k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None
         grp, kind = cd["group"]             # the VA's network by its payer id, though EMA names its administrator: the VA's limits apply
-        rule = filing_rule(grp, kind)
+        rule = filing_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
         file_by = window_end(days[0], rule)
+        file_legal = legal_deadline(days[0], rule)      # the payer's own last day where later (Medicare's next workday)
         # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
         early_by = _add_days(days[0], rule["earliest"]) if rule.get("earliest") else None
         billed = sum(x[2] for x in items)
@@ -5264,7 +5271,7 @@ class Detector:
                       and sent <= (early_by or file_by))
         limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
         if timely:
-            ap = appeal_rule(grp, kind)
+            ap = appeal_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
             deadline = window_end(max(file_by, due), ap)
             by = f"by {early_by} where you can, and by {file_by} at the latest" if early_by else f"by {file_by}"
             dbasis = (f"Sent on time ({sent}). If the payer has no record of it, send it again {by}, the first-filing "
@@ -5309,6 +5316,10 @@ class Detector:
                        None, None, ev, key_parts=(pcn,), claim=claim, id_signal=cd.get("id_signal") or "EMA_OPEN_CLAIM")
         f = self.findings[_fid(cd.get("id_signal") or "EMA_OPEN_CLAIM", pcn)]
         f["appeal_deadline"], f["deadline_basis"] = deadline, dbasis
+        if not timely:
+            # dated by the first-filing limit: the payer's own last day beside it where later (42 CFR 424.44(c): a weekend or a
+            # Federal holiday moves Medicare's to the next workday; Ambetter's 180 days for a participating provider)
+            f["legal_deadline"] = file_legal if file_legal and deadline and file_legal > deadline else None
         f["source"] = cd.get("source") or "ema"
         if cd.get("ema_link") is not None:
             f["ema_link"] = cd["ema_link"]
@@ -6233,8 +6244,8 @@ class Detector:
         f["appeal_deadline"], f["deadline_basis"] = p.get("appeal_deadline"), p.get("deadline_basis")
         legal_p = p.get("legal_deadline")           # the payer's own limit a check worked out beside its safe date
         f["legal_deadline"] = legal_p if (legal_p and f["appeal_deadline"] and legal_p > f["appeal_deadline"]) else None
-        if p["signal"] == "EMA_DENIED" and f["appeal_deadline"]:
-            rule = appeal_rule(claim.get("payer_group"), claim.get("payer_kind"))
+        rule = appeal_rule(claim.get("payer_group"), claim.get("payer_kind")) if p["signal"] == "EMA_DENIED" else None
+        if rule and f["appeal_deadline"] and not rule.get("no_appeal"):     # a no-appeal payer's item is dated by its new claim's limit
             legal = legal_deadline(_add_days(f["appeal_deadline"], -rule["days"]), rule)
             f["legal_deadline"] = legal if legal and legal != f["appeal_deadline"] else None
         if p.get("hint"):

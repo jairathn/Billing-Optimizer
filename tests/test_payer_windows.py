@@ -149,15 +149,15 @@ def test_ambetter_first_filing_keeps_90_days_as_the_safe_date_and_180_as_the_par
 # =========================================================================================== 9-11. Anthem Medicaid
 def test_anthem_medicaid_plans_are_told_apart_by_the_plan_name():
     """The 'Anthem / BCBS Medicaid' group holds Kentucky and Indiana plans; the 835's contract class names them
-    ('KENTUCKY ANTHEM MANAGE CA', 'INDIANA HIP 2.0', 'IN ANTHEM PATHWAYS LTSS'). Indiana (IHCP Works 2026, Anthem): claims in
+    ('KENTUCKY SAMPLE MEDICAID', 'INDIANA SAMPLE PLAN', 'IN SAMPLE PLAN LTSS'). Indiana (IHCP Works 2026, Anthem): claims in
     90 calendar days from the service, a dispute within 60 calendar days of the EOB. Kentucky (Anthem's manual and policy
     G-16001): claims and corrected claims within 365 days of the service, a payment appeal within 90 days, and since April
     14, 2026 at least 120 days from receipt (KRS 205.534(1)(d)1). A plan that names neither gets the shorter window."""
     g, k = "Anthem / BCBS Medicaid", "medicaid"
-    for plan, state in (("KENTUCKY ANTHEM MANAGE CA", "KY"), ("INDIANA HIP 2.0", "IN"), ("IN ANTHEM PATHWAYS LTSS", "IN"),
-                        ("VIRGINIA ANTHEM MEDICAID", None), (None, None)):
+    for plan, state in (("KENTUCKY SAMPLE MEDICAID", "KY"), ("INDIANA SAMPLE PLAN", "IN"), ("IN SAMPLE PLAN LTSS", "IN"),
+                        ("VIRGINIA SAMPLE MEDICAID", None), (None, None)):
         assert codes.plan_state(plan, "ANTHEM") == state, plan
-    ky, ind, unk = {"plan": "KENTUCKY ANTHEM MANAGE CA"}, {"plan": "INDIANA HIP 2.0"}, {"plan": None}
+    ky, ind, unk = {"plan": "KENTUCKY SAMPLE MEDICAID"}, {"plan": "INDIANA SAMPLE PLAN"}, {"plan": None}
     assert window_end("2026-05-20", filing_rule(g, k, **ky)) == "2027-05-20"
     assert window_end("2026-05-20", filing_rule(g, k, **ind)) == "2026-08-18"
     u = filing_rule(g, k, **unk)
@@ -165,13 +165,13 @@ def test_anthem_medicaid_plans_are_told_apart_by_the_plan_name():
     c = corrected_rule(g, k, **ky)
     assert c["clock"] == "dos" and window_end("2026-05-20", c) == "2027-05-20"
     assert corrected_rule(g, k, **ind) is None and corrected_rule(g, k, **unk) is None
-    assert dates("2026-06-01", appeal_rule(g, k, "KENTUCKY ANTHEM MANAGE CA")) == ("2026-08-30", "2026-10-04")
-    assert dates("2026-03-02", appeal_rule(g, k, "KENTUCKY ANTHEM MANAGE CA")) == ("2026-05-31", None)    # a denial before April 14
-    assert dates("2026-06-01", appeal_rule(g, k, "INDIANA HIP 2.0")) == ("2026-07-31", None)
+    assert dates("2026-06-01", appeal_rule(g, k, "KENTUCKY SAMPLE MEDICAID")) == ("2026-08-30", "2026-10-04")
+    assert dates("2026-03-02", appeal_rule(g, k, "KENTUCKY SAMPLE MEDICAID")) == ("2026-05-31", None)    # a denial before April 14
+    assert dates("2026-06-01", appeal_rule(g, k, "INDIANA SAMPLE PLAN")) == ("2026-07-31", None)
     a = appeal_rule(g, k)
     assert dates("2026-06-01", a) == ("2026-07-31", None) and "does not say" in a["label"]
     # the payer's name says the state where the plan does not (a facts dict from an item works the same way)
-    assert window_end("2026-06-01", appeal_rule("Aetna Medicaid", k, **codes.rule_facts({"payer_name": "AETNA BETTER HEALTH OF KENTUCKY"}))) \
+    assert window_end("2026-06-01", appeal_rule("Aetna Medicaid", k, **codes.rule_facts({"payer_name": "AETNA SAMPLE HEALTH OF KENTUCKY"}))) \
         == "2026-09-29"
 
 
@@ -180,11 +180,11 @@ def test_kentucky_medicaid_managed_care_120_days_from_receipt_apply_by_the_date_
     """KRS 205.534(1)(d)1 (effective April 14, 2026): 'within one hundred twenty (120) days of confirmed receipt of a
     notification ... that payment for a submitted claim has been reduced or denied'. Counted from the remittance plus the 5
     days of presumed receipt the product uses for Medicare (125 days), for a denial dated on or after April 14, 2026."""
-    r = appeal_rule("Aetna Medicaid", "medicaid", payer_name="AETNA BETTER HEALTH OF KENTUCKY")
+    r = appeal_rule("Aetna Medicaid", "medicaid", payer_name="AETNA SAMPLE HEALTH OF KENTUCKY")
     assert r["verified"] and r["since"] == "2026-04-14" and "KRS 205.534(1)(d)1" in r["label"]
     assert dates("2026-04-14", r) == ("2026-08-12", "2026-08-17")
     assert dates("2026-04-13", r) == ("2026-07-12", None)                       # the day before: the window before the law
-    w = appeal_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="WELLCARE OF KENTUCKY, INC.", carc="50")
+    w = appeal_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="WELLCARE SAMPLE PLAN OF KENTUCKY", carc="50")
     assert dates("2026-06-01", w) == ("2026-07-31", "2026-10-04")
 
 
@@ -195,7 +195,7 @@ def test_wellcare_kentucky_medicaid_windows():
     untimely filing, incidental procedures, bundling, unlisted and non-covered codes; an appeal of a utilization-management
     denial within 60 days (at least 120 from receipt by the statute since April 14, 2026). Before: the Medicaid defaults
     (365 days to file, a 90-day appeal for every denial)."""
-    g, k, who = "WellCare / Ambetter (Centene) Medicaid", "medicaid", {"payer_name": "WELLCARE OF KENTUCKY, INC."}
+    g, k, who = "WellCare / Ambetter (Centene) Medicaid", "medicaid", {"payer_name": "WELLCARE SAMPLE PLAN OF KENTUCKY"}
     f = filing_rule(g, k, **who)
     assert f["verified"] and window_end("2024-02-29", f) == "2025-02-28" and window_end("2027-03-01", f) == "2028-03-01"
     c = corrected_rule(g, k, **who)
@@ -306,11 +306,11 @@ def test_workers_compensation_bills_are_due_within_45_days_of_the_treatment():
 
 # =========================================================================================== the facts
 def test_rule_facts_reads_an_item_a_line_and_a_claim():
-    item = {"plan": "INDIANA HIP 2.0", "payer_name": "ANTHEM", "payer_id": "ANTHM", "carc": "50", "paid_cents": 0}
-    assert codes.rule_facts(item) == {"plan": "INDIANA HIP 2.0", "payer_name": "ANTHEM", "payer_id": "ANTHM", "cfi": None, "carc": "50",
+    item = {"plan": "INDIANA SAMPLE PLAN", "payer_name": "ANTHEM", "payer_id": "ANTHM", "carc": "50", "paid_cents": 0}
+    assert codes.rule_facts(item) == {"plan": "INDIANA SAMPLE PLAN", "payer_name": "ANTHEM", "payer_id": "ANTHM", "cfi": None, "carc": "50",
                                 "paid": False}
-    line = {"contract_class": " KENTUCKY ANTHEM MANAGE CA ", "claim_filing_indicator": "MC", "paid_cents": 1500}
-    assert codes.rule_facts(line)["plan"] == "KENTUCKY ANTHEM MANAGE CA" and codes.rule_facts(line)["cfi"] == "MC" and codes.rule_facts(line)["paid"] is True
+    line = {"contract_class": " KENTUCKY SAMPLE MEDICAID ", "claim_filing_indicator": "MC", "paid_cents": 1500}
+    assert codes.rule_facts(line)["plan"] == "KENTUCKY SAMPLE MEDICAID" and codes.rule_facts(line)["cfi"] == "MC" and codes.rule_facts(line)["paid"] is True
     assert codes.rule_facts(None) == {"plan": None, "payer_name": None, "payer_id": None, "cfi": None, "carc": None, "paid": None}
     assert codes.rule_facts(item, carc="97")["carc"] == "97" and "ignored" not in codes.rule_facts(item, ignored=1)
 
@@ -362,9 +362,9 @@ def test_detection_dates_each_plan_by_its_own_window(tmp_path, compact):
         return got[sig]
     f = item("IN MEDICAID", "IHCP1", "MC")
     assert f["payer_group"] == "Medicaid IN" and (f["appeal_deadline"], f["legal_deadline"]) == ("2026-07-31", None)
-    f = item("ANTHEM", "ANTHM", "MC", "INDIANA HIP 2.0")
+    f = item("ANTHEM", "ANTHM", "MC", "INDIANA SAMPLE PLAN")
     assert f["payer_group"] == "Anthem / BCBS Medicaid" and (f["appeal_deadline"], f["legal_deadline"]) == ("2026-07-31", None)
-    f = item("ANTHEM", "ANTHM", "MC", "KENTUCKY ANTHEM MANAGE CA")
+    f = item("ANTHEM", "ANTHM", "MC", "KENTUCKY SAMPLE MEDICAID")
     assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-08-30", "2026-10-04") and "KRS 205.534" in f["deadline_basis"]
     f = item("ANTHEM", "ANTHM", "12", "FEDERAL EMPLOYEE PROGRAM")
     assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-11-28", "2026-12-01")

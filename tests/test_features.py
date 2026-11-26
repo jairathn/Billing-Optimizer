@@ -61,7 +61,11 @@ def clean_visits(start: int, n: int, code: str, charge: str, allowed: str, **kw)
 def test_appeal_windows_and_place_of_service():
     assert appeal_rule("Anthem / BCBS", "commercial")["days"] == 730 and appeal_rule("Anthem / BCBS", "commercial")["verified"]
     assert appeal_rule("Anthem / BCBS Medicare Advantage", "medicare_advantage")["days"] == 120
-    assert appeal_rule("Anthem / BCBS Medicaid", "medicaid")["days"] == 90
+    # Anthem's Medicaid plans are told apart by the plan (deadlines unit, 2026-11-26): Kentucky's 90 days, Indiana's 60, and
+    # the shorter where the remittance does not say which (tests/test_payer_windows.py)
+    assert appeal_rule("Anthem / BCBS Medicaid", "medicaid", "KENTUCKY SAMPLE MEDICAID")["days"] == 90
+    assert appeal_rule("Anthem / BCBS Medicaid", "medicaid", "INDIANA SAMPLE PLAN")["days"] == 60
+    assert appeal_rule("Anthem / BCBS Medicaid", "medicaid")["days"] == 60
     assert appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM")["days"] == 180
     assert appeal_rule("UMR", "commercial")["days"] == 365
     assert appeal_rule("Medicare KY (CGS J15)", "medicare")["days"] == 120
@@ -966,7 +970,10 @@ def test_a_fixed_claim_runs_on_the_corrected_claim_clock_where_the_payer_publish
         records = corrected_rule("Medicare KY (CGS J15)", "medicare", "N463", sig, carc)
         assert (records["clock"], records["days"]) == ("remit", 120) and "redetermination" in records["label"], sig
     assert corrected_rule("Medicare KY (CGS J15)", "medicare", "N822,MA130")["clock"] == "dos"
-    assert corrected_rule("Anthem / BCBS", "commercial") is None and corrected_rule("UnitedHealthcare", "commercial") is None
+    assert corrected_rule("Anthem / BCBS", "commercial") is None
+    # UnitedHealthcare's 2026 guide puts a corrected claim inside the agreement's filing limit from the date of service
+    # (deadlines unit, 2026-11-26; tests/test_payer_windows.py)
+    assert corrected_rule("UnitedHealthcare", "commercial")["clock"] == "dos"
     denied = "CAS*CO*16*150.00~LQ*HE*N822~"
     for payer, cfi, sub in (("HUMANA", "16", "a"), ("KY MEDICARE", "MB", "b"), ("ANTHEM", "12", "c"), ("ANTHEM", "16", "d")):
         st = build_store(tmp_path / sub, [claim(1, svc("99213", "150.00", "0.00", None, denied, dos="20260101"), dos="20260101", cfi=cfi)],

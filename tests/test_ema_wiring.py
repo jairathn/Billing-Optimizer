@@ -981,7 +981,9 @@ def test_a_production_claim_to_medicare_keeps_its_firm_year(store, ledger, tmp_p
     denial_world(store, ledger, tmp_path, rows)
     run(store, today="2026-05-08")
     f = [g for g in items(store, "signal='NO_ANSWER'") if g["ema_link"] == F.link_no(43)]
-    assert f and f[0]["appeal_deadline"] == "2027-01-02" and f[0]["legal_deadline"] is None
+    # the year ends on Saturday January 2, 2027: 42 CFR 424.44(c) moves the last day to the next workday, Monday the 4th (the
+    # deadlines unit, 2026-11-26); nothing runs past it
+    assert f and f[0]["appeal_deadline"] == "2027-01-02" and f[0]["legal_deadline"] == "2027-01-04"
 
 
 def test_a_newer_claim_status_alone_never_answers_an_unanswered_claim(store, monkeypatch):

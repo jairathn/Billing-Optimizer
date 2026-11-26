@@ -331,9 +331,9 @@ PLAN_FACTS = ("plan", "payer_name", "payer_id", "cfi", "state", "carc", "paid")
 
 
 def plan_state(plan: str | None = None, payer_name: str | None = None) -> str | None:
-    """'KY' or 'IN' where the plan's name (the 835's contract class: 'KENTUCKY ANTHEM MANAGE CA', 'IN ANTHEM PATHWAYS LTSS',
-    'INDIANA HIP 2.0') or else the payer's name ('WELLCARE OF KENTUCKY, INC.') names the state; None otherwise (a plan
-    naming another state, 'VIRGINIA ANTHEM MEDICAID', is neither)."""
+    """'KY' or 'IN' where the plan's name (the 835's contract class, which for Anthem's Medicaid plans starts with KENTUCKY,
+    INDIANA or IN) or else the payer's name (a plan 'OF KENTUCKY') names the state; None otherwise (a plan naming another
+    state is neither)."""
     for text in (plan, payer_name):
         u = " ".join(str(text or "").upper().split())
         if not u:
@@ -445,16 +445,16 @@ NOT_MEDICARE_ITSELF = r"^(?!Medicare\b|Railroad Medicare\b)"
 
 APPEAL_RULES: list[dict] = [
     {"match": r"", "plan": FEP_PLAN, "kinds": None, "days": 180, "verified": False, "legal": {"months": 6},
-     "label": "Federal Employee Program: 180 days used as a safe date; a denial is reconsidered on the member's written request 'within 6 "
-              "months from the date of the notice' that the claim was denied (5 CFR 890.105(b)(1)); confirm the provider dispute "
-              "period with the local Blue plan",
+     "label": "Federal Employee Program: 180 days used as a safe date; a denial is reconsidered on the member's written request, made "
+              "within '6 months from the date of the notice' that the claim was denied (5 CFR 890.105(b)(1)); confirm the provider "
+              "dispute period with the local Blue plan",
      "source": "5 CFR 890.105(b)(1) (eCFR as of 2026-11-24); 2026 Service Benefit Plan brochure RI 71-005"},
     {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "months": 24, "verified": True, "legal": {"years": 2},
      "label": "Anthem commercial: Claim Payment Reconsideration within two years of the EOP issue date; "
               "Claim Payment Appeal within 90 days of the reconsideration decision",
      "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual, effective September 1, 2026, Claim Payment Disputes"},
     {"match": r"^Anthem", "kinds": {"medicare_advantage"}, "days": 120, "verified": True,
-     "label": "Anthem Medicare Advantage: reconsideration within 120 calendar days from the date on the EOP; appeal within 30 days of the "
+     "label": "Anthem Medicare Advantage: reconsideration within 120 days of the date on the EOP; appeal within 30 days of the "
               "reconsideration letter. A provider not contracted with the plan asks for a reconsideration of a denial 'within 65 calendar "
               "days from the remittance notification' instead, with a waiver of liability (guidebook 7.2)",
      "source": "Anthem Blue Cross and Blue Shield Medicare Advantage Provider Guidebook, edition of January 1, 2027, 5.3 and 7.2"},
@@ -652,14 +652,15 @@ MEDICARE_CLERICAL_CARCS = {"4", "5", "6", "11", "146", "181", "182", "199"}     
 
 
 def corrected_rule(payer_group: str | None, payer_kind: str | None, rarcs: str | None = None, signal: str | None = None,
-                   carc: str | None = None, **facts) -> dict | None:
+                   carc_code: str | None = None, **facts) -> dict | None:
     """The clock for fixing and resending a claim to this payer: {'days', 'clock' ('dos' or 'remit'), 'label', 'source',
     'verified', ...}, or None when only the participation agreement says. `rarcs` are the remarks on the line and its claim;
-    `signal` and `carc` say whether a Medicare fix is clerical (a reopening) or needs records (a redetermination). `facts`
-    (rule_facts) tell one plan of the group from another: an Indiana Medicaid line that was paid is adjusted within 60 days
-    of the remittance, a denied one is a new claim within 180 days of the service."""
+    `signal` and the CARC (`carc_code`, or the facts' carc) say whether a Medicare fix is clerical (a reopening) or needs
+    records (a redetermination). `facts` (rule_facts) tell one plan of the group from another: an Indiana Medicaid line that
+    was paid is adjusted within 60 days of the remittance, a denied one is a new claim within 180 days of the service."""
     grp, kind = payer_group or "", payer_kind or "other"
     f = _facts(facts)
+    carc = carc_code or f.get("carc")
     if carc and not f.get("carc"):
         f["carc"] = carc
     clerical = signal in MEDICARE_CLERICAL_SIGNALS or (signal == "CLAIM_DENIED_UNPAID" and (carc or "") in MEDICARE_CLERICAL_CARCS)
