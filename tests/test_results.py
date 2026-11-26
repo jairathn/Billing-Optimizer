@@ -17,7 +17,7 @@ import sqlite3
 
 import pytest
 
-from remitwatch import actions, detect, ema_reports as er, results, states
+from remitwatch import actions, detect, ema_reports as er, results, runtime, states
 from remitwatch.state import LocalState
 from remitwatch.store import Store
 from tests import ema_fixtures as F
@@ -32,6 +32,9 @@ OWNER = "owner-secret-9876"
 def _env(monkeypatch):
     monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
     monkeypatch.setenv("REMITWATCH_MODE", "server")
+    # the practice is in US Eastern time: the moments these tests write at 08:00 to 12:00 UTC are that morning there, and
+    # a person's work counts on the practice's day (results.work_of), whatever zone the suite runs in
+    monkeypatch.setenv("REMITWATCH_TZ", "America/New_York")
     for k in ("VERCEL", "REMITWATCH_STATE_DIR", "REMITWATCH_EMA_REPORTS", "DROPBOX_APP_KEY", "DROPBOX_REFRESH_TOKEN"):
         monkeypatch.delenv(k, raising=False)
     states._RESPONSE_CACHE.clear()
@@ -1471,12 +1474,15 @@ def test_mark_billed_counts_once_and_a_logged_call_counts_as_a_call(store):
 
 
 def test_the_spot_checks_follow_the_practices_own_day(server_api):
+    """The day's spot checks are the practice's day's (results._today, REMITWATCH_TZ), the day every page counts from,
+    whatever the browser's own clock says: a page a day behind (a browser in another zone, or a page left open since
+    yesterday) is shown the practice's day and never picks a second set for its own; that day's picks are only read."""
     tc, api, _path = server_api
-    # the page sends its own date: a browser in the practice's time zone a day behind the server keeps its day's picks
     got = tc.get("/api/results", params={"day": "2026-06-29"}).json()
-    assert got["day"] == "2026-06-29" and {p["day"] for p in got["spot"]["today"]} == {"2026-06-29"}
-    assert tc.get("/api/results/spot", params={"day": "2026-06-29"}).json()["items"] == got["spot"]["today"]
-    # a date far from the server's is not a time zone: the server's own day is used
+    assert got["day"] == TODAY and {p["day"] for p in got["spot"]["today"]} == {TODAY}
+    assert tc.get("/api/results/spot").json()["items"] == got["spot"]["today"]
+    assert tc.get("/api/results/spot", params={"day": "2026-06-29"}).json()["items"] == []
+    assert tc.get("/api/results", params={"day": "2026-07-01"}).json()["day"] == TODAY
     assert tc.get("/api/results", params={"day": "2026-01-01"}).json()["day"] == TODAY
     sb = tc.get("/api/results/scoreboard", params={"day": "2026-06-29"}).json()
     assert sb["spot"] == {"picked": 5, "answered": 0, "due": 5}
@@ -1691,3 +1697,133 @@ def test_a_part_of_the_figures_that_could_not_be_worked_out_is_in_the_runs_log_w
                                                if p.is_file() and not p.name.endswith(".gz"))
     for piece in ("Pat Invented", "1234567"):
         assert piece not in logged
+
+
+# ================================================================== the practice's calendar: an evening flag, mark or packet
+# A run at 9 PM Eastern, or a person at 9:30 PM, acts on that day where the practice is; UTC's day is already the next. The
+# first-flag day, a person's Paid, a payer's date and the weeks the hours are counted in are all on the practice's calendar
+# (the module fixture puts the practice in US Eastern).
+EVENING_APR1 = "2026-04-02T01:30:00+00:00"      # 9:30 PM Eastern on Wednesday April 1 (UTC's day is already April 2)
+EVENING_APR2 = "2026-04-03T01:30:00+00:00"      # 9:30 PM Eastern on Thursday April 2
+
+
+def _flagged_in_the_evening(s, fid, at=EVENING_APR1):
+    s.conn.execute("UPDATE findings SET first_seen=? WHERE finding_id=?", (at, fid))
+    s.conn.commit()
+
+
+def test_a_paid_marked_the_evening_after_an_evening_flag_counts_as_money_returned(store):
+    """Raised at 9:30 PM Eastern on Apr 1; a biller marks it Paid ($80) at 9:30 PM Eastern on Apr 2, the next day where the
+    practice is, and no payment record shows the money: the person's mark is money returned. With the first flag dated
+    UTC's Apr 2 and the mark the practice's Apr 2, the mark looked made on the flag's own day and was dropped."""
+    fid, _tk = denial(store, 1)
+    _flagged_in_the_evening(store, fid)
+    assert actions.apply_status(store.conn, fid, "resolved", recovered_cents=8000, actor="Biller One", at=EVENING_APR2)
+    store.conn.commit()
+    run(store)
+    reg = results.load_registry(store.conn)[fid]
+    assert reg["first_flagged"] == "2026-04-01", reg["first_flagged"]
+    m = money_of(store, fid)
+    assert m is not None and m["returned"] == 8000, m
+
+
+def test_a_payment_the_payer_dated_the_day_after_an_evening_flag_counts_as_returned_after_the_flag(store):
+    """Raised at 9:30 PM Eastern on Apr 1; the payer pays $90 on a remittance dated Apr 2: money that came after the flag."""
+    fid, _tk = denial(store, 1)
+    _flagged_in_the_evening(store, fid)
+    paid(store, 1, on="2026-04-02", amount=90)
+    run(store)
+    m = money_of(store, fid)
+    assert m is not None and m["returned"] == 9000, (results.load_registry(store.conn)[fid]["first_flagged"], m)
+
+
+def test_a_first_flag_stored_on_utcs_day_is_moved_to_the_practices(store):
+    """A registry row written before the first flag was dated on the practice's calendar keeps UTC's next day; the next
+    refresh lowers it to the practice's (the registry keeps the earliest day), so the marks and payments after it count."""
+    fid, _tk = denial(store, 1)
+    _flagged_in_the_evening(store, fid)
+    results.update_registry(store.conn, today="2026-04-05")
+    store.conn.execute("UPDATE results_items SET first_flagged='2026-04-02' WHERE finding_id=?", (fid,))   # as an older run wrote it
+    store.conn.commit()
+    results.update_registry(store.conn, today="2026-04-06")
+    assert results.load_registry(store.conn)[fid]["first_flagged"] == "2026-04-01"
+
+
+# first flagged by a server run in the evening, marked Paid by a person the next evening, and the day the figures are for
+FLAG_THEN_PAID = {
+    "nov24_2100_then_nov25_2130": ("2026-11-25T02:00:00+00:00", "2026-11-26T02:30:00+00:00", "2026-11-30"),
+    "nov24_2100_then_nov25_2359": ("2026-11-25T02:00:00+00:00", "2026-11-26T04:59:00+00:00", "2026-11-30"),
+    # year end: flagged 9 PM Dec 30, Paid at 11:59 PM Dec 31 (UTC's Jan 1)
+    "dec30_then_dec31_2359": ("2026-12-31T02:00:00+00:00", "2027-01-01T04:59:00+00:00", "2027-01-05"),
+    # daylight saving ends Nov 1: flagged 8:30 PM EDT Oct 31 (UTC's Nov 1), Paid 11:59 PM EST Nov 1 (UTC's Nov 2)
+    "oct31_edt_then_nov1_est_2359": ("2026-11-01T00:30:00+00:00", "2026-11-02T04:59:00+00:00", "2026-11-05"),
+    # February 29: flagged 9 PM Feb 28 2028 (UTC's Feb 29), Paid 11:59 PM Feb 29 (UTC's Mar 1)
+    "feb28_then_feb29_2359": ("2028-02-29T02:00:00+00:00", "2028-03-01T04:59:00+00:00", "2028-03-03"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FLAG_THEN_PAID))
+def test_a_paid_marked_the_day_after_an_evening_flag_counts_as_recovered(store, case):
+    """A run first flags an item in the evening; the next evening a biller marks it Paid with $40.00 and no payment record
+    shows it: a mark made after the flag's day is money recovered (results.attribute leaves out a mark made on or before
+    it). At the year's end, as daylight time ends and on February 29 too."""
+    from tests.test_selfcheck import add_item
+    c = store.conn
+    results.ensure_schema(c)
+    flagged, paid_at, today = FLAG_THEN_PAID[case]
+    add_item(c, "F-p", first_seen=flagged, last_seen=flagged, payment_date="2026-10-20", shortfall_cents=4000)
+    results.update_registry(c, today=runtime.practice_date(flagged))
+    assert actions.apply_status(c, "F-p", "resolved", recovered_cents=4000, actor="Biller One", at=paid_at)
+    c.commit()
+    results.update_registry(c, today=today)
+    payload, _lists = results.compute(c, today=today)
+    first = c.execute("SELECT first_flagged FROM results_items WHERE finding_id='F-p'").fetchone()[0]
+    rd = c.execute("SELECT recovered_date FROM findings WHERE finding_id='F-p'").fetchone()[0]
+    assert first == runtime.practice_date(flagged) and rd == runtime.practice_date(paid_at) and first < rd, (first, rd)
+    assert payload["money"].get("returned_cents") == 4000, (payload["registry"], payload["money"], first, rd)
+
+
+SUNDAY_NIGHT = "2026-11-23T02:30:00+00:00"     # 9:30 PM Eastern on Sunday November 22 (UTC's day is Monday the 23rd)
+
+
+def test_a_medicare_credit_flagged_in_the_evening_is_overdue_61_practice_days_later(store):
+    """A Medicare credit balance first flagged at 9:30 PM Eastern on Nov 24: on Jan 24, 2027 it has been open 61 days where
+    the practice is, past the 60 days the refund rule allows. Counted from UTC's Nov 25 it was 60, and not yet due."""
+    item(store, finding_id="F-credit", signal="CREDIT_BALANCE", category="credit", payer_kind="medicare", status="open",
+         work_state="work_now", first_seen="2026-11-25T02:30:00+00:00", shortfall_cents=4200)
+    got = results._credits(store.conn, "2027-01-24")
+    assert got["open_n"] == 1 and got["medicare_overdue_n"] == 1, got
+    assert results._credits(store.conn, "2027-01-23")["medicare_overdue_n"] == 0        # 60 days: not yet
+
+
+def test_an_appeal_packet_built_on_sunday_evening_counts_in_that_week(store):
+    """A packet built at 9:30 PM Eastern on Sunday Nov 22 is that week's work (the week of Monday Nov 16), priced by the
+    minutes in force that week; UTC's day is Monday the 23rd, the next week."""
+    from remitwatch import notes
+    notes.ensure_packets(store.conn)
+    item(store, finding_id="F-pkt", status="open", work_state="work_now")
+    store.conn.execute("INSERT INTO appeal_packets (packet_id, finding_id, created_at) VALUES ('P1', 'F-pkt', ?)", (SUNDAY_NIGHT,))
+    store.conn.commit()
+    counts, _lists = results._hours_counts(store.conn, {"work": {}}, "2026-11-30")
+    assert counts["by_week"]["packet"] == {"2026-11-16": 1}, counts["by_week"]["packet"]
+
+
+def test_a_packet_and_a_fax_of_the_same_evening_count_in_the_same_week(store):
+    """A biller builds an appeal packet and faxes it at 9:30 PM Eastern on Sunday Nov 22: one evening's work, in one week,
+    the practice's week of Sunday Nov 22 (Monday Nov 16), as the fax (results.work_of) and the owner's minutes
+    (results._minutes_at) are dated. The packet was counted in UTC's week, the fax in the practice's."""
+    from tests.test_selfcheck import add_item
+    c = store.conn
+    results.ensure_schema(c)
+    add_item(c, "F-w", status="appealed", appealed_at=SUNDAY_NIGHT, status_changed_at=SUNDAY_NIGHT, payment_date="2026-11-02")
+    c.execute("INSERT INTO finding_events (finding_id, at, kind, actor) VALUES ('F-w', ?, 'packet', 'Biller One')", (SUNDAY_NIGHT,))
+    c.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, actor) VALUES ('F-w', ?, 'manual', 'open', "
+              "'appealed', 'Biller One')", (SUNDAY_NIGHT,))
+    c.execute("""INSERT INTO faxes (fax_key, direction, finding_id, payer_group, number, purpose, level, status, created_at, sent_at)
+                 VALUES ('X1', 'out', 'F-w', 'Anthem / BCBS', '8005550142', 'appeal', 1, 'sent', ?, ?)""", (SUNDAY_NIGHT, SUNDAY_NIGHT))
+    c.commit()
+    results.update_registry(c, today="2026-12-01")
+    payload, _lists = results.compute(c, today="2026-12-01")
+    by_week = payload["hours_counts"]["by_week"]
+    weeks = {k: sorted(w for w, n in (by_week.get(k) or {}).items() if n) for k in ("packet", "fax")}
+    assert weeks == {"packet": ["2026-11-16"], "fax": ["2026-11-16"]}, weeks

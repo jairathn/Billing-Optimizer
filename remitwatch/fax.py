@@ -117,6 +117,52 @@ class Provider:
         raise FaxError("This fax service cannot list what it sent.")
 
 
+def _epoch_moment(v: Any) -> str:
+    """A unix time stamp as a UTC time with its zone; '' for none, or for one outside 2000 to 2100 (a placeholder)."""
+    try:
+        sec = float(str(v).strip())
+    except (TypeError, ValueError):
+        return ""
+    if not 946684800 <= sec < 4102444800:
+        return ""
+    return datetime.fromtimestamp(sec, timezone.utc).isoformat(timespec="seconds")
+
+
+def _moment(v: Any) -> datetime | None:
+    s = str(v or "").strip()
+    if len(s) <= 10:
+        return None
+    try:
+        t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def sent_moment(reported: Any, queued: Any, now: str) -> str:
+    """The moment a fax went, as every record is written (UTC, with its zone): what the fax line reported when that is a
+    time with its zone, else `now` (the moment its status was read); never before the fax was queued, never after now.
+    A line's own words for a time ('Nov/24/2026 21:31:00', in its account's zone) are no such time: cut to a day they
+    sorted after every real day, and a fax's follow-up was lost."""
+    hi = _moment(now) or datetime.now(timezone.utc)
+    t = _moment(reported) or hi
+    lo = _moment(queued)
+    if lo is not None and t < lo:
+        t = lo
+    if t > hi:
+        t = hi
+    return t.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _range_days() -> tuple[date, date]:
+    """The days a date range asked of the fax service must hold, earliest first: the practice's today and UTC's. SRFax
+    dates a fax in its account's zone, which may be either; a range that stopped at the earlier day would leave the
+    evening's faxes out until the next day. Never the machine's own day, which is neither by rule."""
+    from .runtime import practice_today
+    days = sorted({datetime.now(timezone.utc).date(), date.fromisoformat(practice_today())})
+    return days[0], days[-1]
+
+
 class SRFax(Provider):
     """SRFax's web service: one HTTPS POST per call, `action` naming it, the account's ID and password with every call;
     the answer is {Status: Success|Failed, Result}."""
@@ -161,12 +207,16 @@ class SRFax(Provider):
         word = str(r.get("SentStatus") or r.get("Status") or "").lower()
         state = "failed" if "fail" in word else "sent" if word.startswith("sent") or word == "success" else "queued"
         pages = r.get("Pages") or r.get("PagesSent")
+        # 'at': when it went, as a time with its zone. SRFax words DateSent in the account's own zone ('Nov/20/2026 10:02:00',
+        # no zone named), so the time comes from EpochTime, "a unix time stamp of the DateSent field"; SRFax's words are kept
+        # beside it ('at_text'). With no EpochTime the caller takes the moment it read the status (sent_moment).
         return {"state": state, "pages": int(pages) if str(pages or "").isdigit() else None,
-                "error": str(r.get("ErrorCode") or "")[:200] if state == "failed" else "", "at": r.get("DateSent") or ""}
+                "error": str(r.get("ErrorCode") or "")[:200] if state == "failed" else "",
+                "at": _epoch_moment(r.get("EpochTime")) if state == "sent" else "", "at_text": str(r.get("DateSent") or "")}
 
     def inbox(self, days: int) -> list[dict]:
-        end = date.today()
-        res = self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=(end - timedelta(days=days)).strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
+        first, end = _range_days()
+        res = self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=(first - timedelta(days=days)).strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
         out = []
         for r in res if isinstance(res, list) else []:
             name = str(r.get("FileName") or "")
@@ -186,7 +236,8 @@ class SRFax(Provider):
     def check(self) -> dict:
         steps = []
         try:
-            self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=date.today().strftime("%Y%m%d"), sEndDate=date.today().strftime("%Y%m%d"))
+            first, end = _range_days()
+            self._call("Get_Fax_Inbox", sPeriod="RANGE", sStartDate=first.strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
             steps.append({"step": "Sign-in", "ok": True, "detail": "SRFax accepted the account ID and password"})
         except FaxError as exc:
             steps.append({"step": "Sign-in", "ok": False, "detail": str(exc)})
@@ -199,11 +250,12 @@ class SRFax(Provider):
     def find_sent(self, filename: str, number: str, since: str) -> str | None:
         """SRFax's outbox (Get_Fax_Outbox) from the day before `since`: a fax to `number` whose submitted file has this name.
         Not yet tried against the real service: anything it cannot read is FaxError, and a person checks."""
+        first, end = _range_days()
         try:
             start = date.fromisoformat((since or "")[:10]) - timedelta(days=1)
         except ValueError:
-            start = date.today() - timedelta(days=7)
-        res = self._call("Get_Fax_Outbox", sPeriod="RANGE", sStartDate=start.strftime("%Y%m%d"), sEndDate=date.today().strftime("%Y%m%d"))
+            start = first - timedelta(days=7)
+        res = self._call("Get_Fax_Outbox", sPeriod="RANGE", sStartDate=start.strftime("%Y%m%d"), sEndDate=end.strftime("%Y%m%d"))
         if not isinstance(res, list):
             raise FaxError("SRFax's outbox did not come back as a list.")
         for r in res:
@@ -521,7 +573,8 @@ def number_hold(conn: sqlite3.Connection, f: dict, level: int, earlier: list[dic
         return nb, (f"{pg}'s {second}fax number changed since this item's last fax (was {pretty(was)}, now {pretty(nb['number'])}): "
                     "a person sends this one.")
     if not was and not nb["auto_ok"]:
-        return nb, (f"{pg}'s {second}fax number was changed" + (f" on {nb['changed_at'][:10]}" if nb.get("changed_at") else "")
+        # the day it changed where the practice is (the record keeps UTC): a change at 9 PM Eastern is that day's
+        return nb, (f"{pg}'s {second}fax number was changed" + (f" on {_day(nb['changed_at'])}" if nb.get("changed_at") else "")
                     + " and nobody has confirmed it yet: confirm it on the Faxes page.")
     return nb, None
 

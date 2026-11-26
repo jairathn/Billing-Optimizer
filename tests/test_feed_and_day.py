@@ -338,8 +338,10 @@ EVENING = "2026-11-23T01:30:00+00:00"           # 8:30 PM Eastern on Sunday, Nov
 
 
 def _at(monkeypatch, iso: str) -> None:
-    """Move the clock the practice's day is read from (runtime._utc_now), as tests/test_hotfix2c.py does."""
+    """Move the clock the practice's day is read from (runtime._utc_now), as tests/test_hotfix2c.py does, in a practice in
+    US Eastern time (these moments are Eastern evenings, whatever zone the suite runs in)."""
     t = datetime.fromisoformat(iso)
+    monkeypatch.setenv(runtime.TZ_SETTING, "America/New_York")
     monkeypatch.setattr(runtime, "_utc_now", lambda: t)
 
 

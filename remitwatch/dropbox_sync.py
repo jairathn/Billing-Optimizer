@@ -949,6 +949,7 @@ REFIND_KEY = "ema:refind_v1"        # set once the first cycle that reads EMA's 
 def _export_summary(name: str, rows: list[dict], acct: dict, family: str, added: int) -> dict:
     """What one weekly export held and what of it was added, in the shape the Upload page words (uploads.describe): an
     upload read through the intake hand-off says the same as one read in one piece. Counts and dates only."""
+    from .runtime import practice_today
     days = [r["service_date"] for r in rows if r.get("service_date")]
     distinct = len({r.get("row_fingerprint") for r in rows}) if rows else 0
     titles = {"charge_lines": "Encounter & Charge Lines", "era_lines": "ERA & Payment Lines", "claim_status": "Claim & Claim Status"}
@@ -957,7 +958,7 @@ def _export_summary(name: str, rows: list[dict], acct: dict, family: str, added:
             "service_from": min(days) if days else None, "service_to": max(days) if days else None,
             "added": added, "already": max(0, distinct - added), "repeats": len(rows) - distinct,
             "left": {k: v for k, v in (acct.get("left") or {}).items() if v}, "above": acct.get("above", 0),
-            "read_at": time.strftime("%Y-%m-%d", time.gmtime()), "name": name}
+            "read_at": practice_today(), "name": name}          # the day it was read where the practice is, as the page says it
 
 
 def unread_here(store, sha: str) -> bool:

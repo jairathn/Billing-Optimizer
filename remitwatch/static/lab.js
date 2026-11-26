@@ -388,7 +388,7 @@ function labScenarioRows(v){
     return `<td class="num" data-label="Collections">${moneyK(R.collections)}</td><td class="num" data-label="Costs">${R.cost ? moneyK(R.cost) + (open ? ' <span class="small sev-medium">some not entered</span>' : '') : '–'}</td><td class="num" data-label="After costs">${R.cost && !open ? moneyK(R.collections - R.cost) : '–'}</td><td class="num" data-label="Minutes a day">${R.minutesDay ? R.minutesDay.toFixed(0) : '–'}</td>`; };
   box.innerHTML = rows.length ? `<table class="calc-cards"><thead><tr><th>Scenario</th><th class="num">Collections</th><th class="num">Costs</th><th class="num">After costs</th><th class="num">Minutes a day</th><th></th></tr></thead><tbody>
       ${cur ? `<tr><td><i>Now on screen</i></td>${cells(cur)}</tr>` : ''}
-      ${rows.map(({s, r}, i) => `<tr><td>${esc(s.name)}<div class="small muted">${esc((s.saved_at || '').slice(0, 10))} · ${esc((s.x || {}).year || '')}</div></td>${cells(r)}
+      ${rows.map(({s, r}, i) => `<tr><td>${esc(s.name)}<div class="small muted">${esc(typeof practiceDate === 'function' ? practiceDate(s.saved_at) : (s.saved_at || '').slice(0, 10))} · ${esc((s.x || {}).year || '')}</div></td>${cells(r)}
         <td class="num" style="grid-column:1 / -1"><button data-lab-load="${i}">Open</button> <button class="ghost" data-lab-del="${i}" ${cs.Aok ? '' : 'disabled'}>Delete</button></td></tr>`).join('')}
       </tbody></table>` : '';
   const say = (text, cls) => { const m = v.querySelector('#labSaved'); if(m){ m.textContent = text; m.className = 'small ' + (cls || ''); } };
@@ -423,7 +423,7 @@ async function figuresDraw(v, note){
       ${inp('pct', pctShow(p.pct), 'share, %', 90, 'share of collections, %', LAB_PLAN_LABEL.pct)}${inp('per_wrvu', show(p.per_wrvu), '$ per wRVU', 90, '', LAB_PLAN_LABEL.per_wrvu)}${inp('base', show(p.base), 'base $', 100, '', LAB_PLAN_LABEL.base)}${inp('threshold', show(p.threshold), 'threshold $', 110, '', LAB_PLAN_LABEL.threshold)}${inp('above_pct', pctShow(p.above_pct), 'above, %', 80, '', LAB_PLAN_LABEL.above_pct)}</tr>`; };
   v.querySelector('#calcBody').innerHTML = `
     <div class="panel"><h2>Practice figures</h2>
-      <div class="small muted">The practice's own numbers, used by the Strategy lab and the Provider sheet. Leave a box empty until you have the figure: anything that depends on it is shown as not entered, never guessed. Saved to the site for the owner only${cs.Asaved ? `; last saved ${esc(cs.Asaved.replace('T', ' ').slice(0, 16))}` : ''}. Only the boxes you change are saved, so figures saved in another window are kept.</div>
+      <div class="small muted">The practice's own numbers, used by the Strategy lab and the Provider sheet. Leave a box empty until you have the figure: anything that depends on it is shown as not entered, never guessed. Saved to the site for the owner only${cs.Asaved ? `; last saved ${esc(typeof practiceTime === 'function' ? practiceTime(cs.Asaved) : cs.Asaved.replace('T', ' ').slice(0, 16) + (/T\d\d:\d\d/.test(cs.Asaved) ? ' UTC' : ''))}` : ''}. Only the boxes you change are saved, so figures saved in another window are kept.</div>
       ${labReadNote()}
       <div class="actions" style="margin-top:8px"><button class="primary" id="figSave" ${cs.Aok ? '' : 'disabled'}>Save</button> ${cs.Aok ? '' : '<button id="figRetry">Read them again</button>'} <span id="figMsg" class="small" role="status"></span></div></div>
     <div class="grid two">

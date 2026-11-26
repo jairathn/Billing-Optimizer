@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from remitwatch import api_uploads, uploads
+from remitwatch import api_uploads, runtime, uploads
 from tests import ema_fixtures as F
 from tests.fakes import FakeDropbox
 
@@ -485,7 +485,7 @@ def test_the_same_file_again_changes_nothing(site):
     assert r.status_code == 200 and r.json()["status"] == "already"
     word = "run" if site.mode != "server" else "cycle"          # in the host's own words
     assert r.json()["lines"] == [f"Already have this; nothing changed. This exact file was uploaded on "
-                                 f"{uploads._day(datetime.now(timezone.utc).date().isoformat())} and waits for the next {word}."]
+                                 f"{uploads._day(runtime.practice_today())} and waits for the next {word}."]
     # sent without its checksum first (an older page): the finish finds it is the same file and keeps nothing more
     twin = Up(site, raw, gz=False, sha=False)
     assert twin.send().status_code == 200
@@ -495,7 +495,7 @@ def test_the_same_file_again_changes_nothing(site):
     # once the cycle has read it, the report catalog knows it
     sc = json.loads(site.intake()[pair + ".json"])
     site.done(pair, dict(sc, result={"status": "applied", "lines": ["Read."]}))
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = runtime.practice_today()          # the practice's day, as the page says a day
 
     def read(c):
         c.execute("""INSERT INTO ema_report_files (file_id, report, source_name, via, status, applied_at, received_at, rows_read,
@@ -563,7 +563,7 @@ def test_what_the_cycle_made_of_a_report_is_said_from_the_catalog(tmp_path):
 # ----------------------------------------------------------------------------------- the five exports, the boxes
 def test_the_checklist_says_what_each_export_is_and_whether_it_is_overdue(site):
     from remitwatch import ema_reports
-    today = datetime.now(timezone.utc).date()
+    today = datetime.fromisoformat(runtime.practice_today()).date()      # ages count to the practice's day
     ago = lambda n: (today - timedelta(days=n)).isoformat()      # noqa: E731
 
     def fill(c):
@@ -611,7 +611,7 @@ def test_a_report_received_and_waiting_to_be_read_is_not_called_overdue(site):
     assert before["production"]["overdue"] and not before["production"]["waiting"]
     assert Up(site, text_report(), hint="production").send().status_code == 200
     rows = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}
-    today = uploads._day(datetime.now(timezone.utc).date().isoformat())
+    today = uploads._day(runtime.practice_today())      # an arrival is said on the practice's day
     assert rows["production"]["waiting"] and not rows["production"]["overdue"]
     word = "run" if site.mode != "server" else "cycle"
     assert rows["production"]["last_line"] == f"Last arrived {today} (uploaded here)."
@@ -1227,7 +1227,11 @@ def _put_pair(site: Site, pair: str, sidecar: dict, data: bytes = b"invented") -
 
 
 def _ago(days: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    """This time of day `days` days ago on the practice's calendar (a time in the practice's zone, stepped back on the
+    clock on the wall), as the store writes a moment (UTC): the page counts days where the practice is, and `days` times
+    24 hours back would cross a daylight-time change and be a day less there."""
+    here = datetime.now(timezone.utc).astimezone(runtime.practice_zone())
+    return (here - timedelta(days=days)).astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def test_an_upload_no_cycle_has_read_for_days_does_not_hide_an_overdue_export(site):
@@ -1241,7 +1245,7 @@ def test_an_upload_no_cycle_has_read_for_days_does_not_hide_an_overdue_export(si
     assert f"An upload of it has waited 30 days and no {word} has read it: see the Data tab." in row["state_line"]
     assert f"and no {word} has read it in 30 days" in row["last_line"]
     # data read three days ago keeps the row up to date, and the stuck upload is still said
-    today = datetime.now(timezone.utc).date()
+    today = datetime.fromisoformat(runtime.practice_today()).date()      # ages count to the practice's day
     site.fill(lambda c: c.execute("INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, via) VALUES (?,?,?,?,?,?)",
                                   ("a1", "ar_report", "current", (today - timedelta(days=3)).isoformat(), _ago(3), "upload")))
     row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["ar"]
@@ -1256,7 +1260,7 @@ def test_an_upload_no_cycle_has_read_for_days_does_not_hide_an_overdue_export(si
 def test_a_report_held_or_kept_unread_never_makes_its_export_up_to_date(site, monkeypatch):
     """Only a file RemitWatch read makes an export fresh. A Production report that arrived and was held, or kept
     without being read, leaves the row overdue and says why; beside a fresh read file it is said on the row too."""
-    today = datetime.now(timezone.utc).date()
+    today = datetime.fromisoformat(runtime.practice_today()).date()      # an arrival is said on the practice's day
     why = "It has 40% of the claims the export of Oct 19, 2026 had for these dates: was it filtered by payer, provider or location?"
     site.fill(lambda c: c.execute("""INSERT INTO ema_report_files (file_id, report, status, status_reason, received_at, via)
                                      VALUES (?,?,?,?,?,?)""", ("h1", "production", "held", why, _ago(0), "upload")))
@@ -1334,7 +1338,7 @@ def test_a_report_this_site_does_not_read_is_never_said_to_be_read_next(site, mo
     the same file again and its checklist row all say so. None says the next run reads it, and no "Pull it now" turns
     into "Waiting to be read". Once the site reads Production, the same upload is waiting to be read again."""
     word = "run" if site.mode != "server" else "cycle"
-    today = uploads._day(datetime.now(timezone.utc).date().isoformat())
+    today = uploads._day(runtime.practice_today())      # an arrival is said on the practice's day
     kept = ("kept and not read yet: this site does not read the Production (collections) report yet. It is read once it "
             "does; the practice's server reads it now.")
     monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "ar")
@@ -1357,7 +1361,7 @@ def test_a_report_this_site_does_not_read_is_never_said_to_be_read_next(site, mo
     assert row["last_line"] == f"Last arrived {today} (uploaded here), {kept}"
     assert row["state_line"] == "Overdue: RemitWatch has none yet. Pull it now." and row["host_line"] is None
     # beside Production data read three days ago (on a host that read it then), the row is up to date and says it is kept
-    d3 = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+    d3 = runtime.practice_today(-3)
     site.fill(lambda c: c.execute("INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, via) VALUES (?,?,?,?,?,?)",
                                   ("p3", "production", "current", d3, _ago(3), "dropbox")))
     row = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}["production"]
@@ -1380,10 +1384,11 @@ def test_a_report_this_site_does_not_read_is_never_said_to_be_read_next(site, mo
     assert uploads.kept_unread("ar_report").startswith("not read yet: this site does not read the A/R report yet.")
 
 
-def test_a_file_the_loader_set_aside_unread_is_never_called_read(site):
+def test_a_file_the_loader_set_aside_unread_is_never_called_read(site, monkeypatch):
     """A file the loader recorded and did not read (a layout it does not know) is not "already" RemitWatch's: it can
     be sent again. A pair the router passed over because it had read the same bytes before is said to be already
-    there, not "not read"."""
+    there, not "not read". The practice is in US Eastern time: a file read at 10:00 UTC on Nov 1 was read that day there."""
+    monkeypatch.setenv(runtime.TZ_SETTING, "America/New_York")
     raw = b"Foo,Bar,Baz\r\n1,2,3\r\n"
     sha = hashlib.sha256(raw).hexdigest()
 

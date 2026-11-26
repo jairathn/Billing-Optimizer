@@ -169,11 +169,13 @@ class ResultsError(ValueError):
 
 # --------------------------------------------------------------------------------------------------------- helpers
 def _today(today: Any = None) -> str:
-    """The day the figures are for: the run's day when it passes one, else today in UTC (the one place the clock is read
-    for a date)."""
+    """The day the figures are for: the run's day when it passes one, else the practice's (runtime.practice_today), the
+    day every list counts its windows from; never UTC's, a day ahead of a US practice each evening. The one place the
+    clock is read for a date."""
     if today:
         return str(today)[:10]
-    return datetime.now(timezone.utc).date().isoformat()
+    from .runtime import practice_today
+    return practice_today()
 
 
 def _now() -> str:
@@ -181,8 +183,16 @@ def _now() -> str:
 
 
 def _d(iso: Any) -> date | None:
+    """A stored day as written, or the practice's date of a stored moment (an item first flagged, a packet built, a fax at
+    9:30 PM Eastern: that day, as the states and work_of date them, never UTC's next): every day count and week here."""
+    if iso is None:
+        return None
+    s = str(iso)
     try:
-        return date.fromisoformat(str(iso)[:10])
+        if len(s) > 10:
+            from .runtime import practice_date
+            s = practice_date(s)
+        return date.fromisoformat(s[:10])
     except (TypeError, ValueError):
         return None
 
@@ -442,6 +452,7 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
     written with its first-flag date (the item's own first_seen); a listed one keeps the earliest first-flag date ever
     seen; one no longer listed is marked gone (it stays, so money that comes on it later still counts); an item that went
     from Work now to Expired is recorded as lost to its deadline, with its dollars. Returns the counts."""
+    from .runtime import practice_date
     ensure_schema(conn)
     t = _today(today)
     have: dict[str, tuple] = {}
@@ -459,7 +470,10 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
         f = dict(zip(sel, r))
         fid = f["finding_id"]
         seen.add(fid)
-        first = str(f.get("first_seen") or "")[:10] or t
+        # the first-flag day on the practice's calendar, as a person's Paid (recovered_date) and the payers' dates it is
+        # compared with: an item raised by a run at 9 PM Eastern was flagged that day, not UTC's next (a row stored on
+        # UTC's day is lowered to it by the min() below)
+        first = practice_date(str(f.get("first_seen") or "")) or t
         ws = f.get("work_state")
         prev = have.get(fid)
         if prev is None:
@@ -551,10 +565,14 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
     (as the work its note names), the work lines the item's buttons record (sent, call, posted, billed, fix) and every fax
     sent through RemitWatch (a fax counts once it went out: status 'sent'); the status line that only repeats a fax or a
     'billed' line is folded into it."""
+    from .runtime import practice_date
+    from .states import _moment, fax_day
     ids = sorted(set(fids))
     out: dict[str, list[dict]] = {fid: [] for fid in ids}
     if not ids:
         return out
+    # 'date': the day of the work where the practice is (the records keep UTC: a Sent at 9 PM Eastern is that day's, and
+    # counts in that day's week); 'at' keeps the moment itself
     if _table(conn, "finding_events"):
         note = "e.note" if "note" in _cols(conn, "finding_events") else "NULL"
         for part in _chunks(ids):
@@ -564,7 +582,7 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
                                                                   ORDER BY e.at, e.id"""):
                 k = _work_kind(kind, to, actor, text)
                 if k and at:
-                    out[fid].append({"date": str(at)[:10], "at": str(at), "kind": k, "who": str(actor or "").strip()[:80] or "a person",
+                    out[fid].append({"date": practice_date(str(at)), "at": str(at), "kind": k, "who": str(actor or "").strip()[:80] or "a person",
                                      "pages": 0, "src": "status" if kind == "manual" else "event"})
         _drop(conn, "rs_w")
     if _table(conn, "faxes") and {"finding_id", "direction", "status"} <= _cols(conn, "faxes"):
@@ -573,11 +591,13 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
             for fid, status, sent_at, created_at, pages, doc in conn.execute(
                     """SELECT x.finding_id, x.status, x.sent_at, x.created_at, x.pages, x.doc FROM faxes x
                        WHERE x.direction='out' AND x.finding_id IN (SELECT id FROM temp.rs_fx)"""):
-                when = str(sent_at or created_at or "")
-                if status != "sent" or not when:
+                # the day it went, as the states date it (never before it was queued; a fax line's own words are no day)
+                day = fax_day(sent_at, created_at)
+                if status != "sent" or not day:
                     continue
+                when = str(sent_at if _moment(sent_at) else created_at or sent_at or "")
                 who = str(_json(doc).get("actor") or "").strip()[:80] or "RemitWatch"
-                out[fid].append({"date": when[:10], "at": when, "kind": "fax", "who": who, "pages": int(pages or 0), "src": "fax"})
+                out[fid].append({"date": day, "at": when, "kind": "fax", "who": who, "pages": int(pages or 0), "src": "fax"})
         _drop(conn, "rs_fx")
     for fid, v in out.items():
         v.sort(key=lambda w: (w["at"], w["kind"]))
@@ -1866,6 +1886,7 @@ def _fix_markers(conn: sqlite3.Connection) -> list[dict]:
     itself is not copied)."""
     if not (_table(conn, "finding_events") and _fx(conn)):
         return []
+    from .runtime import practice_date
     out, seen = [], set()
     for fid, at, kind, note, actor, grp, sig in conn.execute(
             """SELECT e.finding_id, e.at, e.kind, e.note, e.actor, f.payer_group, f.signal FROM finding_events e
@@ -1875,11 +1896,12 @@ def _fix_markers(conn: sqlite3.Connection) -> list[dict]:
         if kind != "fix" and not FIX_RE.search(text):
             continue
         what = next((k for k, rx in FIX_KINDS if rx.search(text)), "fix")
-        key = (grp, str(at)[:10], what)
+        day = practice_date(str(at or ""))           # the practice's day of the fix (the history keeps UTC times)
+        key = (grp, day, what)
         if key in seen:
             continue
         seen.add(key)
-        out.append({"date": str(at)[:10], "payer_group": grp or "", "kind": what, "finding_id": fid, "signal": sig})
+        out.append({"date": day, "payer_group": grp or "", "kind": what, "finding_id": fid, "signal": sig})
     return out[-40:]
 
 
@@ -2259,9 +2281,10 @@ def needs_compute(conn: sqlite3.Connection) -> bool:
 def _minutes_at(settings: dict | None, day: str) -> dict:
     """The minutes in force on a day: the newest version the owner saved on or before it (the history keeps each), the
     defaults before the first save."""
+    from .runtime import practice_date
     best = None
     for h in (settings or {}).get("history") or []:
-        at = str(h.get("at") or "")[:10]
+        at = practice_date(str(h.get("at") or ""))       # the practice's day of the save, as the weeks are counted
         if at and at <= day and (best is None or at >= best[0]):
             best = (at, h)
     got = ((best[1].get("values") or {}).get("minutes") if best else None) or {}

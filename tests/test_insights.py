@@ -65,8 +65,10 @@ def test_every_signal_that_is_work_has_a_kind_and_the_endpoint_serves_it(tmp_pat
     assert "SAMPLE" not in json.dumps(b).upper()           # no patient on the home screen's data
 
 
-def test_batches_decisions_missed_and_done(tmp_path):
+def test_batches_decisions_missed_and_done(tmp_path, monkeypatch):
+    from remitwatch import runtime
     from remitwatch.actions import apply_status
+    monkeypatch.setenv(runtime.TZ_SETTING, "America/New_York")      # the practice is in US Eastern time: 15:00 UTC is 10 AM there
     st = store_with_work(tmp_path)
     b = insights.brief(st.conn, today="2026-11-13")
     kinds = {(x["kind"], x["payer_group"]): x for x in b["batches"]}
