@@ -43,7 +43,7 @@ Merge order when they finish: fix7d, fix7c, decisions, hook, deadlines, then a17
 commit, the full suite in the four environments from a frozen worktree of the merge commit, push to both branch names).
 
 The review (`plans/review_2026-11-26.md`, 37 findings in five areas, every verdict in) feeds the fix wave after the
-merges. Its brief is `plans/briefs/2026-11-26_fixwave.md` (written 21:40 UTC): seven fixers with a table of the functions
+merges. Its brief is `plans/briefs/2026-11-26_fixwave.md` (written 21:20 UTC): seven fixers with a table of the functions
 each owns, so they run side by side without editing the same code. F1 ledger and takebacks (money-1, 2, 5, 6, 8, 9,
 hosts-4, answers-5's paid_proof part, the voids, PLB/J1 in paid_proof, unpaired reversals); F2 recoveries and closures
 (money-3, 4, 7, 10, 11, the rest of privacy-3: proof rows that reconcile, privacy-4, J3490, $0 lines, the status-1
