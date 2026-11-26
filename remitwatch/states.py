@@ -662,6 +662,13 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     adj_c: dict[str, list] = {}
     rmk_l: dict[str, list] = {}
     rmk_c: dict[str, list] = {}
+    # what the detection run's ledger found the payer's recoupments (PLB WO, FB, J1 naming a claim, on any later check)
+    # took from each payment: paid_proof never counts it as paid (detect._save_taken)
+    taken_l: dict[str, int] = {}
+    if lkeys and _table(conn, "ledger_taken"):
+        for part in _chunks(lkeys):
+            taken_l.update(conn.execute(f"SELECT line_key, taken_cents FROM ledger_taken WHERE line_key IN ({','.join('?' * len(part))})",
+                                        part).fetchall())
     if has_adj and (lkeys or ckeys):
         _temp(conn, "st_lk", ["k TEXT PRIMARY KEY"], [(k,) for k in lkeys])
         _temp(conn, "st_ck", ["k TEXT PRIMARY KEY"], [(k,) for k in ckeys])
@@ -700,7 +707,7 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
                          "method": r[7], "received": r[8], "freq": r[9], "pccn": r[10], "crossover": r[11], "claim_charge": r[12],
                          "claim_paid": r[13], "claim_pr": r[14], "line_key": r[15], "svc": r[16], "code": r[17], "ocode": r[18],
                          "modifiers": r[19], "charge": r[20], "paid": r[21], "allowed": r[22], "units": r[23], "ounits": r[24],
-                         "lcn": r[25], "tk": r[26], "cfi": r[27], "read": r[28],
+                         "lcn": r[25], "tk": r[26], "cfi": r[27], "read": r[28], "taken": taken_l.get(r[15], 0) if r[15] else 0,
                          "adj": adj_l.get(r[15], []) if r[15] else [], "rmk": rmk_l.get(r[15], []) if r[15] else [],
                          "cadj": adj_c.get(r[1], []), "crmk": rmk_c.get(r[1], [])})
         _pair_reversals(recs)
@@ -1719,6 +1726,10 @@ def paid_proof(fx: dict) -> dict | None:
     gone = set(_ev(f).get("taken_back_lines") or [])
     if gone:
         stand = [x for x in stand if x.get("line_key") not in gone]
+    # and what the ledger's recoupments took from any payment of the bill (a WO, FB or J1 on a later check): a payment taken
+    # back in full pays nothing, one taken back in part pays what is left of it
+    stand = [dict(x, paid=(x["paid"] or 0) - x["taken"]) if x.get("taken") else x for x in stand
+             if not (x.get("taken") and x["taken"] >= (x["paid"] or 0) > 0)]
     own = own_rows(fx)
     once = code_once(fx)
     lcns = {x.get("lcn") for x in own if x.get("lcn")}

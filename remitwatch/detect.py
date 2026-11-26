@@ -382,6 +382,9 @@ EVENTS_SEEN_META = "detect:events_seen"     # the newest finding_events id the l
 # with "older_" for the rest (paid before the remittances on file begin). Each analysis saves it; the Data tab's checks
 # name it (insights.data_health), and the dashboard's copy carries it.
 REVERSALS_NOT_ON_FILE_META = "ledger:reversals_not_on_file"
+# The ledger's reversal pairing reads these payer companies (payer_company) as one: UnitedHealthcare's administrator UMR,
+# formerly Wausau Benefits, reverses under the Wausau name (its own group) payments it made as UMR (Detector._build_ledger)
+LEDGER_COMPANIES = {"umr": "uhc"}
 # A claim id written inside a recoupment's reference, among other text (the payer's own claim number before or after it, a
 # letter, a date): the practice's claim ids are a bill id and a submission suffix (bill_of). Trace finding T-I1.
 CLAIM_ID_IN_TEXT = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{5,6}C\d{1,3}")
@@ -1858,6 +1861,10 @@ class Detector:
         when = lambda l: l.get("payment_date") or l.get("txn_payment_date") or ""          # noqa: E731
         payer = lambda l: l.get("payer_id") or l.get("payer_name")                         # noqa: E731
         payer_word = lambda name: re.sub(r"[^A-Z0-9]", "", (name or "").upper())         # noqa: E731
+
+        def company(l) -> str:
+            c = payer_company(l.get("payer_group") or normalize_payer(l.get("payer_name"))[0])
+            return LEDGER_COMPANIES.get(c, c)
         left: dict[str, int] = {}
         pos: dict[tuple, list] = defaultdict(list)
         revs = []
@@ -1952,6 +1959,13 @@ class Detector:
                          and (not payer(r) or one_payer(payer(r), payer(p), (r["patient_control_number"], p["patient_control_number"])))]
                 # only a payment of the reversal's own amount: one of another amount is another version's payment (T-I5)
                 cands = [p for p in cands if p["paid_cents"] == amount or left[p["line_key"]] == amount]
+                if not cands and pccn.get(r["claim_key"]):
+                    # a payer that reverses under another id and name of its company than it paid under (an administrator
+                    # reversing under its former name: Wausau for UMR) never joins by id or name: the payer's own claim
+                    # number and the amount pair them, within one payer company
+                    cands = [p for p in pos.get(svc(r), []) if left[p["line_key"]] > 0 and when(p) < when(r)
+                             and (p["paid_cents"] == amount or left[p["line_key"]] == amount)
+                             and pccn.get(p["claim_key"]) == pccn.get(r["claim_key"]) and company(p) and company(p) == company(r)]
                 if not cands:
                     lost.append((r["patient_control_number"], amount, r.get("service_date"), payer(r)))
                     continue
@@ -2121,7 +2135,26 @@ class Detector:
                                            for l in self.lines_by_claim.get(ck, [])), default="")
             not_applied.append((name, cents, len(ents), ents[0][2] if ents else None, dos))
         self._count_not_on_file(lost, not_applied)
+        self._save_taken(left)
         return {k: v for k, v in left.items() if v > 0}
+
+    def _save_taken(self, left: dict) -> None:
+        """What the recoupments (PLB WO, FB, J1 naming a claim) took from each payment, saved for the item states: the states
+        read it beside each 835 answer (states._r835), so a payment a takeback left unpaid never proves an item paid
+        (paid_proof sees reversals on the remittances themselves, not recoupments on other checks). ledger_taken holds one row
+        per payment line a recoupment took from: the cents taken, the day of the last take, what still stands. Written on
+        every run, on either kind of store (the dashboard's copy does not carry it: its states are the stored ones)."""
+        per: dict[str, list] = {}
+        for p, day, cents, _entry in getattr(self, "plb_took", None) or []:
+            r = per.setdefault(p["line_key"], [0, ""])
+            r[0] += cents
+            r[1] = max(r[1], day or "")
+        c = self.conn
+        c.execute("CREATE TABLE IF NOT EXISTS ledger_taken (line_key TEXT PRIMARY KEY, taken_cents INTEGER, taken_on TEXT, "
+                  "standing_cents INTEGER)")
+        c.execute("DELETE FROM ledger_taken")
+        c.executemany("INSERT INTO ledger_taken (line_key, taken_cents, taken_on, standing_cents) VALUES (?,?,?,?)",
+                      [(lk, v[0], v[1] or None, max(0, left.get(lk, 0))) for lk, v in sorted(per.items())])
 
     def _plb_names(self, rows: list) -> tuple[list[str], set[str]]:
         """The claim each PLB entry (rows of reference, amount, date, payer, ...) names, for netting and taking back,
@@ -7018,7 +7051,9 @@ class Detector:
         - a service of the same patient billed again on another claim since the payment (a claim voided and billed again:
           a global billed again as its two parts): the new claim's answer is the work;
         - a claim whose recoupment took a payment only in part (a payer's repricing): the recoupment's own listing stands
-          for the claim.
+          for the claim;
+        - a service the practice voided after the payment (_voided_services: a void 837 with no later send, or EMA's charge
+          voided): the payer took the money back because the practice withdrew the charge.
         A second payer's share taken back (claim status 2 or 3) is judged against that payer's own standing payments of the
         service, never the primary's: the primary's payment does not pay the coinsurance the second payer took back, so the
         share is listed (bill the patient, or dispute the takeback) unless that payer pays it again or another second payer
@@ -7059,6 +7094,8 @@ class Detector:
             if who.get(x["claim_key"]):
                 same_svc[(who[x["claim_key"]], x.get("procedure_code"), x.get("service_date"))].append(x)
         taken_lines = set(by_line)
+        voided = self._voided_services({(bill_of(p["patient_control_number"]), p.get("procedure_code"), p.get("service_date"), when(p))
+                                        for p, *_x in took})
         # the denials of these services still open (the line rules' items), that the payer has not reversed since: (bill,
         # code, date) -> items
         undone: dict[tuple, str] = {}
@@ -7104,6 +7141,8 @@ class Detector:
                 continue
             if entry.get("claim") in partial:
                 continue            # the claim's recoupment took another payment only in part: its own listing stands for it
+            if (bill, code, dos) in voided:
+                continue            # the practice voided the charge since: the takeback answers the void
             paid_on = when(p)
             again = [x for x in answers.get((bill, code, dos), []) if x["line_key"] not in taken_lines
                      and (when(x) > paid_on or (when(x) == paid_on and x["patient_control_number"] != p["patient_control_number"]))
@@ -7142,6 +7181,40 @@ class Detector:
                 judged[key] = judged.get(key, 0) + share
                 cents -= share
         return judged
+
+    def _voided_services(self, svcs: set[tuple]) -> set[tuple]:
+        """The services (bill, code, date) of these taken-back payments (bill, code, date, the payment's day) that the practice
+        voided after the payment: the bill's newest 837 send since the payment is a void (frequency 8) with no other send that
+        day or later (a void and a new claim the same day is a replacement), or EMA's lines of the service show its charge
+        voided (every line's status a void and the charges netting to nothing: a posted void of the charge, not a status
+        alone). The 835s' own void answers (CLP09 8) make no item already (T-N5)."""
+        if not svcs:
+            return set()
+        c = self.conn
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('claims_837', 'ema_lines')")}
+        out: set[tuple] = set()
+        bills = sorted({b for b, _c, _d, _w in svcs if b})
+        if "claims_837" in tables:
+            sends: dict[str, list] = defaultdict(list)
+            for b in bills:
+                for pcn, bht, freq in c.execute("""SELECT patient_control_number, bht_created, TRIM(COALESCE(frequency_code, ''))
+                                                   FROM claims_837 WHERE patient_control_number >= ? AND patient_control_number < ?""",
+                                                (b, b + "~")):
+                    if bill_of(pcn) == b and bht:
+                        sends[b].append((real_day(bht) or "", freq))
+            for b, code, dos, paid_on in svcs:
+                voids = [d for d, f in sends.get(b, []) if f == "8" and d and d >= (paid_on or "")]
+                if voids and not any(f != "8" and d >= max(voids) for d, f in sends.get(b, [])):
+                    out.add((b, code, dos))
+        if "ema_lines" in tables:
+            from .ema_reports import status_class
+            for b, code, dos, _paid_on in svcs:
+                if (b, code, dos) in out:
+                    continue
+                rows = c.execute("SELECT status, charges FROM ema_lines WHERE bill = ? AND svc = ? AND cpt = ?", (b, dos, code)).fetchall()
+                if rows and all(status_class(st) == "void" for st, _ch in rows) and sum(ch or 0 for _st, ch in rows) <= 0:
+                    out.add((b, code, dos))
+        return out
 
     @staticmethod
     def _taken_back_detail(p, day: str, cents: int, entry: dict) -> dict:

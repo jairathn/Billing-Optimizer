@@ -616,3 +616,145 @@ def test_money9_the_open_denial_names_what_medicaid_still_owes(tmp_path, kind, m
     finally:
         lg.close()
         s.close()
+
+
+# ================================================================================================ residual: PLB/J1 in paid_proof
+@pytest.mark.parametrize("reason", ["WO", "FB", "J1"])
+def test_a_payment_a_recoupment_took_back_proves_nothing_paid(tmp_path, kind, reason):
+    """C017's visit is denied (missing information); the corrected claim C024 is paid $117.60; the payer then answers the
+    service again on C031 (a duplicate denial), and in August withholds the $117.60 naming C024 from a check that pays
+    another patient. The ledger takes C024's payment back. No item of the service may be done on that payment: the
+    takeback left it unpaid (next_fixes section 4: paid_proof saw reversals, not PLB or J1 takebacks)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_denied_line(f"{BILL}C017", carc="16")], "20260415")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_denied_line(f"{BILL}C031", carc="18", payer_ctl="PC300C")], "20260615")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*{reason}:87654321 {BILL}C024*117.60~")
+    det = w.run("r1", today="2026-09-20")
+    assert left_on(det, f"{BILL}C024") == 0, "the ledger did not take the payment back"
+    rows = w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0")
+    print(brief(rows), [(r["patient_control_number"], r["work_state"], r["state_basis"]) for r in rows])
+    done = [(r["patient_control_number"], r["signal"], r["state_basis"]) for r in rows if r["work_state"] == "done"]
+    assert not done, f"done on a payment the payer took back: {done}"
+    assert any(r["work_state"] == "work_now" for r in rows), "the service the takeback left unpaid is on no work item"
+    w.store.close()
+
+
+def _states_store(tmp_path, kind: str):
+    """A store of either kind with EMA's tables and the derived tables, as tests/test_states.py's store."""
+    from remitwatch import detect as D, ema_reports as er
+    from tests import test_states as TS
+    if kind == "file":
+        return TS.new_store(str(tmp_path / "store.sqlite"))
+    s = Store(":memory:", compact=True)
+    er.ensure_schema(s.conn)
+    D.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (TS.SALT_HEX,))
+    s.conn.commit()
+    return s
+
+
+@pytest.mark.parametrize("taken,done", [(0, True), (3000, True), (7000, False), (11000, False)])
+def test_paid_proof_counts_only_what_the_ledger_left_of_a_later_payment(tmp_path, kind, taken, done):
+    """A denial of 99213 ($90.00 expected), then a later payment of the same line ($110.00). The ledger found a recoupment
+    took `taken` of that payment (ledger_taken): what is left must still reach half of the expected amount to prove the
+    denial paid; a payment taken back in full proves nothing."""
+    from tests import test_states as TS
+    s = _states_store(tmp_path, kind)
+    try:
+        tk0 = TS.denied(s)
+        TS.item(s, line_key=TS.line_key(s, tk0), claim_key=f"{tk0}-0", transaction_key=tk0)
+        tk1 = TS.remit(s, trace="T1", paid_on="2026-04-10", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+                                                                    "lines": [TS.ln("99213", 150, 110, [("CO", "45", 40)], lcn="1")]}])
+        s.conn.execute("CREATE TABLE IF NOT EXISTS ledger_taken (line_key TEXT PRIMARY KEY, taken_cents INTEGER, taken_on TEXT, "
+                       "standing_cents INTEGER)")
+        if taken:
+            s.conn.execute("INSERT INTO ledger_taken VALUES (?,?,?,?)", (TS.line_key(s, tk1), taken, "2026-04-20", 11000 - taken))
+        s.conn.commit()
+        st = TS.state(s)
+        print(taken, st["work_state"], st.get("rule"), st.get("state_basis"))
+        assert (st["work_state"] == "done") is done, (taken, st["work_state"], st.get("state_basis"))
+        if done:
+            assert st["proof"]["cents"] == 11000 - taken, st["proof"]
+    finally:
+        s.close()
+
+
+# ================================================================================================ residual: reversals under another company name
+UMR_PAY = {"payer": "UNITED MEDICAL RESOURCES", "payer_id": "UMR01"}
+
+
+@pytest.mark.parametrize("rev_payer,rev_ctl,paired", [
+    ({"payer": "WAUSAU", "payer_id": "WAUS1"}, "PC300B", True),       # UMR's former name, the payer's own claim number
+    ({"payer": "WAUSAU", "payer_id": "WAUS1"}, "PC300X", False),      # another claim number: another version's payment
+    ({"payer": "AETNA", "payer_id": "AETN1"}, "PC300B", False),       # another company, whatever its claim number
+])
+def test_a_reversal_under_another_name_of_the_payers_company_pairs_by_its_claim_number(tmp_path, kind, rev_payer, rev_ctl, paired):
+    """UMR pays C024 $117.60 under its own name and id; the payer later reverses it under 'WAUSAU' (UMR's former name) and
+    another id. The ids never join, so before this the reversal stayed unpaired (counted as reversing a payment not on file)
+    and the payment stood. The payer's own claim number and the amount pair them, within one payer company (next_fixes
+    section 4: 27 such reversals on the real copy)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301", **UMR_PAY)
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520", **UMR_PAY)
+    w.remit([visit_reversed(f"{BILL}C024", payer_ctl=rev_ctl)], "20260610", **rev_payer)
+    det = w.run("r1", today="2026-09-20")
+    m = w.meta(REVERSALS_NOT_ON_FILE_META)
+    print(rev_payer, rev_ctl, left_on(det, f"{BILL}C024"), m)
+    if paired:
+        assert left_on(det, f"{BILL}C024") == 0 and m["lines"] + m["older_lines"] == 0, (left_on(det, f"{BILL}C024"), m)
+    else:
+        assert left_on(det, f"{BILL}C024") == 11760 and m["lines"] + m["older_lines"] == 1, (left_on(det, f"{BILL}C024"), m)
+    w.store.close()
+
+
+# ================================================================================================ residual: takebacks on voided claims
+@pytest.mark.parametrize("sends,listed", [
+    ([("8", "20260615")], False),                       # the practice voided C024 after the payment: the takeback answers it
+    ([("8", "20260615"), ("7", "20260615")], True),     # a void and a new claim the same day is a replacement, not a void
+    ([("8", "20260501")], True),                        # a void sent before the payment: the payment came after it
+])
+def test_a_takeback_of_a_claim_the_practice_voided_is_no_work(tmp_path, kind, sends, listed):
+    """Anthem pays C024 $117.60 on May 20; the practice sends C024 again as a void (837 frequency 8); in August Anthem
+    recoups the $117.60 naming C024. The takeback is the payer's answer to the void: nothing to dispute or bill (next_fixes
+    section 2: TAKEBACK items on voided claims). A void followed by a new claim the same day is a replacement and leaves
+    the takeback listed; so does a void sent before the payment."""
+    from tests.test_837_sends import clm837, send
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    send(w.store, tmp_path, [clm837(f"{BILL}C024", [("99214", "223.65", "20260401")])], "20260402")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    for freq, day in sends:
+        send(w.store, tmp_path, [clm837(f"{BILL}C024", [("99214", "223.65", "20260401")], freq=freq)], day)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*117.60~")
+    det = w.run("r1", today="2026-09-20")
+    assert left_on(det, f"{BILL}C024") == 0
+    tb = w.rows("signal='TAKEBACK'")
+    print(sends, brief(tb))
+    assert bool(tb) is listed, brief(tb)
+    w.store.close()
+
+
+@pytest.mark.parametrize("status,charges,listed", [("Inactive/Voided", 0, False), ("Inactive/Voided", 22365, True),
+                                                   ("Payment Pending", 0, True)])
+def test_a_takeback_of_a_charge_ema_shows_voided_is_no_work(tmp_path, kind, status, charges, listed):
+    """EMA's lines of the service show the charge voided (every line's status a void, the charges netting to nothing): the
+    practice withdrew the charge, and the payer's recoupment of its payment is no work. A void status with the charge
+    still on the line, or a zero charge under another status, is not enough (a status alone never closes or drops an item)."""
+    from remitwatch import ema_reports as er
+    w = World(tmp_path, kind)
+    er.ensure_schema(w.store.conn)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*117.60~")
+    w.store.conn.execute("INSERT INTO ema_lines (link, svc, cpt, bill, claim_id, status, charges, ins_paid, balance) VALUES (?,?,?,?,?,?,?,?,?)",
+                         (7001, "2026-04-01", "99214", BILL, f"{BILL}C024", status, charges, 0, 0))
+    w.store.conn.commit()
+    w.run("r1", today="2026-09-20")
+    tb = w.rows("signal='TAKEBACK'")
+    assert bool(tb) is listed, (status, charges, brief(tb))
+    w.store.close()
