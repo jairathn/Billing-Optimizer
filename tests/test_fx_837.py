@@ -116,6 +116,113 @@ def test_the_work_on_the_older_bill_passes_to_the_bill_made_again(tmp_path, kind
     s.close()
 
 
+def _exports_claim(s, claim_id: str, sent: str, **kw) -> None:
+    """EMA's weekly exports list this claim: its 99214 charge (September 14) and its status, Submitted on `sent`."""
+    from tests.test_workable import ema
+    ema(s.conn, claim_id, bill_created=sent, **kw)
+    ema(s.conn, claim_id, family="claim_status", claim_status="Submitted", claim_submission_date=sent, **kw)
+    s.conn.commit()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_older_bill_only_the_837s_know_yields_to_the_newer_bill_the_exports_chase(tmp_path, kind):
+    """(answers-1 across the passes, the 837 pass's side; F3b's need.) The practice sent one patient's visit of September
+    14 (99214) on bill CB0000M41 September 15; only the 837s know it. No payer answered, so it made the bill again as
+    CB0000M42 and sent it September 25; EMA's weekly exports list M42 (its 837 is on file too). The exports' pass chases
+    M42; the 837 pass would chase M41 as well: one visit twice. Only M42 is chased (the exports' pass makes its own older
+    claim yield to a newer 837 bill the other way round)."""
+    s = _store(tmp_path, kind)
+    member = "WDUP000041"
+    send(s, tmp_path, [clm837("CB0000M41C017", V, member=member)], "20260915")
+    _exports_claim(s, "CB0000M42C017", "2026-09-25")
+    send(s, tmp_path, [clm837("CB0000M42C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    det = Detector(s, run_id="t1")
+    det.run()
+    found = {r["patient_control_number"]: dict(r) for r in s.query(
+        "SELECT * FROM findings WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') AND COALESCE(stale,0)=0")}
+    _show(found)
+    assert set(found) == {"CB0000M42C017"}
+    assert det.ema_counts["837_visit_under_exports_bill"] == 1
+    assert "billed before on claim CB0000M41C017" in (found["CB0000M42C017"]["hint"] or "")
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_family_members_older_837_bill_does_not_yield_to_the_subscribers_exports_bill(tmp_path, kind):
+    """The control: bill CB0000M43 (837 only, September 15) is the subscriber's child's visit (the patient loop names the
+    child); bill CB0000M44, the exports' (September 25), is the subscriber's own visit the same day, under the same
+    subscriber id. Two people's visits: both are chased."""
+    s = _store(tmp_path, kind)
+    member = "WDUP000043"
+    send(s, tmp_path, [clm837("CB0000M43C017", V, member=member, patient=("SAMPLE", "KID", "20150301"))], "20260915")
+    _exports_claim(s, "CB0000M44C017", "2026-09-25")
+    send(s, tmp_path, [clm837("CB0000M44C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    _show(found)
+    assert set(found) == {"CB0000M43C017", "CB0000M44C017"}
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_newer_837_bill_of_the_visit_an_older_exports_bill_carries_stays_chased(tmp_path, kind):
+    """The other way round: the exports' bill CB0000M45 (September 15) is the older; the practice sent the visit again as
+    CB0000M46 (September 25), which only the 837s know. The 837 pass keeps M46: the newest bill carries the visit (the
+    exports' pass is the one that drops its older claim, _exports_yield_to_newer_bills on the exports' branch)."""
+    s = _store(tmp_path, kind)
+    member = "WDUP000045"
+    _exports_claim(s, "CB0000M45C017", "2026-09-15")
+    send(s, tmp_path, [clm837("CB0000M45C017", V, member=member)], "20260915")
+    send(s, tmp_path, [clm837("CB0000M46C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    _show(found)
+    assert "CB0000M46C017" in found and found["CB0000M46C017"]["source"] == "837"
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_837_bill_sent_the_same_day_as_the_exports_bill_of_the_visit_yields_to_it(tmp_path, kind):
+    """Two bills of one patient's visit sent the same day, September 25: CB0000M52, which EMA's weekly exports list, and
+    CB0000M53, which only the 837s know (its claim id is the higher). The exports' pass keeps its claim (a bill sent the
+    same day is not a bill made again), so the 837 pass yields: the visit is chased once, on M52."""
+    s = _store(tmp_path, kind)
+    member = "WDUP000052"
+    _exports_claim(s, "CB0000M52C017", "2026-09-25")
+    send(s, tmp_path, [clm837("CB0000M52C017", V, member=member), clm837("CB0000M53C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    _show(found)
+    assert set(found) == {"CB0000M52C017"}
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_work_on_an_older_837_bill_passes_to_the_newer_bill_the_exports_chase(tmp_path, kind):
+    """Bill CB0000M47 (837 only) is listed as never answered; a biller starts it and writes a note. The practice makes the
+    bill again as CB0000M48 (sent September 25), which EMA's weekly exports then list. The next run chases M48 only,
+    Started, with the note."""
+    from remitwatch.actions import apply_status
+    s = _store(tmp_path, kind)
+    member = "WDUP000047"
+    send(s, tmp_path, [clm837("CB0000M47C017", V, member=member)], "20260915")
+    _remits(s, tmp_path, _visits(), "20261020")
+    found = _chased(s, "t1")
+    assert set(found) == {"CB0000M47C017"}
+    apply_status(s.conn, found["CB0000M47C017"]["finding_id"], "in_progress", "Called Anthem: no record of it", actor="biller")
+    s.conn.commit()
+    _exports_claim(s, "CB0000M48C017", "2026-09-25")
+    send(s, tmp_path, [clm837("CB0000M48C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, _visits(start=40), "20261110")
+    found = _chased(s, "t2")
+    _show(found)
+    assert set(found) == {"CB0000M48C017"}
+    m48 = found["CB0000M48C017"]
+    assert m48["status"] == "in_progress" and "no record of it" in (m48["notes"] or ""), (m48["status"], m48["notes"])
+    s.close()
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_line_added_in_a_resend_the_exports_do_not_show_yet_is_chased_from_the_837s(tmp_path, kind):
     """(answers-5, the reviewer's L02.) Anthem paid bill CB0000L02's C017 (a 99214) in full. EMA's weekly exports list the
@@ -332,6 +439,41 @@ def test_a_line_added_in_a_resend_after_the_bill_was_paid_is_chased_from_the_837
     ev = json.loads(mine[0]["evidence"])
     assert ev["codes"] == ["17110"], f"only the service no 835 of the bill answered is chased: {ev['codes']}"
     assert mine[0]["shortfall_cents"] == 8000
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_837_pass_walks_its_bills_not_every_answered_claim(tmp_path, kind):
+    """(Found measuring on the world copy: the run spent more than 20 minutes in the resend scan, _837_resends.) Each query
+    that reads claims by a bill's range of claim ids from a temporary list of bills must walk that list and look the claims
+    up by the claim id index. The server's store also indexes claims by status: with a status filter beside the range,
+    SQLite (which keeps no statistics here) read every claim a payer answered as primary and probed the list for each, once
+    for every 500 bills. The answers-5 scenario (L01) makes every such query of the 837 pass run."""
+    import re
+    from tests.test_features import claim
+    s = _store(tmp_path, kind)
+    rates = [claim(600 + i, svc("17110", "200.00", "80.00", "80.00", "CAS*CO*45*120.00~")) for i in range(25)]
+    v1 = [("99214", "223.65", "20260730")]
+    send(s, tmp_path, [clm837("CB0000L01C017", v1)], "20260801")
+    _remits(s, tmp_path, [answer("CB0000L01C017", dos="20260730")], "20260820")
+    send(s, tmp_path, [clm837("CB0000L01C024", v1 + [("17110", "200.00", "20260730")], freq="7")], "20260901")
+    _remits(s, tmp_path, rates + _visits(), "20261110")
+    seen: list[str] = []
+    s.conn.set_trace_callback(seen.append)
+    Detector(s, run_id="t1").run()
+    s.conn.set_trace_callback(None)
+    ddl = {m.group(1): q for q in seen for m in [re.match(r"\s*CREATE TEMP TABLE (d837_\w+)", q)] if m}
+    joins = [q for q in seen if re.search(r"FROM temp\.d837_\w+ x\s+JOIN claims cl ON cl\.patient_control_number >= x\.bill", q)]
+    assert any("temp.d837_rs" in q for q in joins), "the scenario reaches the resend scan"
+    bad = []
+    for q in joins:
+        t = re.search(r"FROM temp\.(d837_\w+) x", q).group(1)
+        s.conn.execute(f"DROP TABLE IF EXISTS temp.{t}")
+        s.conn.execute(ddl[t])
+        plan = [r[3] for r in s.conn.execute("EXPLAIN QUERY PLAN " + q)]
+        if not plan[0].startswith("SCAN x"):
+            bad.append((t, plan))
+    assert not bad, bad
     s.close()
 
 
