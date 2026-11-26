@@ -52,7 +52,7 @@ REVERSAL = "22"
 DONE = {"PAID", "MOVED_TO_PATIENT", "SETTLED_SECONDARY", "VOIDED", "ZERO_CHARGE", "NOT_PAYABLE"}
 OWED = {"DENIED", "SHORT", "TAKEN_BACK", "NEVER_ANSWERED", "WORKED_WAITING"}
 UNKNOWN = {"SECONDARY_ONLY", "IN_PROCESS", "NO_FEED", "FEED_STOPPED", "EMA_PAID_NO_REMIT", "EMA_VOIDED",
-           "NOT_SENT_UNKNOWN"}
+           "NOT_SENT_UNKNOWN", "TWIN_ANSWERED"}
 
 # Item kinds by RemitWatch signal. D: about an unpaid unit (denial, bundling, claim denial). U: about a paid unit
 # (underpayment, downcode, code change). N: claim sent, no answer. T: a PLB take-back. A: aggregate, not one unit.
@@ -174,6 +174,15 @@ def hkey(*parts):
     return hashlib.sha256(s.encode()).hexdigest()[:20]
 
 
+def plan_digest(dim, value):
+    """A17 rule 1: a plan value (an 835 group number or contract class) as a short one-way digest with its dimension
+    ('g' or 'c'). The value itself is never kept, printed or written."""
+    v = re.sub(r"\s+", " ", str(value or "")).strip().upper()
+    if not v:
+        return None
+    return dim + hashlib.sha256((dim + "|" + v).encode()).hexdigest()[:10]
+
+
 def specific_payer_id(pid):
     p = (pid or "").strip().upper()
     if not p or p in GENERIC_PAYER_IDS or p.startswith("ZP"):
@@ -231,7 +240,11 @@ class Proc:
     """One claim processing (one CLP loop) of one payer."""
     __slots__ = ("ck", "tk", "seq", "pcn", "bill", "sfx", "fam", "st", "freq", "prod", "clp07", "pos", "date", "ordk",
                  "charge", "paid", "ccas", "crarc", "lines", "npi", "trace", "sup", "copy_of", "cancelled_by", "cancels",
-                 "xover", "nlines_raw", "stmt", "pk", "mks", "copy_kind")
+                 "xover", "nlines_raw", "stmt", "pk", "mks", "copy_kind",
+                 # A17: the plan digests (rule 1), the rate product (product + own-schedule plan), the setting the
+                 # payer priced (rule 2), the office state of the clinician's day (rule 1), the patient's share (CLP05)
+                 # and whether the processing is a bare $0 row (rule 5)
+                 "plan_g", "plan_c", "rprod", "pos_eff", "pos_src", "ostate", "prr", "bare")
 
 
 class Line:
@@ -259,7 +272,7 @@ class Ans:
 class Svc:
     """A service group: (bill, code, component, date of service). Its units are 1..U."""
     __slots__ = ("key", "bill", "code", "comp", "dos", "lines", "answers", "sends", "ema", "emast", "U", "units",
-                 "in_scope", "scope_basis", "charge_pu", "pks", "eml", "ema_how", "notes")
+                 "in_scope", "scope_basis", "charge_pu", "pks", "eml", "ema_how", "notes", "twins")
 
     def __init__(self, key):
         self.key = key
@@ -278,13 +291,14 @@ class Svc:
         self.eml = []        # EMA Production claim lines matched to this service (EmaLine)
         self.ema_how = ""    # how they were matched: bill, person, unique
         self.notes = set()   # side facts for the truth table (written off in EMA, secondary balance...)
+        self.twins = []      # A17 rule 5: several send-day twins (EMA claims of the same lines that day), each a list
 
 
 class EmaLine:
     """One EMA Production claim line: (claim link, date of service, code), its postings added up. Keys and money only."""
     __slots__ = ("link", "svc", "cpt", "bill", "person", "charges", "units", "pays", "adjs", "answers", "status",
                  "action", "pnames", "primary", "pat_paid", "pat_adj", "allowed", "ar", "svcs", "first_posted",
-                 "last_posted")
+                 "last_posted", "bare", "first_charge", "facility")
 
     def __init__(self, link, svc, cpt):
         self.link, self.svc, self.cpt = link, svc, cpt
@@ -306,6 +320,9 @@ class EmaLine:
         self.svcs = []       # the auditor's services it was matched to
         self.first_posted = ""
         self.last_posted = ""
+        self.bare = []       # A17 rule 5: $0 rows under a check with no proof of an answer (posted, payer id, check)
+        self.first_charge = ""   # A17 rule 5: the day EMA first posted the line's charge (its send-day twins)
+        self.facility = False
 
 
 # unit tuple: state, sub, carc, fam, gov_line_key, gov_date, owed_cents (per unit), basis, window_end, inside(bool)
@@ -374,6 +391,164 @@ EMA_OPEN_STATUSES = {"Payment Pending", "Denied", "Insurance Reprocessing", "Med
                      "Ready for Posting", "Batched for Printing", "Batched for Sending", "Invalid"}
 PLACEHOLDER_CENTS = 1        # fix 13: a line charged $0.01 a unit is a placeholder, not money
 
+# ---- A17 rule constants (public payer ids and code lists; nothing practice-specific)
+# rule 1 (plan-level rate keys): a plan (an 835 group number, REF*1L, or contract class, REF*CE) is read apart from the
+# rest of its payer and product when it has PLAN_MIN_ANSWERS clean answers and its own amount differs from the rest's
+# on PLAN_DIFFER_MIN codes or more (each with PLAN_CODE_MIN answers on both sides), and on more codes than it agrees
+PLAN_MIN_ANSWERS = 100
+PLAN_CODE_MIN = 5
+PLAN_DIFFER_MIN = 3
+# ratios between two modes that say nothing about a plan's schedule: an NP/PA tier (85%) or a multiple-procedure half
+PLAN_AMBIGUOUS_RATIOS = (0.85, 1 / 0.85, 0.5, 2.0)
+# rule 1 (the office state): the Medicare carrier that answers a clinician's claims names the state of the office
+# (CGS, jurisdiction 15, Kentucky; WPS, jurisdiction 8, Indiana: the families ID_MERGE builds from their payer ids)
+STATE_OF_FAMILY = {"MEDICARE-KY": "KY", "MEDICARE-IN": "IN"}
+# rule 5: send-day twins. EMA writes a claim's 837 the day it posts the claim's charges or the day after (measured: 99.9%
+# of the claims the link map ties to a bill went out 0 or 1 day after their first charge posting)
+TWIN_SLACK_DAYS = 1
+# rule 4: the payer window table. Its schema (one JSON file, the researched table or an invented one in the self-test):
+#   {"schema": "a17-payer-windows/1", "payers": [entry, ...], "default": entry (optional)}
+#   entry: {"id": "...", "label": "...",
+#           "match": {"payer_ids": [...], "families": [...], "name_patterns": [regex, ...],
+#                     "classes": ["MCR"|"MAP"|"MCD"|"GOV"|"COM", ...], "products": [CLP06 codes ...]},
+#           "first_filing": window, "corrected_claim": window, "appeals": [window with "level": 1, 2, ...]}
+#   window: {"days": N} or {"months": N}, "from": "dos" | "remit" | "denial" | "send" | "decision", "source": "..."
+# Every window must name its source; a window without one is not used (the entry falls back to the defaults).
+WINDOW_SCHEMA = "a17-payer-windows/1"
+# rule 5: a remark code (RARC) posted as a reason on an EMA line
+RARC_RE = re.compile(r"^(N\d+|M\d+|MA\d+)$")
+WINDOW_FROM = {"dos", "remit", "denial", "send", "decision"}
+
+
+def add_months(a, n):
+    """a + n calendar months (ISO dates); the day is kept, else the month's last day (a timely-filing limit counted in
+    months ends on the same day of the month)."""
+    d = dt.date.fromisoformat(a)
+    y, m = divmod(d.month - 1 + n, 12)
+    y, m = d.year + y, m + 1
+    for day in (d.day, 30, 29, 28):
+        try:
+            return dt.date(y, m, min(d.day, day)).isoformat()
+        except ValueError:
+            continue
+    return dt.date(y, m, 28).isoformat()
+
+
+class PayerWindows:
+    """A17 rule 4: the payer window table (first filing, corrected claim, appeal levels), each window with its source,
+    in place of A16's flat days. Matching: a payer id or family named by the entry, else a pattern on the payer's name;
+    then the entry's product classes or CLP06 products when it names them. With no table, or no entry for a payer, or an
+    entry without a sourced window of the kind asked, the defaults are A16's (appeal 120 days for Medicare, 90 for
+    Medicaid, 180 otherwise, from the answer; first filing 365 days from the date of service for Medicare, Medicaid and
+    Medicare Advantage, 180 otherwise)."""
+
+    def __init__(self, table=None):
+        self.entries = []
+        self.default = None
+        self.problems = Counter()
+        self.used = Counter()
+        self.version = None
+        if table:
+            self.load(table)
+
+    @staticmethod
+    def _window(w):
+        if not isinstance(w, dict):
+            return None
+        src = w.get("source")
+        if isinstance(src, list):
+            src = "; ".join(str(x) for x in src if x)
+        if not src or not str(src).strip():
+            return None
+        n_days, n_months = w.get("days"), w.get("months")
+        frm = (w.get("from") or "").strip().lower()
+        if frm not in WINDOW_FROM:
+            return None
+        try:
+            if n_days is not None:
+                return ("days", int(n_days), frm, str(src))
+            if n_months is not None:
+                return ("months", int(n_months), frm, str(src))
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def _entry(self, e):
+        m = e.get("match") or {}
+        ent = {"id": str(e.get("id") or e.get("label") or "entry"),
+               "ids": {str(x).strip().upper() for x in (m.get("payer_ids") or []) if str(x).strip()},
+               "fams": {str(x).strip().upper() for x in (m.get("families") or []) if str(x).strip()},
+               "pats": [], "classes": {str(x).strip().upper() for x in (m.get("classes") or [])},
+               "products": {str(x).strip().upper() for x in (m.get("products") or [])}}
+        for pat in m.get("name_patterns") or []:
+            try:
+                ent["pats"].append(re.compile(pat, re.I))
+            except re.error:
+                self.problems["bad_name_pattern"] += 1
+        for kind in ("first_filing", "corrected_claim"):
+            w = self._window(e.get(kind))
+            if e.get(kind) is not None and w is None:
+                self.problems[kind + "_without_source_or_unreadable"] += 1
+            ent[kind] = w
+        levels = {}
+        for a in e.get("appeals") or []:
+            w = self._window(a)
+            if w is None:
+                self.problems["appeal_without_source_or_unreadable"] += 1
+                continue
+            try:
+                levels[int(a.get("level") or 1)] = w
+            except (TypeError, ValueError):
+                self.problems["appeal_level_unreadable"] += 1
+        ent["appeals"] = levels
+        return ent
+
+    def load(self, table):
+        if isinstance(table, str):
+            with open(table) as fh:
+                table = json.load(fh)
+        if (table.get("schema") or WINDOW_SCHEMA) != WINDOW_SCHEMA:
+            self.problems["unknown_schema"] += 1
+        self.version = table.get("version") or table.get("as_of")
+        self.entries = [self._entry(e) for e in table.get("payers") or [] if isinstance(e, dict)]
+        if isinstance(table.get("default"), dict):
+            self.default = self._entry(table["default"])
+
+    def find(self, fam, prod, name):
+        """The table's entry for a payer family, product (CLP06) and payer name; None when none matches."""
+        if not self.entries:
+            return None
+        fam_u = (fam or "").upper()
+        ids = {fam_u, fam_u[3:] if fam_u.startswith("ID:") else fam_u}
+        ids |= {k for k, v in ID_MERGE.items() if v == fam_u}
+        cls = PRODUCT_CLASS.get((prod or "").split("#")[0], "COM")
+        best, best_rank = None, None
+        for e in self.entries:
+            if e["ids"] & ids or fam_u in e["fams"]:
+                rank = 0
+            elif name and any(p.search(name) for p in e["pats"]):
+                rank = 1
+            else:
+                continue
+            if e["classes"] or e["products"]:
+                if cls not in e["classes"] and (prod or "").split("#")[0] not in e["products"]:
+                    continue
+            else:
+                rank += 2          # an entry for every product of the payer comes after one for this product
+            if best_rank is None or rank < best_rank:
+                best, best_rank = e, rank
+        return best or self.default
+
+    @staticmethod
+    def end(w, anchors):
+        kind, n, frm, src = w
+        a = anchors.get(frm)
+        if not a and frm in ("denial", "decision"):
+            a = anchors.get("remit")       # a denial or a decision is dated by the remittance that carries it
+        if not a:
+            return None
+        return add_days(a, n) if kind == "days" else add_months(a, n)
+
 
 # --------------------------------------------------------------------------------------------------------- loading
 def table_names(con):
@@ -404,9 +579,15 @@ def load_ema_books(R, con, ledger=None):
     R.ema_link_bill = {}
     R.ema_checks = {}
     R.ema_ar = []
+    R.ema_facility_links = set()    # A17 rule 5: the surgery center's facility claims are no send-day twins
+    R.ema_tied_links = set()        # A17 rule 5: links the map ties to a bill, even a conflicting one
     tabs = R.tables
     if "ema_link_map" in tabs:
         for link, bill, conflict, fac in select(con, "ema_link_map", ["link", "bill", "conflict", "facility"]):
+            if link is not None and fac:
+                R.ema_facility_links.add(link)
+            if link is not None and bill:
+                R.ema_tied_links.add(link)
             if link is not None and bill and not conflict and not fac:
                 R.ema_link_bill[link] = split_claim_id(bill)[0]
     if "ema_claim_links" in tabs:
@@ -431,6 +612,8 @@ def load_ema_books(R, con, ledger=None):
     lines = R.ema_lines
     pat = defaultdict(lambda: [0, 0])
     n_rows = 0
+    reason_days = set()
+    chk_rows = []
     for (posted, svc, cpt, units, link, chk, grp, code, status, action, payer, primary, person, charges, ins_paid,
          pat_paid, contr, nonc, pat_adj, allowed) in lc.execute(
             "select posted, svc, cpt, units, link, check_no, grp, code, status, action, payer, primary_payer, person, "
@@ -460,7 +643,12 @@ def load_ema_books(R, con, ledger=None):
             E.charges += charges
             u = units_of(units) or 1
             E.units += u if charges > 0 else -u
+            if charges > 0 and posted and (not E.first_charge or posted < E.first_charge):
+                E.first_charge = posted
         chk = (str(chk).strip() if chk is not None else "")
+        g_, c_ = (grp or "").strip().upper(), (code or "").strip().upper()
+        if g_ or RARC_RE.match(c_):
+            reason_days.add((key, posted))     # A17 rule 5: the payer's reason posted on the line that day
         if ins_paid:
             m = R.ema_checks.get((chk, names.get(payer, ""))) if chk else None
             E.pays.append((posted, payer, ins_paid, chk, bool(m and m[0] in ("exact", "loose"))))
@@ -468,7 +656,9 @@ def load_ema_books(R, con, ledger=None):
             E.adjs.append((posted, payer, (grp or "").strip().upper(), (code or "").strip().upper(), contr or 0,
                            nonc or 0))
         if chk:
-            E.answers.append((posted, payer, chk))
+            # A17 rule 5: a check row is an answer when it carries money or an allowed amount, or the payer's reason
+            # was posted on the line that day (decided once every row is read)
+            chk_rows.append((key, posted, payer, chk, ins_paid or 0, allowed or 0))
         if payer is not None:
             E.pnames.add(payer)
             if status is not None:
@@ -481,6 +671,16 @@ def load_ema_books(R, con, ledger=None):
         E.pat_adj += pat_adj or 0
         if allowed and allowed > E.allowed:
             E.allowed = allowed
+    n_bare = 0
+    for key, posted, payer, chk, ins_paid, allowed in chk_rows:
+        E = lines[key]
+        if ins_paid or allowed or (key, posted) in reason_days:
+            E.answers.append((posted, payer, chk))
+        else:
+            E.bare.append((posted, payer, chk))
+            n_bare += 1
+    R.ema_bare_rows = n_bare
+    del chk_rows, reason_days
     # patient money (posted with no claim link) joins a claim line when exactly one line has that person, day and code
     n_lines = Counter((E.person, E.svc, E.cpt) for E in lines.values() if E.person is not None)
     for E in lines.values():
@@ -510,9 +710,12 @@ def load(con, ledger=None):
         "claim_key", "transaction_key", "claim_seq", "patient_control_number", "claim_status_code", "charge_cents",
         "paid_cents", "patient_responsibility_cents", "claim_filing_indicator", "payer_claim_control_number",
         "facility_type_code", "claim_frequency_code", "statement_from", "payer_name", "payer_id", "payment_date",
-        "crossover_carrier_name", "rendering_provider_npi", "patient_last", "patient_first", "patient_id", "insured_id"])
-    # replace the patient's name and member ids by one-way keys at once
-    R.claims = [c[:18] + (hkey(c[18], c[19]), hkey(c[20]), hkey(c[21])) for c in R.claims]
+        "crossover_carrier_name", "rendering_provider_npi", "patient_last", "patient_first", "patient_id", "insured_id",
+        "group_number", "contract_class"])
+    # replace the patient's name and member ids by one-way keys at once; A17 rule 1: the plan (REF*1L group number,
+    # REF*CE contract class) is kept only as a one-way digest, never as the value
+    R.claims = [c[:18] + (hkey(c[18], c[19]), hkey(c[20]), hkey(c[21]), plan_digest("g", c[22]), plan_digest("c", c[23]))
+                for c in R.claims]
     R.lines = select(con, "lines", [
         "line_key", "claim_key", "line_seq", "procedure_qualifier", "procedure_code", "modifiers", "charge_cents",
         "paid_cents", "paid_units", "original_procedure_qualifier", "original_procedure_code", "original_modifiers",
@@ -540,8 +743,17 @@ def load(con, ledger=None):
         # the claim-status rows' CARCs (the payer's answer as EMA recorded it)
         R.ema = [r[:16] + (src.get(r[1]) or "", hkey(r[16]), (r[17] or "").strip(), r[18], r[19], (r[20] or "").strip(),
                           (r[21] or "").strip()) for r in rows]
+        # A17 rules 1 and 2: the practice location EMA names on a claim id's rows (kept as a digest only)
+        R.ema_loc = defaultdict(Counter)
+        if "location" in column_names(con, "ema_rows"):
+            for cid, loc, n in con.execute("select claim_id, location, count(*) from ema_rows where claim_id is not null "
+                                           "and location is not null group by 1, 2"):
+                d = plan_digest("l", loc)
+                if d:
+                    R.ema_loc[(cid or "").strip().upper()][d] += n
     else:
         R.ema = []
+        R.ema_loc = {}
     load_ema_books(R, con, ledger)
     R.findings = select(con, "findings", [
         "finding_id", "signal", "category", "actionable", "status", "line_key", "claim_key", "transaction_key",
@@ -558,10 +770,14 @@ def load(con, ledger=None):
 
 # ------------------------------------------------------------------------------------------------------- the audit
 class Audit:
-    def __init__(self, raw, as_of, log=print):
+    def __init__(self, raw, as_of, log=print, windows=None):
         self.R = raw
         self.as_of = as_of
         self.log = log
+        # A17 rule 4: the payer window table (a path, a parsed table, or a PayerWindows); None keeps A16's windows
+        self.windows = windows if isinstance(windows, PayerWindows) else PayerWindows(windows)
+        self.day_state, self.loc_state, self.loc_of = {}, {}, {}
+        self.xrank = {}
         self.stats = Counter()
         self.money = Counter()
         self.fams = Families()
@@ -604,7 +820,7 @@ class Audit:
             (lrarc[lk] if lk else crarc[ck]).append(code.strip().upper())
         for c in R.claims:
             (ck, tk, seq, pcn, st, charge, paid, prr, prod, clp07, pos, freq, stmt, pname, pid, pdate, xover, npi,
-             pk, mk1, mk2) = c
+             pk, mk1, mk2, gdig, cdig) = c
             t = R.tx.get(tk)
             p = Proc()
             p.ck, p.tk, p.seq = ck, tk, seq or 0
@@ -631,6 +847,12 @@ class Audit:
             p.stmt = iso(stmt)
             p.pk = pk
             p.mks = {x for x in (mk1, mk2) if x}
+            p.plan_g, p.plan_c = gdig, cdig
+            p.rprod = p.prod
+            p.pos_eff, p.pos_src = p.pos, ("835" if p.pos else "")
+            p.ostate = None
+            p.prr = prr or 0
+            p.bare = False
             self.procs[ck] = p
         for ln in R.lines:
             (lk, ck, seq, qual, code, mods, charge, paid, punits, oqual, ocode, omods, ounits, sdate, pstart, allowed,
@@ -748,7 +970,7 @@ class Audit:
                     self.stats["copy_no_reversal_between"] += 1
                     self.money["copy_no_reversal_between_paid"] += x.paid
         for p in self.procs.values():
-            if p.copy_of is None:
+            if p.copy_of is None and not p.bare:      # A17 rule 5: a bare $0 row answers nothing
                 self.by_bill[p.bill].append(p)
         for b in self.by_bill:
             self.by_bill[b].sort(key=lambda p: p.ordk)
@@ -938,7 +1160,7 @@ class Audit:
                     member_pk[mk][p.pk] += 1
         self.member_pk = {mk: c.most_common(1)[0][0] for mk, c in member_pk.items()}
         for p in self.procs.values():
-            if p.copy_of is not None:
+            if p.copy_of is not None or p.bare:       # A17 rule 5: a bare $0 row answers nothing
                 continue
             for L in p.lines:
                 s = self.svc((p.bill, L.code, L.comp, L.dos))
@@ -952,7 +1174,7 @@ class Audit:
         self.l837_raw = l837
         answers_by_pcn = defaultdict(list)
         for p in self.procs.values():
-            if p.copy_of is None:
+            if p.copy_of is None and not p.bare:
                 answers_by_pcn[p.pcn].append(p)
         for v in answers_by_pcn.values():
             v.sort(key=lambda p: p.ordk)
@@ -1101,7 +1323,7 @@ class Audit:
         its date: those services get a virtual line carrying the claim's adjustments and a share of its payment."""
         self.attach_unlisted_on_claim_denials()
         for p in self.procs.values():
-            if p.copy_of is not None or p.lines or p.st == REVERSAL:
+            if p.copy_of is not None or p.lines or p.st == REVERSAL or p.bare:
                 continue
             if p.paid == 0 and set(p.crarc) & SPLIT_NOTICE_RARCS:
                 # A16 fix 13: "claim separated, a separate notice follows" (MA15) answers no service by itself
@@ -1207,7 +1429,7 @@ class Audit:
         are one billed line the payer split (copay, sequestration, contractual parts): they count the units once."""
         n_split = 0
         for p in self.procs.values():
-            if p.copy_of is not None or p.st == REVERSAL:
+            if p.copy_of is not None or p.st == REVERSAL or p.bare:
                 continue
             groups = defaultdict(list)
             for L in p.lines:
@@ -1299,14 +1521,204 @@ class Audit:
             return "FEED_STOPPED"
         return "LIVE"
 
+    # ------------------------------------------------------------------ A17 rule 5: a bare $0 row is no answer
+    def mark_bare(self):
+        """A17 rule 5 (fix7b's rule, from the hand-trace of the dropped never-answered claims): a remittance processing
+        that pays nothing and carries no reason (no CAS at claim or line level, no remark code), no allowed amount and
+        nothing on the patient (CLP05 0) answers nothing: a batch check can list a claim it does not pay. It is left out
+        of the answers (the claim stays sent and unanswered). A denial status (CLP02 4), a reversal (22) or any reason
+        makes it an answer."""
+        n = 0
+        for p in self.procs.values():
+            if p.st not in ("1", "2", "3", "19", "20", "21") or p.paid != 0 or p.prr:
+                continue
+            if p.ccas or p.crarc:
+                continue
+            if any(L.paid or L.cas or L.rarc or (L.asrc == "B6" and L.allowed) for L in p.lines):
+                continue
+            p.bare = True
+            n += 1
+        self.stats["bare_zero_processings_no_answer"] = n
+
+    # ------------------------------------------------------------------ A17 rule 2: the setting a payer priced
+    def fill_settings(self):
+        """A17 rule 2 (the separate surgical site's own schedule): the setting a claim was priced in. CLP08 when the
+        remittance gives it (never changed); else the place of service the claim id's own 837s billed (the most common),
+        else that of the bill's other claim ids' 837s; else the setting of the claim's EMA location, where the claims of
+        that location whose remittances do give CLP08 are of one setting (90% of at least 20). Without this, a payer that
+        leaves CLP08 empty makes a surgical site's claims read as office claims and its facility schedule a cut of the
+        office rate."""
+        R = self.R
+        pos_pcn = defaultdict(Counter)
+        for (k, bht, pcn, total, freq, pname, pid, sdate, pos, sub) in R.c837:
+            pos = (pos or "").strip()
+            if pos and (freq or "").strip() != "8":
+                pos_pcn[(pcn or "").strip().upper()][pos] += 1
+        pos_bill = defaultdict(Counter)
+        for pcn, c in pos_pcn.items():
+            pos_bill[split_claim_id(pcn)[0]].update(c)
+        loc_of = {pcn: c.most_common(1)[0][0] for pcn, c in getattr(R, "ema_loc", {}).items() if c}
+        votes = defaultdict(Counter)
+        seen = set()
+        for p in self.procs.values():
+            if p.pos and p.pcn in loc_of and p.pcn not in seen:
+                seen.add(p.pcn)
+                votes[loc_of[p.pcn]][p.pos] += 1
+        loc_pos = {}
+        for loc, c in votes.items():
+            top, k = c.most_common(1)[0]
+            if sum(c.values()) >= 20 and k >= 0.9 * sum(c.values()):
+                loc_pos[loc] = top
+        self.loc_of = loc_of
+        n = Counter()
+        for p in self.procs.values():
+            if p.pos:
+                continue
+            c = pos_pcn.get(p.pcn) or pos_bill.get(p.bill)
+            if c:
+                p.pos_eff, p.pos_src = c.most_common(1)[0][0], "837"
+            elif loc_of.get(p.pcn) in loc_pos:
+                p.pos_eff, p.pos_src = loc_pos[loc_of[p.pcn]], "ema_location"
+            else:
+                continue
+            n[p.pos_src + "_" + ("office" if p.pos_eff in ("", "11") else "facility")] += 1
+        for k, v in n.items():
+            self.stats["setting_filled_from_" + k] = v
+
+    # ------------------------------------------------------------------ A17 rule 1: the office state
+    def office_states(self):
+        """A17 rule 1 (the office-state PA/NP rule): the state of the office a clinician worked in on a day: the state of
+        the Medicare carrier that answered that clinician's claims of that day (when one state did), else the state of the
+        claim's EMA location, where the clinician days at that location with a known state are of one state (90% of at
+        least 20). Some payers pay an NP or PA in full in one state and at 85% in the other."""
+        day = defaultdict(Counter)
+        for p in self.procs.values():
+            st = STATE_OF_FAMILY.get(p.fam)
+            if not st or p.copy_of is not None:
+                continue
+            for L in p.lines:
+                npi = L.npi or p.npi
+                if npi and L.dos:
+                    day[(npi, L.dos)][st] += 1
+        self.day_state = {}
+        for k, c in day.items():
+            mc = c.most_common(2)
+            if len(mc) == 1 or mc[0][1] > mc[1][1]:
+                self.day_state[k] = mc[0][0]
+        loc_of = getattr(self, "loc_of", {})
+        votes = defaultdict(Counter)
+        for p in self.procs.values():
+            loc = loc_of.get(p.pcn)
+            if not loc:
+                continue
+            for L in p.lines[:1]:
+                st = self.day_state.get((L.npi or p.npi, L.dos))
+                if st:
+                    votes[loc][st] += 1
+        self.loc_state = {}
+        for loc, c in votes.items():
+            top, k = c.most_common(1)[0]
+            if sum(c.values()) >= 20 and k >= 0.9 * sum(c.values()):
+                self.loc_state[loc] = top
+        n = Counter()
+        for p in self.procs.values():
+            d = next((L.dos for L in p.lines if L.dos), None) or p.stmt
+            p.ostate = self.office_state(p.npi, d, p.pcn)
+            n[p.ostate or "unknown"] += 1
+        for k, v in n.items():
+            self.stats["office_state_" + k] = v
+
+    def office_state(self, npi, dos, pcn=None):
+        st = self.day_state.get((npi, dos)) if npi and dos else None
+        if st:
+            return st
+        loc = getattr(self, "loc_of", {}).get(pcn) if pcn else None
+        return self.loc_state.get(loc) if loc else None
+
+    # ------------------------------------------------------------------ A17 rule 4: payer windows
+    def win(self, fam, prod):
+        return self.windows.find(fam, prod, self.fams.label(fam) if fam else "")
+
+    def appeal_end(self, fam, prod, answer_date, level=1, default_prod=None):
+        """The end of the window to appeal a payer's answer dated answer_date (A17 rule 4: the table's appeal level,
+        from the answer; else A16's days by product, default_prod standing for the product where A16 used another)."""
+        if not answer_date:
+            return None
+        e = self.win(fam, prod)
+        w = e["appeals"].get(level) if e else None
+        if w:
+            end = PayerWindows.end(w, {"remit": answer_date, "denial": answer_date, "decision": answer_date})
+            if end:
+                self.windows.used[(e["id"], "appeal_%d" % level)] += 1
+                return end
+        return add_days(answer_date, self.appeal_days(prod if default_prod is None else default_prod))
+
+    def filing_end(self, fam, prod, dos, send=None, default_days=None):
+        """The first-filing limit of a service (A17 rule 4: the table's, from the date of service; else A16's days by
+        product, or default_days where A16 used a fixed number)."""
+        if not dos:
+            return None
+        e = self.win(fam, prod)
+        w = e["first_filing"] if e else None
+        if w:
+            end = PayerWindows.end(w, {"dos": dos, "send": send})
+            if end:
+                self.windows.used[(e["id"], "first_filing")] += 1
+                return end
+        return add_days(dos, self.filing_days(prod) if default_days is None else default_days)
+
+    def corrected_end(self, fam, prod, dos, answer_date, default_days=None):
+        """The window to send a corrected claim after a payer's answer (A17 rule 4: the table's corrected-claim window,
+        from the date of service or the answer; else the first-filing limit, as A16)."""
+        e = self.win(fam, prod)
+        w = e["corrected_claim"] if e else None
+        if w:
+            end = PayerWindows.end(w, {"dos": dos, "remit": answer_date, "denial": answer_date})
+            if end:
+                self.windows.used[(e["id"], "corrected_claim")] += 1
+                return end
+        return self.filing_end(fam, prod, dos, default_days=default_days)
+
+    def never_answered_end(self, fam, prod, dos, sent):
+        """A claim sent and never answered (A17 rule 4): the payer's first-filing limit from the date of service (the
+        table's, else A16's 365 days), and at least 180 days from the send (the practice holds the proof of timely filing
+        a resubmission needs)."""
+        ends = [x for x in (self.filing_end(fam, prod, dos, sent, default_days=365) if dos else None,
+                            add_days(sent, 180) if sent else None) if x]
+        return max(ends) if ends else ""
+
+    def prod_hint(self, bill, fam, pks=()):
+        """The product (CLP06) a payer's claim is of when no answer on the claim says it: the payer's latest answer on the
+        same bill, else on the same patient's other bills; None when none."""
+        best = None
+        for p in self.by_bill.get(bill, []):
+            if p.fam == fam and p.prod and (best is None or p.ordk > best.ordk):
+                best = p
+        if best is None and pks:
+            idx = getattr(self, "_pk_fam_procs", None)
+            if idx is None:
+                idx = defaultdict(list)
+                for p in self.procs.values():
+                    if p.pk and p.copy_of is None and p.prod and not p.bare:
+                        idx[(p.pk, p.fam)].append(p)
+                self._pk_fam_procs = idx
+            for pk in sorted(pks):
+                for p in idx.get((pk, fam), []):
+                    if best is None or p.ordk > best.ordk:
+                        best = p
+        return best.prod if best is not None else None
+
     # ------------------------------------------------------------------ rates
     @staticmethod
     def pos_class(p):
-        return "office" if p.pos in ("", "11") else "facility"
+        # A17 rule 2: the setting the payer priced (CLP08, else the 837's place of service, else the EMA location's)
+        pos = p.pos_eff if getattr(p, "pos_eff", None) is not None else p.pos
+        return "office" if pos in ("", "11") else "facility"
 
     @staticmethod
     def pclass(prod):
-        return PRODUCT_CLASS.get(prod, "COM")
+        # A17 rule 1: a rate product carries its plan after '#'; the class is the product's
+        return PRODUCT_CLASS.get((prod or "").split("#")[0], "COM")
 
     @staticmethod
     def is_unlisted(code):
@@ -1322,15 +1734,10 @@ class Audit:
         top = max(surg, key=lambda L: (L.charge / max(1, L.ub), L.allowed / max(1, L.up or L.ub), -L.seq))
         return {L.lk for L in p.lines if L not in surg or L is top}
 
-    def build_rates(self):
-        """The payer's own rate (A16, fix 5 and the owner's rule 4.1): the most common allowed amount per unit on the
-        payer's clean, standing, primary, paid answers for the same product (CLP06), code, component, year and setting.
-        Observed on full-rate lines only (a lower-valued surgical line beside another may be a multiple-procedure
-        reduction); no rate for unlisted codes. The mode drops amounts at half of another amount holding 20% of the
-        answers and breaks ties to the larger amount. The rendering provider's own mode is used only as a recognised
-        tier: 10 answers or more at 60% or more, at 1.00 or 0.85 (NP/PA) of the payer's mode; any other provider-level
-        discount is not absorbed (the line is compared with the payer's mode and the pair is listed for review)."""
-        obs = defaultdict(Counter)
+    def clean_rate_answers(self):
+        """The answers a payer's rate is read on (A16 fix 5): clean, standing, primary, paid, no reducing modifier or
+        multiple-procedure cut, not an unlisted code, a full-rate line. [(answer, allowed per unit, year, setting)]."""
+        out = []
         frl_cache = {}
         for A in self.answers:
             p, s = A.p, A.svc
@@ -1351,13 +1758,157 @@ class Audit:
                 if frl is not None and not any(L.lk in frl for L in A.lines):
                     self.stats["rate_obs_skipped_not_full_rate_line"] += 1
                     continue
-            apu = int(round(A.allowed / A.up))
-            yr = s.dos[:4]
-            pc = self.pos_class(p)
-            obs[(p.fam, p.prod, s.code, s.comp, yr, pc, A.npi or "")][apu] += 1
-            obs[(p.fam, p.prod, s.code, s.comp, yr, pc)][apu] += 1
-            obs[(p.fam, p.prod, s.code, s.comp, yr)][apu] += 1
-            obs[(p.fam, "@" + self.pclass(p.prod), s.code, s.comp, yr)][apu] += 1
+            out.append((A, int(round(A.allowed / A.up)), s.dos[:4], self.pos_class(p)))
+        return out
+
+    @staticmethod
+    def _plan_of(p, dim):
+        return p.plan_g if dim == "g" else p.plan_c
+
+    def detect_plan_schedules(self, clean):
+        """A17 rule 1 (plan-level rate keys; the hand-check of the dropped underpayments, 2026-11-25, found a payer's
+        group-wide mode mixing firm plan rates: one large employer plan on its own schedule, products with amounts of their
+        own). A plan, an employer plan (the 835's group number) or a product (its contract class), is read apart from the
+        rest of its payer and product when it has PLAN_MIN_ANSWERS clean answers and, on the codes where both the plan and
+        the rest show a firm amount (PLAN_CODE_MIN answers each, a clear mode), its amount differs from the rest's on
+        PLAN_DIFFER_MIN codes or more and on more codes than it agrees (a ratio of an NP/PA tier or a multiple-procedure
+        half says nothing either way). The plan that differs most is read apart first, then the others are compared again
+        with what is left, so the rest never stands for a large plan's own schedule. Employer plans first, then products
+        on the answers no employer plan read apart holds. Sets p.rprod (the product and the plan's digest) for every
+        processing of such a plan; its rates are read and looked up under that key."""
+        self.own_plans = {}
+        for dim in ("g", "c"):
+            size = Counter()
+            for A, apu, yr, pc in clean:
+                v = self._plan_of(A.p, dim)
+                if v:
+                    size[(A.p.fam, A.p.prod, v)] += 1
+            big = {u for u, n in size.items() if n >= PLAN_MIN_ANSWERS}
+            if not big:
+                continue
+            tot = defaultdict(Counter)
+            mine = defaultdict(lambda: defaultdict(Counter))
+            for A, apu, yr, pc in clean:
+                p, s = A.p, A.svc
+                if dim == "c" and p.plan_g and (p.fam, p.prod, p.plan_g) in self.own_plans:
+                    continue
+                k = (s.code, s.comp, yr, pc)
+                tot[(p.fam, p.prod) + k][apu] += 1
+                v = self._plan_of(p, dim)
+                if v and (p.fam, p.prod, v) in big:
+                    mine[(p.fam, p.prod, v)][k][apu] += 1
+            removed = defaultdict(Counter)
+            apart = set()
+            while True:
+                best = None
+                for u in sorted(mine):
+                    if u in apart:
+                        continue
+                    agree = differ = 0
+                    for k, c in mine[u].items():
+                        m1, k1, n1 = self.mode_of(c)
+                        if not m1 or n1 < PLAN_CODE_MIN or k1 < 0.6 * n1:
+                            continue
+                        rest = tot[u[:2] + k] - removed[u[:2] + k] - c
+                        m2, k2, n2 = self.mode_of(rest)
+                        if not m2 or n2 < PLAN_CODE_MIN or k2 < 0.5 * n2:
+                            continue
+                        r = m1 / m2
+                        if abs(r - 1) <= 0.015:
+                            agree += 1
+                        elif any(abs(r - x) <= 0.015 * x for x in PLAN_AMBIGUOUS_RATIOS):
+                            continue
+                        elif abs(r - 1) >= 0.03 and abs(m1 - m2) >= 200:
+                            differ += 1
+                    if differ >= PLAN_DIFFER_MIN and differ > agree:
+                        score = (differ - agree, size[u], u[2])
+                        if best is None or score > best[0]:
+                            best = (score, u)
+                if best is None:
+                    break
+                u = best[1]
+                apart.add(u)
+                for k, c in mine[u].items():
+                    removed[u[:2] + k].update(c)
+            for u in apart:
+                self.own_plans[u] = dim
+        n = Counter()
+        for p in self.procs.values():
+            p.rprod = p.prod
+            for dim, v in (("g", p.plan_g), ("c", p.plan_c)):
+                if v and (p.fam, p.prod, v) in self.own_plans:
+                    p.rprod = p.prod + "#" + v
+                    n[dim] += 1
+                    break
+        self.stats["plans_read_apart_employer"] = sum(1 for d in self.own_plans.values() if d == "g")
+        self.stats["plans_read_apart_product"] = sum(1 for d in self.own_plans.values() if d == "c")
+        self.stats["processings_on_own_plan_schedule"] = sum(n.values())
+
+    def learn_state_tiers(self):
+        """A17 rule 1 (the office-state PA/NP rule; the hand-check found a payer paying NPs and PAs in full in one state's
+        offices and at 85% in the other's). For each payer, product class, clinician and office state: the tier the payer
+        pays that clinician at there (100 or 85) when 5 or more of its clean answers there sit at the payer's full rate
+        or at 85% of it, 60% of them at one. For each payer, product class and state: the tier it pays NP/PA clinicians at
+        there, when every NP/PA clinician with a tier there has the same one (2 clinicians at least)."""
+        st_obs = defaultdict(Counter)
+        for A, apu, yr, pc in getattr(self, "_clean_rate_answers", []):
+            p, s = A.p, A.svc
+            if not A.npi:
+                continue
+            state = self.office_state(A.npi, s.dos, p.pcn)
+            if not state:
+                continue
+            full = self.full_rate.get((p.fam, p.rprod, s.code, s.comp, yr, pc))
+            if not full:
+                continue
+            r = apu / full
+            b = "100" if abs(r - 1) <= 0.015 else "85" if abs(r - 0.85) <= 0.015 else None
+            if b:
+                st_obs[(p.fam, self.pclass(p.prod), A.npi, state)][b] += 1
+        self.state_tier = {}
+        for k, c in st_obs.items():
+            n = sum(c.values())
+            b, m = c.most_common(1)[0]
+            if n >= 5 and m >= 0.6 * n:
+                self.state_tier[k] = b
+        per = defaultdict(Counter)
+        for (fam, cls, npi, state), b in self.state_tier.items():
+            if self.np_type.get(npi):
+                per[(fam, cls, state)][b] += 1
+        self.state_np_tier = {k: next(iter(c)) for k, c in per.items() if len(c) == 1 and sum(c.values()) >= 2}
+        self.stats["state_tiers"] = len(self.state_tier)
+        self.stats["state_np_tiers"] = len(self.state_np_tier)
+
+    def tier_in_state(self, fam, prod, npi, state):
+        """The tier ('100' or '85') a payer pays this clinician at in this office's state, or None (A17 rule 1)."""
+        if not npi or not state:
+            return None
+        cls = self.pclass(prod)
+        t = getattr(self, "state_tier", {}).get((fam, cls, npi, state))
+        if t is None and self.np_type.get(npi):
+            t = getattr(self, "state_np_tier", {}).get((fam, cls, state))
+        return t
+
+    def build_rates(self):
+        """The payer's own rate (A16, fix 5 and the owner's rule 4.1): the most common allowed amount per unit on the
+        payer's clean, standing, primary, paid answers for the same product (CLP06), code, component, year and setting.
+        Observed on full-rate lines only (a lower-valued surgical line beside another may be a multiple-procedure
+        reduction); no rate for unlisted codes. The mode drops amounts at half of another amount holding 20% of the
+        answers and breaks ties to the larger amount. The rendering provider's own mode is used only as a recognised
+        tier: 10 answers or more at 60% or more, at 1.00 or 0.85 (NP/PA) of the payer's mode; any other provider-level
+        discount is not absorbed (the line is compared with the payer's mode and the pair is listed for review)."""
+        clean = self.clean_rate_answers()
+        self._clean_rate_answers = clean
+        # A17 rule 1: the plans that pay a schedule of their own are read apart (p.rprod = product + plan digest)
+        self.detect_plan_schedules(clean)
+        obs = defaultdict(Counter)
+        for A, apu, yr, pc in clean:
+            p, s = A.p, A.svc
+            rp = p.rprod
+            obs[(p.fam, rp, s.code, s.comp, yr, pc, A.npi or "")][apu] += 1
+            obs[(p.fam, rp, s.code, s.comp, yr, pc)][apu] += 1
+            obs[(p.fam, rp, s.code, s.comp, yr)][apu] += 1
+            obs[(p.fam, "@" + self.pclass(rp), s.code, s.comp, yr)][apu] += 1
             obs[(p.fam, s.code, s.comp, yr)][apu] += 1          # family-wide: estimates for unanswered units only
         self.rate_obs = obs
         # the payer's mode per (payer, product, code, component, year, setting)
@@ -1471,6 +2022,73 @@ class Audit:
         # 1 answer in 10 (UHC commercial pays G2211 on 5% of its answers, its HMO product on 7%); a non-covered denial of
         # a code paid now and then (coverage criteria) keeps the 5% line
         self.rarely_paid_cls_bundled = {k for k, n in seen_c.items() if n >= 20 and paid_c[k] < 0.10 * n}
+        self.learn_state_tiers()
+
+    def cross_claim_ranking(self):
+        """A17 rule 3 (cross-claim multiple-procedure ranking; the hand-check found a payer ranking a patient's Mohs and a
+        repair billed on a separate surgery-center claim by the order it processed the two claims). A payer reduces the
+        second and later procedures of one patient's day by one clinician to half, across that day's claims: the procedure
+        worth most (the payer's own full rate for it, in its own setting and plan; never less than what it allowed) is owed
+        in full, the others half. For a patient's same-day procedures with one payer and clinician (surgical, not add-on,
+        one unit, paid, standing primary answers) on two claims or more:
+        - a procedure that is not the one worth most: owed half (rightly reduced when paid about half; short below it);
+        - the one worth most, paid about half: what the day's procedures were allowed together is compared with what they
+          are owed together (the top in full, the others half); a gap over $1 and 3% is owed on it ('misranked'), else
+          the payer's day is right in total ('balanced').
+        Procedures on one claim only are left to A16's rules (the payer ranked them itself). Sets self.xrank:
+        {id(answer): (role, owed cents per unit)}."""
+        groups = defaultdict(list)
+        for A in self.answers:
+            p, s = A.p, A.svc
+            if A.virtual or not A.standing or p.st not in ("1", "19") or p.bare or not p.pk or not s.dos:
+                continue
+            if not self.is_surgical(s.code) or s.code in ADDON_CODES or self.is_unlisted(s.code):
+                continue
+            if A.paid_tb <= 0 or A.up != 1 or A.ub != 1 or A.allowed <= 0 or A.changed:
+                continue
+            if set(A.mods) & REDUCING_MODS:
+                continue
+            groups[(p.pk, s.dos, p.fam, A.npi or "")].append(A)
+        self.xrank = {}
+        n = Counter()
+        for key in sorted(groups):
+            As = groups[key]
+            if len({A.p.ck for A in As}) < 2:
+                continue
+            vals = []
+            for A in As:
+                p, s = A.p, A.svc
+                st_ = self.office_state(A.npi, s.dos, p.pcn)
+                r = self.rate_for(p.fam, p.rprod, s.code, s.comp, s.dos[:4], self.pos_class(p), A.npi, st_)
+                if r is None:
+                    break
+                alw = A.allowed - (A.paid - A.paid_tb)
+                vals.append((A, max(r[1], alw), r[0], alw))
+            if len(vals) != len(As):
+                n["groups_without_a_rate"] += 1
+                continue
+            n["groups"] += 1
+            vals.sort(key=lambda x: (x[1], x[3], x[0].lk), reverse=True)
+            tA, tV, tE, tAlw = vals[0]
+            for A, V, E, alw in vals[1:]:
+                half = 0.5 * E
+                if alw < half - max(100, 0.05 * half):
+                    self.xrank[id(A)] = ("below_half", int(round(half - alw)))
+                    n["second_below_half"] += 1
+                elif alw <= half + 0.05 * half:
+                    self.xrank[id(A)] = ("half_ok", 0)
+                    n["second_half_ok"] += 1
+            if abs(tAlw - 0.5 * tE) <= 0.05 * tE:
+                owed_total = tE + sum(0.5 * E for A, V, E, alw in vals[1:])
+                gap = int(round(owed_total - sum(alw for A, V, E, alw in vals)))
+                if gap > max(100, 0.03 * tE):
+                    self.xrank[id(tA)] = ("misranked", gap)
+                    n["top_misranked"] += 1
+                else:
+                    self.xrank[id(tA)] = ("balanced", 0)
+                    n["top_balanced"] += 1
+        for k, v in n.items():
+            self.stats["cross_claim_" + k] = v
 
     @staticmethod
     def mode_of(c, tiered=False):
@@ -1503,9 +2121,11 @@ class Audit:
         amt, k = max(keep.items(), key=lambda kv: (kv[1], kv[0]))
         return amt, k, n2
 
-    def rate_for(self, fam, prod, code, comp, year, pc, npi):
+    def rate_for(self, fam, prod, code, comp, year, pc, npi, state=None):
         """The firm rate for judging a payment: (expected per unit for this provider, the payer's mode, the payer-level
-        observations, tier). Same payer, product, setting and year only; None when there is none (or unlisted code)."""
+        observations, tier). Same payer, product (A17: and plan, prod being the rate product), setting and year only; None
+        when there is none (or unlisted code). A17 rule 1: the tier the payer pays this clinician at in this office's
+        state, when known, decides between the full rate and 85% of it."""
         if self.is_unlisted(code):
             return None
         key6 = (fam, prod, code, comp, year, pc)
@@ -1515,7 +2135,11 @@ class Audit:
         full = self.full_rate.get(key6, pm[0])
         exp, tier = full, "payer"
         pt = self.prov_tier.get(key6 + (npi or "",)) if npi else None
-        if pt is not None:
+        st_t = self.tier_in_state(fam, prod, npi, state)
+        if st_t is not None and (pt is None or pt[0] in ("same", "np85")):
+            if st_t == "85":
+                exp, tier = int(round(0.85 * full)), "np85_state"
+        elif pt is not None:
             if pt[0] == "np85":
                 exp, tier = pt[1], "np85"
             elif pt[0] == "discount":
@@ -1527,14 +2151,19 @@ class Audit:
         weak = pm[1] < 0.5 * pm[2] and full == pm[0]
         return exp, full, self.rate_obs[key6], tier, weak
 
-    def np_ok_here(self, fam, prod, code, comp, year, pc, npi, tier):
+    def np_ok_here(self, fam, prod, code, comp, year, pc, npi, tier, state=None):
         """Owner rule 4.1: an 85% payment is accepted only for a provider whose own payments sit at 85%: its own mode at
         this payer and code (5 answers or more) at 85% of the full rate; with no such evidence, its type (NP/PA) or an
-        unknown rendering provider. A provider this payer pays at 100% is not excused at 85%."""
-        if tier in ("np85",):
+        unknown rendering provider. A provider this payer pays at 100% is not excused at 85%. A17 rule 1: where the
+        payer's tier for this clinician in this office's state is known, it decides (in full in one state, 85% in the
+        other)."""
+        if tier in ("np85", "np85_state"):
             return True
         if not npi:
             return True
+        st_t = self.tier_in_state(fam, prod, npi, state)
+        if st_t is not None:
+            return st_t == "85"
         key6 = (fam, prod, code, comp, year, pc)
         full = self.full_rate.get(key6)
         c = self.rate_obs.get(key6 + (npi,))
@@ -1548,13 +2177,13 @@ class Audit:
                     return False
         return bool(self.np_type.get(npi))
 
-    def rate_est(self, fam, prod, code, comp, year, pc=None, npi=None):
+    def rate_est(self, fam, prod, code, comp, year, pc=None, npi=None, state=None):
         """A price for an unpaid unit (an estimate unless it is the firm rate): firm rate, else the product's mode
         (any setting), else the product class's mode; never across product classes. (amount, basis)."""
         if self.is_unlisted(code):
             return None, ""
         if prod is not None and pc is not None:
-            r = self.rate_for(fam, prod, code, comp, year, pc, npi)
+            r = self.rate_for(fam, prod, code, comp, year, pc, npi, state)
             if r is not None:
                 return r[0], "rate_l6" if r[3] in ("payer", "provider_discount") else "rate_" + r[3]
         tries = []
@@ -1720,11 +2349,14 @@ class Audit:
         B.ub = sum(L.ub for L in ls)
         return B
 
-    def window_end(self, prod, carc, deny_date, dos):
-        end = add_days(deny_date, self.appeal_days(prod)) if deny_date else None
+    def window_end(self, fam, prod, carc, deny_date, dos, default_prod=None):
+        """A denial's window: its appeal window, and for a reason a corrected claim fixes (or no answer date) the
+        corrected-claim window, whichever ends later (A17 rule 4: the payer window table; else A16's days)."""
+        p0 = prod if default_prod is None else default_prod
+        end = self.appeal_end(fam, prod, deny_date, default_prod=p0) if deny_date else None
         code = carc.split("-", 1)[-1] if carc else ""
         if dos and (code in CORRECTABLE_CARCS or end is None):
-            tf = add_days(dos, self.filing_days(prod))
+            tf = self.corrected_end(fam, prod, dos, deny_date, default_days=self.filing_days(p0))
             end = max(end, tf) if end else tf
         return end
 
@@ -1732,8 +2364,8 @@ class Audit:
         return [p for p in self.by_bill.get(bill, []) if p.date >= date and p.st in PRIMARY and p.cancelled_by is None
                 and p.freq != "8" and p.lines]
 
-    def owed_rate(self, s, fam, prod, pc, npi=None):
-        r_amt, basis = self.rate_est(fam, prod, s.code, s.comp, (s.dos or "0000")[:4], pc, npi)
+    def owed_rate(self, s, fam, prod, pc, npi=None, state=None):
+        r_amt, basis = self.rate_est(fam, prod, s.code, s.comp, (s.dos or "0000")[:4], pc, npi, state)
         cpu = s.charge_pu
         if r_amt:
             return (min(r_amt, cpu) if cpu else r_amt), basis
@@ -1884,7 +2516,106 @@ class Audit:
         for k, v in n.items():
             self.stats["ema_matched_" + k] = v
         self.stats["ema_lines"] = len(lines)
+        self.send_day_twins(lines)
         self._ef = {}
+
+    def send_day_twins(self, lines):
+        """A17 rule 5 (the never-answered send-day twins; fix837's open point, and the hand-trace of the claims the 837
+        pass dropped found most of them paid through EMA claims no link named). EMA posts a claim's charges and writes its
+        837 the same day or the day after (TWIN_SLACK_DAYS). A bill whose EMA claim nothing names (no link, no line matched)
+        is matched to the EMA claims whose charges were first posted that day or the day before its first send, with
+        exactly its billed lines (day, code, charge), and that no link ties to any bill (nor the surgery center's facility
+        claims): its send-day twins. They are used one to one only: when no more bills went out that day with those lines
+        (and no EMA claim of their own) than there are such EMA claims. One twin is the bill's EMA claim (its lines are
+        the bill's services' EMA lines); several make the bill answered only when every one of them is (truth:
+        twin_answer)."""
+        R = self.R
+        tied = getattr(R, "ema_tied_links", set()) | getattr(R, "ema_facility_links", set())
+        by_link = defaultdict(list)
+        for E in lines.values():
+            by_link[E.link].append(E)
+        pool = defaultdict(list)
+        for link in sorted(by_link):
+            Es = by_link[link]
+            if link in tied or any(E.bill or E.svcs for E in Es):
+                continue
+            ls = tuple(sorted((E.svc, E.cpt, E.charges) for E in Es if E.charges > 0))
+            fc = min((E.first_charge for E in Es if E.first_charge), default="")
+            if not ls or not fc:
+                continue
+            for k in range(TWIN_SLACK_DAYS + 1):
+                pool[(add_days(fc, k), ls)].append(link)
+        # each bill's first send and its lines (the 837s), for the bills whose EMA claim nothing names
+        known = {E.bill for E in lines.values() if E.bill}
+        known |= {s.bill for s in self.svcs.values() if s.eml}
+        first = {}
+        for (k, bht, pcn, total, freq, pname, pid, sdate, pos, sub) in R.c837:
+            bht = iso(bht)
+            if not bht or (freq or "").strip() == "8":
+                continue
+            bill = split_claim_id((pcn or "").strip().upper())[0]
+            if bill in known:
+                continue
+            if bill not in first or (bht, k) < first[bill][:2]:
+                first[bill] = (bht, k, sdate)
+        consumers = defaultdict(list)
+        for bill, (bht, k, sdate) in first.items():
+            agg = defaultdict(int)
+            for (_k, seq, code, mods, charge, units, ldate) in self.l837_raw.get(k, []):
+                code = (code or "").strip().upper()
+                if code:
+                    agg[(iso(ldate) or iso(sdate) or "", code)] += charge or 0
+            ls = tuple(sorted((d, c, ch) for (d, c), ch in agg.items() if ch > 0))
+            if ls:
+                consumers[(bht, ls)].append(bill)
+        self.twin_of = {}
+        n = Counter()
+        for key in sorted(consumers):
+            bills = consumers[key]
+            links = pool.get(key, [])
+            if not links:
+                continue
+            if len(bills) > len(links):
+                n["twins_more_bills_than_twins"] += len(bills)
+                continue
+            for bill in bills:
+                self.twin_of[bill] = list(links)
+                for skey in self.bill_svcs.get(bill, ()):
+                    sv = self.svcs.get(skey)
+                    if sv is None or sv.eml or not sv.dos:
+                        continue
+                    tw = [[E for E in by_link[lk] if E.svc == sv.dos and E.cpt == sv.code] for lk in links]
+                    tw = [x for x in tw if x]
+                    if len(tw) != len(links):
+                        continue
+                    if len(links) == 1:
+                        sv.eml, sv.ema_how = tw[0], "send_day_twin"
+                        for E in tw[0]:
+                            E.svcs.append(sv)
+                        n["services_one_twin"] += 1
+                    else:
+                        sv.twins, sv.ema_how = tw, "send_day_twins"
+                        n["services_several_twins"] += 1
+                n["bills_with_twins"] += 1
+        for k, v in n.items():
+            self.stats["ema_" + k] = v
+
+    def twin_answer(self, s):
+        """A17 rule 5: a service with several send-day twins is answered only when every twin is: paid when each twin
+        holds a payment (net, over $1), else answered in some way ('TWIN_ANSWERED', not owed, not done: undecided). None
+        when a twin holds no answer (the claim stays unanswered)."""
+        paid, dates = [], []
+        for Es in s.twins:
+            amt = sum(x[2] for E in Es for x in E.pays)
+            answered = amt != 0 or any(E.answers for E in Es)
+            if not answered:
+                return None
+            paid.append(amt)
+            dates += [x[0] for E in Es for x in E.pays] + [x[0] for E in Es for x in E.answers]
+        d = min(dates) if dates else ""
+        if all(a > 100 for a in paid):
+            return ("PAID", "send_day_twins_all_paid", "", "", "", d, 0, "", "", False)
+        return ("TWIN_ANSWERED", "send_day_twins_all_answered", "", "", "", d, 0, "", "", False)
 
     def efam(self, payer_id):
         f = self.ema_pfam.get(payer_id)
@@ -1987,6 +2718,12 @@ class Audit:
         ans = [(d, f) for d, f in ef["answers"] if f not in excl]
         denied = [f for f, st in stat.items() if st == "Denied"]
         resolved = [f for f, st in stat.items() if st.startswith("Resolved")]
+        # A17 rule 5 (fix7b's rule): a status alone never answers. A Denied status stands with the payer's answer row
+        # (money, an allowed amount or a reason that day), a reason that payer posted on the line, or the CARCs EMA's
+        # weekly claim-status export recorded; a $0 row under a check with none of these is no answer
+        wk0 = [x[6] for x in s.emast if len(x) > 6 and x[6]]
+        proof = {f for d, f in ans} | {f for d, f, g, c, a, n in ef["adjs"] if g or c}
+        denied = [f for f in denied if f in proof or wk0]
         if not denied and not (ans and resolved):
             return None
         fams = set(denied) | {f for d, f in ans if f in resolved}
@@ -2201,10 +2938,14 @@ class Audit:
             sub = "full"
             if mods & MPPR_MODS or any(r == "59" for A in fl for g, r, a in A.cas):
                 sub = "full_mppr"
-            rinfo = self.rate_for(fam, gov.p.prod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(gov.p),
-                                  gov.npi)
+            # A17 rule 1: the rate of the claim's own plan (gov.p.rprod) and the tier of this clinician in this office's
+            # state; rule 2: the setting the payer priced (pos_class)
+            gst = self.office_state(gov.npi, s.dos, gov.p.pcn)
+            rinfo = self.rate_for(fam, gov.p.rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(gov.p),
+                                  gov.npi, gst)
             state, owed, basis = "PAID", 0, ""
             short_units = []          # (units, gap per unit, provider discount?) of paid pieces below the rate
+            xsub = ""                 # A17 rule 3: the sub-kind of a short day ranked across claims
             if gov.changed:
                 sub = "paid_other_code"
             if mods & REDUCING_MODS:
@@ -2227,8 +2968,8 @@ class Audit:
                     pieces = [(apu, up_f, gov, None)]
                 subs = Counter()
                 # an NP/PA (or a line with no rendering provider to tell) may be paid at 85% of the payer's full rate
-                np_ok = self.np_ok_here(fam, gov.p.prod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(gov.p),
-                                        gov.npi, r_tier)
+                np_ok = self.np_ok_here(fam, gov.p.rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(gov.p),
+                                        gov.npi, r_tier, gst)
                 for p_apu, p_units, A, L in pieces:
                     pm = set(L.mods) if L is not None else set(A.mods)
                     # calibration round 3: a multiple-procedure modifier the payer applied (SVC01 51 with an SVC06 that
@@ -2237,6 +2978,16 @@ class Audit:
                         {m_ for x_ in A.lines for m_ in (getattr(x_, "amods", None) or ())}
                     pc_ = L.cas if L is not None else A.cas
                     pf = 0.5 if (pm & MPPR_MODS or any(r == "59" for g, r, a in pc_)) else 1.0
+                    xr = self.xrank.get(id(A))
+                    if xr is not None:
+                        # A17 rule 3: the patient's day ranked across its claims (cross_claim_ranking), whether or not
+                        # the payer marked the line as a multiple procedure (it may mark the wrong one)
+                        if xr[0] in ("half_ok", "balanced"):
+                            subs["half_rate_mppr_cross_claim"] += p_units
+                            continue
+                        short_units.append((p_units, xr[1], False))
+                        xsub = "misranked_cross_claim" if xr[0] == "misranked" else "below_half_cross_claim"
+                        continue
                     # A16 fix 5(c): the expected amount never exceeds the billed charge per unit; an NP/PA's payment is
                     # tested against the payer's full rate and its 85% (whichever the payer applies to that provider)
                     cands = [r_payer, r_amt] + ([int(round(0.85 * r_payer))] if np_ok else [])
@@ -2253,10 +3004,10 @@ class Audit:
                         # payment's own amount out of the list, so the test could never pass; and one provider's own
                         # discount is no second rate of the payer: owner rule 4.1); never an amount at 85% of the rate
                         surg = self.is_surgical(s.code)
-                        own_c = self.rate_obs.get((fam, gov.p.prod, s.code, s.comp, (s.dos or "0000")[:4],
+                        own_c = self.rate_obs.get((fam, gov.p.rprod, s.code, s.comp, (s.dos or "0000")[:4],
                                                    self.pos_class(gov.p), gov.npi or "")) or Counter()
                         o_obs = Counter({a_: k - own_c.get(a_, 0) for a_, k in r_obs.items() if k - own_c.get(a_, 0) > 0})
-                        k6_ = (fam, gov.p.prod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(gov.p))
+                        k6_ = (fam, gov.p.rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(gov.p))
                         for dn in self.disc_provs.get(k6_, ()):
                             if dn != (gov.npi or ""):
                                 for a_, k in (self.rate_obs.get(k6_ + (dn,)) or {}).items():
@@ -2293,8 +3044,8 @@ class Audit:
                     owed = int(round(sum(u_ * g_ for u_, g_, d_ in short_units) /
                                      max(1, sum(u_ for u_, g_, d_ in short_units))))
                     disc = all(d_ for u_, g_, d_ in short_units)
-                    sub = "paid_other_code" if gov.changed else ("below_rate_provider_discount" if disc else
-                                                                 "below_weak_rate" if r_weak else "below_rate")
+                    sub = "paid_other_code" if gov.changed else xsub or ("below_rate_provider_discount" if disc else
+                                                                         "below_weak_rate" if r_weak else "below_rate")
                     if disc:
                         rv = self.review[(fam, gov.npi or "")]
                         rv[0] += 1
@@ -2311,20 +3062,21 @@ class Audit:
                     sub = "waiting_secondary"
             tbd = max((L.tb_date or "" for A in fl for L in A.lines), default="")
             wbase = tbd if (state == "SHORT" and sub == "partly_taken_back" and tbd) else gov.p.date
-            wend = add_days(wbase, self.appeal_days(gov.p.prod)) if state == "SHORT" else ""
+            wend = self.appeal_end(fam, gov.p.prod, wbase) if state == "SHORT" else ""
             inside = bool(wend) and wend >= self.as_of
             n_short = min(PU, sum(u_ for u_, g_, d_ in short_units)) if state == "PAID" else 0
             if n_short:
                 weak = rinfo[4]
                 disc = all(d_ for u_, g_, d_ in short_units)
                 g_avg = int(round(sum(u_ * g_ for u_, g_, d_ in short_units) / max(1, sum(u_ for u_, g_, d_ in short_units))))
-                wend_s = add_days(gov.p.date, self.appeal_days(gov.p.prod))
+                wend_s = self.appeal_end(fam, gov.p.prod, gov.p.date)
                 if disc:
                     rv = self.review[(fam, gov.npi or "")]
                     rv[0] += 1
                     rv[1] += n_short
                     rv[2] += n_short * g_avg
-                units += [("SHORT", "below_rate_provider_discount" if disc else "below_weak_rate" if weak else "below_rate",
+                units += [("SHORT", xsub or ("below_rate_provider_discount" if disc else "below_weak_rate" if weak
+                                             else "below_rate"),
                            "", fam, gov.lk, gov.p.date, g_avg, basis, wend_s, wend_s >= self.as_of)] * n_short
             units += [(state, sub, "", fam, gov.lk, gov.p.date, owed, basis, wend, inside)] * (PU - n_short)
         rest = U - len(units)
@@ -2348,7 +3100,7 @@ class Audit:
             g = tb[0]
             k = min(rest, taken_units)
             tbd = max((L.tb_date or "" for L in g.lines), default="") or g.p.date
-            wend = add_days(tbd, self.appeal_days(g.p.prod))
+            wend = self.appeal_end(g.p.fam, g.p.prod, tbd)
             units += [("TAKEN_BACK", "plb", "", g.p.fam, g.lk, g.p.date, int(round(g.paid / max(1, g.up))), "taken",
                        wend, wend >= self.as_of)] * k
             rest = U - len(units)
@@ -2368,7 +3120,7 @@ class Audit:
             if not evid and recon and answered >= billed - max(100, 0.01 * billed):
                 return units + [("PAID", "all_billed_units_adjudicated", "", fam, gov.lk, gov.p.date, 0, "", "",
                                  False)] * rest
-            wend = add_days(gov.p.date, self.appeal_days(gov.p.prod))
+            wend = self.appeal_end(fam, gov.p.prod, gov.p.date)
             return units + [("SHORT", "fewer_units_answered", "", fam, gov.lk, gov.p.date, int(round(gov.apu())),
                              "paid_unit", wend, wend >= self.as_of)] * rest
         if unpaid:
@@ -2382,6 +3134,10 @@ class Audit:
         ea = self.ema_answer(s, ef, excl)
         if ea is not None:
             return units + self.ema_answer_units(s, rest, ea, ef)
+        if s.twins:
+            tw = self.twin_answer(s)
+            if tw is not None:
+                return units + [tw] * rest
         if sec:
             ls = max(sec, key=lambda A: A.p.ordk)
             return units + [("SECONDARY_ONLY", "primary_remittance_missing", "", ls.p.fam, ls.lk, ls.p.date, 0, "", "",
@@ -2417,7 +3173,9 @@ class Audit:
             return units + [("EMA_PAID_NO_REMIT", "", "", fam, "", sd, owed, basis, "", False)] * rest
         if est == "Inactive/Voided":
             return units + [("EMA_VOIDED", "", "", fam, "", sd, 0, "", "", False)] * rest
-        wend = max(add_days(s.dos, 365) if s.dos else sd, add_days(sd, 180))
+        # A17 rule 4: the payer's first-filing limit (the window table, the product from the payer's answers on the bill
+        # or the patient's other bills), at least 180 days from the send
+        wend = self.never_answered_end(fam, self.prod_hint(s.bill, fam, s.pks), s.dos, sd)
         if self.answers_after(s.bill, sd, fam):
             return units + [("NEVER_ANSWERED", "answered_without_this_code", "", fam, "", sd, owed, basis, wend,
                              wend >= self.as_of)] * rest
@@ -2464,7 +3222,7 @@ class Audit:
         if basis != "charge":
             basis = "est_" + basis if not basis.startswith("est_") else basis
         ew = self.ema_work(ef, fam, d)
-        wend = self.window_end("", carc, d, s.dos)
+        wend = self.window_end(fam, self.prod_hint(s.bill, fam, s.pks) or "", carc, d, s.dos, default_prod="")
         if ew:
             return [("WORKED_WAITING", ew, carc, fam, "", d, owed, basis, wend, wend >= self.as_of)] * rest
         return [("DENIED", "ema_off_feed_answer", carc, fam, "", d, owed, basis, wend, wend >= self.as_of)] * rest
@@ -2559,8 +3317,11 @@ class Audit:
                     cnum = carc.split("-", 1)[-1]
                     sub = "latest_answer_is_duplicate_denial"
                 break
+        # A17 rules 1 and 2: the rate of the claim's own plan, the clinician's tier in this office's state, the setting
+        rprod = g.p.rprod
+        gst = self.office_state(g.npi, s.dos, g.p.pcn)
         if kind == "ZERO_RATE":
-            r_amt, _ = self.rate_est(fam, prod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi)
+            r_amt, _ = self.rate_est(fam, rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi, gst)
             if r_amt and r_amt > 0:
                 kind, carc = "DENIED", "CO-45"
                 cnum = "45"
@@ -2577,12 +3338,12 @@ class Audit:
         if pr_allowed > 0 and (kind == "PATIENT" or (kind == "DENIED" and level_cut)):
             # the payer allowed the service and sent the allowed amount to the patient: moved to the patient, or short
             # when that allowed amount is below the payer's own rate (A16 fix 7: per unit of the UNPAID part)
-            rinfo = self.rate_for(fam, prod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi)
+            rinfo = self.rate_for(fam, rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi, gst)
             apu = pr_allowed / max(1, sum(self.unpaid_part(A).ub for A in gl))
             if rinfo is not None:
                 # the same tests as a payment: capped at the charge, an NP/PA's 85%, a multiple-procedure half
-                np_ok = self.np_ok_here(fam, prod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi,
-                                        rinfo[3])
+                np_ok = self.np_ok_here(fam, rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi,
+                                        rinfo[3], gst)
                 cands = sorted({(min(c_, s.charge_pu) if s.charge_pu else c_) for c_ in
                                 [rinfo[1], rinfo[0]] + ([int(round(0.85 * rinfo[1]))] if np_ok else [])})
                 if np_ok and s.charge_pu and s.charge_pu < rinfo[1]:
@@ -2591,11 +3352,11 @@ class Audit:
                 half = any(abs(apu - 0.5 * c_) <= 0.05 * c_ for c_ in cands + [r_amt]) and self.mppr_eligible(g, s.code)
                 # calibration round 3: the same second-rate test as a payment (an amount the payer allows across
                 # providers on 20%+ of its answers, not one provider's discount)
-                alt = self.second_rate_alts(fam, prod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p),
+                alt = self.second_rate_alts(fam, rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p),
                                             g.npi, rinfo[2], rinfo[1])
                 second = any(abs(apu - a_) <= 2 for a_ in alt)
                 if r_amt - apu > max(100, 0.03 * r_amt) and not half and not second:
-                    wend = add_days(g.p.date, self.appeal_days(prod))
+                    wend = self.appeal_end(fam, prod, g.p.date)
                     basis = "rate_l6" if rinfo[3] in ("payer", "provider_discount") else "rate_" + rinfo[3]
                     ssub = "to_patient_below_rate"
                     if rinfo[3] == "provider_discount":
@@ -2613,7 +3374,7 @@ class Audit:
         # denial, a payer's paper check): checked before the not-payable test (a paid unit is paid)
         exc, efam_, edate = self.ema_paid_excess(s, ef)
         if exc > 0:
-            owed0, basis0 = self.owed_rate(s, fam, prod, self.pos_class(g.p), g.npi)
+            owed0, basis0 = self.owed_rate(s, fam, rprod, self.pos_class(g.p), g.npi, gst)
             if efam_ == fam or exc >= 0.4 * max(1, owed0 or s.charge_pu) * rest * (0.5 if basis0 == "charge" else 1):
                 return [("PAID", "ema_paid_off_feed", carc, efam_, g.lk, edate, 0, "", "", False)] * rest
         np_ = self.not_payable(s, fam, prod, carc, [g.p])
@@ -2629,7 +3390,7 @@ class Audit:
             ssub = "cob" if cob else "secondary_allowed"
             ls = settle[-1]
             return [("SETTLED_SECONDARY", ssub, carc, fam, ls.lk, ls.p.date, 0, "", "", False)] * rest
-        owed, basis = self.owed_rate(s, fam, prod, self.pos_class(g.p), g.npi)
+        owed, basis = self.owed_rate(s, fam, rprod, self.pos_class(g.p), g.npi, gst)
         la = self.line_allowed(gl)
         if la:
             owed, basis = (min(la, s.charge_pu) if s.charge_pu else la), "line_allowed"
@@ -2678,24 +3439,24 @@ class Audit:
                 la = max(own_after, key=lambda A: A.p.ordk)
                 k2, c2 = self.denial_of([self.unpaid_part(la)])
                 c2 = c2 if k2 == "DENIED" and c2 != "none" else carc
-                wend = self.window_end(prod, c2, la.p.date, s.dos)
+                wend = self.window_end(fam, prod, c2, la.p.date, s.dos)
                 return [("DENIED", "resent_and_denied_again", c2, fam, la.lk, la.p.date, owed, basis, wend,
                          wend >= self.as_of)] * rest
             if self.answers_after(s.bill, nd, nfam):
                 st, sub = "NEVER_ANSWERED", "answered_without_this_code"
             elif rejected:
-                wend = self.window_end(prod, carc, g.p.date, s.dos)
-                wend = max(wend, add_days(s.dos, 365)) if s.dos else wend
+                wend = self.window_end(fam, prod, carc, g.p.date, s.dos)
+                wend = max(wend, self.filing_end(fam, prod, s.dos, default_days=365)) if s.dos else wend
                 return [("DENIED", "resend_rejected_before_payer", carc, fam, g.lk, g.p.date, owed, basis, wend,
                          wend >= self.as_of)] * rest
             else:
                 waited = days_between(nd, self.feed_date)
                 st = "WORKED_WAITING"
                 sub = "resent_overdue" if waited > self.usual_days(nfam or fam) else "resent_within_usual_time"
-            wend = self.window_end(prod, carc, nd, s.dos)
-            wend = max(wend, add_days(s.dos, 365)) if s.dos else wend
+            wend = self.window_end(fam, prod, carc, nd, s.dos)
+            wend = max(wend, self.filing_end(fam, prod, s.dos, default_days=365)) if s.dos else wend
             return [(st, sub, carc, fam, g.lk, g.p.date, owed, basis, wend, wend >= self.as_of)] * rest
-        wend = self.window_end(prod, carc, g.p.date, s.dos)
+        wend = self.window_end(fam, prod, carc, g.p.date, s.dos)
         ew = self.ema_work(ef, fam, g.p.date)
         if ew:
             return [("WORKED_WAITING", ew, carc, fam, g.lk, g.p.date, owed, basis, wend, wend >= self.as_of)] * rest
@@ -3432,11 +4193,14 @@ class Audit:
 
     # ------------------------------------------------------------------ run
     def run(self):
-        steps = [("processings", self.build_processings), ("dedupe", self.dedupe), ("reversals", self.pair_reversals),
+        steps = [("processings", self.build_processings), ("bare_rows", self.mark_bare),
+                 ("settings", self.fill_settings), ("office_states", self.office_states),
+                 ("dedupe", self.dedupe), ("reversals", self.pair_reversals),
                  ("takebacks", self.apply_takebacks), ("services", self.build_services),
                  ("claim_level", self.attach_claim_level), ("answers", self.build_answers),
                  ("timing", self.payer_timing), ("units_scope", self.units_and_scope),
-                 ("units_from_bills", self.units_from_bills), ("rates", self.build_rates), ("ema_match", self.ema_match),
+                 ("units_from_bills", self.units_from_bills), ("rates", self.build_rates),
+                 ("cross_claim_ranking", self.cross_claim_ranking), ("ema_match", self.ema_match),
                  ("truth", self.compute_truth), ("link_patients", self.link_patients), ("items", self.map_findings),
                  ("judge", self.judge), ("left_on_table", self.left_on_table)]
         for name, fn in steps:
@@ -3611,7 +4375,8 @@ create table claims (claim_key TEXT PRIMARY KEY, transaction_key TEXT, claim_seq
   claim_status_code TEXT, charge_cents INTEGER, paid_cents INTEGER, patient_responsibility_cents INTEGER,
   claim_filing_indicator TEXT, payer_claim_control_number TEXT, facility_type_code TEXT, claim_frequency_code TEXT,
   statement_from TEXT, payer_name TEXT, payer_id TEXT, payment_date TEXT, crossover_carrier_name TEXT,
-  rendering_provider_npi TEXT, patient_last TEXT, patient_first TEXT, patient_id TEXT, insured_id TEXT);
+  rendering_provider_npi TEXT, patient_last TEXT, patient_first TEXT, patient_id TEXT, insured_id TEXT,
+  group_number TEXT, contract_class TEXT);
 create table lines (line_key TEXT PRIMARY KEY, claim_key TEXT, line_seq INTEGER, procedure_qualifier TEXT,
   procedure_code TEXT, modifiers TEXT, charge_cents INTEGER, paid_cents INTEGER, paid_units REAL,
   original_procedure_qualifier TEXT, original_procedure_code TEXT, original_modifiers TEXT, original_units REAL,
@@ -3630,7 +4395,7 @@ create table ema_rows (row_fingerprint TEXT PRIMARY KEY, family TEXT, source_nam
   service_date TEXT, bill_created TEXT, claim_id TEXT, bill_item_id TEXT, cpt TEXT, modifiers TEXT, payer TEXT,
   coverage_type TEXT, claim_status TEXT, claim_submission_date TEXT, denial_date TEXT, charges_cents INTEGER,
   units REAL, policy_number TEXT, activity_type TEXT, insurance_payments_cents INTEGER, payments_cents INTEGER,
-  payment_method TEXT, carc TEXT);
+  payment_method TEXT, carc TEXT, location TEXT);
 create table names (id INTEGER PRIMARY KEY, name TEXT);
 create table postings (src INTEGER, posted TEXT, svc TEXT, cpt TEXT, units REAL, link INTEGER, check_no TEXT, grp TEXT,
   code TEXT, kind INTEGER, status INTEGER, action INTEGER, payer INTEGER, plan INTEGER, primary_payer INTEGER,
@@ -3671,6 +4436,7 @@ class Fake:
         self.expect_review = {}   # (bill, code, comp, dos) -> on the payer x provider review list? (A16, rule 4.1)
         self.expect_secbal = {}   # (bill, code, comp, dos) -> reported as a secondary balance? (A16, section 5)
         self.expect_owed = {}     # (bill, code, comp, dos) -> owed cents per unit of unit 1 (A16)
+        self.expect_wend = {}     # (bill, code, comp, dos) -> window end of unit 1 (A17 rule 4)
         self.fix_of = {}          # check -> the A16 fix it tests (checks absent here are A15's own)
         self.fix = None           # the fix the cases being written test
 
@@ -3685,13 +4451,14 @@ class Fake:
         return tk
 
     def claim(self, tk, pcn, st, charge, paid, lines, prod="12", clp07=None, freq="1", ccas=(), payer="TESTPAY ONE",
-              pid="T0001", date=None, xover=None, patient=None):
+              pid="T0001", date=None, xover=None, patient=None, pos="11", group=None, cclass=None, npi="1000000001",
+              prr=0):
         ck = self.key("cl")
         d = date or self.con.execute("select payment_date from transactions where transaction_key=?", (tk,)).fetchone()[0]
         last, first = patient or ("TESTLAST" + pcn[:9], "TESTFIRST")
-        self.con.execute("insert into claims values (" + ",".join("?" * 22) + ")",
-                         (ck, tk, 1, pcn, st, charge, paid, 0, prod, clp07 or ("PCC" + pcn), "11", freq, None, payer,
-                          pid, d, xover, "1000000001", last, first, "M" + last, "M" + last))
+        self.con.execute("insert into claims values (" + ",".join("?" * 24) + ")",
+                         (ck, tk, 1, pcn, st, charge, paid, prr, prod, clp07 or ("PCC" + pcn), pos, freq, None, payer,
+                          pid, d, xover, npi, last, first, "M" + last, "M" + last, group, cclass))
         for g, r, a in ccas:
             self.con.execute("insert into adjustments (claim_key, line_key, level, group_code, reason_code, amount_cents)"
                              " values (?,?,?,?,?,?)", (ck, None, "claim", g, r, a))
@@ -3706,17 +4473,17 @@ class Fake:
                               ln.get("paid_units", units if lpaid else 0), "HC" if ln.get("ocode") else None,
                               ln.get("ocode"), json.dumps(ln["omods"]) if ln.get("omods") else None,
                               ln.get("orig_units", units if not lpaid else None), dos, None, allowed,
-                              ln.get("npi", "1000000001")))
+                              ln.get("npi", npi)))
             for g, r, a in ln.get("cas", []):
                 self.con.execute("insert into adjustments (claim_key, line_key, level, group_code, reason_code, "
                                  "amount_cents) values (?,?,?,?,?,?)", (ck, lk, "line", g, r, a))
             keys.append(lk)
         return ck, keys
 
-    def send837(self, pcn, bht, lines, freq="1", payer="TESTPAY ONE", pid="T0001", sub=None):
+    def send837(self, pcn, bht, lines, freq="1", payer="TESTPAY ONE", pid="T0001", sub=None, pos="11"):
         k = self.key("c8")
         self.con.execute("insert into claims_837 values (?,?,?,?,?,?,?,?,?,?)",
-                         (k, bht, pcn, sum(l_["charge"] for l_ in lines), freq, payer, pid, lines[0]["dos"], "11", sub))
+                         (k, bht, pcn, sum(l_["charge"] for l_ in lines), freq, payer, pid, lines[0]["dos"], pos, sub))
         for i, ln in enumerate(lines):
             self.con.execute("insert into lines_837 values (?,?,?,?,?,?,?,?)",
                              (self.key("l8"), k, i + 1, ln["code"], ",".join(ln.get("mods", [])) or None, ln["charge"],
@@ -3766,7 +4533,7 @@ class Fake:
         pass on A16; it is not required to fail on A15)."""
         d = {"unit": self.expect_unit, "item": self.expect_item, "sub": self.expect_sub, "lot": self.expect_lot,
              "counts": self.expect_unit_counts, "billed": self.expect_units_billed, "review": self.expect_review,
-             "secbal": self.expect_secbal, "owed": self.expect_owed}[kind]
+             "secbal": self.expect_secbal, "owed": self.expect_owed, "wend": self.expect_wend}[kind]
         d[key] = value
         self.fix_of[(kind, key)] = self.fix + (" [guard]" if guard else "")
 
@@ -4989,6 +5756,168 @@ def build_selftest_store():
                bill="ZZ55RPAY1")
     F.ema_check("CHKRP3", T1, "none")
     F.exp("sub", ("ZZ55RPAY1", "99213", "G", "2026-06-01"), ("PAID", "ema_repaid_after_takeback"))
+    # ================================================================================================== A17 rules
+    # ---- rule 1: plan-level rate keys. One large employer plan (its own group number) pays its own schedule beside the
+    # payer's network rate; for 99213 it holds too few of the payer's answers (14%) to pass A16's second-rate test
+    F.fix = "A17 rule 1 (plan-level rate keys: an employer plan's own schedule)"
+    TPL = dict(payer="TESTPAY PL", pid="T0050")
+    net_r = {"99213": 10000, "99214": 14000, "99212": 7000, "11102": 10000}
+    own_r = {"99213": 8000, "99214": 12600, "99212": 6300, "11102": 9000}
+    n_ = 0
+    for code, n_net, n_own in (("99213", 90, 15), ("99214", 30, 30), ("99212", 30, 30), ("11102", 30, 30)):
+        for grp, cnt, amt in (("small", n_net, net_r[code]), ("big", n_own, own_r[code])):
+            for j in range(cnt):
+                n_ += 1
+                dos_ = add_days("2026-02-01", n_ % 150)
+                F.claim(F.tx(add_days(dos_, 20), **TPL), "ZZ70P%04dC017" % n_, "1", amt + 5000, amt,
+                        oneline(code, amt + 5000, amt, dos_, allowed=amt, cas=[("CO", "45", 5000)]),
+                        group=("GRPSMALL%02d" % (j % 25)) if grp == "small" else "GRPBIG", **TPL)
+    F.claim(F.tx("2026-07-21", **TPL), "ZZ70PLAN1C017", "1", 13000, 8000,
+            oneline("99213", 13000, 8000, "2026-07-01", allowed=8000, cas=[("CO", "45", 5000)]), group="GRPBIG", **TPL)
+    F.exp("sub", ("ZZ70PLAN1", "99213", "G", "2026-07-01"), ("PAID", "full"))
+    F.claim(F.tx("2026-07-22", **TPL), "ZZ70PLAN2C017", "1", 13000, 8000,
+            oneline("99213", 13000, 8000, "2026-07-02", allowed=8000, cas=[("CO", "45", 5000)]), group="GRPSMALL03",
+            **TPL)
+    F.exp("unit", ("ZZ70PLAN2", "99213", "G", "2026-07-02"), "SHORT", guard=True)
+    # ---- rule 1: the office-state PA/NP rule. A commercial payer pays an NP in full in Kentucky offices and at 85% in
+    # Indiana offices; the NP is mostly in Kentucky, so A16 (one mode across states) calls the Indiana 85% short
+    F.fix = "A17 rule 1 (the office-state NP/PA rule)"
+    TST = dict(payer="TESTPAY ST", pid="T0051")
+    MKY = dict(payer="TESTPAY MCR KY", pid="15102")
+    MIN_ = dict(payer="TESTPAY MCR IN", pid="08102")
+    PHY, NPR = "2000000001", "2000000002"
+
+    def med(tag, i, d, code, amt, npi, carrier):
+        F.claim(F.tx(add_days(d, 14), **carrier), "ZZ71%s%03dC017" % (tag, i), "1", amt + 3000, int(amt * 0.8),
+                oneline(code, amt + 3000, int(amt * 0.8), d, allowed=amt, cas=[("CO", "45", 3000),
+                                                                             ("PR", "2", amt - int(amt * 0.8))]),
+                prod="MB", npi=npi, **carrier)
+
+    for i in range(4):
+        d = add_days("2026-03-02", i)
+        med("MP", 2 * i, d, "99213", 10000, PHY, MKY)
+        med("MP", 2 * i + 1, d, "99214", 14000, PHY, MKY)
+    ky_days = [add_days("2026-04-01", i) for i in range(10)]
+    in_days = [add_days("2026-05-04", i) for i in range(6)]
+    for i, d in enumerate(ky_days):
+        med("MK", i, d, "99213" if i % 2 == 0 else "99214", 8500 if i % 2 == 0 else 11900, NPR, MKY)
+    for i, d in enumerate(in_days):
+        med("MI", i, d, "99213", 8500, NPR, MIN_)
+    for i in range(6):
+        d = add_days("2026-04-20", i)
+        F.claim(F.tx(add_days(d, 20), **TST), "ZZ71SP%03dC017" % i, "1", 15000, 10000,
+                oneline("99213", 15000, 10000, d, allowed=10000, cas=[("CO", "45", 5000)]), npi=PHY, **TST)
+    for i, d in enumerate(ky_days[:9]):
+        F.claim(F.tx(add_days(d, 20), **TST), "ZZ71SK%03dC017" % i, "1", 15000, 10000,
+                oneline("99213", 15000, 10000, d, allowed=10000, cas=[("CO", "45", 5000)]), npi=NPR, **TST)
+    for i, d in enumerate(in_days):
+        F.claim(F.tx(add_days(d, 20), **TST), "ZZ71SI%03dC017" % i, "1", 15000, 8500,
+                oneline("99213", 15000, 8500, d, allowed=8500, cas=[("CO", "45", 6500)]), npi=NPR, **TST)
+    F.exp("sub", ("ZZ71SI000", "99213", "G", in_days[0]), ("PAID", "full"))
+    F.claim(F.tx(add_days(ky_days[9], 20), **TST), "ZZ71SKLASC017", "1", 15000, 8500,
+            oneline("99213", 15000, 8500, ky_days[9], allowed=8500, cas=[("CO", "45", 6500)]), npi=NPR, **TST)
+    F.exp("unit", ("ZZ71SKLAS", "99213", "G", ky_days[9]), "SHORT", guard=True)
+    # ---- rule 2: a payer that leaves CLP08 empty; the claims of the surgery center (the 837's place of service 24)
+    # are priced on the facility schedule, not short of the office rate
+    F.fix = "A17 rule 2 (a separate surgical site's own schedule, CLP08 empty)"
+    TAN = dict(payer="TESTPAY AN", pid="T0052")
+    for i in range(10):
+        d = add_days("2026-03-10", i)
+        F.send837("ZZ72OF%03dC017" % i, d, oneline("11402", 20000, 0, d), pos="11", **TAN)
+        F.claim(F.tx(add_days(d, 20), **TAN), "ZZ72OF%03dC017" % i, "1", 20000, 15000,
+                oneline("11402", 20000, 15000, d, allowed=15000, cas=[("CO", "45", 5000)]), pos="", **TAN)
+    for i in range(9):
+        d = add_days("2026-04-10", i)
+        pcn = "ZZ72AS%03dC017" % i
+        F.send837(pcn, d, oneline("11402", 20000, 0, d), pos="24", **TAN)
+        F.claim(F.tx(add_days(d, 20), **TAN), pcn, "1", 20000, 9000,
+                oneline("11402", 20000, 9000, d, allowed=9000, cas=[("CO", "45", 11000)]), pos="", **TAN)
+    F.exp("sub", ("ZZ72AS000", "11402", "G", "2026-04-10"), ("PAID", "full"))
+    # ---- rule 3: cross-claim multiple-procedure ranking. A Mohs (office claim) and a repair (surgery-center claim) of one
+    # patient's day: X, the payer cut the Mohs (worth more) to half and paid the repair in full (misranked: half the
+    # difference is owed); Y, it cut the repair to half (right)
+    F.fix = "A17 rule 3 (cross-claim multiple-procedure ranking)"
+    THU = dict(payer="TESTPAY HU", pid="T0053", prod="16")
+    for i in range(6):
+        d = add_days("2026-03-16", i)
+        F.claim(F.tx(add_days(d, 21), payer=THU["payer"], pid=THU["pid"]), "ZZ73MO%03dC017" % i, "1", 80000, 60000,
+                oneline("17311", 80000, 60000, d, allowed=60000, cas=[("CO", "45", 20000)]), pos="11", **THU)
+        F.claim(F.tx(add_days(d, 21), payer=THU["payer"], pid=THU["pid"]), "ZZ73RE%03dC017" % i, "1", 40000, 30000,
+                oneline("13132", 40000, 30000, d, allowed=30000, cas=[("CO", "45", 10000)]), pos="24", **THU)
+    PX, PY = ("TESTLASTX", "TESTFIRSTX"), ("TESTLASTY", "TESTFIRSTY")
+    F.claim(F.tx("2026-06-20", payer=THU["payer"], pid=THU["pid"]), "ZZ73REPX1C017", "1", 40000, 30000,
+            oneline("13132", 40000, 30000, "2026-06-01", allowed=30000, cas=[("CO", "45", 10000)]), pos="24",
+            patient=PX, **THU)
+    F.claim(F.tx("2026-06-22", payer=THU["payer"], pid=THU["pid"]), "ZZ73MOHX1C017", "1", 80000, 30000,
+            oneline("17311", 80000, 30000, "2026-06-01", allowed=30000, cas=[("CO", "45", 20000), ("CO", "59", 30000)]),
+            pos="11", patient=PX, **THU)
+    F.exp("sub", ("ZZ73MOHX1", "17311", "G", "2026-06-01"), ("SHORT", "misranked_cross_claim"))
+    F.exp("owed", ("ZZ73MOHX1", "17311", "G", "2026-06-01"), 15000)
+    PZ = ("TESTLASTZ", "TESTFIRSTZ")
+    F.claim(F.tx("2026-06-20", payer=THU["payer"], pid=THU["pid"]), "ZZ73REPZ1C017", "1", 40000, 30000,
+            oneline("13132", 40000, 30000, "2026-06-03", allowed=30000, cas=[("CO", "45", 10000)]), pos="24",
+            patient=PZ, **THU)
+    F.claim(F.tx("2026-06-22", payer=THU["payer"], pid=THU["pid"]), "ZZ73MOHZ1C017", "1", 80000, 30000,
+            oneline("17311", 80000, 30000, "2026-06-03", allowed=30000, cas=[("CO", "45", 50000)]), pos="11",
+            patient=PZ, **THU)
+    F.exp("owed", ("ZZ73MOHZ1", "17311", "G", "2026-06-03"), 15000)
+    F.claim(F.tx("2026-06-20", payer=THU["payer"], pid=THU["pid"]), "ZZ73MOHY1C017", "1", 80000, 60000,
+            oneline("17311", 80000, 60000, "2026-06-02", allowed=60000, cas=[("CO", "45", 20000)]), pos="11",
+            patient=PY, **THU)
+    F.claim(F.tx("2026-06-22", payer=THU["payer"], pid=THU["pid"]), "ZZ73REPY1C017", "1", 40000, 15000,
+            oneline("13132", 40000, 15000, "2026-06-02", allowed=15000, cas=[("CO", "45", 25000)]), pos="24",
+            patient=PY, **THU)
+    F.exp("sub", ("ZZ73REPY1", "13132", "G", "2026-06-02"), ("PAID", "half_rate_mppr_cross_claim"))
+    # ---- rule 4: the payer window table (an invented table: SELFTEST_WINDOWS). A correctable denial of a payer whose
+    # table gives 60 days to appeal and 90 days to file from the date of service is past its window: not money left on
+    # the table (A16's flat 180 days kept it inside); a window without a source is not used
+    F.fix = "A17 rule 4 (the payer window table, each window with its source)"
+    TWN = dict(payer="TESTPAY WN", pid="T0054")
+    F.claim(F.tx("2026-08-01", **TWN), "ZZ74WIND1C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2026-07-20", cas=[("CO", "16", 15000)]), **TWN)
+    F.exp("lot", ("ZZ74WIND1", "99213", "G", "2026-07-20"), False)
+    F.exp("wend", ("ZZ74WIND1", "99213", "G", "2026-07-20"), "2026-10-18")
+    TWN2 = dict(payer="TESTPAY WNX", pid="T0055")
+    F.claim(F.tx("2026-09-01", **TWN2), "ZZ74WIND2C017", "1", 15000, 0,
+            oneline("99213", 15000, 0, "2026-08-20", cas=[("CO", "50", 15000)]), **TWN2)
+    F.exp("wend", ("ZZ74WIND2", "99213", "G", "2026-08-20"), "2027-02-28", guard=True)
+    # ---- rule 5: never answered. A bare $0 row (835 or EMA) answers nothing; a status alone answers nothing; a $0 answer
+    # with its proof does; send-day twins (EMA claims of the same lines first posted the day the claim went out) are the
+    # claim's EMA claim, one to one only
+    F.fix = "A17 rule 5 (never answered: bare $0 rows, a status alone, $0 answers, send-day twins)"
+    F.send837("ZZ75BARE1C017", "2026-06-02", oneline("99213", 15000, 0, "2026-06-01"))
+    F.claim(F.tx("2026-06-20"), "ZZ75BARE1C017", "1", 15000, 0, oneline("99213", 15000, 0, "2026-06-01"))
+    F.exp("sub", ("ZZ75BARE1", "99213", "G", "2026-06-01"), ("NEVER_ANSWERED", "no_answer"))
+    F.send837("ZZ75BARE2C017", "2026-06-03", oneline("99213", 15000, 0, "2026-06-02"))
+    F.ema_line(900501, "2026-06-02", "99213", [(0, "charge", 15000, T1, None), (30, "answer", 0, T1, "CHKBARE")],
+               bill="ZZ75BARE2", status="Resolved/Other")
+    F.exp("sub", ("ZZ75BARE2", "99213", "G", "2026-06-02"), ("NEVER_ANSWERED", "no_answer"))
+    F.send837("ZZ75STAT1C017", "2026-06-05", oneline("99213", 15000, 0, "2026-06-04"))
+    F.ema_line(900502, "2026-06-04", "99213", [(0, "charge", 15000, T1, None)], bill="ZZ75STAT1", status="Denied")
+    F.exp("sub", ("ZZ75STAT1", "99213", "G", "2026-06-04"), ("NEVER_ANSWERED", "no_answer"))
+    F.send837("ZZ75ZPAT1C017", "2026-06-06", oneline("99213", 15000, 0, "2026-06-05"))
+    F.ema_line(900503, "2026-06-05", "99213", [(0, "charge", 15000, T1, None), (25, "answer", 0, T1, "CHKZPAT"),
+                                               (25, "adj", 5000, T1, ("CO", "45", False))],
+               bill="ZZ75ZPAT1", status="Resolved/Paid")
+    F.exp("unit", ("ZZ75ZPAT1", "99213", "G", "2026-06-05"), "MOVED_TO_PATIENT", guard=True)
+    F.send837("ZZ76TWIN1C017", "2026-06-10", oneline("99213", 15000, 0, "2026-06-08"))
+    F.ema_line(900601, "2026-06-08", "99213", [(2, "charge", 15000, T1, None), (30, "pay", 8000, T1, "CHKTW1")],
+               person=7601)
+    F.ema_line(900602, "2026-06-08", "99213", [(5, "charge", 15000, T1, None), (30, "pay", 8000, T1, "CHKTW2")],
+               person=7602)
+    F.exp("sub", ("ZZ76TWIN1", "99213", "G", "2026-06-08"), ("PAID", "ema_paid_off_feed"))
+    for tw in ("ZZ76TWIN2C017", "ZZ76TWIN3C017"):
+        F.send837(tw, "2026-06-17", oneline("99212", 9000, 0, "2026-06-16"))
+    for lk, per in ((900611, 7611), (900612, 7612)):
+        F.ema_line(lk, "2026-06-16", "99212", [(1, "charge", 9000, T1, None), (30, "pay", 6000, T1, "CHK%d" % lk)],
+                   person=per)
+    F.exp("sub", ("ZZ76TWIN2", "99212", "G", "2026-06-16"), ("PAID", "send_day_twins_all_paid"))
+    for tw in ("ZZ76TWIN4C017", "ZZ76TWIN5C017", "ZZ76TWIN6C017"):
+        F.send837(tw, "2026-06-24", oneline("99212", 9000, 0, "2026-06-23"))
+    for lk, per in ((900621, 7621), (900622, 7622)):
+        F.ema_line(lk, "2026-06-23", "99212", [(1, "charge", 9000, T1, None), (30, "pay", 6000, T1, "CHK%d" % lk)],
+                   person=per)
+    F.exp("sub", ("ZZ76TWIN4", "99212", "G", "2026-06-23"), ("NEVER_ANSWERED", "no_answer"), guard=True)
     F.fix = None
     F.con.commit()
     return F
@@ -5028,6 +5957,10 @@ def evaluate(F, a):
         sv = a.svcs.get(key)
         got = sv.units[0][6] if sv and sv.units else None
         add("owed", key, got == want, f"owed per unit {key[0]} {key[1]} expected {want} got {got}")
+    for key, want in getattr(F, "expect_wend", {}).items():
+        sv = a.svcs.get(key)
+        got = sv.units[0][8] if sv and sv.units else None
+        add("wend", key, got == want, f"window end {key[0]} {key[1]} expected {want} got {got}")
     sb_keys = {x[0].key for x in getattr(a, "sec_bal", [])}
     for key, want_in in F.expect_secbal.items():
         add("secbal", key, (key in sb_keys) == want_in, f"secondary balance {key[0]} {key[1]} expected {want_in}")
@@ -5046,11 +5979,20 @@ def evaluate(F, a):
     return out
 
 
+SELFTEST_WINDOWS = {"schema": WINDOW_SCHEMA, "version": "selftest (invented)", "payers": [
+    {"id": "testpay_wn", "label": "TESTPAY WN", "match": {"payer_ids": ["T0054"]},
+     "first_filing": {"days": 90, "from": "dos", "source": "invented for the self-test"},
+     "appeals": [{"level": 1, "days": 60, "from": "remit", "source": "invented for the self-test"},
+                 {"level": 2, "days": 60, "from": "decision", "source": "invented for the self-test"}]},
+    {"id": "testpay_wnx", "label": "TESTPAY WNX", "match": {"payer_ids": ["T0055"]},
+     "appeals": [{"level": 1, "days": 30, "from": "remit"}]}]}
+
+
 def selftest():
     F = build_selftest_store()
     F.expect_units_billed[("ZZ11JJJJ1", "11103", "G", "2026-08-04")] = 2
     raw = load(F.con)
-    a = Audit(raw, "2026-11-23", log=lambda *x: None).run()
+    a = Audit(raw, "2026-11-23", log=lambda *x: None, windows=SELFTEST_WINDOWS).run()
     res = evaluate(F, a)
     fails = [r for r in res if not r[2]]
     by_fix = defaultdict(lambda: [0, 0])
@@ -5064,8 +6006,9 @@ def selftest():
         for name, fix, ok, detail in fails:
             print("   ", fix, "|", detail)
         return 1
-    print(f"SELFTEST PASSED: {len(res)} checks ({sum(1 for r in res if r[1] == 'A15 base')} from A15, "
-          f"{sum(1 for r in res if r[1] != 'A15 base')} new in A16)")
+    n15 = sum(1 for r in res if r[1] == "A15 base")
+    n17 = sum(1 for r in res if r[1].startswith("A17"))
+    print(f"SELFTEST PASSED: {len(res)} checks ({n15} from A15, {len(res) - n15 - n17} from A16, {n17} new in A17)")
     return 0
 
 

@@ -1,4 +1,5 @@
-"""Score push 2's worklist with the independent auditor (claim_audit_a16.py, rules A16) and compare it with A16's pass 1.
+"""Score a detection run's worklist with the independent auditor (claim_audit_a17.py, rules A17; AUDITOR=claim_audit_a16
+scores the same run with A16) and compare it with a pass-1 output when there is one.
 
 The auditor's truth is computed from the raw 835 / 837 / EMA weekly tables only (findings play no part in it), so the
 truth on p2/world_p2.sqlite is the truth of pass 1 (checked: the unit tables must be equal row for row).
@@ -14,7 +15,9 @@ Writes (private, mode 600, in p2/): out_p2/ (the auditor's own outputs for view 
 finding id, signal, status, state, verdicts S and W, pass-1 verdict), p2_lot.tsv (left-on-table units, both views and
 pass 1), p2_eval.json (every aggregate). Prints aggregates only.
 
-Usage: python3 -I -B p2_analyze.py
+Usage: AUDIT_DIR=PRIVATE_DIR [AUDITOR=claim_audit_a16] python3 -I -B p2_analyze17w.py WORLD_COPY TAG
+  AUDIT_DIR holds p2/ema_ledger.sqlite (the world's posting ledger) and, optionally, a16/pass1/audit_result.sqlite.
+  Outputs go to AUDIT_DIR/<rules>/p2/ (private, mode 600). AUDIT_AS_OF and AUDIT_TODAY override the two dates.
 """
 import copy
 import json
@@ -25,19 +28,22 @@ import sys
 import time
 from collections import Counter, defaultdict
 
+import importlib  # noqa: E402
+
 A = os.environ.get("AUDIT_DIR") or sys.exit("set AUDIT_DIR to the private audit folder (world copies, pass-1 results)")
 P2 = os.path.join(A, "p2")
-DB = sys.argv[1] if len(sys.argv) > 1 else os.path.join(P2, "world_p2.sqlite")
-LEDGER = os.path.join(P2, "ema_ledger.sqlite")
+DB = sys.argv[1] if len(sys.argv) > 1 else os.path.join(P2, "world.sqlite")
+LEDGER = os.environ.get("AUDIT_LEDGER") or os.path.join(P2, "ema_ledger.sqlite")
 TAG = sys.argv[2] if len(sys.argv) > 2 else "p2"
-OUTDIR = os.path.join(A, "a16", "p2")
-OUT = os.path.join(OUTDIR, "out_" + TAG)
+AUDITOR = os.environ.get("AUDITOR") or "claim_audit_a17"
 PASS1 = os.path.join(A, "a16", "pass1", "audit_result.sqlite")
-AS_OF = "2026-11-23"          # the auditor's as-of date (pass 1's)
-TODAY = "2026-11-24"          # the day push 2's run was dated (the released run's day too)
+AS_OF = os.environ.get("AUDIT_AS_OF") or "2026-11-23"      # the auditor's as-of date (pass 1's)
+TODAY = os.environ.get("AUDIT_TODAY") or "2026-11-24"      # the day the detection run was dated
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # plans/tools: claim_audit_a16
-import claim_audit_a16 as ca  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # plans/tools: the auditors
+ca = importlib.import_module(AUDITOR)
+OUTDIR = os.path.join(A, ca.RULES_VERSION.lower(), "p2")
+OUT = os.path.join(OUTDIR, "out_" + TAG)
 
 OPEN_ST = ("open", "in_progress", "appealed")
 
@@ -47,6 +53,8 @@ def ro(path):
 
 
 def pass1():
+    if not os.path.exists(PASS1):
+        return {}, []       # no pass-1 output in this folder: its columns stay empty
     c = ro(PASS1)
     v = {}
     for r in c.execute("select finding_id, signal, category, status, kind, verdict, sub, item_cents, truth_cents, "
