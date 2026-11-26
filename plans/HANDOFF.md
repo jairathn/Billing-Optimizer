@@ -42,15 +42,19 @@ a unit from its branch and progress file (the brief says what done means), or st
 Merge order when they finish: fix7d, fix7c, decisions, hook, deadlines, then a17's tool (each: merge into the integration
 commit, the full suite in the four environments from a frozen worktree of the merge commit, push to both branch names).
 
-The review (`plans/review_2026-11-26.md`, 37 findings in five areas; verifiers running) feeds the fix wave after the
-merges, as six fixers that do not edit the same functions: F1 ledger and takebacks (money-1, 2, 5, 6, 8, 9 and fix7e-a's
-voids, PLB/J1 in paid_proof, unpaired reversals, the Medicaid catch-all); F2 recoveries and closures (money-3, 4, 7, 10,
-11, privacy-3, which blocks the release once the hook's self-checks run, privacy-4, and fix7e-a's copay, $0 lines,
-J3490, supplement and second-payer items); F3 answers and the 837 (answers-1 to 7, fix7e-b); F4 the EMA side (fix7e-c);
-F5 people (people-1 to 6: the Paid amount box first); F6 hosts (hosts-1 to 4 and 6: the server's pending-analysis
-mark, supersession after a stopped cycle, diagnose on a stopped state folder, the takeback reference tie, Vercel memory
-with fix7a's summaries) and privacy-5 (runlog.caught in 41 new except blocks). Then the review's
-confirmed findings, A17 (running already), fix7e, the final every-claim trace and the release gates (section 0 below, "Then, in order").
+The review (`plans/review_2026-11-26.md`, 37 findings in five areas, every verdict in) feeds the fix wave after the
+merges. Its brief is `plans/briefs/2026-11-26_fixwave.md` (written 21:40 UTC): seven fixers with a table of the functions
+each owns, so they run side by side without editing the same code. F1 ledger and takebacks (money-1, 2, 5, 6, 8, 9,
+hosts-4, answers-5's paid_proof part, the voids, PLB/J1 in paid_proof, unpaired reversals); F2 recoveries and closures
+(money-3, 4, 7, 10, 11, the rest of privacy-3: proof rows that reconcile, privacy-4, J3490, $0 lines, the status-1
+supplement, the second payer's share above Medicaid's rate); F3a the 837 pass and sizing (answers-1, 3, 4, 5, 6 in the
+837 pass, units, SBR01, the dependent's id, the waiting and send-week views, the 837 rows in every story); F3b the
+exports, the twins and G8 (answers-1, 2, 3, 5, 7 on the exports' side and fix7e-c's twins and G8 parts); F4 the EMA side
+and the bare $0 rule everywhere (fix7e-c, C5, C6's copay, the Medicaid catch-all, "already worked" routed to call); F5
+people (people-1 to 6, the Paid amount box first) and decision 2's follow-ups (Medicaid members never billed, CO-only
+second payer to Done, the service year shown); F6 hosts (hosts-1, 2, 3, 5 and the A/R-only image check). F7 runs after
+they merge: privacy-5, every except block logs, with a repository test. Then A17 again, the final every-claim trace and
+the release gates (section 0 below, "Then, in order").
 
 ### Integrator's notes on what the units found (2026-11-26 20:45 UTC)
 - **privacy-3 is a merge blocker for the hook.** Its verifier refuted it only because nothing runs the self-check at
