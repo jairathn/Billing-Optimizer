@@ -676,6 +676,41 @@ def test_a_takeback_on_an_item_of_its_own_is_not_worked_again_on_another_payers_
     w.store.close()
 
 
+@pytest.mark.parametrize("wo,listing", [("517.60", True), ("467.60", False)])
+def test_a_recoupment_listed_on_its_own_carries_what_it_took_from_a_claim_in_part(tmp_path, kind, wo, listing):
+    """Medicaid denies the whole of claim C017 in April; Medicare, the first payer, pays its 99214 $117.60 and its 11102
+    $450.00 in May, then withholds `wo` naming C017 from an August check that pays another patient. The ledger takes the
+    11102's $450.00 and part of the 99214's payment: C017 is a claim the recoupment took from only in part, so there is no
+    TAKEBACK line item, and a recoupment of $500 or more keeps its own listing at its whole amount (match it to the
+    payer's letter). That listing carries what it took: Medicaid's denial still rests on Medicare's payments (done, the
+    takeback named), never the same money worked twice. A recoupment under $500 has no listing of its own: the takeback
+    is on no item, and Medicaid's denial is not done on the payments it took."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301", **KY)
+    w.remit([clm(f"{BILL}C017", "4", "723.65", "0.00", sv("99214", "223.65", "0.00", 1, "CAS*CO*22*223.65~")
+                 + sv("11102", "500.00", "0.00", 1, "CAS*CO*22*500.00~"), payer_ctl="PC300D")], "20260415", **MCD)
+    w.remit([clm(f"{BILL}C017", "1", "723.65", "567.60", sv("99214", "223.65", "117.60", 1, "CAS*CO*45*106.05~", allowed="117.60")
+                 + sv("11102", "500.00", "450.00", 1, "CAS*CO*45*50.00~", allowed="450.00"), payer_ctl="PC300M")], "20260520", **KY)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C017*{wo}~", **KY)
+    w.run("r1", today="2026-09-20")
+    rows = w.rows(f"COALESCE(stale, 0) = 0 AND (patient_control_number LIKE '{BILL}%' OR signal = 'TAKEBACK')")
+    print(wo, brief(rows), [(r["signal"], r["work_state"], r["state_basis"]) for r in rows])
+    assert not [r for r in rows if r["signal"] == "TAKEBACK" and r["line_key"]], "a claim taken from in part has no TAKEBACK line item"
+    own = [r for r in rows if r["signal"] == "TAKEBACK" and not r["line_key"]]
+    assert bool(own) is listing, brief(own)
+    taken = {r[0] for r in w.store.conn.execute("SELECT listed FROM ledger_taken")}
+    assert taken == ({1} if listing else {0}), taken
+    mcd = [r for r in rows if r["signal"] != "TAKEBACK" and "Medicaid" in (r["payer_group"] or "")]
+    assert mcd, "Medicaid's denial is an item"
+    if listing:
+        assert all(r["work_state"] == "done" for r in mcd), [(r["work_state"], r["state_basis"]) for r in mcd]
+        assert all("worked on its own takeback item" in (r["state_basis"] or "") for r in mcd), [r["state_basis"] for r in mcd]
+    else:
+        assert all(r["work_state"] != "done" for r in mcd), [(r["work_state"], r["state_basis"]) for r in mcd]
+    w.store.close()
+
+
 def test_a_takeback_no_item_carries_leaves_the_payment_unmarked(tmp_path, kind):
     """The control of the test above: the payer answers the service again after its payment (a duplicate denial), so no
     TAKEBACK item carries the takeback (that answer is the work): the ledger leaves it unmarked and the payment proves

@@ -73,44 +73,57 @@ states.py `paid_proof` and its helpers, `paid_first_elsewhere` (and the branches
   items' proofs and names it ("...; KY MEDICARE took $117.60 of it back later, worked on its own takeback item"). An
   unlisted takeback (the service answered again since: that answer is the work) still pays nothing. Tests:
   `test_a_takeback_on_an_item_of_its_own_is_not_worked_again_on_another_payers_denial` (WO, J1) and its control
-  `test_a_takeback_no_item_carries_leaves_the_payment_unmarked`. Every residual fix broken and restored (breaks.py:
-  R1 12 failed, R1 listed 4, R2 2, R3 4; restored 122 passed).
+  `test_a_takeback_no_item_carries_leaves_the_payment_unmarked`, and for the recoupment's own listing
+  `test_a_recoupment_listed_on_its_own_carries_what_it_took_from_a_claim_in_part` ($517.60 listed: the denial done with
+  the takeback named; $467.60, under $500, not listed: the denial not done). Every residual fix broken and restored
+  (breaks.py: R1 12 failed, R1 listed 4, R2 2, R3 4; restored 122 passed; the partial-claim mark separately: 2 failed,
+  restored 4 passed).
 
 ## Half done
-- The measurement again with the listed fix (the first run's numbers are under "Measured"), then the hand traces of
-  whatever else moves, then delete the world copy (`$U/p2/world.sqlite*`, the tip_tree and branch_tree worktrees).
+- (nothing: the full suite in python3 and in 3.11.1/SQLite 3.40 is running at the time of writing; see "Tests")
 
 ## Next
-1. Re-measure the branch (commit, `git -C $U/branch_tree checkout --detach <commit>`, `KEEP_WORLD=1 $U/measure.sh
-   $U/branch_tree branch2`, `compare.py snap_tip snap_branch2`), trace the moves, fill "Measured".
-2. Suites (touched files, then the full suite in python3 and in 3.11.1/SQLite 3.40), merge the integration tip again,
-   final push, report.
+1. When the suites pass: merge the integration tip again (`git fetch origin && git merge origin/claude/ecstatic-fermi-orfcgo`),
+   rerun tests/test_fx_ledger.py, final push, report.
 
 ## Measured
-First run (2026-11-26 22:44 to 22:53 UTC; world copy of store 11-24 with EMA's reports, server cycle, today 2026-11-24):
-tip = integration 993f440 (fix7d merged; plans 5eb528e), branch = 624bf75 (that tip merged) + 6e32766 (residuals) +
-the uncommitted findings fixes of 7993e16 (all committed by then). Detection 259 s (tip) and 275 s (branch), peak 1,056 MB.
-- 22 items moved, $2,768.96 (signal, payer group, items, dollars):
-  - TAKEBACK vanished 8, $1,135.80: Humana Medicare Advantage 7 ($1,092.92), UMR 1 ($42.88). Takebacks of charges the
-    practice voided (6 by EMA's posted void, 2 by an 837 void after the payment). A17: all 8 already done (VOIDED).
-  - TAKEBACK appeared 6, $145.39: Humana 5 ($120.89), Humana Medicare Advantage 1 ($24.50). Second payers' shares taken
-    back in full (money-2). A17 calls them already done (its unit counts a taken-back second share as moved to the
-    patient or paid); EMA shows one of them, $34.41, still open on the line.
-  - DENIED_DUPLICATE_UNPAID done -> expired 4, $562.61 (Humana Medicare Advantage): the payment the duplicate denial
+Final run (2026-11-26 23:10 to 23:19 UTC) on a fresh private world copy (store 11-24 with EMA's reports, server cycle,
+today 2026-11-24). Tip = the integration branch at 993f440 (fix7d merged) with plans 5eb528e; branch = 8bf4493, which
+merged that same tip (624bf75); the integration branch has not moved since, so no other merge is in either side.
+Detection 259 s (tip) and 240 s (branch), peak 1,057 MB both. (A first run at 22:44 measured 6e32766 + the findings
+fixes: the same moves plus one wrong one, the Medicaid denial fixed since; its hand trace is below.)
+- 21 items moved, $2,722.84 (signal, payer group, items, dollars):
+  - TAKEBACK vanished 8, $1,135.80: Humana Medicare Advantage 7 ($1,092.92), UMR 1 ($42.88): takebacks of charges the
+    practice voided (6 by EMA's posted void, $1,080.44; 2 by an 837 void after the payment, $55.36). A17: all 8
+    already done (VOIDED).
+  - TAKEBACK appeared 6, $145.39: Humana 5 ($120.89), Humana Medicare Advantage 1 ($24.50): second payers' shares taken
+    back in full (money-2). A17 calls them already done (its unit counts a taken-back second share as paid or moved to
+    the patient); EMA still shows one of them open on the line.
+  - DENIED_DUPLICATE_UNPAID done -> expired 4, $562.61 (Humana Medicare Advantage): the payment each duplicate denial
     rested on was taken back by a WO naming the claim, and no other item carries that takeback (the PLB residual).
-  - CLAIM_DENIED_UNPAID done -> expired 1, $23.31 (Medicaid KY): WRONG, fixed since (the listed takeback above).
-  - REJECTED_PRE_PAYER done -> work now 3, $879.04: Humana Medicare Advantage 2 ($457.74), Medicaid IN 1 ($421.30).
-    answers-5: the only payment was made before the item's send, or paid one service of the claim and not the drug.
+  - REJECTED_PRE_PAYER done -> work now 3, $879.04: Humana Medicare Advantage 2 ($457.74), Medicaid IN 1 ($421.30)
+    (answers-5: the payment cited came before the item's send, or paid one service of the claim and not the drug).
 - A17 classes, W view, in scope (items, dollars), tip -> branch:
-  - Work now correct 1316 $213,547.49 -> 1318 $214,005.23; already done 590 $33,716.42 -> 588 $33,661.06; already worked
-    27 $4,689.95 -> same; duplicate 5 $1,296.14 -> same; wrong amount 223 $15,539.93 -> 224 $15,961.23; undecided 40
-    $7,700.45 -> same; closed wrongly 1 $76.87 -> same; closed correct 2618 -> 2615.
+  - Work now: correct 1316 $213,547.49 -> 1318 $214,005.23; already done 590 $33,716.42 -> 588 $33,661.06; already
+    worked 27 $4,689.95 -> same; duplicate 5 $1,296.14 -> same; wrong amount 223 $15,539.93 -> 224 $15,961.23 (the
+    Medicaid IN claim, sized at Medicaid's full rate: F3a's sizing residual); undecided 40 $7,700.45 -> same.
+  - Closed: correct 2618 -> 2615 (the 3 rejected claims are listed now); closed wrongly 1 $76.87 -> same; wrong amount
+    127 $14,035.40 -> same.
   - Money left on the table (lot W, denied, in scope): 346 claims, 929 units, $50,333.20 -> 343, 528, $49,502.96.
-- Ledger meta (Data tab, REVERSALS_NOT_ON_FILE_META): the reversals of payments not on file, 190 lines dated within the
-  archive (as on the tip) and 967 older (994 on the tip: 27 now paired under another name of the payer's company); the
-  recoupments that take back no payment on file, new: 18 claims $1,104.44 within the archive and 34 claims $3,355.62
-  older, 44 entries each. (The reviewer's 36 entries $7,885.80 counted WO under $500 with no payment before them on the
-  11-24 copy, before CS/72 netting and money-5's budget: not the same measure.)
+- Ledger meta (the Data tab's REVERSALS_NOT_ON_FILE_META): reversals of payments not on file, 190 lines within the
+  archive (as on the tip) and 967 older (994 on the tip: the 27 reversals under another name of the payer's company now
+  pair, $1,684.33); recoupments that take back no payment on file, new: 18 claims $1,104.44 within the archive and 34
+  claims $3,355.62 older (44 entries each). The reviewer's measure (WO under $500 naming one claim on file with no
+  payment of it before the WO) gives 37 entries $7,544.39 on this copy (36, $7,885.80 on theirs): 29 of them ($6,333.25)
+  are cancelled by the payer's own CS, 72 or FB entries naming the same claim (nothing withheld, net); of the other 8
+  ($1,211.14) the ledger took money from a payment of the same claim for 6, and 2 took nothing and are in the new count.
+- ledger_taken on the real copy: 342 payments a recoupment took from ($32,988.19), 67 of them ($12,309.71) listed on an
+  item of their own (58 TAKEBACK line items; the rest under a recoupment's own listing).
+- Hand trace (private, `$U/trace_moves.txt` and `$U/hand_trace_verdicts.txt`): all 22 items the first run moved, from
+  the raw rows (835 lines and CAS, PLB entries naming the claim, 837 sends, EMA's lines), relative days only. 20 right
+  (one of them with the amount wrong, F3a's sizing), 1 wrong (the Medicaid denial: fixed by ledger_taken.listed, and the
+  final run moves it back to done with the takeback named), 1 unclear (a duplicate denial whose remittance also
+  withholds the same amount naming the claim: only the payer's letter says whether the payment stands).
 
 ## Needs from others
 Each with its failing test in `plans/progress/fx-ledger_needs/` (named need_*.py so the suite does not collect it; copy it
