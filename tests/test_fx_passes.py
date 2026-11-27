@@ -261,3 +261,106 @@ def test_an_older_exports_bill_is_still_chased_when_the_newer_bill_answered_is_a
     found = _chased(s, "t1")
     assert "CB0000E83C017" in found, sorted(found)
     s.close()
+
+
+# ======================================================================================= the 837's own patient
+def _bc_volume(s) -> None:
+    """Blue Cross's remittances that reach May 1 (its usual 99214 at $110)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import remit as raw_remit
+    for n in range(25):
+        raw_remit(s, trace=f"BC{n:05d}", paid_on="2026-05-01", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(200 + n), "status": "1", "member": f"MB{n:08d}", "last": "VOLUME", "first": f"B{n}",
+                           "lines": [("2026-04-20", "99214", 200, 110, [("CO", "45", 90)])]}])
+
+
+BC = ("BLUE CROSS TEST", "BCT01")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("named", ["same", "other"])
+def test_an_837_that_names_its_patient_takes_the_ema_claim_charged_before_its_send(tmp_path, kind, ema_env, named):
+    """(answers-7, the review's test made decidable by the 837's own patient) Only the 837s know claim F.claim_id(91): a
+    99214 at $200, visit March 2, sent to Blue Cross March 20; EMA charged it March 3 as EMA claim 91 (patient 'Sample,
+    Bravo Q', born July 14, 1961), nothing posted, the A/R pairs no claim id with it. Another patient's EMA claim 92 of the
+    same day, code and charge was paid April 10, so EMA's claim cannot be told by content alone. No remittance names the
+    patient; the 837 does (its subscriber loop, no patient loop): SAMPLE BRAVO born 1961-07-14 ('same'), and the claim keeps
+    EMA claim 91: one item. Naming another person ('other'), EMA claim 91 is not this claim's: both stay listed."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay
+    s, lg = _ema_store(tmp_path, kind)
+    rows = [charge(F.link_no(91), cpt="99214", amount=200, patient=1, posted=D(2026, 3, 3)),
+            charge(F.link_no(92), cpt="99214", amount=200, patient=2, posted=D(2026, 3, 3)),
+            pay(F.link_no(92), "PAPER-92", 110, cpt="99214", patient=2, posted=D(2026, 4, 10))]
+    denial_world(s, lg, tmp_path, rows)
+    _bc_volume(s)
+    sub = ("SAMPLE", "BRAVO", "19610714") if named == "same" else ("OTHERPERSON", "ZED", "19700101")
+    send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")], payer=BC, member="MEMBER000091",
+                              subscriber=sub)], "20260320")
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [dict(r) for r in s.query("SELECT patient_control_number, ema_link, source FROM findings WHERE signal='NO_ANSWER' "
+                                    "AND COALESCE(stale,0)=0")]
+    own = [g for g in got if g["patient_control_number"] == F.claim_id(91)]
+    g8 = [g for g in got if g["ema_link"] == F.link_no(91) and g["source"] != "837"]
+    if named == "same":
+        assert len(own) == 1 and own[0]["ema_link"] == F.link_no(91) and not g8, (own, g8)
+    else:
+        assert len(own) == 1 and own[0]["ema_link"] is None and len(g8) == 1, (own, g8)
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_send_day_twins_of_two_patients_are_told_apart_by_their_837s(tmp_path, kind, ema_env):
+    """(The send-day twins, with the 837's own patient) Claims F.claim_id(67) and F.claim_id(68), two patients' 99204 at $250
+    for March 2 visits, went to Blue Cross March 4; only the 837s know them. EMA holds two claims of that day, code, charge
+    and payer, charged March 4: patient 1's (Sample, Bravo Q), paid April 12, and patient 2's (Example, Charlie Jr), with
+    nothing posted. Without a name the two cannot be told apart and both stay listed (tests/test_837_sends.py). Each 837
+    names its patient (SAMPLE BRAVO; EXAMPLE CHARLIE): claim 67 is answered by its own EMA claim, and claim 68 is listed
+    once, with its own EMA claim (Production's check does not list that claim again)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay
+    s, lg = _ema_store(tmp_path, kind)
+    sent = D(2026, 3, 4)
+    rows = [charge(F.link_no(67), cpt="99204", amount=250, patient=1, posted=sent),
+            pay(F.link_no(67), "PAPER-67", 130, cpt="99204", patient=1, posted=D(2026, 4, 12)),
+            charge(F.link_no(68), cpt="99204", amount=250, patient=2, posted=sent)]
+    denial_world(s, lg, tmp_path, rows)
+    _bc_volume(s)
+    send(s, tmp_path, [clm837(F.claim_id(67), [("99204", "250.00", "20260302")], payer=BC, member="MEMBER000067",
+                              subscriber=("SAMPLE", "BRAVO", None)),
+                       clm837(F.claim_id(68), [("99204", "250.00", "20260302")], payer=BC, member="MEMBER000068",
+                              subscriber=("EXAMPLE", "CHARLIE", None))], "20260304")
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [dict(r) for r in s.query("SELECT patient_control_number, ema_link, source FROM findings WHERE signal='NO_ANSWER' "
+                                    "AND COALESCE(stale,0)=0")]
+    assert not [g for g in got if g["patient_control_number"] == F.claim_id(67) or g["ema_link"] == F.link_no(67)], got
+    mine = [g for g in got if g["patient_control_number"] == F.claim_id(68) or g["ema_link"] == F.link_no(68)]
+    assert len(mine) == 1 and mine[0]["source"] == "837" and mine[0]["ema_link"] == F.link_no(68), mine
+    s.close()
+
+
+# ======================================================================================= F8's observations
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_send_to_a_medicaid_plan_sharing_a_payer_id_is_that_medicaid_plans(tmp_path, kind):
+    """(Observed by F8 on the 11-24 copy) Payer id TST99 is a company's: three claims sent under it named SAMPLE HEALTH PLAN
+    were answered as primary by its commercial plan (AMBETTER TEST PLAN). Its Indiana Medicaid managed-care plan shares
+    the id: claim CB0000P02 went to INDIANA MEDICAID TEST PLAN under TST99 and no payer answered it. The send is the
+    Medicaid plan's (its windows apply), not the id's commercial majority; a send named SAMPLE HEALTH PLAN under the same id
+    (CB0000P03, the control) stays the commercial plan's."""
+    s = _store(tmp_path, kind)
+    plan = ("SAMPLE HEALTH PLAN", "TST99")
+    send(s, tmp_path, [clm837(f"CB0000P1{n}C017", V, payer=plan) for n in range(3)]
+         + [clm837("CB0000P02C017", V, payer=("INDIANA MEDICAID TEST PLAN", "TST99")), clm837("CB0000P03C017", V, payer=plan)],
+         "20260915")
+    _remits(s, tmp_path, [answer(f"CB0000P1{n}C017") for n in range(3)], "20261110", payer="AMBETTER TEST PLAN", payer_id="TST99")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    assert found["CB0000P02C017"]["payer_group"] == "Medicaid IN", found["CB0000P02C017"]["payer_group"]
+    assert found["CB0000P03C017"]["payer_group"] == "Ambetter (Centene)", found["CB0000P03C017"]["payer_group"]
+    s.close()

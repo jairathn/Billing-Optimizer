@@ -7300,14 +7300,20 @@ class Detector:
 
         def group_of(r: list) -> tuple[str, str]:
             """The payer group and kind a claim went to: the VA's network by its payer id (named after its administrator),
-            else what the same member's answered claims to that payer id were, else what most claims sent under the id
-            were answered as, else the 837's payer name."""
+            else what the same member's answered claims to that payer id were, else a Medicaid plan the 837's payer name
+            names, else what most claims sent under the id were answered as, else the 837's payer name."""
             pid = (r[4] or "").strip().upper()
             if pid in VA_PAYER_IDS:
                 return VA_GROUP
             sv = sub_votes.get((r[4], r[8]))
             if sv:
                 return sv.most_common(1)[0][0]
+            # a send whose payer name says Medicaid is that Medicaid plan's, whatever product most claims sent under the
+            # payer id were answered as: a company's Medicaid managed-care plan can share its commercial or Medicare
+            # Advantage plan's payer id, and the Medicaid plan's own windows apply (observed by the fix wave's F8)
+            own = normalize_payer(r[5]) if r[5] else None
+            if own and own[1] == "medicaid":
+                return own
             v = id_votes.get(r[4])
             if v:
                 top, n = v.most_common(1)[0]
@@ -8330,7 +8336,7 @@ class Detector:
             if not keys:
                 continue                    # nothing names the patient: the claim's own EMA claim may be an answered one,
                                             # which is no candidate, and the one left another patient's (fx-exports-r1-4, r2-6)
-            if done.get(cid, set()) & (own | weak):
+            if done.get(cid, set()) & keys:
                 continue                    # an EMA claim of its lines that names its patient was answered: maybe its own
             if not own and len(xs) > 1:
                 continue                    # a member id's one remitted name never chooses among several
@@ -9598,22 +9604,9 @@ class Detector:
             cds += [{"pcn": p, "b": bill_of(p), "items": [], "k": {"member": members.get(n837[p]["key"])}} for p in p837]
             answers = {cd["pcn"]: {"link": cd.get("ema_link") if cd["pcn"] in info else n837[cd["pcn"]]["f"].get("ema_link")}
                        for cd in cds}
+            # (_who reads each claim's patient as the 837 pass does, _837_patients: the patient its bill's 837s name where
+            # the reader kept it, its bill's remittances, and EMA's patient for the bill through the EMA claim found for it)
             who = self._who(cds, answers)
-            # the 837 pass's own view of each of its claims' patient (_837_patients: the patient its 837 names where the
-            # reader kept it, else its bill's remittances and EMA's patient for the bill), with what _who reads besides (the
-            # EMA claim a bridge found for it): one patient's two bills are matched as the 837 pass matched them
-            rows = {p: [n837[p]["sent"], n837[p]["sent"], "", False, None, None, None, n837[p]["key"],
-                        members.get(n837[p]["key"]), 0] for p in p837}
-            for p, w in (self._837_patients(rows) or {}).items():
-                got = who.setdefault(p, {})
-                got["names"] = set(got.get("names") or ()) | set(w.get("names") or ())
-                got["persons"] = set(got.get("persons") or ()) | set(w.get("persons") or ())
-                if w.get("member"):
-                    got["members"] = set(got.get("members") or ()) | {w["member"]}
-                if w.get("from") == "837" and w.get("persons"):
-                    pp = got.setdefault("pairs", {})
-                    for n in w.get("names") or ():
-                        pp[n] = set(pp.get(n) or ()) | set(w["persons"])
             for e, ps in pairs.items():
                 same = {p for p in ps if self._one_patient(who.get(e) or {}, who.get(p) or {})}
                 if same:
