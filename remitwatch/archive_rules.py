@@ -72,7 +72,7 @@ from functools import lru_cache
 from statistics import median
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .codes import carc_text, code_category, is_unlisted, payer_group_kind, rarc_text
+from .codes import carc_text, code_category, component_of, is_unlisted, payer_group_kind, rarc_text
 
 CHUNK = 500
 PAYMENT_STATUSES = ("1", "2", "3", "19", "20", "21")
@@ -296,9 +296,13 @@ class Archive:
     def answers_of(self, a: Ans) -> list[Ans]:
         """Every answer on the item's service: its bill, the code the practice billed (whatever code the payer answered
         under) and its date of service, oldest first. A line billed under another code is another service, even where the
-        payer answered both under one code (77600 recoded to 77436 beside a billed 77436)."""
+        payer answered both under one code (77600 recoded to 77436 beside a billed 77436). A line billed for one part of
+        the service (the reading, 26, or the technical part, TC) is answered only by answers of that part or of the whole
+        service, and the whole service only by answers of the whole: a TC payment pays nothing of the reading (T-C1,
+        review money-7; the detector counts two parts paid as the whole service, the rules here leave that to it)."""
         code = a.billed_code
-        out = {x.line_key: x for x in self.service(a.bill, code, a.dos) if x.billed_code == code}
+        want = component_of(a.mods)
+        out = {x.line_key: x for x in self.service(a.bill, code, a.dos) if x.billed_code == code and _answers_part(component_of(x.mods), want)}
         out[a.line_key] = a
         return sorted(out.values(), key=lambda x: (x.paid_on or "", x.trace or "", x.line_key))
 
@@ -602,6 +606,12 @@ def _name_key(name: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(name or "").upper())
 
 
+def _answers_part(got: str, want: str) -> bool:
+    """Whether an answer for part `got` of a service (component_of: '26', 'TC', or '' for the whole) is an answer of a
+    line billed for part `want`: the same part, or the whole service answering a part (T-C1)."""
+    return got == want or (got == "" and want != "")
+
+
 def _two_plans(a, b) -> bool:
     """Two plans of one company: the claim filing indicators make them different kinds (its Medicaid plan and its
     Medicare Advantage plan, or its commercial plan), whatever name or payer id they share. A kind the rules do not
@@ -731,6 +741,12 @@ def _group_of(a: Ans, x: Ans, gm: tuple) -> tuple | None:
         if len(same) == 1:
             k = same[0]
     return k
+
+
+def _answer_sig(a: Ans) -> tuple:
+    """One answer of a line, as a second delivery of it repeats it (fold_repeat_denials): the claim id, status, code,
+    date, modifiers, charge, payment and every reason with its amount."""
+    return (a.pcn, a.status, a.code, a.dos, tuple(sorted(a.mods or ())), a.charge, a.paid, tuple(sorted(a.adj or ())))
 
 
 def _attribute(a: Ans, x: Ans, gm: tuple | None = None) -> str:
@@ -2173,12 +2189,27 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
     for f, a in _line_items(items, arch, zero_paid=True, categories=("denial", "bundling", "downcoding")):
         # one billed line: two lines of one code on a claim (77401 and 77401-59) are two units, never repeats of each other
         groups[(a.bill, a.billed_code, a.dos, _line_identity(a, arch), a.group or a.payer)].append((f, a))
-    # each payer's newest answer of each line: its newest listings that are not a copy's denial (else its newest)
+    # each payer's newest answer of each line: its newest listings that are not a copy's denial (else its newest). The same
+    # answer delivered again the same day on another remittance (the very same claim id, status, code, date, modifiers,
+    # charge, payment and reasons) is no unit of that answer: it folds into the first delivery, a worked one first (review
+    # money-11; detect._answer_copies passes most such deliveries by, under one payer id)
+    if worked is None:
+        worked = worked_ids(conn, [f["finding_id"] for v in groups.values() if len(v) > 1 for f, _a in v])
     heads: dict[tuple, tuple[list, str]] = {}
+    again: dict[int, tuple] = {}            # id(item) of a delivery again -> the first delivery it folds into
     for k, v in groups.items():
         pool = [p for p in v if not _copy_denial(p[1])] or v
         newest = max((a.paid_on or "") for _f, a in pool)
-        heads[k] = (sorted((p for p in pool if (p[1].paid_on or "") == newest), key=lambda p: (p[1].trace or "", p[1].line_key)), newest)
+        first: dict[tuple, tuple] = {}
+        for p in sorted((p for p in pool if (p[1].paid_on or "") == newest),
+                        key=lambda p: (p[0]["finding_id"] not in worked, p[1].txn or "", p[1].trace or "", p[1].line_key)):
+            sig = _answer_sig(p[1])
+            if sig in first and first[sig][1].txn != p[1].txn:
+                again[id(p[0])] = first[sig]
+            else:
+                first.setdefault(sig, p)
+        heads[k] = (sorted((p for p in pool if (p[1].paid_on or "") == newest and id(p[0]) not in again),
+                           key=lambda p: (p[1].trace or "", p[1].line_key)), newest)
     # a payer that said the line is not its to pay hands it to the payer that answered it since
     moved: dict[tuple, tuple] = {}
     for k, (carriers, newest) in heads.items():
@@ -2188,21 +2219,24 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
                  and not any(_same_payer_loose(a2, a) for _f2, a2 in h[0] for _f, a in carriers)]
         if later:
             moved[k] = max(later, key=lambda kh: (kh[1][1], str(kh[0][4] or "")))[1][0][0]
-    folding = [p for k, v in groups.items() if len(v) > 1 or k in moved for p in v]
-    if worked is None:
-        worked = worked_ids(conn, [f["finding_id"] for f, _a in folding])
+    lone = [f["finding_id"] for k, v in groups.items() if len(v) < 2 and k in moved for f, _a in v]
+    if lone:
+        worked = set(worked) | set(worked_ids(conn, lone))
     out = []
     for k, v in groups.items():
         if len(v) < 2 and k not in moved:
             continue
         carriers, _newest = heads[k]
         here = k not in moved
-        carrier, carrier_ans = moved[k] if not here else carriers[0]
         for f, a in sorted(v, key=lambda p: (p[1].paid_on or "", p[1].line_key)):
             if here and any(f is c for c, _x in carriers):
                 continue                # the lines of the payer's newest answer stay as they are
+            carrier, carrier_ans = (again[id(f)] if id(f) in again else moved[k] if not here else carriers[0])
             what = f"{_reasons_text(a)} on {a.paid_on}"
-            if not here:
+            if id(f) in again:
+                note = (f"The payer delivered this same answer ({what}) twice the same day, on two remittances: it is one answer, "
+                        f"and this listing is part of the first delivery's item.")
+            elif not here:
                 note = (f"{a.payer_name or 'The payer'} said this service is not its to pay ({what}); {carrier_ans.payer_name or 'another payer'} "
                         f"answered it since, on {carrier_ans.paid_on}: that answer is the one to work, and this listing is part of its item.")
             elif _copy_denial(a) and not _copy_denial(carrier_ans):

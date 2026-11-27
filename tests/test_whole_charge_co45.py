@@ -4,7 +4,9 @@
   the claim and lists the line as CO-45 for the whole charge;
 - the practice billed the service again under another code, and the payer paid that code (a code corrected after a
   coding remark, or another code of the same kind);
-- the payer has no rate for the code: it never allowed or paid it.
+- (no longer: fix wave F2, review privacy-4) the payer has no rate for the code, as it never allowed or paid it. That
+  line is listed after all, marked as a code the payer never paid (evidence payer_has_no_rate): the owner's decision 4
+  pursues codes a payer rarely pays, and rule 2 gives every write-off an owner.
 Each was listed on Work now (the auditor's already-done items). Everything here is invented: names, member numbers, claim
 ids, payer claim numbers, traces and amounts. Each test runs on both kinds of store."""
 from __future__ import annotations
@@ -77,8 +79,10 @@ def test_a_code_corrected_after_the_payers_coding_remark_and_paid_is_no_denial(t
 
 
 def test_a_payer_with_no_rate_for_the_code_makes_no_denial_but_one_that_pays_it_does(tmp_path, kind):
-    """The plan never allowed or paid 11401: its CO-45 for the whole charge is how it answers a code it has no rate for,
-    not a denial. The same plan paid 99213 before: its CO-45 for a whole 99213 charge is still a denial in all but name."""
+    """The plan never allowed or paid 11401: its CO-45 for the whole charge is how it answers a code it has no rate for.
+    It is listed all the same, marked as a code the payer never paid, for a person or the owner's policy to decide (fix
+    wave F2, review privacy-4: it was dropped with no item and no dollar count). The same plan paid 99213 before: its CO-45
+    for a whole 99213 charge is a denial in all but name."""
     w = World(tmp_path, kind)
     w.remit([clm("CB0000500C001", "1", "146.00", "60.00", sv("99213", "146.00", "60.00", 1, "CAS*CO*45*86.00~", dos="20260210", allowed="60.00"),
                  payer_ctl="PR0", dos="20260210")], "20260301", **PINE)
@@ -86,6 +90,7 @@ def test_a_payer_with_no_rate_for_the_code_makes_no_denial_but_one_that_pays_it_
              clm("CB0000600C017", "1", "146.00", "0.00", sv("99213", "146.00", "0.00", 1, "CAS*CO*45*146.00~"), payer_ctl="PR2")],
             "20260415", **PINE)
     det = w.run("r1")
-    assert [r["procedure_code"] for r in co45_items(w)] == ["99213"], [(r["procedure_code"], r["patient_control_number"]) for r in co45_items(w)]
+    got = {r["procedure_code"]: bool(json.loads(r["evidence"]).get("payer_has_no_rate")) for r in co45_items(w)}
+    assert got == {"11401": True, "99213": False}, [(r["procedure_code"], r["patient_control_number"]) for r in co45_items(w)]
     assert det.ema_counts["co45_payer_has_no_rate"] == 1
     w.store.close()

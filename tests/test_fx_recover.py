@@ -208,6 +208,10 @@ def test_money11_a_denial_delivered_twice_the_same_day_is_one_item(tmp_path, kin
     listed = [r for r in rows if r.get("work_state") not in ("done",)]
     assert len(listed) == 1, (f"one denial delivered twice is {len(listed)} items, ${sum(r['shortfall_cents'] or 0 for r in listed)/100:.2f} "
                               "listed for one $117.60 service")
+    # under one payer id the second delivery makes no item at all (the detector passes it by as a copy of the answer, and
+    # the self-check's vanished count knows it): no listing of it is folded into the item either
+    assert len(w.rows("patient_control_number='CB0000300C017'")) == 1, [(r["signal"], r["stale"]) for r in w.rows()]
+    assert not json.loads(listed[0]["evidence"]).get("folded"), json.loads(listed[0]["evidence"]).get("folded")
     w.store.close()
 
 
@@ -364,4 +368,191 @@ def test_privacy4_a_code_written_with_its_modifiers_in_the_code_field_is_not_a_c
     items = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000750C017"]
     print([(r["signal"], r["status"]) for r in items])
     assert items, "the payer paid 17263 before: its whole-charge CO-45 on '17263 76' is a denial"
+    assert not json.loads(items[0]["evidence"]).get("payer_has_no_rate"), "17263 was paid before: the payer has a rate for it"
+    w.store.close()
+
+
+def _proof_rows(s, pcn: str) -> tuple[dict, list[dict]]:
+    r = s.conn.execute("SELECT evidence FROM findings WHERE patient_control_number=? AND COALESCE(stale,0)=0", (pcn,)).fetchone()
+    ev = json.loads(r[0]) if r and r[0] else {}
+    return ev, list((ev.get("paid_later") or {}).get("proof") or [])
+
+
+def test_privacy3_the_patients_share_closure_carries_the_answer_lines_reconciled_to_the_cent(tmp_path, kind):
+    """The closure as the patient's share names the settling answer line: dated, on its claim and trace, its code,
+    charge, allowed, paid and every adjustment by group and reason; it adds up (charge = paid + adjustments; allowed =
+    paid + the patient's share), and has_proof finds the closure proven by it."""
+    s = _store(tmp_path, kind)
+    _add(s, tmp_path, _usual("12", "117.60") + [_clp("CB0000P01C017", "1", _line("0.00", "CAS*CO*16*223.65~LQ*HE*MA130~"))],
+         "20261001", **ANTHEM)
+    Detector(s, run_id="t1").run()
+    _add(s, tmp_path, [_again("CB0000P01C024", "CAS*PR*1*117.60~")], "20261110", **ANTHEM)
+    Detector(s, run_id="t2").run()
+    ev, rows = _proof_rows(s, "CB0000P01C017")
+    print(rows)
+    assert ev.get("settled_by", {}).get("how") == "processed to the patient's responsibility"
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["date"], row["claim"], row["code"], row["kind"]) == ("2026-11-10", "CB0000P01C024", "99214", "to_patient")
+    assert row["trace"] and row["charge_cents"] == 22365 and row["allowed_cents"] == 11760 and row["amount_cents"] == 0
+    assert sorted((a["group"], a["carc"], a["amount_cents"]) for a in row["adjustments"]) == [("CO", "45", 10605), ("PR", "1", 11760)]
+    assert selfcheck.answer_reconciles(row) and selfcheck.has_proof(ev)
+    s.close()
+
+
+def test_privacy3_the_secondary_closure_with_nothing_paid_carries_the_answer_lines(tmp_path, kind):
+    """Medicaid's answer as secondary (OA-23 the primary's payment applied, CO-45 its cut, nothing paid) is the proof:
+    charge $223.65 = paid $0 + OA-23 $70.00 + CO-45 $153.65."""
+    s = _store(tmp_path, kind)
+    _add(s, tmp_path, _usual("MC", "70.00") + [_clp("CB0000S01C017", "4", _line("0.00", COB), cfi="MC")], "20261001", **MEDICAID)
+    Detector(s, run_id="t1").run()
+    _add(s, tmp_path, [_clp("CB0000S01C017", "2", _second("0.00"), cfi="MC")], "20261110", **MEDICAID)
+    Detector(s, run_id="t2").run()
+    ev, rows = _proof_rows(s, "CB0000S01C017")
+    print(rows)
+    assert len(rows) == 1 and rows[0]["kind"] == "answer" and rows[0]["claim_status"] == "2"
+    assert sorted((a["group"], a["carc"], a["amount_cents"]) for a in rows[0]["adjustments"]) == [("CO", "45", 15365), ("OA", "23", 7000)]
+    assert selfcheck.answer_reconciles(rows[0]) and selfcheck.has_proof(ev)
+    s.close()
+
+
+def test_privacy3_settled_by_alone_or_with_rows_that_do_not_add_up_is_no_proof():
+    """has_proof accepts the payer's settling answer only when its rows are dated, on a claim, and add up to the cent."""
+    sb = {"payer": "Anthem / BCBS", "date": "2026-11-10", "claim": "CB0000P01C024", "how": "processed to the patient's responsibility"}
+    good = {"date": "2026-11-10", "claim": "CB0000P01C024", "kind": "to_patient", "charge_cents": 22365, "allowed_cents": 11760,
+            "amount_cents": 0, "adjustments": [{"group": "PR", "carc": "1", "amount_cents": 11760},
+                                               {"group": "CO", "carc": "45", "amount_cents": 10605}]}
+    later = {"payment_date": "2026-11-10", "claim": "CB0000P01C024", "paid_cents": 0}
+    assert not selfcheck.has_proof({"settled_by": sb, "paid_later": later})
+    assert selfcheck.has_proof({"settled_by": sb, "paid_later": dict(later, proof=[good])})
+    short = dict(good, adjustments=[{"group": "PR", "carc": "1", "amount_cents": 5000}, {"group": "CO", "carc": "45", "amount_cents": 10605}])
+    assert not selfcheck.has_proof({"settled_by": sb, "paid_later": dict(later, proof=[short])}), "$67.60 of the charge unexplained"
+    wrong_allowed = dict(good, allowed_cents=12000)
+    assert not selfcheck.has_proof({"settled_by": sb, "paid_later": dict(later, proof=[wrong_allowed])}), "allowed is not paid + the patient's share"
+    undated = dict(good, date=None)
+    assert not selfcheck.has_proof({"settled_by": sb, "paid_later": dict(later, proof=[undated])})
+    claim_level = {"date": "2026-11-10", "claim": "CB0000S01C017", "kind": "answer", "charge_cents": 22365, "allowed_cents": 7000,
+                   "amount_cents": 0, "adjustments": [{"group": "CO", "carc": "45", "amount_cents": 15365}],
+                   "claim_adjustments": [{"group": "OA", "carc": "23", "amount_cents": 7000}]}
+    assert selfcheck.answer_reconciles(claim_level), "a secondary's OA-23 put on its claim counts"
+
+
+def test_privacy3_an_answer_that_does_not_add_up_closes_nothing(tmp_path, kind):
+    """The corrected claim's answer puts $50.00 on the patient's deductible and $106.05 as CO-45 against a $223.65 charge:
+    $67.60 of it is unexplained. Nothing is closed on it: the denial stays listed, the hint says what does not add up."""
+    s = _store(tmp_path, kind)
+    _add(s, tmp_path, _usual("12", "117.60") + [_clp("CB0000P09C017", "1", _line("0.00", "CAS*CO*16*223.65~LQ*HE*MA130~"))],
+         "20261001", **ANTHEM)
+    Detector(s, run_id="t1").run()
+    _add(s, tmp_path, [_clp("CB0000P09C024", "1", _line("0.00", "CAS*PR*1*50.00~CAS*CO*45*106.05~", "117.60"))], "20261110", **ANTHEM)
+    det = Detector(s, run_id="t2")
+    det.run()
+    r = s.conn.execute("SELECT status, evidence FROM findings WHERE patient_control_number='CB0000P09C017' AND COALESCE(stale,0)=0").fetchone()
+    print(r[0] if r else None, det.ema_counts.get("settled_not_reconciled"))
+    assert r and r[0] == "open", "an answer that does not add up to the cent closed the item"
+    said = json.loads(r[1]).get("answer_not_reconciled") or {}
+    assert det.ema_counts.get("settled_not_reconciled") == 1 and "does not add up" in (said.get("text") or "")
+    assert said.get("proof") and not selfcheck.answer_reconciles(said["proof"][0])
+    s.close()
+
+
+def test_money11_a_denial_delivered_twice_the_same_day_under_two_payer_ids_folds_into_one_item(tmp_path, kind):
+    """The same denial of C017 arrives the same day on two remittances of one payer under two of its payer ids (the
+    detector's copies key on the payer id, so both deliveries make an item). Rule 7's fold keeps every line of the newest
+    day as units of that answer; a second delivery of the very same answer is no unit: it folds into the first."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_denied_line("CB0000300C017", carc="16", payer_ctl="PC300A")], "20260415", payer="ANTHEM", payer_id="ANTHM")
+    w.remit([visit_denied_line("CB0000300C017", carc="16", payer_ctl="PC300A")], "20260415", payer="ANTHEM", payer_id="ANTH2")
+    w.run("r1", today="2026-06-20")
+    rows = w.rows("patient_control_number='CB0000300C017' AND COALESCE(stale,0)=0")
+    listed = [r for r in rows if r["status"] == "open" and r.get("work_state") not in ("done",)]
+    print([(r["signal"], r["status"], r["work_state"], r["shortfall_cents"]) for r in rows])
+    assert len(listed) == 1, f"one denial delivered twice is {len(listed)} items"
+    w.store.close()
+
+
+def test_money11_control_two_denied_units_of_one_answer_stay_two_items(tmp_path, kind):
+    """The control: one remittance denies two lines of 17110 on the same claim (two lesions, two units of its answer).
+    Both stay listed: lines of one remittance are never copies of each other."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "17110", "177.56", "50.00"), "20260301")
+    two = clm("CB0000301C017", "1", "355.12", "0.00", sv("17110", "177.56", "0.00", 1, "CAS*CO*16*177.56~")
+              + sv("17110", "177.56", "0.00", 1, "CAS*CO*16*177.56~", mods="59"), payer_ctl="PC301")
+    w.remit([two], "20260415")
+    w.run("r1", today="2026-06-20")
+    rows = [r for r in w.rows("patient_control_number='CB0000301C017' AND COALESCE(stale,0)=0") if r["status"] == "open"]
+    print([(r["signal"], r["modifiers"], r["shortfall_cents"]) for r in rows])
+    assert len(rows) == 2, rows
+    w.store.close()
+
+
+def test_money7_a_second_payers_payment_of_another_part_is_no_share_of_the_recovery(tmp_path, kind):
+    """C017's 88305-26 is denied (CO-16). The corrected claim C024 is paid $24.00 for the 26 by the primary ($6.00 left as
+    coinsurance); the supplement then pays $12.00 for the TC (another part) and $6.00 for the 26. The reading recovered
+    $30.00: the supplement's TC payment pays nothing of it (with_second_shares by part)."""
+    w = World(tmp_path, kind)
+    _usual_parts(w)
+    w.remit([_part("CB0000300C017", "26", "0", "PC300A")], "20260415")
+    w.remit([clm("CB0000300C024", "1", "150.00", "24.00", sv("88305", "150.00", "24.00", 1, "CAS*CO*45*120.00~CAS*PR*2*6.00~",
+                                                            allowed="30.00", mods="26"), payer_ctl="PC300B")], "20260520")
+    w.remit([clm("CB0000300C024", "2", "150.00", "12.00", sv("88305", "150.00", "12.00", 1, "CAS*OA*23*138.00~", mods="TC"),
+                 payer_ctl="GP300A")], "20260525", **GAP)
+    w.remit([clm("CB0000300C024", "2", "150.00", "6.00", sv("88305", "150.00", "6.00", 1, "CAS*OA*23*144.00~", mods="26"),
+                 payer_ctl="GP300B")], "20260601", **GAP)
+    w.run("r1", today="2026-06-20")
+    r = w.rows("patient_control_number='CB0000300C017' AND procedure_code='88305' AND COALESCE(stale,0)=0")
+    print(brief(r))
+    assert r and r[0]["status"] == "resolved" and r[0]["recovered_cents"] == 3000, brief(r)
+    w.store.close()
+
+
+@pytest.mark.parametrize("mc_paid,mc_coins,gap_paid,gap_coins", [("84.00", "21.00", "21.00", "0")])
+def test_money4_the_recovery_is_the_gain_not_the_cap(tmp_path, kind, mc_paid, mc_coins, gap_paid, gap_coins):
+    """As money-4's case, but the appeal brings less than the shortfall: Medicare reverses its $64.00 and pays $84.00,
+    the supplement reverses its $16.00 and pays $21.00. The service held $80.00 after the downcode (the supplement's
+    share of it included) and holds $105.00 now: $25.00 recovered, though the shortfall is $37.60."""
+    pcn = "CB0000300C017"
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(101, 25, "99213", "160.00", "80.00"), "20260301", **KY)
+    w.remit([clm(pcn, "1", "223.65", "64.00", _svc4("99213", "223.65", "64.00", "CAS*CO*45*143.65~CAS*PR*2*16.00~", allowed="80.00"),
+                 payer_ctl="MC1")], "20260415", **KY)
+    w.remit([clm(pcn, "2", "223.65", "16.00", _svc4("99213", "223.65", "16.00", "CAS*OA*23*207.65~"), payer_ctl="GP1")], "20260425", **GAP)
+    w.remit([clm(pcn, "22", "-223.65", "-64.00", _svc4("99213", "-223.65", "-64.00", "CAS*CO*45*-143.65~CAS*PR*2*-16.00~", units=-1),
+                 payer_ctl="MC1"),
+             clm(pcn, "1", "223.65", mc_paid, _svc4("99214", "223.65", mc_paid, f"CAS*CO*45*118.65~CAS*PR*2*{mc_coins}~", allowed="105.00"),
+                 payer_ctl="MC2")], "20260701", **KY)
+    w.remit([clm(pcn, "22", "-223.65", "-16.00", _svc4("99213", "-223.65", "-16.00", "CAS*OA*23*-207.65~", units=-1), payer_ctl="GP1"),
+             clm(pcn, "2", "223.65", gap_paid, _svc4("99214", "223.65", gap_paid, "CAS*OA*23*202.65~"), payer_ctl="GP2")], "20260710", **GAP)
+    w.run("r1", today="2026-08-01")
+    rows = w.rows(f"patient_control_number='{pcn}'")
+    print(brief(rows))
+    med = [r for r in rows if r["payer_name"] == "KY MEDICARE" and r["category"] == "downcoding"]
+    assert med and med[0]["status"] == "resolved", brief(rows)
+    assert med[0]["shortfall_cents"] > 2500, med[0]["shortfall_cents"]
+    assert sum(r["recovered_cents"] or 0 for r in rows) == 2500, [(r["signal"], r["recovered_cents"]) for r in rows]
+    w.store.close()
+
+
+def test_money3_a_secondary_share_another_item_counted_is_not_counted_again_by_the_closure_as_secondary(tmp_path, kind):
+    """Medicare denies C017 (CO-16) and pays the corrected claim C024 $94.08, $23.52 coinsurance; Medicaid denies C024 for
+    coordination (CO-22), then processes it as secondary and pays the whole $23.52. The Medicare closure counts the
+    $23.52 as part of the service's recovery (its line is used); Medicaid's closure as secondary must not count it again
+    (one per-line ledger): $117.60 arrived, $117.60 recovered in all."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301", **KY)
+    w.remit([visit_denied_line("CB0000300C017", carc="16")], "20260415", **KY)
+    w.remit([clm("CB0000300C024", "1", "223.65", "94.08", sv("99214", "223.65", "94.08", 1, "CAS*CO*45*106.05~CAS*PR*2*23.52~", allowed="117.60"),
+                 payer_ctl="PC300B")], "20260520", **KY)
+    w.remit([clm("CB0000300C024", "1", "223.65", "0.00", sv("99214", "223.65", "0.00", 1, "CAS*CO*22*223.65~"), payer_ctl="MD300A")],
+            "20260610", **MCD)
+    w.remit([clm("CB0000300C024", "2", "223.65", "23.52",
+                 sv("99214", "223.65", "23.52", 1, "CAS*OA*23*94.08~CAS*CO*45*106.05~", allowed="117.60"), payer_ctl="MD300B")],
+            "20260701", **MCD)
+    w.run("r1", today="2026-09-20")
+    rows = w.rows("procedure_code='99214' AND patient_control_number LIKE 'CB0000300%'")
+    print(brief(rows))
+    closed = {r["payer_name"]: r["recovered_cents"] for r in rows if r["status"] == "resolved"}
+    assert "KENTUCKY MEDICAID" in closed, f"the scenario no longer closes Medicaid's denial as secondary: {brief(rows)}"
+    assert sum(r["recovered_cents"] or 0 for r in rows) <= 9408 + 2352, f"recovered more than arrived: {closed}"
     w.store.close()
