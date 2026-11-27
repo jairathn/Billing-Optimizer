@@ -108,14 +108,16 @@ DETECT_RULES = "2.12"           # 2.12: push 2 (2.10, 2.11: EMA's reports, work 
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
 # the files whose rules a run applies: any change re-analyses the archive once (a module not in this release is left out)
 RULE_FILES = ("detect.py", "codes.py", "fees.py", "link.py", "pfs.py", "ema_reports.py", "ema_ledger.py", "ema_checks.py",
-              "states.py", "story.py", "archive_rules.py", "archive.py")
+              "states.py", "story.py", "archive_rules.py", "archive.py", "rarely_paid.py",
+              os.path.join("data", "payer_code_rules.json"))
 
 
 def _rules_hash() -> str:
     """This file and the ones whose rules it applies: payer windows and reason codes (codes.py), CMS's global periods
     and multiple-procedure indicators (pfs.py), fee families (fees.py), how remittance lines are tied to EMA rows
     (link.py), EMA's reports and the checks on them (ema_reports.py, ema_ledger.py, ema_checks.py), the item states
-    (states.py), the item story (story.py) and the archive-only rules (archive_rules.py)."""
+    (states.py), the item story (story.py), the archive-only rules (archive_rules.py) and the researched rules of codes
+    a payer almost never pays (rarely_paid.py, data/payer_code_rules.json)."""
     h = hashlib.sha256()
     here = os.path.dirname(os.path.abspath(__file__))
     for name in RULE_FILES:
@@ -2927,6 +2929,12 @@ class Detector:
             served = {(o.get("procedure_code"), o.get("service_date")) for o in rows}
             primary = any(not self._one_payer(o, itself) and o.get("claim_status_code") in ("1", "19", "4")
                           and (o.get("procedure_code"), o.get("service_date")) in served for o in answers)
+            # the owner's decision 3 (2026-11-26): what arrived is the recovery, and what the payer still owes for the
+            # service in that role stays listed with its proof, whatever its size (archive_rules.owed_in_second_role)
+            due = self._second_role_due(f, rows, paid_rows, answers, itself)
+            if due and due["left_cents"] > 0:
+                self._second_role_short(f, due, grp, day, primary)
+                return
             note = (f"{grp} processed this {what} as secondary on {day} (claim {other_id})"
                     + (f" and paid {_usd(paid)}, its share" if paid > 0 else ", applying the primary payer's answer (OA-23) and paying nothing more")
                     + ": its denial as the primary payer is settled"
@@ -2958,6 +2966,49 @@ class Detector:
         f["evidence"] = json.dumps(ev, default=str)
         f["hint"] = None
         self.ema_counts["settled_" + how] += 1
+
+    def _second_role_due(self, f: dict, rows: list, paid_rows: list | None, answers: list, itself: tuple) -> dict | None:
+        """What the payer that denied the item as primary owes for its services as secondary, and what is left after what
+        it paid (archive_rules.owed_in_second_role): its answer lines (the settling ones and the ones it paid since), their
+        claim's OA-23 where no line of that claim carries one, and what the other payers paid for those services (their
+        standing payments on the bill)."""
+        from .archive_rules import owed_in_second_role
+        mine = {o["line_key"]: o for o in list(rows) + list(paid_rows or [])}
+        with_line_oa23 = {o["claim_key"] for o in mine.values()
+                          if any(g == "OA" and rc == "23" for g, rc, _a in self.adj.get(o["line_key"], []))}
+        claim_done: set = set()
+        lines = []
+        for o in mine.values():
+            adj = list(self.adj.get(o["line_key"], []))
+            ck = o["claim_key"]
+            if ck not in with_line_oa23 and ck not in claim_done:
+                # the prior payer's answer applied once, on the claim (a line with no reason of its own)
+                adj += [(g, rc, a) for g, rc, a in self.claim_adj.get(ck, []) if g == "OA" and rc == "23"]
+                claim_done.add(ck)
+            lines.append({"allowed": o.get("allowed_cents"), "charge": o.get("charge_cents"), "paid": self.standing.get(o["line_key"], 0),
+                          "adj": adj})
+        served = {(o.get("procedure_code"), o.get("service_date")) for o in mine.values()}
+        firsts = [o for o in answers if not self._one_payer(o, itself) and (o.get("procedure_code"), o.get("service_date")) in served
+                  and o.get("claim_status_code") != "22"]
+        others = sum(self.standing.get(o["line_key"], 0) for o in firsts)
+        # what the other payers left on the line (the patient share on their answers that paid): the most this payer can
+        # owe in its role (review r1-7)
+        paying = [o for o in firsts if self.standing.get(o["line_key"], 0) > 0]
+        left = sum(a for o in paying for g, _rc, a in self.adj.get(o["line_key"], []) if g == "PR") if paying else None
+        return owed_in_second_role(lines, others, f.get("expected_cents"), left)
+
+    def _second_role_short(self, f: dict, due: dict, grp: str, day: str, primary: bool) -> None:
+        """The payer paid as secondary less than it owes for the service in that role: the item stays listed at what is
+        left (no dollar floor), its answer as the proof (evidence second_role), never closed by it."""
+        from .archive_rules import second_role_words
+        text = second_role_words(due, grp, "as secondary", day)
+        ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+        ev["second_role"] = dict(due, date=day, role="as secondary", text=text, size_before_cents=f.get("shortfall_cents"),
+                                 primary_remittance="on file" if primary else "not on file")
+        f["evidence"] = json.dumps(ev, default=str)
+        f["shortfall_cents"] = due["left_cents"]
+        f["hint"] = text
+        self.ema_counts["second_role_short"] += 1
 
     def _settle_unpaid_lines(self) -> None:
         """After the line rules: a line denial (or a bundled line) left unpaid that the payer which denied it has settled since
@@ -3494,7 +3545,11 @@ class Detector:
             got = self.used_units.setdefault(detail["line_key"], [0, 0.0])
             free = (detail.get("units") or 1) - got[0]
             seen = free <= 0
-            f["recovered_cents"], f["recovered_date"] = (0 if seen or not counts else max(paid, 0)), paid_date
+            # what actually arrived after the item's answer, when the rule measured less than the payment (the payer took
+            # back an earlier payment of the service with it: the owner's decision 3)
+            cap = detail.get("arrived_cents")
+            got_now = max(paid if cap is None else min(paid, int(cap)), 0)
+            f["recovered_cents"], f["recovered_date"] = (0 if seen or not counts else got_now), paid_date
             if not seen:
                 got[0] += min(free, need)
                 got[1] += f["recovered_cents"]
@@ -7249,35 +7304,110 @@ class Detector:
 
     def fold_payer_policy(self) -> None:
         """Denials from the remittances of a code the payer pays on 5% or less of at least 20 lines it answered as primary
-        since 2025 (UHC's G6001, PM case C18; the answer key's R9): the payer's policy, not an appeal per line. They fold
-        into one pattern per payer and code in the owner's table (meta ema:payer_policy), counted with their dollars, and
-        are listed line by line only once the owner chooses 'pursue' for the pattern. Only with EMA's reports on file
-        (the owner's table is built then)."""
+        since 2025 (UHC's G6001, PM case C18; the answer key's R9), or of a payer and code the research covers
+        (remitwatch.rarely_paid, the owner's decision 4: Anthem's 77600 with the 2026 surface radiation codes, whose 2025
+        lines it paid): the payer's policy, not an appeal per line. The code is the one the practice billed, so a 77600
+        the payer answered as 77436 and paid nothing on is one of them. They make one pattern per payer and code in the
+        owner's table (meta ema:payer_policy; one per period where the research splits the pair on a date), counted with
+        their dollars. Nothing is accepted by default: they stay listed, pursued, until the owner accepts the pattern.
+        Only with EMA's reports on file (the owner's table is built then)."""
         if not self.ema_on:
             return
         from . import ema_checks as ec
+        from . import rarely_paid as rp
         decisions = ec._meta(self.conn, ec.POLICY_KEY, {}) or {}
         folded: dict[str, dict] = {}
         for fid, f in list(self.findings.items()):
-            if not f.get("line_key") or f.get("category") not in ("denial", "bundling") or (f.get("paid_cents") or 0) > 0 \
-                    or f.get("signal") in ("FORWARDED_TO_CARRIER", "SECONDARY_NOT_BILLED") or f.get("auto_status"):
+            if not f.get("line_key") or f.get("auto_status"):
                 continue
-            share = self._paid_share(f.get("payer_group"), f.get("procedure_code"))
-            if not share or share[0] > ec.POLICY_MAX_PAID_SHARE * share[1]:
+            got = rp.item_codes(f)          # an unpaid denial line: its billed code and date
+            if not got:
                 continue
-            key = f"{f.get('payer_group')}|{f.get('procedure_code')}||payer_policy"
+            code, svc = got[0]
+            grp = f.get("payer_group")
+            share = self._paid_share(grp, code)
+            rare = bool(share) and share[0] <= ec.POLICY_MAX_PAID_SHARE * share[1]
+            entry = rp.entry_for(grp, code, svc)
+            if not (rare or rp.applies(entry, False)):
+                continue
+            key = rp.pattern_key(grp, code, svc)
             # nothing is accepted by default (PLAN decision 14), and a code a payer almost never pays is pursued in a batch per
-            # payer until the owner accepts it (the owner's decision 16: appeal at any win rate when it beats the cost to send)
-            decision = (decisions.get(key) or {}).get("decision") or "pursue"
-            pt = folded.setdefault(key, {"group": f.get("payer_group"), "code": f.get("procedure_code"), "paid": share[0],
-                                         "answered": share[1], "n": 0, "cents": 0, "decision": decision, "default": key not in decisions,
-                                         "source": "835"})
+            # payer until the owner accepts it (the owner's decision 16: appeal at any win rate when it beats the cost to send).
+            # A decision made for the pair at every date (before decision 4 named periods) covers each period
+            dec = rp.decision_for(decisions, key)
+            decision = (dec or {}).get("decision") or "pursue"
+            pt = folded.setdefault(key, {"group": grp, "code": code, "paid": share[0] if share else None,
+                                         "answered": share[1] if share else None, "n": 0, "cents": 0, "decision": decision,
+                                         "default": dec is None, "source": "835",
+                                         "researched": (entry or {}).get("verdict") if rp.applies(entry, rare) else None})
             pt["n"] += 1
             pt["cents"] += f.get("shortfall_cents") or 0
             if decision != "pursue":
                 del self.findings[fid]
                 self.ema_counts["payer_policy_835"] += 1
         self._policy_835 = folded
+
+    def _rarely_paid_step(self) -> None:
+        """explain_rarely_paid, contained: a failure is logged and counted, the old evidence is dropped (never shown as
+        today's), and the run goes on; with REMITWATCH_EMA_STRICT it is raised (the tests)."""
+        try:
+            self.explain_rarely_paid()
+        except MemoryError:
+            raise
+        except Exception as exc:        # noqa: BLE001  (logged; the items are not changed by this step)
+            if os.environ.get("REMITWATCH_EMA_STRICT") == "1":
+                raise
+            from .runlog import caught
+            caught(exc, "rarely_paid")
+            self.ema_counts["rarely_paid_failed"] += 1
+            try:
+                from .rarely_paid import WHY_META
+                self.conn.execute("DELETE FROM meta WHERE key=?", (WHY_META,))
+            except sqlite3.Error as exc2:
+                caught(exc2, "rarely_paid.drop")
+
+    def explain_rarely_paid(self) -> None:
+        """Why a payer does not pay a code it almost never pays (the owner's decision 4), from this store: for each pair an
+        item of this run is about that the research covers for its payer group, or that the payer pays on 5% or less of
+        the lines it answered (the remittances here, else EMA's books), and for each pattern in the owner's table, the
+        lines it answered as primary and paid by year, the reasons and remarks on the unpaid ones, their modifiers and
+        places of service, the codes billed with them, how often it paid another line of the claim, and the code it
+        answered instead (remitwatch.rarely_paid.evidence). Kept in meta rarely_paid:why for the item drawer, the policy
+        page, the appeal packet and the note review, on both hosts. Counts, codes and years only: no patient data."""
+        from . import ema_checks as ec
+        from . import rarely_paid as rp
+        wanted: dict[str, dict] = {}
+
+        def want(key: str, grp: str, code: str, svc: str | None) -> None:
+            if key not in wanted:
+                parts = rp.parse_key(key)
+                entry = rp.entry_for(grp, code, svc)
+                wanted[key] = rp.spec_for(grp, code, entry, parts.get("period"))
+        for f in self.findings.values():
+            grp = f.get("payer_group")
+            for code, svc in rp.item_codes(f):
+                entry = rp.entry_for(grp, code, svc)
+                share = self._paid_share(grp, code)
+                rare = bool(share) and share[0] <= ec.POLICY_MAX_PAID_SHARE * share[1]
+                if rare or rp.applies(entry, False):
+                    want(rp.pattern_key(grp, code, svc), grp, code, svc)
+        # every pattern of the owner's table this run made: the remittances' (fold_payer_policy) and EMA's own (C5)
+        keys = dict(self.__dict__.get("_policy_835") or {})
+        try:
+            lo = json.loads((self.conn.execute("SELECT value FROM meta WHERE key=?", (ec.C5_LEFT_OUT_KEY,)).fetchone() or ["{}"])[0])
+            keys.update(((lo.get("payer_policy") or {}).get("patterns") or {}) if isinstance(lo, dict) else {})
+        except (ValueError, TypeError, sqlite3.Error) as exc:
+            from .runlog import caught
+            caught(exc, "rarely_paid.patterns")      # the items' own pairs still get their evidence
+        for key, p in keys.items():
+            parts = rp.parse_key(key)
+            if parts["group"] and parts["code"]:
+                day = (parts.get("period") or {}).get("from") or (parts.get("period") or {}).get("to")
+                want(key, parts["group"], parts["code"], day)
+        pairs = rp.evidence(self.lines, adj=self.adj, rem=self.rem, claim_adj=self.claim_adj, claim_rem=self.claim_rem,
+                            standing=self.standing, by_claim=self.lines_by_claim, wanted=wanted, conn=self.conn)
+        rp.save(self.conn, pairs, at=self.now, run_id=self.run_id)
+        self.ema_counts["rarely_paid_pairs"] = len(pairs)
 
     def _has_835_finding(self, bill: str | None, svc: str | None, code: str | None) -> bool:
         """The run already holds an item from the remittances for this bill, date and code (or the whole claim that day)."""
@@ -8100,10 +8230,45 @@ class Detector:
                 continue
             r["work_state"], r["follow_up_on"] = st.get("work_state"), st.get("follow_up_on")
             r["state_basis"] = (st.get("state_basis") or "")[:300] or None
-            r["appeal_block"] = st.get("appeal_block")
+            r["appeal_block"] = st.get("appeal_block") or self._never_payable_block(r, st)
             r["state_rule"] = st.get("rule")
             getattr(self, "state_rules", {})[r["finding_id"]] = st.get("rule")      # for the decision log
+            self._payer_work_size(r, st, states)
             self.ema_counts["state_" + str(st.get("work_state"))] += 1
+
+    def _payer_work_size(self, r: dict, st: dict, states) -> None:
+        """A patient-group denial whose work is with the payer (a corrected claim or a resubmission sent, its follow-up: any
+        state but the patient's side, states.PATIENT_SIDE_RULES) is stored at what the payer pays for the service (its rate,
+        kept in the evidence by archive rule 8), not at the patient's share, so Work now's dollars and the ranking count what
+        that work can bring (review r1-4). The share stays in the evidence for the bill-the-patient step."""
+        if st.get("work_state") not in ("work_now", "waiting") or st.get("rule") in states.PATIENT_SIDE_RULES:
+            return
+        if not states.patient_denial(r):
+            return
+        rate = int(states._ev(r).get("payer_rate_cents") or 0)
+        if rate > 0 and r.get("shortfall_cents") != rate:
+            r["shortfall_cents"] = r["expected_cents"] = rate
+            self.ema_counts["patient_denial_payer_work"] += 1
+
+    def _never_payable_block(self, r: dict, st: dict) -> str | None:
+        """'never_payable' for an item to work now that a payer's published rule never pays (the owner's decision 4, the
+        rule that leads its next step: story._with_payer_rule): no appeal goes for it in bulk, and the bulk list's Left
+        out line says why. Its state is not changed. A failure is logged and blocks nothing."""
+        if st.get("work_state") != "work_now":
+            return None
+        try:
+            from . import rarely_paid as rp
+            if st.get("route") not in rp.LEAD_ROUTES:
+                return None
+            if rp.never_payable_lead(self.conn, r):
+                self.ema_counts["never_payable_block"] += 1
+                return "never_payable"
+        except Exception as exc:        # noqa: BLE001  (logged; the item keeps its state, and its panel still says the rule)
+            if os.environ.get("REMITWATCH_EMA_STRICT") == "1":
+                raise
+            from .runlog import caught
+            caught(exc, "rarely_paid.block")
+        return None
 
     def _save_ema_wiring(self) -> None:
         """What the run did with EMA's reports, for the Data tab and the maintainers: counts by step, and any step that failed;
@@ -8852,6 +9017,7 @@ class Detector:
         self.run_ema_unposted()         # 10: 835 payments EMA never posted (C4)
         self.run_ema_writeoffs()        # 11: written off in EMA (C2) and the overlays (W2)
         self.run_more_rules()           #    secondary never billed, credits, EMA-only short payments
+        self._rarely_paid_step()        #    why a payer does not pay a code it almost never pays (the owner's decision 4)
         self.hook_fold()
         from . import archive           # unit E: a locked year's aggregate items stay as measured on its whole year
         archive.carry_locked_aggregates(self)

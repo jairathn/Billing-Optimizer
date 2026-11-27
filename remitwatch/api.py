@@ -1525,6 +1525,11 @@ PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it L
 # items done with $0 recovered, by their work (remitwatch.states' appeal_block): a payment the 835 made that EMA never posted
 # ('post'), and a credit that is only a takeback EMA never posted ('credit'): the money already came, or none is owed
 ZERO_PAID_BLOCKS = ("post", "credit")
+# A person's Done (the owner's decision 2): a patient-group denial closed with $0 recovered, with who and when, by the
+# strict JSON true 'done' on a Paid; its note starts with states.DONE_NOTE so the item's history and state say Done
+DONE_ONLY = ("Done is for a service the payer put on the patient (no referral, coverage dates, a plan exclusion). Mark this "
+             "one Paid with the amount, or Let go with a reason.")
+DONE_STRICT = "Done is sent as true, or not at all. Reload the page."
 
 
 async def _body_object(request: Request) -> dict:
@@ -1575,18 +1580,22 @@ def _seen_ok(v: Any) -> bool:
 
 def _status_now(conn: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
     """Each item's status on this copy, whether the daily run set it by itself (a payment it found, a reason hidden for a
-    payer), and its charge (the bound on a Paid amount)."""
+    payer), its charge (the bound on a Paid amount), and whether it is a patient-group denial a person may mark Done (the
+    owner's decision 2: states.patient_denial)."""
     from .actions import LAST_DECISION
+    from .states import PATIENT_DENIAL_SIGNALS, patient_denial
     events = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_events'").fetchone())
     block = "f.appeal_block" if "appeal_block" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else "NULL"
+    sigs = ",".join("'" + x + "'" for x in PATIENT_DENIAL_SIGNALS)
     out: dict[str, dict] = {}
     for k in range(0, len(ids), 500):
         part = ids[k:k + 500]
         for r in conn.execute(f"""SELECT f.finding_id, f.status, f.auto_note, f.charge_cents, {LAST_DECISION if events else "NULL"} last,
-                                         {block} block
+                                         {block} block, f.signal, f.carc, CASE WHEN f.signal IN ({sigs}) THEN f.evidence END
                                   FROM findings f WHERE f.finding_id IN ({','.join('?' * len(part))})""", part):
             out[r[0]] = {"status": r[1], "charge_cents": r[3], "block": r[5],
-                         "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden")}
+                         "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden"),
+                         "patient_denial": patient_denial({"signal": r[6], "carc": r[7], "evidence": r[8]})}
     return out
 
 
@@ -1606,10 +1615,12 @@ def _sending_now(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
     return out | _preparing(conn, ids)
 
 
-def _person_status(ids: list[str], status: str, notes: str | None, rec: int | None, actor: str, seen: dict, single: bool) -> dict:
+def _person_status(ids: list[str], status: str, notes: str | None, rec: int | None, actor: str, seen: dict, single: bool,
+                   done: bool = False) -> dict:
     """A person's status change, checked and applied in one step: on a server inside one transaction on the store, on a
     serverless host against the copy it serves, then journaled. single: one item's change, refused as a whole (Refused)
-    when it must not be made; else the items that must not be changed are left as they are and named."""
+    when it must not be made; else the items that must not be changed are left as they are and named. done: a person's
+    Done on a patient-group denial (Paid with $0, the owner's decision 2), refused for any other item."""
     out: dict = {"n": 0, "changed": [], "in_flight": []}
 
     def sort(conn) -> list[str]:
@@ -1636,6 +1647,8 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                                                   f"{STATUS_LABELS.get(cur['status'], cur['status'])}. It was not changed.", status=cur["status"])
                 out["changed"].append(i)
                 continue
+            if single and done and not cur.get("patient_denial"):
+                raise Refused(400, "done", DONE_ONLY)
             if single and status == "resolved":
                 charge = cur.get("charge_cents") or 0
                 top = min(MAX_PAID_CENTS, PAID_TIMES_CHARGE * charge) if charge > 0 else MAX_PAID_CENTS
@@ -1643,7 +1656,7 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                     raise Refused(400, "amount", NO_AMOUNT)
                 if rec < 0:
                     raise Refused(400, "amount", "The amount paid cannot be below zero.")
-                if rec == 0 and cur.get("block") not in ZERO_PAID_BLOCKS:
+                if rec == 0 and not done and cur.get("block") not in ZERO_PAID_BLOCKS:
                     raise Refused(400, "amount", PAID_ZERO)   # nothing recovered: the item was not paid, it was lost or let go
                 if rec > top:
                     raise Refused(400, "amount", f"That is more than {'ten times the charge on this line' if top < MAX_PAID_CENTS else '$1,000,000'}"
@@ -1706,6 +1719,16 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
     and Lost take a reason (LET_GO_REASON), kept in the item's history."""
     body = await _body_object(request)
     status, notes, rec = _status_fields(body)
+    done = body.get("done")
+    if done is not None and done is not True:
+        raise HTTPException(400, DONE_STRICT)       # an override is strict JSON true (the hotfix rule): never "true" or 1
+    if done is True:
+        # Done (the owner's decision 2): Paid with $0.00, its note starting with Done so the history and the state say so
+        from .states import DONE_NOTE
+        if status != "resolved" or rec not in (None, 0):
+            raise HTTPException(400, "Done closes the item with nothing recovered: send it as Paid with $0.00.")
+        rec = 0
+        notes = DONE_NOTE + (f": {notes.strip()}" if notes and notes.strip() else "")
     seen = body.get("seen_status")
     if not _seen_ok(seen):
         raise HTTPException(400, "The status your page showed could not be read. Reload the page.")
@@ -1716,7 +1739,7 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
             raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
                                      "only with a note. Say why.")
         raise HTTPException(400, LET_GO_REASON)
-    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True)
+    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True, done is True)
     return {"ok": True}
 
 
@@ -1830,11 +1853,33 @@ def volume(_: str = Depends(require_auth)):
 
 
 # --------------------------------------------------------------------------- appeal packet
+def _with_payer_rules(detail: dict) -> dict:
+    """The item's "Why <payer> does not pay <code>" blocks (remitwatch.rarely_paid, the owner's decision 4), as the drawer
+    shows them from the newest run, for the packet's checklist and the note review's input. Without them (a store that
+    cannot be read just now) the packet falls back on the rules that name the item's payer group, and the log says why."""
+    if "payer_rules" in detail:
+        return detail
+    try:
+        from . import rarely_paid
+        conn = db()
+        try:
+            blocks = rarely_paid.why(conn, detail.get("finding") or {})
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:        # noqa: BLE001  (logged; the packet is built with the rules at hand)
+        from .runlog import caught
+        caught(exc, "api.payer_rules")
+        return detail
+    return dict(detail, payer_rules=[{k: v for k, v in b.items() if k != "evidence"} for b in blocks])
+
+
 @app.get("/api/appeal/{finding_id}")
 def appeal(finding_id: str, _: str = Depends(require_auth)):
     from .appeals import build_packet
 
-    detail = finding_detail(finding_id, "ok")
+    detail = _with_payer_rules(finding_detail(finding_id, "ok"))
     f = detail["finding"]
     if not f.get("claim_key") and f.get("signal") not in ("TAKEBACK", "FEE_SKIM"):
         # context rows (sequestration, MIPS) and contract-level findings have no letter: there is nothing to reprocess
@@ -2988,12 +3033,18 @@ async def activity_assumptions_save(request: Request, user: str = Depends(requir
 
 # --------------------------------------------------------------------------- progress: are we winning
 MONEY = "category IN ('downcoding','bundling','denial','underpayment') AND COALESCE(stale,0)=0"
+# a person's Done (the owner's decision 2: Paid with $0.00, its note starting with Done, as states.py reads it): nothing came
+# back from the payer, so Progress never counts it as paid later or as money recovered (review r2-4)
+DONE_SQL = "(status='resolved' AND COALESCE(recovered_cents,0)=0 AND substr(COALESCE(notes,''),1,4)='Done')"
+PAID_SQL = f"(status='resolved' AND NOT {DONE_SQL})"
 
 
 @app.get("/api/progress")
 def progress(_: str = Depends(require_auth)):
     out: dict[str, Any] = {}
-    out["pipeline"] = rows(f"SELECT status, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, COALESCE(SUM(recovered_cents),0) recovered_cents FROM findings WHERE {MONEY} GROUP BY 1")
+    # a person's Done is its own row ('done'): "Paid back" counts what the payers paid, never a service the patient was billed for
+    out["pipeline"] = rows(f"SELECT CASE WHEN {DONE_SQL} THEN 'done' ELSE status END status, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, "
+                           f"COALESCE(SUM(recovered_cents),0) recovered_cents FROM findings WHERE {MONEY} GROUP BY 1")
     # window open and window closed, counted as the Worklist's tiles count them (a routine-rate pattern is open while one
     # of its claims is, with those claims' cents), so the figures here are the ones a click on those tiles lists
     token = _WINDOWS_MEMO.set({})
@@ -3003,22 +3054,22 @@ def progress(_: str = Depends(require_auth)):
     finally:
         _WINDOWS_MEMO.reset(token)
     out["recovered_by_month"] = rows(f"""SELECT substr(recovered_date,1,7) month, category, COUNT(*) n, COALESCE(SUM(recovered_cents),0) cents
-                                         FROM findings WHERE {MONEY} AND status='resolved' AND recovered_date >= '2023-01' GROUP BY 1,2 ORDER BY 1""")
-    out["cohorts"] = rows(f"""SELECT month, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n,
-                                     COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
+                                         FROM findings WHERE {MONEY} AND {PAID_SQL} AND recovered_date >= '2023-01' GROUP BY 1,2 ORDER BY 1""")
+    out["cohorts"] = rows(f"""SELECT month, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n,
+                                     COALESCE(SUM(CASE WHEN {PAID_SQL} THEN recovered_cents END),0) recovered_cents,
                                      SUM(status IN ('appealed','in_progress')) working_n, SUM(status='lost') lost_n
                               FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL AND month >= '2024-01' GROUP BY 1 ORDER BY 1""")
-    out["by_payer"] = rows(f"""SELECT payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n,
-                                      COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
+    out["by_payer"] = rows(f"""SELECT payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n,
+                                      COALESCE(SUM(CASE WHEN {PAID_SQL} THEN recovered_cents END),0) recovered_cents,
                                       SUM(status='lost') lost_n, SUM(status IN ('appealed','in_progress')) working_n,
                                       COALESCE(SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END),0) open_cents,
                                       COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= ? THEN shortfall_cents END),0) live_cents,
-                                      ROUND(AVG(CASE WHEN status='resolved' AND recovered_date IS NOT NULL THEN julianday(recovered_date) - julianday(payment_date) END)) avg_days
+                                      ROUND(AVG(CASE WHEN {PAID_SQL} AND recovered_date IS NOT NULL THEN julianday(recovered_date) - julianday(payment_date) END)) avg_days
                                FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL
                                GROUP BY 1 HAVING n >= 25 ORDER BY cents DESC LIMIT 30""", (_day(0),))
     out["downcode_trend"] = rows(f"SELECT month, payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {FAMILY['downcoding'][0]} AND status != 'dismissed' AND COALESCE(stale,0)=0 AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1")
     out["visit_lines"] = rows(f"SELECT month, payer_group, SUM(lines) lines FROM exposure WHERE code IN ({EM_LIST}) AND month >= '2024-01' GROUP BY 1,2") if has_table("exposure") else []
-    out["family_trend"] = rows(f"""SELECT month, category, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n
+    out["family_trend"] = rows(f"""SELECT month, category, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n
                                    FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1""")
     out["all_lines"] = rows("SELECT month, SUM(lines) lines FROM exposure WHERE month >= '2024-01' GROUP BY 1 ORDER BY 1") if has_table("exposure") else []
     out["snapshots"] = rows("SELECT at, status, SUM(n) n, SUM(cents) cents FROM progress_snapshots WHERE category IN ('downcoding','bundling','denial','underpayment') GROUP BY run_id, status ORDER BY at") if has_table("progress_snapshots") else []
@@ -3395,6 +3446,7 @@ def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes |
     two identifiers; one uploaded or attached by a person ('upload', 'person') only by what its text shows."""
     from .notes import build_from_note, lesson
     ident = {"ok": True} if source == "ema" else _note_identity(detail, raw_claim, name, data, text)
+    detail = _with_payer_rules(detail)          # the payer's rule for the code goes to the review and the checklist
 
     def build(conn):
         out = build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
@@ -4546,7 +4598,8 @@ BULK_RULE = ("status='open' AND COALESCE(stale,0)=0 AND work_state='work_now' AN
 BLOCK_WORDS = {"paid": "it was paid or settled", "credit": "the line carries a credit (money owed back)",
                "reprocessed": "the payer reprocessed the line after this answer", "waiting": "it waits on the payer's answer to work already done",
                "settled_in_ema": "EMA shows the line settled: find which payer paid before appealing it",
-               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)"}
+               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)",
+               "never_payable": "the payer's published rule does not pay this code, and no appeal changes that (its panel says what to check)"}
 # never appealed, whoever asks and whatever the item's status: a line paid, credited or reprocessed (amendment 14); one EMA
 # shows settled, or the archive shows likely paid (orchestrator decision 4), goes only after a person checked it is unpaid
 NEVER_APPEALED = ("paid", "credit", "reprocessed")
@@ -4559,7 +4612,8 @@ CLOSED_STATES = {"done": "it was found paid or settled", "accepted": "it is acce
                  "expired": "every window to appeal it has closed"}
 # why an open item a letter settles is not on the bulk list, in the "Left out" line's words and order
 LEFT_OUT = (("paid", "paid"), ("waiting", "waiting"), ("credit", "credit"), ("reprocessed", "reprocessed"), ("settled", "settled in EMA"),
-            ("likely_paid", "likely paid"), ("no_date", "no filing date"), ("no_state", "state not worked out yet"), ("other", "other"))
+            ("likely_paid", "likely paid"), ("never_payable", "never payable under the payer's rule"), ("no_date", "no filing date"),
+            ("no_state", "state not worked out yet"), ("other", "other"))
 LEFT_OUT_WORDS = dict(BLOCK_WORDS, settled="EMA shows it settled: find which payer paid", no_date="no filing date on file: its panel says what to check",
                       no_state="the run has not worked out its state yet", other="not an item to appeal now")
 
@@ -4571,10 +4625,10 @@ def _bulk_ready(cols: set[str]) -> bool:
 
 def _left_out_reason(r: dict) -> str:
     """Why an open item an appeal letter would settle is not on the bulk list (LEFT_OUT): paid, waiting, credit,
-    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), no filing date,
-    no state worked out yet, or other."""
+    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), never payable
+    under the payer's published rule (the owner's decision 4), no filing date, no state worked out yet, or other."""
     block = r.get("appeal_block")
-    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid"):
+    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid", "never_payable"):
         return block
     if block in ("settled_in_ema", "patient_paid"):
         return "settled"
@@ -4800,7 +4854,8 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
         packet_id = pk["packet_id"]
     elif kind == "rate":
         from .notes import build_letter_only
-        packet_id = _keep_packet(lambda conn: build_letter_only(conn, detail, raw_claim, reveal=SHOW_PHI))["packet_id"]
+        rated = _with_payer_rules(detail)
+        packet_id = _keep_packet(lambda conn: build_letter_only(conn, rated, raw_claim, reveal=SHOW_PHI))["packet_id"]
     else:
         from . import modmed
         key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))

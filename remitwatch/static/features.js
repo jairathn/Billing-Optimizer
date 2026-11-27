@@ -195,7 +195,8 @@ async function progressTab(v){
     ${kpi('Being worked', money(g('appealed').cents+g('in_progress').cents), (g('appealed').n+g('in_progress').n).toLocaleString()+' sent or started', 'working')}
     ${kpi('Window open', money(p.live.cents), p.live.n.toLocaleString()+' items you can still get back', 'open')}
     ${kpi('Window closed', money(p.expired.cents), p.expired.n.toLocaleString()+' items (filing rules partly estimated)', 'closed')}
-    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', '') : ''}</div>
+    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', '') : ''}
+    ${g('done').n ? kpi('Marked done', money(g('done').cents), g('done').n.toLocaleString()+' closed by a person with nothing from the payer (the patient billed, or given up)', '') : ''}</div>
     <div class="grid two">
       <div class="panel"><h2>Recovered by month</h2><div class="note">Money paid on a later remittance for lines that were first denied, bundled or cut. Counted automatically when the payment arrives.</div><canvas id="cRec"></canvas></div>
       <div class="panel"><h2>Share recovered, by month of the first payment</h2><div class="note">Of what went wrong in each month, how much has been won back so far. Recent months are still in play.</div><canvas id="cCoh"></canvas></div>
@@ -326,6 +327,7 @@ function packetHtml(p){
       ${(a.gaps||[]).length?`<div class="small"><b>Gaps:</b> ${a.gaps.map(esc).join(' · ')}</div>`:''}${(a.documentation_tips||[]).length?`<div class="small"><b>For next time:</b> ${a.documentation_tips.map(esc).join(' · ')}</div>`:''}`:''}
     <div class="actions" style="margin-top:8px"><a href="/api/packets/${p.packet_id}/pdf"><button class="primary">Download the packet (PDF)</button></a><button id="pkCopy">Copy letter</button>
       <input id="pkTo" placeholder="email the PDF to…" style="min-width:220px"><button id="pkSend">Send</button><span id="pkMsg" class="small muted"></span></div>
+    ${(p.checklist||[]).length ? `<div class="note sev-medium"><b>Before you send it</b>${p.checklist.map(c => `<div>${esc(c)}</div>`).join('')}</div>` : ''}
     <div class="note">The PDF contains the patient's name, member ID and the note. Email it only to a mailbox inside the practice or a payer address that accepts appeals.</div>
     ${p.corrected_claim_instructions?`<div class="small"><b>Correction instead of appeal:</b> ${esc(p.corrected_claim_instructions)}</div>`:''}
     <pre>${esc(p.letter)}</pre></div>`;
@@ -492,9 +494,10 @@ const XP_STRENGTH = {proven:'Proven: two sources agree', one_source:'From one so
 const XP_SOURCE = {'835':'835', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
 const XP_BUTTON = {build_packet:'Build the appeal packet', attach_note:'Attach the visit note', find_note:'Find the note in EMA', upload_note:'Upload the note',
   fax_payer:'Fax it to the payer', copy_instructions:'Copy the steps', mark_sent:'Mark sent', log_outcome:'Log what happened', mark_posted:'Mark posted in EMA',
-  mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA'};
+  mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA',
+  billed_patient:'Billed the patient', mark_done:'Done'};
 // the one button that moves the item on, the first of these its next step offers (fax only once a packet can be read first)
-const XP_FIRST = ['fax_payer','build_packet','mark_posted','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
+const XP_FIRST = ['fax_payer','build_packet','mark_posted','billed_patient','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
 const XP_OUTCOME = {auto_written_off:'Auto write-off', written_off_while_pending:'Written off while pending', lost_to_timely_filing:'Lost to late filing'};
 // what stops an appeal outright (the server holds to it): a line paid, credited, reprocessed or waiting on the payer. A line
 // EMA shows settled, or the archive shows likely paid, is checked first: its fax stays under More and asks for the check
@@ -505,6 +508,8 @@ XP_BUTTON.decide = 'Decide what to do';
 function xpPrimary(nx, hasPacket){
   const b = xpButtons(nx);
   if(b.includes('fax_payer') && hasPacket && !XP_CHECK_FIRST.has(nx.appeal_block)) return 'fax_payer';
+  // a payer's published rule that never pays the code leads: no appeal, and nothing to send first; the steps say what to check
+  if(nx.payer_rule === 'never_payable' && nx.appeal_ok === false) return b.includes('copy_instructions') ? 'copy_instructions' : null;
   // a correction made in EMA: read the steps, do it there, then mark it sent
   if(['corrected','eob_first'].includes(nx.route) && b.includes('mark_sent')) return 'mark_sent';
   // a decision first (fix, appeal or let go): the three choices, never "what did the payer do"
@@ -528,7 +533,9 @@ const XP_BY_STATUS = {waiting: ["Wait for the payer's answer. The next run dates
   work_now: ['Work it as its reason says; the next run gives its exact next step.', ['mark_sent', 'log_outcome', 'let_go']]};
 function xpEffective(f, x){
   const ex = (x && x.explain) || {}, told = (ex.verdict || {}).state || (ex.state || {}).work_state;
-  if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state]) return x;
+  // a state the server worked out from the person's own newer action (Billed the patient, Done: by_person) is newer than
+  // any status words here, and says whom the item waits on (the patient, never the payer)
+  if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state] || (ex.state || {}).by_person) return x;
   const when = f.status_changed_at ? ` on ${longDate(practiceDate(f.status_changed_at))}` : '';
   const [action, buttons] = XP_BY_STATUS[f.work_state];
   return Object.assign({}, x, {explain: Object.assign({}, ex, {
@@ -611,6 +618,39 @@ function xpEmaHtml(b){
     ${b.postings_note ? `<div class="note">${esc(b.postings_note)}</div>` : ''}
     <div class="small muted">EMA's claim status is context only: what happened to this line is in the story.</div></details>`;
 }
+// "Why <payer> does not pay <code>" (remitwatch.rarely_paid, the owner's decision 4): what the newest run found in the
+// remittances (lines answered and paid, the reasons, remarks, modifiers, places of service and codes billed with it), the
+// payer's published rule with its sources (each fetched twice), what the note or the claim must show, and the verdict in
+// plain words. Open when no note can change it; folded otherwise.
+const XP_RULE_CLS = {never_payable: 'sev-high', claim: 'sev-medium', note: 'ok', unclear: 'muted'};
+function xpRuleSources(list){
+  const by = [];
+  (list || []).forEach(s => { if(!s || !s.title) return; let g = by.find(x => x.title === s.title);
+    if(!g){ g = {title: s.title, url: s.url, date: s.date, quotes: []}; by.push(g); } if(s.quote && g.quotes.length < 2) g.quotes.push(s.quote); });
+  return by.map(g => `<div>${/^https:\/\//.test(String(g.url || '')) ? `<a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">${esc(g.title)}</a>` : esc(g.title)}${g.date ? ', ' + esc(g.date) : ''}${g.quotes.map(q => `<div class="muted"><i>“${esc(q)}”</i></div>`).join('')}</div>`).join('');
+}
+function xpPayerRuleHtml(blocks){
+  // a rule shown in full once: a later code under the same rule (one state's enrollment rule for several codes of a
+  // claim, say) points back to it instead of repeating it
+  const told = [];
+  const sameAs = b => told.find(t => t.payer_group === b.payer_group && t.verdict === b.verdict && t.rule === b.rule
+    && (t.what_to_show || '') === (b.what_to_show || '') && (t.condition || '') === (b.condition || ''));
+  return (blocks || []).map(b => {
+    const same = b.rule ? sameAs(b) : null;
+    if(b.rule && !same) told.push(b);
+    return `<details class="dfold xp-rule"${b.verdict === 'never_payable' ? ' open' : ''}>
+    <summary>${esc(b.title || '')}${b.period ? ` <span class="muted small">(services ${esc(b.period)})</span>` : ''}</summary>
+    <div class="small ${XP_RULE_CLS[b.verdict] || 'muted'}"><b>${esc(b.verdict_text || '')}</b></div>
+    ${(b.evidence_text || []).length ? `<div class="small" style="margin-top:4px"><b>What the remittances show</b>${b.as_of ? ` <span class="muted">(the run of ${esc(longDate(String(b.as_of).slice(0,10)))})</span>` : ''}<ul>${b.evidence_text.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`
+      : (b.evidence_note ? `<div class="small muted">${esc(b.evidence_note)}</div>` : '')}
+    ${same ? `<div class="small muted" style="margin-top:4px">The payer's rule and what the note or the claim must show: the same as for ${esc(same.code)} above.</div>` : `
+    ${b.rule ? `<div class="small" style="margin-top:4px"><b>The payer's rule:</b> ${esc(b.rule)}</div>` : ''}
+    ${b.what_to_show ? `<div class="small" style="margin-top:4px"><b>What the note or the claim must show:</b> ${esc(b.what_to_show)}</div>` : ''}
+    ${b.condition ? `<div class="small sev-medium">${esc(b.condition)}</div>` : ''}
+    ${(b.sources || []).length ? `<div class="small" style="margin-top:4px"><b>Sources</b> <span class="muted">(each read twice${b.researched ? ', researched ' + esc(b.researched) : ''})</span>${xpRuleSources(b.sources)}</div>` : ''}`}
+  </details>`;
+  }).join('');
+}
 // "Why did this change?": the run's decisions on this item (built later, GET /api/findings/{id}/decisions); hidden until it answers
 async function xpDecisions(id, el){
   if(!el) return;
@@ -652,6 +692,11 @@ function xpBind(f, x, r, d, done){
       await event('posted', n.trim()); say('Noted in its history.'); },
     mark_billed: async () => { const n = prompt(`Who was billed, and when? (${nx.route === 'bill_patient' ? 'the patient' : 'the other payer'}; kept in its history)`, ''); if(n === null) return;
       if(!n.trim()){ err('Not changed: say who was billed.'); return; } await event('billed', n.trim()); await status('appealed', 'Billed: ' + n.trim()); },
+    // a service the payer put on the patient (the owner's decision 2): one change each, the server's own words in its history
+    billed_patient: async () => { const n = prompt('Billed the patient? It waits for the patient\'s payment in EMA and closes when EMA shows it.\n\nHow, and anything to remember (kept in its history; optional):', ''); if(n === null) return;
+      await status('appealed', 'Billed the patient' + (n.trim() ? ': ' + n.trim() : '')); },
+    mark_done: async () => { const n = prompt('Mark it done? It leaves the list and counts as done by you, with nothing recovered.\n\nWhy (kept in its history; optional):', ''); if(n === null) return;
+      await status('resolved', n.trim(), {recovered_cents: 0, done: true}); },
     accept_pattern: () => xpAccept(f, nx, err, say),
     let_go: async () => { const n = prompt('Let it go? It leaves the list and counts as let go.\n\nWhy (kept in its history; required):', ''); if(n === null) return;
       if(!n.trim()){ err('Not changed: letting an item go needs a reason.'); return; } await status('dismissed', n.trim()); },
@@ -712,7 +757,9 @@ function xpOutcome(f, d, status, err){
 async function xpAccept(f, nx, err, say){
   const pattern = nx.pattern;
   if(!pattern){ state.tab = 'policy'; location.hash = 'policy'; if(typeof closeDetail === 'function') closeDetail(); render(); return; }
-  if(!confirm(`Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
+  const pp = pattern.endsWith('|payer_policy') ? pattern.split('|') : null;
+  if(!confirm(pp ? `Accept that ${pp[0]} does not pay ${pp[1]}${pp[2] ? ' (services ' + pp[2] + ')' : ''}? Every such denial leaves Work now at the next run and stays counted on the Write-off policy page, with who decided, where Pursue brings them back.`
+                 : `Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
   const where = document.querySelector('#xpMsg');
   if(typeof faxOwnerPost === 'function') await faxOwnerPost('/api/ema/policy', {pattern, decision: 'accept'}, where);
   else await post('/api/ema/policy', {pattern, decision: 'accept'});
@@ -729,10 +776,14 @@ async function xpFaxPreview(f, packets, d){
     if(m){ m.className = 'small sev-medium'; m.textContent = text; } else alert(text);
     return;
   }
-  let letter = '';
-  try { letter = pk ? ((await api('/api/packets/' + encodeURIComponent(pk.packet_id))).letter || '') : ((await api('/api/appeal/' + encodeURIComponent(f.finding_id))).letter || ''); } catch(e){}
+  // the packet's "Before you send it" checklist (the payer's published rule for the code, the owner's decision 4): shown
+  // here, where the fax goes out, never in what is faxed
+  let letter = '', checklist = [];
+  try { const got = pk ? await api('/api/packets/' + encodeURIComponent(pk.packet_id)) : await api('/api/appeal/' + encodeURIComponent(f.finding_id));
+        letter = (got && got.letter) || ''; checklist = (got && Array.isArray(got.checklist)) ? got.checklist : []; } catch(e){}
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Fax to ${esc(f.payer_group || 'the payer')}</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">Read what goes, then send it. It goes as it is to the payer's confirmed appeal fax number, and the item is marked Sent.</div>
+    ${checklist.length ? `<div class="note sev-medium" id="xpFaxCheck"><b>Before you send it</b>${checklist.map(c => `<div>${esc(c)}</div>`).join('')}</div>` : ''}
     <div class="actions">${pk ? `<a href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf" target="_blank" rel="noopener"><button>Open the PDF</button></a>` : ''}<button class="primary" id="xpFaxGo">Send the fax</button></div>
     <div id="xpFaxMsg" class="small"></div><pre>${esc(letter)}</pre>`;
   $('#modal').classList.add('open');
