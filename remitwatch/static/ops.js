@@ -28,8 +28,9 @@ async function opPanels(el){
   opBindRun(el);
 }
 
-// "Analysis on this site" (Vercel only): when the site last analysed, that it analyses only on a press, a run going now,
-// what the last run could not check (open items and dollars), and the button that starts the run chain.
+// "Analysis on this site" (Vercel only): when the site last analysed, that it analyses only on a press, what it reads of
+// EMA's reports (the A/R only, so its lists can differ from the server's), a run going now, what the last run could not
+// check (open items and dollars), and the button that starts the run chain.
 function opAnalysisHtml(a){
   if(!a.press_only) return '';
   const an = a.analysed || {}, run = a.running, un = a.unchecked, lists = a.lists;
@@ -40,6 +41,7 @@ function opAnalysisHtml(a){
   return `<div class="panel" id="opAnalysis"><div class="panel-head"><h2>Analysis on this site</h2>
       <span class="small muted">${esc(a.text || '')}</span></div>
     <div class="small"><b>${last}</b></div>
+    ${a.ema ? `<div class="note small" data-op-ema>${esc(a.ema)}</div>` : ''}
     ${run ? `<div class="note small">A run is going (asked for or started ${opWhen(run.since)} UTC). It finishes by itself, and the lists change when it has.</div>` : ''}
     ${stopped}
     ${un && un.text ? `<div class="warnbox small"><b>What the last run could not check.</b> ${esc(un.text)}</div>` : ''}

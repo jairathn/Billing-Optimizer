@@ -106,9 +106,11 @@ def archive_sink():
 # ----------------------------------------------------------------------- the owner's decision 1: analysis on a press
 def analysis_status(conn=None) -> dict:
     """What every page of the Vercel site says about its analysis: that it analyses only when someone presses Run the
-    analysis now, when it last did ({at, run_id, trigger, findings} from the runs' status), a run going now, and what the
-    last run could not check (items and dollars), and a last run that stopped before it finished (cloud.failed_note, with
-    the open items of the dashboard's copy `conn`). On a server: {'press_only': False} (it analyses on its own schedule)."""
+    analysis now, what it reads of EMA's reports ('ema': the A/R only by default, so its lists can differ from the
+    server's; '' when it reads both), when it last did ({at, run_id, trigger, findings} from the runs' status), a run going
+    now, and what the last run could not check (items and dollars), and a last run that stopped before it finished
+    (cloud.failed_note, with the open items of the dashboard's copy `conn`). On a server: {'press_only': False} (it
+    analyses on its own schedule)."""
     if not runtime.serverless():
         return {"press_only": False}
     from . import cloud
@@ -131,7 +133,9 @@ def analysis_status(conn=None) -> dict:
     # a run that stopped with an error, one the platform stopped (its lock left behind, no status of its own), or a chain
     # that stopped after its last allowed run: each is said with what stands and what to do (cloud.stopped_note)
     failed = None if going else cloud.stopped_note(last, conn, stalled=status.get("stalled"))
-    return {"press_only": True, "text": cloud.PRESS_ONLY_TEXT, "analysed": last.get("analysed"), "running": going,
+    # what this site reads of EMA's reports (the A/R only, by default here): its lists can differ from the server's
+    return {"press_only": True, "text": cloud.PRESS_ONLY_TEXT, "ema": cloud.ema_reads_text(), "analysed": last.get("analysed"),
+            "running": going,
             "unchecked": last.get("unchecked"), "failed": failed, "lists": lists,
             "last_run": {k: last.get(k) for k in ("started", "finished", "trigger", "error", "more", "halted", "deferred")}}
 

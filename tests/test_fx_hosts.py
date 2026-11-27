@@ -555,3 +555,185 @@ def test_import_cloud_refuses_an_image_the_last_run_did_not_save_with_its_senten
     said = capsys.readouterr().out
     assert "not the one the last run saved" in said and "Traceback" not in said
     assert not os.path.exists(db)
+
+
+# --------------------------------------------------------------------------- safe mode and the new items of a held run
+
+@pytest.fixture(params=["file", "compact"])
+def sc_store(request, tmp_path, monkeypatch):
+    """A store of either kind, as tests/test_selfcheck.py builds it (the self-check runs on both hosts)."""
+    from remitwatch import ema_reports as er
+    from remitwatch import selfcheck as sc
+    from tests import ema_fixtures as F
+    from tests.test_selfcheck import _new
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    for k in ("VERCEL", "REMITWATCH_TODAY", "REMITWATCH_MEMORY_BUDGET_MB", "REMITWATCH_MAX_SECONDS", "REMITWATCH_CYCLE_BUDGET_SECONDS"):
+        monkeypatch.delenv(k, raising=False)
+    sc._GROUPS.clear()
+    s = _new(request.param, tmp_path)
+    yield s
+    s.close()
+
+
+def _ledger_off(c) -> None:
+    """The posting ledger and the store's copy of it disagree by $5 (the hook's fault run: rows gone from the ledger)."""
+    from remitwatch import selfcheck as sc
+    sc.meta_set(c, sc.K_MONEY, {"checks": [sc._result("ledger_store", [("cell-1", 500, None)])]})
+
+
+def _ledger_on(c) -> None:
+    from remitwatch import selfcheck as sc
+    sc.meta_set(c, sc.K_MONEY, {"checks": [sc._result("ledger_store", [])]})
+
+
+def test_a_run_held_over_the_data_it_read_holds_its_new_items_with_it_and_says_so_with_their_dollars(sc_store):
+    """The failing check is about the input (the posting ledger against the store's copy of it): the run's new items rest
+    on data that check distrusts, so they are held with the run, counted on the banner and the Data tab with their
+    dollars and why; the next run that passes lists them."""
+    from remitwatch import selfcheck as sc
+    from tests.test_selfcheck import _listed, add_item, run
+    c = sc_store.conn
+    add_item(c, "F-1")
+    add_item(c, "F-2")
+    _ledger_on(c)
+    run(c, None, "r1")
+
+    def found(cn):
+        add_item(cn, "F-new", line_key="Lnew", shortfall_cents=7500, appeal_deadline="2026-12-02")
+    _ledger_off(c)
+    out = run(c, found, "r2")
+    assert out["held"] and out["hold_checks"] == ["ledger_store"], out
+    assert "F-new" not in _listed(c), "a new item resting on distrusted data is held with the run"
+    safe = sc.safe_mode(c)
+    assert (safe["new_items"], safe["new_items_held"], safe["new_items_held_cents"], safe["new_items_why"]) == (0, 1, 7500, "input")
+    assert "held the 1 new item to work ($75.00)" in safe["text"] and "rest on data a failing check distrusts" in safe["text"]
+    banner = sc.banner(c)["text"]
+    assert "holds back the 1 new item ($75.00)" in banner and "distrusts" in banner, banner
+    _ledger_on(c)                                            # the ledger is right again: the next run passes
+    out = run(c, found, "r3")
+    assert not out["held"] and "F-new" in _listed(c)
+    assert not sc.safe_mode(c)["on"] and sc.banner(c) is None
+
+
+def test_a_run_held_over_its_own_closures_still_lists_its_new_items_and_says_why(sc_store):
+    """The failing check is about what the run decided (a closure without its proof), not the data it read: the current
+    rule stands (the new items to work are listed), and the banner says so and why, with their dollars."""
+    from remitwatch import selfcheck as sc
+    from tests.test_selfcheck import _listed, add_item, bad_closure, run
+    c = sc_store.conn
+    add_item(c, "F-1")
+    add_item(c, "F-2")
+    run(c, None, "r1")
+
+    def found(cn):
+        bad_closure(cn)
+        add_item(cn, "F-new", line_key="Lnew", shortfall_cents=7500, appeal_deadline="2026-12-02")
+    out = run(c, found, "r2")
+    assert out["held"] and out["hold_checks"] == ["closure_proof"], out
+    assert "F-new" in _listed(c)
+    safe = sc.safe_mode(c)
+    assert (safe["new_items"], safe["new_items_cents"], safe["new_items_held"], safe["new_items_why"]) == (1, 7500, 0, None)
+    assert "still lists the 1 new item to work ($75.00)" in safe["text"] and "not the data it read" in safe["text"]
+    banner = sc.banner(c)["text"]
+    assert "lists the 1 new item ($75.00)" in banner and "not the data it read" in banner, banner
+
+
+def test_a_run_held_over_both_its_data_and_its_closures_holds_its_new_items(sc_store):
+    """Both kinds of check fail: the data is distrusted, so the new items are held (the reason names the data check)."""
+    from remitwatch import selfcheck as sc
+    from tests.test_selfcheck import _listed, add_item, bad_closure, run
+    c = sc_store.conn
+    add_item(c, "F-1")
+    add_item(c, "F-2")
+    _ledger_on(c)
+    run(c, None, "r1")
+
+    def found(cn):
+        bad_closure(cn)
+        add_item(cn, "F-new", line_key="Lnew", shortfall_cents=7500)
+    _ledger_off(c)
+    out = run(c, found, "r2")
+    assert out["held"] and sorted(out["hold_checks"]) == ["closure_proof", "ledger_store"], out
+    assert "F-new" not in _listed(c)
+    safe = sc.safe_mode(c)
+    assert safe["new_items_why"] == "input" and safe["new_items_held"] == 1
+    assert "the store's EMA money equals the posting ledger's" in safe["text"], safe["text"]
+
+
+def test_a_flood_held_with_a_run_is_counted_with_its_dollars(sc_store):
+    """The flood rule stands (more new work than a run brings is held with it) and the banner counts it in dollars."""
+    from remitwatch import selfcheck as sc
+    from tests.test_selfcheck import _listed, add_item, bad_closure, run
+    c = sc_store.conn
+    add_item(c, "F-1")
+    add_item(c, "F-2")
+    run(c, None, "r1")
+
+    def found(cn):
+        bad_closure(cn)
+        for i in range(30):
+            add_item(cn, f"F-new{i:02d}", line_key=f"Lnew{i}", shortfall_cents=1000)
+    out = run(c, found, "r2")
+    assert out["held"] and not any(f.startswith("F-new") for f in _listed(c))
+    safe = sc.safe_mode(c)
+    assert (safe["new_items_held"], safe["new_items_held_cents"], safe["new_items_why"]) == (30, 30000, "flood")
+    assert "held the 30 new items ($300.00)" in safe["text"] and "more than one run usually brings" in safe["text"]
+    assert "holds back the 30 new items ($300.00)" in sc.banner(c)["text"]
+
+
+# --------------------------------------------------------------------------- Vercel reads EMA's A/R only (decision 6)
+from tests.test_cloud import box, site  # noqa: E402,F401  (the Vercel site over an invented state folder)
+
+AR_ONLY = "This site reads EMA's A/R report only."
+
+
+def test_the_vercel_data_tab_and_setup_page_say_the_site_reads_the_ar_only_so_its_lists_can_differ(site, monkeypatch):
+    """The integrator's decision 6: a serverless host reads EMA's A/R report only (ema_reports.switch 'ar'), so its lists
+    can differ from the server's, which reads Production as well. The Data tab's analysis panel and the setup page say
+    so; with the switch at 'all' (both reports read here too) they do not."""
+    from remitwatch import cloud
+    tc, auth, _api, _state = site
+    monkeypatch.delenv("REMITWATCH_EMA_REPORTS", raising=False)
+    an = tc.get("/api/ops/panels", headers=auth).json()["analysis"]
+    assert an["press_only"] is True and an["ema"].startswith(AR_ONLY) and "Production" in an["ema"], an
+    assert "lists can differ" in an["ema"] and "—" not in an["ema"]
+    assert cloud.press_only_text() == cloud.PRESS_ONLY_TEXT + " " + an["ema"]
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    assert tc.get("/api/ops/panels", headers=auth).json()["analysis"]["ema"] == ""
+    assert cloud.press_only_text() == cloud.PRESS_ONLY_TEXT
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "off")
+    assert "neither of EMA's reports" in tc.get("/api/ops/panels", headers=auth).json()["analysis"]["ema"]
+
+
+def test_the_setup_page_status_carries_the_ar_only_sentence_on_vercel(monkeypatch):
+    """setup_status's press_text (the setup page) is the press-only sentence and what the site reads of EMA's reports."""
+    from remitwatch import cloud
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.delenv("REMITWATCH_EMA_REPORTS", raising=False)
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    st = cloud.setup_status(probe=False)
+    assert st.get("press_only") and AR_ONLY in st.get("press_text", ""), st.get("press_text")
+
+
+@pytest.mark.skipif(not __import__("shutil").which("node"), reason="needs node")
+def test_the_data_tab_panel_draws_the_ar_only_line(tmp_path):
+    """static/ops.js draws the panel's line for what the site reads of EMA's reports (and nothing when it reads both)."""
+    import json
+    import subprocess
+    script = tmp_path / "draw.js"
+    script.write_text(r"""
+const fs = require('fs'), vm = require('vm');
+const ctx = {console, document: {}, window: {}, state: {}, esc: s => String(s), money: c => '$' + c, opPl: (n, w) => n + ' ' + w};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), ctx);
+const a = {press_only: true, text: 'press', analysed: {at: '2026-11-20T10:00:00Z'}};
+console.log(JSON.stringify({with: ctx.opAnalysisHtml(Object.assign({ema: process.argv[3]}, a)), without: ctx.opAnalysisHtml(Object.assign({ema: ''}, a))}));
+""")
+    ops = os.path.join(ROOT, "remitwatch", "static", "ops.js")
+    got = subprocess.run(["node", str(script), ops, AR_ONLY], capture_output=True, text=True, timeout=60)
+    assert got.returncode == 0, got.stderr[-1500:]
+    out = json.loads(got.stdout.strip().splitlines()[-1])
+    assert AR_ONLY in out["with"] and "data-op-ema" in out["with"]
+    assert "data-op-ema" not in out["without"]

@@ -67,6 +67,27 @@ PRESS_TRIGGERS = ("press", "button")    # the runs a person's press starts (the 
 PRESS_ONLY_TEXT = ("This site analyses only when someone presses Run the analysis now (the Data tab). The practice's "
                    "server analyses on its own every day and is where the billers work: what is recorded on this site is "
                    "not on the server.")
+
+
+def ema_reads_text() -> str:
+    """What this site reads of EMA's reports when it is not both, and that the server's lists can differ for it (the
+    integrator's decision 6: a serverless host reads the A/R only, remitwatch.ema_reports.switch, so a Production file
+    waits and the image holds none of its rows). '' when the site reads both."""
+    from . import ema_reports
+    s = ema_reports.switch()
+    if s == "ar":
+        return ("This site reads EMA's A/R report only. The practice's server reads EMA's Production report as well, so "
+                "its lists can differ from this site's.")
+    if s == "off":
+        return ("This site reads neither of EMA's reports. The practice's server reads them, so its lists can differ from "
+                "this site's.")
+    return ""
+
+
+def press_only_text() -> str:
+    """PRESS_ONLY_TEXT and what this site reads of EMA's reports (ema_reads_text): what the setup page says."""
+    more = ema_reads_text()
+    return PRESS_ONLY_TEXT + (" " + more if more else "")
 ACTIONS = "actions"
 PACKETS = "packets"
 _PROCESS_START = time.time()
@@ -3011,7 +3032,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
             out["storage_error"] = str(exc)[:160]
     if not server:      # the owner's decision 1: this site analyses only on a press; the page says when it last did
         out["press_only"] = True
-        out["press_text"] = PRESS_ONLY_TEXT
+        out["press_text"] = press_only_text()
         out["analysed"] = (out.get("last_cycle") or {}).get("analysed")
     required = [c for c in checks if c["key"] in (("password", "dropbox_app", "dropbox_token", "data_folder", "store") if server else
                                                     ("password", "cron_secret", "dropbox_app", "dropbox_token", "data_folder", "state_folder"))]
