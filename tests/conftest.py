@@ -11,3 +11,15 @@ os.environ.setdefault("REMITWATCH_ALLOW_OPEN", "1")
 # the bulk appeal paths are on in tests (production leaves them off until EMA payments are read); tests of the default
 # turn it off themselves
 os.environ.setdefault("REMITWATCH_BULK_APPEAL", "1")
+
+
+import pytest  # noqa: E402  (after the settings above, which must hold before any test module imports the app)
+
+
+@pytest.fixture(autouse=True)
+def _own_scratch_folder(tmp_path_factory, monkeypatch):
+    """Every test writes the serverless scratch files (runtime.tmp_dir) in a folder of its own, beside its tmp_path, never
+    in the machine's shared /tmp/remitwatch: the suite's parallel shards and other checkouts' runs use that one too, and
+    one run's serving copy could replace another's mid-test (tests/test_scratch_isolation.py). A test or fixture that sets
+    REMITWATCH_TMP itself still decides: it does so after this."""
+    monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path_factory.mktemp("scratch")))
