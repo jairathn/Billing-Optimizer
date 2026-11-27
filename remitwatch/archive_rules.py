@@ -259,7 +259,7 @@ class Claim:
     recorded."""
     __slots__ = ("claim_key", "txn", "pcn", "bill", "status", "charge", "paid", "patient_resp", "pccn", "freq", "crossover",
                  "payer", "payer_name", "group", "kind", "paid_on", "trace", "adj", "rem", "lines", "original_ref", "halves",
-                 "same_id", "reanswer", "restated", "net", "seq")
+                 "same_id", "reanswer", "restated", "net", "seq", "plan")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -381,11 +381,11 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
         wanted = set(bills)
         keep = []
         # every claim id from the bill up to the bill followed by 'D': the bill itself and its submissions (bill + 'C' + digits)
-        for (ck, txn, pcn, st, charge, paid, pr, pccn, freq, cross, oref, cpay, cfi, seq, tpay, trace, pname, pid) in conn.execute(
+        for (ck, txn, pcn, st, charge, paid, pr, pccn, freq, cross, oref, cpay, cfi, seq, tpay, trace, pname, pid, plan) in conn.execute(
                 """SELECT c.claim_key, c.transaction_key, c.patient_control_number, c.claim_status_code, c.charge_cents, c.paid_cents,
                           c.patient_responsibility_cents, c.payer_claim_control_number, c.claim_frequency_code, c.crossover_carrier_name,
                           c.original_reference_number, c.payment_date, c.claim_filing_indicator, c.claim_seq,
-                          t.payment_date, t.trace_number, t.payer_name, t.payer_id
+                          t.payment_date, t.trace_number, t.payer_name, t.payer_id, c.contract_class
                    FROM temp.b2_bills b
                    JOIN claims c ON c.patient_control_number >= b.bill AND c.patient_control_number < b.hi
                    JOIN transactions t ON t.transaction_key = c.transaction_key
@@ -396,7 +396,8 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
             grp, kind = payer_group_kind(pname, cfi)
             cl = Claim(claim_key=ck, txn=txn, pcn=pcn, bill=b, status=st, charge=charge or 0, paid=paid or 0, patient_resp=pr, pccn=pccn,
                        freq=freq, crossover=cross, original_ref=oref, payer=_payer_key(pid, pname), payer_name=pname,
-                       group=grp, kind=kind, paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[], restated=False, seq=seq)
+                       group=grp, kind=kind, paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[], restated=False, seq=seq,
+                       plan=(plan or "").strip() or None)
             arch.claims[ck] = cl
             arch.by_bill[b].append(cl)
             keep.append((ck,))
@@ -756,8 +757,10 @@ def _group_of(a: Ans, x: Ans, gm: tuple) -> tuple | None:
 
 def _answer_sig(a: Ans) -> tuple:
     """One answer of a line, as a second delivery of it repeats it (fold_repeat_denials): the claim id, status, code,
-    date, modifiers, charge, payment and every reason with its amount."""
-    return (a.pcn, a.status, a.code, a.dos, tuple(sorted(a.mods or ())), a.charge, a.paid, tuple(sorted(a.adj or ())))
+    date, modifiers, charge, payment and every reason with its amount, under the same plan (REF*CE: an answer under
+    another plan is not a copy of it)."""
+    return (a.pcn, a.status, a.code, a.dos, tuple(sorted(a.mods or ())), a.charge, a.paid, tuple(sorted(a.adj or ())),
+            getattr(a.claim, "plan", None))
 
 
 def _attribute(a: Ans, x: Ans, gm: tuple | None = None) -> str:

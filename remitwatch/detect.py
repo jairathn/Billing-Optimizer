@@ -10626,14 +10626,15 @@ class Detector:
         to 8). The folds wait for hook_fold."""
         from .archive_rules import hook_archive_rules
         self.archive_summary = hook_archive_rules(self)    # per-rule counts, applied_counts, rate_errors; sets self.archive_folds
-        self._voided_denials()
 
     def _voided_denials(self) -> None:
         """A denial of a claim the practice voided afterwards is done, the void its proof (F1's routed need): the newest 837
         send of the claim since the denial is a void (frequency 8) with nothing sent after it, or EMA shows the charge
         voided (_voided_services, read with the denial's own answer day as the day). Archive rule h reads the payer's
         answer to such a void; this reads the practice's own void when no answer to it is on file. Every service the item
-        lists must be voided; an item a person worked keeps its listing (states._decide's archive branch)."""
+        lists must be voided; an item a person worked keeps its listing (states._decide's archive branch). It runs after
+        resolve_elsewhere: a claim voided and billed again under a new bill that paid is closed as paid at its own size
+        first (the measurement: 16 such items had lost a fifth of their size to the void's $0)."""
         from .archive_rules import R_SAME_DAY, _reclass, apply_actions
         todo = [f for f in self.findings.values() if not f.get("auto_status") and f.get("claim_key") and f["category"] in ("denial", "bundling")
                 and not (json.loads(f["evidence"]).get("archive_rule") if f.get("evidence") else None)]
@@ -11749,6 +11750,7 @@ class Detector:
         self.emit_second_rates()        # 8
         self.hook_archive_rules()       # 9: the archive-only branches first (needs_B2: before resolve_elsewhere)
         self.resolve_elsewhere()        #    then the archive's own closures
+        self._voided_denials()
         self.run_ema_outcomes()         #    the line outcomes, once; paid in EMA (C6)
         self.run_ema_unposted()         # 10: 835 payments EMA never posted (C4)
         self.run_ema_writeoffs()        # 11: written off in EMA (C2) and the overlays (W2)

@@ -1130,3 +1130,25 @@ def test_f1_a_denial_of_a_claim_the_practice_voided_afterwards_is_not_work(tmp_p
     assert rows, "the denial is an item"
     assert all(r["work_state"] != "work_now" for r in rows), lbrief(rows)
     w.store.close()
+
+
+def test_f1_a_denial_voided_and_billed_again_on_a_new_bill_that_paid_is_paid_at_its_size(tmp_path, kind):
+    """Anthem denies C017's 99214 (missing information) on April 15; the practice voids C017 (837 frequency 8) on April
+    20 and bills the visit on a new bill, which Anthem pays on May 10 ($94.08, the patient's $23.52 left). The denial was
+    paid on another claim: closed as
+    paid at its own size, not reclassified as a voided claim worth $0 first (the measurement: 16 items paid on a new bill
+    lost a fifth of their size)."""
+    from tests.review3.r3helpers import visit_denied_line
+    from tests.test_837_sends import clm837, send
+    from tests.test_fx_ledger import BILL, World as LWorld, brief as lbrief
+    w = LWorld(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    send(w.store, tmp_path, [clm837(f"{BILL}C017", [("99214", "223.65", "20260401")])], "20260402")
+    w.remit([visit_denied_line(f"{BILL}C017", carc="16")], "20260415")
+    send(w.store, tmp_path, [clm837(f"{BILL}C017", [("99214", "223.65", "20260401")], freq="8")], "20260420")
+    w.remit([clm("CB0000999C017", "1", "223.65", "94.08", sv("99214", "223.65", "94.08", 1, "CAS*CO*45*106.05~CAS*PR*2*23.52~",
+                                                         allowed="117.60"))], "20260510")
+    w.run("r1", today="2026-09-20")
+    rows = w.rows(f"patient_control_number = '{BILL}C017' AND COALESCE(stale, 0) = 0")
+    assert [(r["status"], r["shortfall_cents"]) for r in rows] == [("resolved", 11760)], lbrief(rows)
+    w.store.close()
