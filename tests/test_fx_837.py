@@ -46,7 +46,7 @@ def clm837(claim_id: str, lines: list[tuple], payer: tuple = ANTHEM, freq: str =
     - resp: SBR01, the payer's responsibility for this claim (P primary, S secondary, T tertiary; '' none); cfi: SBR09;
     - other: the other payer's loop for a claim sent to a payer as its secondary (2320/2330B): {'payer': (name, id),
       'resp': 'P', 'paid': dollars (AMT*D), 'left': dollars (AMT*EAF), 'pr': dollars of CAS*PR, 'co': dollars of CAS*CO,
-      'lines': [(paid, pr dollars)] per service line (SVD, CAS*PR)};
+      'lines': [(paid, pr dollars[, left dollars])] per service line (SVD, CAS*PR, and AMT*EAF when left is given)};
     - others: more other payers' loops in that order, the same keys; one with no 'paid' has adjudicated nothing (no AMT*D).
     Lines: (code, charge in dollars, date of service CCYYMMDD, modifiers 'A:B', units)."""
     member = member or member_of(claim_id)
@@ -69,9 +69,10 @@ def clm837(claim_id: str, lines: list[tuple], payer: tuple = ANTHEM, freq: str =
         units = ln[4] if len(ln) > 4 else 1
         out += f"LX*{n}~SV1*HC:{code}{':' + mods if mods else ''}*{charge}*UN*{units}***1~DTP*472*D8*{dos}~"
         if other and other.get("lines") and n <= len(other["lines"]):
-            paid, pr = other["lines"][n - 1]
+            paid, pr = other["lines"][n - 1][:2]
+            left = other["lines"][n - 1][2] if len(other["lines"][n - 1]) > 2 else None
             out += (f"SVD*{other['payer'][1]}*{paid:.2f}*HC:{code}**{units}~" + (f"CAS*PR*1*{pr:.2f}~" if pr else "")
-                    + f"DTP*573*D8*{dos}~")
+                    + f"DTP*573*D8*{dos}~" + (f"AMT*EAF*{left:.2f}~" if left is not None else ""))
     return out
 
 
