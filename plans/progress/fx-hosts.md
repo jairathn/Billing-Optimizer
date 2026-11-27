@@ -1,13 +1,14 @@
 # fx-hosts (fix wave F6, hosts): progress
 
 Branch `wip/fx-hosts`, from the integration tip 8c59195, merged with the tip 34e3573 (briefs and plans only since 8c59195)
-and with the tips 47b1ba0 (Merge wip/fx-ledger, and the brief that routed F1's need to F6) and fe9ad71 (Merge wip/fx-837,
-Merge wip/fx-exports, and the brief that routed F3b's needs).
+and with the tips 47b1ba0 (Merge wip/fx-ledger, and the brief that routed F1's need to F6), fe9ad71 (Merge wip/fx-837,
+Merge wip/fx-exports, and the brief that routed F3b's needs) and 6fda121 (the world tool that reads the 837s again; plans
+only, so the measurements on fe9ad71 stand).
 Brief: `plans/briefs/2026-11-26_fixwave.md`, section "F6 hosts"; rules in `plans/briefs/2026-11-26_common.md`.
 Tests: `tests/test_fx_hosts.py` (the reviewer's since-hosts-tests and the verifier's since-hosts-verify-tests, ported, plus
 the unit's own; invented data only). Private folder: `$S/tk/units/fx-hosts/` (mode 700).
 
-Last updated: 2026-11-27 05:46 UTC.
+Last updated: 2026-11-27 06:17 UTC.
 
 ## Done (each fix broken on purpose and restored: `$S/tk/units/fx-hosts/breaks.py`, every break fails its tests)
 
@@ -147,7 +148,8 @@ at f5b8a79; the merges included: 34e3573, 47b1ba0, fe9ad71):
   fetched by then reachable under the names they were read under): 3,158 of the 5,383 files read in 37.8 s, 93,800
   claims updated (the patient's keys and the payer's place now on 93,800 of 158,573 claims, the other payer on 2,468),
   2,225 not found (not fetched yet) counted and remembered; the next call read nothing (0.07 s). At that pace the whole
-  set takes about a minute on a server. What the read moves on the worklist is F3c's measurement (a reread world copy).
+  set takes about a minute on a server (the integrator's world tool, the same calls, read all 5,383 in 117 s). What the
+  read moves on the worklist is F3c's measurement (a reread world copy).
 
 ## Half done / next (for F6's fix round)
 
@@ -176,7 +178,8 @@ at f5b8a79; the merges included: 34e3573, 47b1ba0, fe9ad71):
 - Whole suite on f5b8a79 (the tip fe9ad71 merged), python3 3.13/SQLite 3.53 (2 shards): 3,844 passed, 29 skipped, 1
   xfailed, 1 failed: test_swing.py::test_every_page_of_the_server_site_shows_it_at_the_top_until_acknowledged, a
   Playwright "Invalid InterceptionId" error under the load of the measurement runs; test_swing.py alone again: 56 passed.
-- Whole suite on f5b8a79, Python 3.11.1/SQLite 3.40: running at this push; the next push gives the result.
+- Whole suite on f5b8a79, Python 3.11.1/SQLite 3.40 (2 shards): 3,654 passed, 13 skipped, 1 xfailed; 159 failed and 48
+  errors, every one on `Connection.serialize` (absent from that build, as CLAUDE.md allows), none otherwise.
 - Touched suites on the merged branch (fx_hosts, fx_837, fx_exports, story, cloud, docs, fx_ledger, selfcheck): 856
   passed, 1 skipped. Earlier: on 3e0b872 the whole suite in python3 passed (3,391), on e344223 in 3.11.1 only the
   serialize class failed.
