@@ -2992,11 +2992,12 @@ class Detector:
 
     def _claim_share(self, lk: str) -> float:
         """The part of a paying line's money its claim paid: 1, or less where the claim's lines pay more than the claim does
-        (CLP04, less its prompt-pay interest and what the payer added at the claim level) and the claim's own adjustments
-        take the difference back, as a second payer's PI-22 or OA-23 naming the first payer's payment does (the line pays
-        as if first, the claim pays the difference). The claim's paying lines share the take-back in proportion to what
-        each pays (the fx-recover hand trace: such a line's whole payment was counted as recovered). A claim total that
-        differs from its lines with no adjustment of its own to say why changes nothing here."""
+        (CLP04, less its prompt-pay interest) and the claim's own adjustments take the difference back, as a second payer's
+        PI-22 or OA-23 naming the first payer's payment does (the line pays as if first, the claim pays the difference). The
+        claim's paying lines share the take-back in proportion to what each pays (the fx-recover hand trace: such a line's
+        whole payment was counted as recovered). What the payer added at the claim level (a negative adjustment: the
+        patient's share it paid after all) is money the claim paid toward its lines. A claim total that differs from its
+        lines with no adjustment of its own to say why changes nothing here."""
         shares = self.__dict__.setdefault("_claim_shares", {})
         of = self.__dict__.get("_claim_of_line")
         if of is None:
@@ -3017,8 +3018,7 @@ class Detector:
                     caught(exc, "detect.claim_share_amounts")
                     amts = {}
                 interest = amts.get("I") if isinstance(amts, dict) else None
-                added = sum(-a for _g, _rc, a in self.claim_adj.get(ck, []) if a < 0)
-                paid = (row[0] or 0) - max(interest if isinstance(interest, int) else 0, 0) - added
+                paid = (row[0] or 0) - max(interest if isinstance(interest, int) else 0, 0)
                 taken = sum(a for _g, _rc, a in self.claim_adj.get(ck, []) if a > 0)
                 if paid < lines_paid and taken > 0:
                     share = (lines_paid - min(lines_paid - max(paid, 0), taken)) / lines_paid
@@ -4240,6 +4240,11 @@ class Detector:
             found: dict[tuple, dict] = defaultdict(dict)       # same patient, after the denial: can close
             weak: dict[tuple, dict] = defaultdict(dict)        # a hint only
             why_weak: dict[tuple, str] = {}
+            # a part of the service (26 or TC) billed apart, after the same payer paid the whole service on another bill:
+            # a duplicate whatever its CARC (F1's routed need: 88305 parts denied after the global was paid)
+            part_apart = bool(ls) and all(part_of(ln) in ("26", "TC") for ln in ls)
+            me = {x for x in (f.get("payer_id"), f.get("payer_name")) if x}
+            whole_first = False
             for (code, dos) in units:
                 per_unit = exp / max(sum(units.values()), 1) if exp else 0
                 for k, other_payer in ((strict, False), (name, True)):
@@ -4256,10 +4261,11 @@ class Detector:
                         if other_payer and not (mine_ema and self.ema_patient.get(e[1]) == mine_ema):
                             weak[(code, dos)][(e[1], e[0], e[7])] = e
                             why_weak.setdefault((code, dos), "it is the same name on another member number, and nothing ties the two claims to one patient")
-                        elif not dup and e[0] <= mine:
+                        elif not dup and e[0] <= mine and not (part_apart and e[7] == "" and e[9] in me):
                             weak[(code, dos)][(e[1], e[0], e[7])] = e
                             why_weak.setdefault((code, dos), "that claim was paid before this denial, so the denial may be for something else")
                         else:
+                            whole_first |= not dup and e[0] <= mine
                             found[(code, dos)][(e[1], e[0], e[7])] = e
             per_line = exp / max(len(units), 1) if exp else None
 
@@ -4275,7 +4281,7 @@ class Detector:
             best = min((e for v in found.values() for e in v.values()), key=lambda e: e[0], default=None)
             all_once = all(code in once for code, _d in units)
             if closable and best and units and len(covered) == len(units) and all_once:
-                how = "the service was already paid on another claim" if dup and best[0] <= mine else "another claim for the same patient, date of service and code"
+                how = "the service was already paid on another claim" if (dup or whole_first) and best[0] <= mine else "another claim for the same patient, date of service and code"
                 # what it recovered: the other claims' payments after the denial for the item's own units (a line's own,
                 # every code's for a whole claim); a payment made before it (a duplicate's denial) recovered nothing (T-C5).
                 # The note names the payments that paid them (T-C6)
@@ -8719,6 +8725,53 @@ class Detector:
         to 8). The folds wait for hook_fold."""
         from .archive_rules import hook_archive_rules
         self.archive_summary = hook_archive_rules(self)    # per-rule counts, applied_counts, rate_errors; sets self.archive_folds
+        self._voided_denials()
+
+    def _voided_denials(self) -> None:
+        """A denial of a claim the practice voided afterwards is done, the void its proof (F1's routed need): the newest 837
+        send of the claim since the denial is a void (frequency 8) with nothing sent after it, or EMA shows the charge
+        voided (_voided_services, read with the denial's own answer day as the day). Archive rule h reads the payer's
+        answer to such a void; this reads the practice's own void when no answer to it is on file. Every service the item
+        lists must be voided; an item a person worked keeps its listing (states._decide's archive branch)."""
+        from .archive_rules import R_SAME_DAY, _reclass, apply_actions
+        todo = [f for f in self.findings.values() if not f.get("auto_status") and f.get("claim_key") and f["category"] in ("denial", "bundling")
+                and not (json.loads(f["evidence"]).get("archive_rule") if f.get("evidence") else None)]
+        svcs: dict[str, list] = {}
+        for f in todo:
+            ls = self.lines_by_claim.get(f["claim_key"], [])
+            if f.get("line_key"):
+                ls = [ln for ln in ls if ln["line_key"] == f["line_key"]]
+            ks = [(bill_of(f["patient_control_number"]), ln.get("procedure_code"), ln.get("service_date"), f.get("payment_date") or "",
+                   f["patient_control_number"], f["claim_key"], f.get("payer_group") or "") for ln in ls if ln.get("procedure_code")]
+            if ks:
+                svcs[f["finding_id"]] = ks
+        voided = self._voided_services({k for ks in svcs.values() for k in ks})
+        if not voided:
+            return
+        acts = []
+        for f in todo:
+            ks = svcs.get(f["finding_id"])
+            if not ks or not all((k[0], k[1], k[2], k[4]) in voided for k in ks):
+                continue
+            day = None
+            try:
+                day = self.conn.execute("SELECT MAX(bht_created) FROM claims_837 WHERE patient_control_number = ? "
+                                        "AND TRIM(COALESCE(frequency_code, '')) = '8'", (f["patient_control_number"],)).fetchone()[0]
+            except sqlite3.Error as exc:
+                from .runlog import caught
+                caught(exc, "detect.voided_denials")
+            day = real_day(day) if day else None
+            proof = [{"date": day, "source": "837" if day else "ema", "kind": "void", "payer": f.get("payer_name"), "amount_cents": 0,
+                      "codes": sorted({k[1] for k in ks}), "decisive": True, "line_key": f.get("line_key"), "claim_key": f["claim_key"],
+                      "trace": None, "claim_status": None, "code": f.get("procedure_code"), "units": None, "allowed_cents": None,
+                      "text": (f"The practice sent a void of this claim (frequency 8) on {day}, and nothing for it since" if day else
+                               "EMA shows the charge voided (every line of the service a void, the charges netting to nothing)")}]
+            hint = ("The practice voided this claim after the payer's denial" + (f" (the void was sent on {day})" if day else " (EMA shows the charge voided)")
+                    + ", and nothing was billed for it since. Nothing is left to work unless the claim was voided by mistake.")
+            acts.append(_reclass(R_SAME_DAY, f, "voided", "Voided by the practice", hint, 0, "done", proof))
+        if acts:
+            n = apply_actions(self, acts)
+            self.ema_counts["denials_on_voided_claims"] += int(n.get("reclassify", 0))
 
     def hook_fold(self) -> None:
         """Before save: repeat listings of one service folded into the item that carries it (archive_rules fold_into). A
@@ -8808,6 +8861,13 @@ class Detector:
             r["state_rule"] = st.get("rule")
             getattr(self, "state_rules", {})[r["finding_id"]] = st.get("rule")      # for the decision log
             self._payer_work_size(r, st, states)
+            part = st.get("paid_first_partial") or {}
+            if st.get("work_state") in ("work_now", "waiting") and int(part.get("owed") or 0) > 0 \
+                    and r.get("shortfall_cents") != int(part["owed"]):
+                # a Medicaid denial kept as work because the first payer paid part of Medicaid's rate is worth what Medicaid
+                # still owes (its rate less the first payment, capped at EMA's open balance), not its whole rate (money-9)
+                r["shortfall_cents"] = int(part["owed"])
+                self.ema_counts["paid_first_partial_sized"] += 1
             self.ema_counts["state_" + str(st.get("work_state"))] += 1
 
     def _payer_work_size(self, r: dict, st: dict, states) -> None:

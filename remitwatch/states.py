@@ -3596,6 +3596,10 @@ def states_of(conn: sqlite3.Connection, items: Iterable[dict], *, outcomes: dict
             fx["_conn"] = conn
             try:
                 out[f["finding_id"]] = _public(decide(fx, t, conn))
+                if fx.get("paid_first_partial"):
+                    # what the second payer still owes after a first payer's partial payment, for the size the detection run
+                    # stores (detect._set_states; F1's routed need, money-9's second half)
+                    out[f["finding_id"]]["paid_first_partial"] = dict(fx["paid_first_partial"])
             finally:
                 fx.pop("_conn", None)
     return out

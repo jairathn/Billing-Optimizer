@@ -77,6 +77,17 @@ from .codes import carc_text, code_category, component_of, is_unlisted, payer_gr
 CHUNK = 500
 PAYMENT_STATUSES = ("1", "2", "3", "19", "20", "21")
 PRIMARY_STATUSES = ("1", "19")
+# CARC 22 (covered by another payer) or 23 (the prior payer's adjudication), by the payer: the answer was processed after
+# another payer's, whatever claim status it reports (states.AFTER_OTHER_CARCS, detect.AFTER_OTHER_CARCS)
+AFTER_OTHER_CARCS = frozenset({"22", "23"})
+
+
+def _after_other_payer(x) -> bool:
+    """This answer was processed after another payer's (CARC 22 or 23 on its line or its claim, by the payer): a supplement
+    answering with claim status 1 pays its share as second payer, never another plan's payment as primary (F1's
+    fx-ledger-r1-3 reads it the same way in states.paid_proof and detect._taken_back_items)."""
+    claim = getattr(x, "claim", None)
+    return any(r in AFTER_OTHER_CARCS and g != "PR" for g, r, _c in list(x.adj or []) + list(getattr(claim, "adj", None) or []))
 SECONDARY_STATUSES = ("2", "3", "20", "21")
 REVERSAL_STATUS = "22"
 COST_SHARE_CARCS = frozenset({"1", "2", "3"})           # the patient's deductible, coinsurance and copay: never a denial
@@ -1216,7 +1227,7 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
     for f, a in _line_items(items, arch, zero_paid=True):
         ans = arch.answers_of(a)
         prim = [x for x in ans if x.line_key != a.line_key and x.standing > 0 and not _same_payer_loose(x, a) and x.status in PRIMARY_STATUSES
-                and (_before(x, a) or ((x.paid_on or "") == (a.paid_on or "") and x.trace != a.trace))]
+                and not _after_other_payer(x) and (_before(x, a) or ((x.paid_on or "") == (a.paid_on or "") and x.trace != a.trace))]
         if not prim:
             continue
         p = prim[0]

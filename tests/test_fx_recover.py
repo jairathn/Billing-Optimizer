@@ -994,13 +994,14 @@ def test_trace_a_second_payers_payment_after_a_denial_that_held_nothing_is_what_
     w.store.close()
 
 
-@pytest.mark.parametrize("offset", ["line", "claim"])
+@pytest.mark.parametrize("offset", ["line", "claim", "claim_added"])
 def test_trace_the_items_own_payer_paying_as_second_payer_after_its_denial_is_what_came_back(tmp_path, kind, offset):
     """Maple pays a 99213 first ($70.00). Pine, billed first by mistake, denies it (CO-50), then processes it as second
     payer and pays $10.00: on the line (its OA-23 naming Maple's payment), or with the line at $80.00 and Maple's $70.00
     taken back at the claim level (PI-22: the claim pays $10.00). Pine's item recovered the $10.00 that arrived (the hand
     trace: the second payer was the item's own payer, its payment was taken as a share of the answer and the recovery was
-    $0; a line that pays more than its claim was counted whole)."""
+    $0; a line that pays more than its claim was counted whole). With the claim also paying $5.00 of the patient's share
+    back at its own level (PR-2 of -$5.00: the claim pays $15.00), $15.00 arrived."""
     w = World(tmp_path, kind)
     w.remit(clean_visits(1, 25, "99213", "100.00", "80.00"), "20260301", **PINE)
     first = sv("99213", "100.00", "70.00", 1, "CAS*CO*45*20.00~CAS*PR*2*10.00~", allowed="80.00")
@@ -1010,15 +1011,19 @@ def test_trace_the_items_own_payer_paying_as_second_payer_after_its_denial_is_wh
     if offset == "line":
         second = clm("CB0000730C017", "2", "100.00", "10.00", sv("99213", "100.00", "10.00", 1, "CAS*CO*45*20.00~CAS*OA*23*70.00~",
                                                                allowed="80.00"), payer_ctl="P2")
-    else:
+    elif offset == "claim":
         second = clm("CB0000730C017", "2", "100.00", "10.00", sv("99213", "100.00", "80.00", 1, "CAS*CO*45*20.00~", allowed="80.00"),
                      payer_ctl="P2", claim_cas="CAS*PI*22*70.00~")
+    else:
+        second = clm("CB0000730C017", "2", "100.00", "15.00", sv("99213", "100.00", "80.00", 1, "CAS*CO*45*20.00~", allowed="80.00"),
+                     payer_ctl="P2", claim_cas="CAS*OA*23*70.00~CAS*PR*2*-5.00~")
     w.remit([second], "20260601", **PINE)
     w.run("t1", today="2026-06-20")
     rows = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000730C017"
             and r["payer_name"] == PINE["payer"]]
     print(brief(rows))
-    assert [(r["status"], r["recovered_cents"]) for r in rows] == [("resolved", 1000)], brief(rows)
+    want = 1500 if offset == "claim_added" else 1000
+    assert [(r["status"], r["recovered_cents"]) for r in rows] == [("resolved", want)], brief(rows)
     w.store.close()
 
 
@@ -1038,4 +1043,90 @@ def test_trace_the_items_own_payer_paying_more_as_second_payer_after_its_short_a
     rows = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000740C017"]
     print(brief(rows))
     assert [(r["status"], r["recovered_cents"]) for r in rows] == [("resolved", 3000)], brief(rows)
+    w.store.close()
+
+
+# =========================================================================== routed from F1 (plans/progress/fx-ledger_needs/)
+def test_f1_a_part_denied_after_the_whole_service_was_paid_on_another_bill_is_not_work(tmp_path, kind):
+    """need_part_paid_as_global_elsewhere: the whole 88305 paid on bill 400 on April 20; the 26 billed apart on bill 401
+    (the same patient, the same day) and denied CO-96 on May 15. The part is a duplicate of the whole service paid, not
+    work."""
+    from tests.test_fx_ledger import World as LWorld, brief as lbrief
+    w = LWorld(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "88305", "120.00", "68.00"), "20260301")
+    w.remit([clm("CB0000400C017", "1", "120.00", "68.00", sv("88305", "120.00", "68.00", 1, "CAS*CO*45*52.00~", allowed="68.00"))],
+            "20260420")
+    w.remit([clm("CB0000401C017", "1", "60.00", "0.00", sv("88305", "60.00", "0.00", 1, "CAS*CO*96*60.00~", mods="26"))], "20260515")
+    w.run("r1", today="2026-09-20")
+    rows = [r for r in w.rows("patient_control_number = 'CB0000401C017' AND COALESCE(stale, 0) = 0")]
+    assert all(r["work_state"] != "work_now" for r in rows), lbrief(rows)
+    w.store.close()
+
+
+def test_f1_medicares_denial_is_not_closed_on_the_supplements_status_1_coinsurance(tmp_path, kind):
+    """need_status_1_supplement_not_primary: Medicare paid the 99214, the supplement paid the $29.40 coinsurance with
+    claim status 1 and OA-23, then Medicare reversed its payment and denied the service (CO-97). The supplement's
+    coinsurance is no payment as primary: Medicare's denial is not closed on it."""
+    from tests.test_fx_ledger import BILL, GAP as L_GAP, KY as L_KY, World as LWorld
+    w = LWorld(tmp_path, kind)
+    pcn = f"{BILL}C017"
+    w.remit(clean_visits(1, 25, "99214", "223.65", "147.00"), "20260301", **L_KY)
+    w.remit([clm(pcn, "19", "223.65", "117.60", sv("99214", "223.65", "117.60", 1, "CAS*CO*45*76.65~CAS*PR*2*29.40~", allowed="147.00"),
+                 payer_ctl="MC1")], "20260415", **L_KY)
+    w.remit([clm(pcn, "1", "223.65", "29.40", sv("99214", "223.65", "29.40", 1, "CAS*CO*45*76.65~CAS*OA*23*117.60~", allowed="147.00"),
+                 payer_ctl="GP1")], "20260425", **L_GAP)
+    w.remit([clm(pcn, "22", "-223.65", "-117.60", sv("99214", "-223.65", "-117.60", -1, "CAS*CO*45*-76.65~CAS*PR*2*-29.40~",
+                                                     allowed="-147.00"), payer_ctl="MC1"),
+             clm(pcn, "1", "223.65", "0.00", sv("99214", "223.65", "0.00", 1, "CAS*CO*97*223.65~"), payer_ctl="MC2")], "20260520", **L_KY)
+    w.run("r1", today="2026-09-20")
+    den = [r for r in w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0") if "Supplement" not in (r["payer_group"] or "")]
+    assert den, "Medicare's denial is an item"
+    for r in den:
+        assert not (r["work_state"] == "done" and "as primary" in (r["state_basis"] or "")), (
+            f"Medicare's denial is closed on the supplement's $29.40 coinsurance (claim status 1, OA-23) as if it paid as primary: "
+            f"{r['state_basis']}")
+    w.store.close()
+
+
+def test_f1_a_medicaid_denial_the_first_payer_paid_in_part_is_sized_at_what_medicaid_still_owes(tmp_path, kind, monkeypatch):
+    """need_medicaid_share_size: Medicaid's rate for the 99214 is $70.00; the first payer paid $50.00 on a paper check;
+    EMA shows $70.00 open. The denial is work (F1) and its size is the $20.00 Medicaid still owes, not its whole rate."""
+    import datetime as dt
+    from remitwatch import states
+    from tests import ema_fixtures as F
+    from tests import test_ema_wiring as EW
+    from tests.test_paid_first_elsewhere import STATE, TODAY, _by_claim, _carry, _claim, _ema, _history, _host
+    s, lg = _host(tmp_path, kind, monkeypatch)
+    try:
+        _history(s)
+        _claim(s, 44, payer=STATE, carc="96")
+        rows, ar = _ema(44, first_paid=50, share="open")
+        rows.append(_carry(dt.date(2026, 5, 25)))
+        EW.load(s, lg, tmp_path, rows, ar)
+        EW.run(s, today=TODAY)
+        f = _by_claim(s)[F.claim_id(44)]
+        st = states.state_of(s.conn, f, today=TODAY)
+        assert st["work_state"] == "work_now", st
+        assert f["shortfall_cents"] == 2000, f"sized at {f['shortfall_cents']} cents, while Medicaid owes $20.00"
+    finally:
+        lg.close()
+        s.close()
+
+
+def test_f1_a_denial_of_a_claim_the_practice_voided_afterwards_is_not_work(tmp_path, kind):
+    """need_denial_on_a_voided_claim: Anthem denies C017's 99214 (missing information) on April 15; the practice sends
+    C017 again as a void (837 frequency 8) on April 20 and nothing after it: the charge is withdrawn, and the denial is
+    nothing to work."""
+    from tests.review3.r3helpers import visit_denied_line
+    from tests.test_837_sends import clm837, send
+    from tests.test_fx_ledger import BILL, World as LWorld, brief as lbrief
+    w = LWorld(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    send(w.store, tmp_path, [clm837(f"{BILL}C017", [("99214", "223.65", "20260401")])], "20260402")
+    w.remit([visit_denied_line(f"{BILL}C017", carc="16")], "20260415")
+    send(w.store, tmp_path, [clm837(f"{BILL}C017", [("99214", "223.65", "20260401")], freq="8")], "20260420")
+    w.run("r1", today="2026-09-20")
+    rows = w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0")
+    assert rows, "the denial is an item"
+    assert all(r["work_state"] != "work_now" for r in rows), lbrief(rows)
     w.store.close()
