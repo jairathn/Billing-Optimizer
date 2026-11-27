@@ -921,3 +921,54 @@ def test_medicaid_control_a_service_medicaid_never_priced_caps_nothing(tmp_path,
     w, r = _claim_denied_after_primary(tmp_path, kind, {"99203": ("110.00", "105.00")})
     assert (r["shortfall_cents"], r["work_state"]) == (11100, "work_now"), (r["shortfall_cents"], r["work_state"], r["hint"])
     w.store.close()
+
+
+# =========================================================================== the hand trace of the real copy (fx-recover)
+def test_trace_a_second_payers_share_paid_after_a_denial_is_part_of_what_came_back(tmp_path, kind):
+    """KY Medicare denies a 99214 (CO-16). It pays the corrected claim $94.08 (forwarded), and the supplement pays its
+    $23.52. Medicare then reverses that and pays $84.00; the supplement reverses its $23.52 and pays $21.00. The denial
+    held no money for the supplement to share: all of the $105.00 now standing came back after it (the hand trace: the
+    supplement's first share was taken as held at the denial, and the recovery shrank to $81.48)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301", **KY)
+    w.remit([clm("CB0000700C017", "1", "223.65", "0.00", sv("99214", "223.65", "0.00", 1, "CAS*CO*16*223.65~"), payer_ctl="K1")],
+            "20260410", **KY)
+    paid = lambda amt, pr: sv("99214", "223.65", amt, 1, f"CAS*CO*45*106.05~CAS*PR*2*{pr}~", allowed=f"{float(amt) + float(pr):.2f}")  # noqa: E731
+    w.remit([clm("CB0000700C024", "19", "223.65", "94.08", paid("94.08", "23.52"), payer_ctl="K2")], "20260501", **KY)
+    w.remit([clm("CB0000700C024", "2", "223.65", "23.52", sv("99214", "223.65", "23.52", 1, "CAS*OA*23*200.13~"), payer_ctl="G1")],
+            "20260510", **GAP)
+    w.remit([clm("CB0000700C024", "22", "-223.65", "-94.08", sv("99214", "-223.65", "-94.08", -1, "CAS*CO*45*-106.05~CAS*PR*2*-23.52~"),
+                 payer_ctl="K2"),
+             clm("CB0000700C024", "19", "223.65", "84.00", sv("99214", "223.65", "84.00", 1, "CAS*CO*45*118.65~CAS*PR*2*21.00~",
+                                                               allowed="105.00"), payer_ctl="K3")], "20260601", **KY)
+    w.remit([clm("CB0000700C024", "22", "-223.65", "-23.52", sv("99214", "-223.65", "-23.52", -1, "CAS*OA*23*-200.13~"), payer_ctl="G1"),
+             clm("CB0000700C024", "2", "223.65", "21.00", sv("99214", "223.65", "21.00", 1, "CAS*OA*23*202.65~"), payer_ctl="G2")],
+            "20260610", **GAP)
+    w.run("t1", today="2026-06-20")
+    rows = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000700C017"]
+    print(brief(rows), [(r["status"], r["recovered_cents"]) for r in rows])
+    assert rows and all(r["status"] == "resolved" for r in rows), brief(rows)
+    assert sum(r["recovered_cents"] or 0 for r in rows) == 10500, [(r["signal"], r["recovered_cents"]) for r in rows]
+    w.store.close()
+
+
+def test_trace_a_payment_that_replaces_one_held_at_the_answer_is_no_units_recovery(tmp_path, kind):
+    """Anthem pays one 11310 ($87.45) and denies two more billed with 76 (CO-252). It then reverses the claim and pays all
+    three: the first again at $87.45, the two others at $43.73 each. Each 76 item recovered $43.73: the $87.45 only
+    replaced the payment the payer held at the denials (the hand trace: one item took it and capped, the other got $11.61)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "11310", "104.98", "89.23"), "20260301")
+    first = sv("11310", "104.98", "87.45", 1, "CAS*CO*45*15.75~CAS*CO*253*1.78~", allowed="89.23")
+    denied = sv("11310", "104.98", "0.00", 1, "CAS*CO*252*104.98~", mods="76")
+    w.remit([clm("CB0000710C017", "1", "314.94", "87.45", first + denied + denied, payer_ctl="A1")], "20260415")
+    back = sv("11310", "-104.98", "-87.45", -1, "CAS*CO*45*-15.75~CAS*CO*253*-1.78~", allowed="-89.23") \
+        + sv("11310", "-104.98", "0.00", -1, "CAS*CO*252*-104.98~", mods="76") * 2
+    half = sv("11310", "104.98", "43.73", 1, "CAS*CO*59*60.36~CAS*CO*253*0.89~", allowed="44.62")
+    w.remit([clm("CB0000710C017", "22", "-314.94", "-87.45", back, payer_ctl="A1"),
+             clm("CB0000710C017", "1", "314.94", "174.91", first + half + half, payer_ctl="A2")], "20260507")
+    w.run("t1", today="2026-05-20")
+    rows = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000710C017" and r["signal"] != "UNDERPAID_VS_OWN_RATE"]
+    print(brief(rows), [(r["signal"], r["status"], r["shortfall_cents"], r["recovered_cents"]) for r in rows])
+    got = sorted(r["recovered_cents"] or 0 for r in rows if r["status"] == "resolved")
+    assert got == [4373, 4373], [(r["signal"], r["status"], r["recovered_cents"]) for r in rows]
+    w.store.close()

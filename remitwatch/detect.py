@@ -2810,16 +2810,16 @@ class Detector:
             return self.paid_events.get(key, [])
         return [e for e in self.paid_by_code.get((key[0], key[1]), []) if e[7] is None]
 
-    def _gained(self, keys: list, part: str | None, mine: str, own_pcn: str | None, evs: list) -> tuple[float, set]:
+    def _gained(self, keys: list, part: str | None, mine: str, own_pcn: str | None, evs: list) -> tuple[float, set, Counter]:
         """What a service gained since an item's answer (review money-4): the money every payer's payments of it hold now,
         less what they held at the answer (`mine`, on the item's claim id `own_pcn`: a payment taken back by then held
         nothing). A second payer's share of that answer (paid after it, before the first later payment that pays the item:
         the supplement's coinsurance of a downcoded answer) counts as held then, at what it paid: a supplement that takes its
         share back and pays the new one has added only the difference. `keys`: the service's (bill, code, date), with the
         item's own line's when that is another code (a downcode paid again under the code billed); `part`: the item's part
-        (pays_part). Returns (that gain, the paying lines made since the answer, which hold it)."""
+        (pays_part). Returns (that gain, the paying lines made since the answer, which hold it, and the amounts of the
+        payments held at the answer that were taken back since: a payment of one of those amounts since only replaces it)."""
         when = lambda p: p.get("payment_date") or p.get("txn_payment_date") or ""      # noqa: E731
-        first = min((e[0] for e in evs if e[0]), default=None)
         rows: dict[str, list] = {}          # line key -> [date, claim status, claim id, cents standing now]
         taken: dict[str, list] = defaultdict(list)          # line key -> [(day, cents)] taken back
         for key in keys:
@@ -2832,17 +2832,32 @@ class Detector:
                     rows.setdefault(p["line_key"], [when(p), p.get("claim_status_code"), p["patient_control_number"], 0])
         now = held = 0.0
         since: set[str] = set()
+        seconds: list = []
+        replaced: Counter = Counter()
         for lk, (d, st, pcn, stands) in rows.items():
             gone = taken.get(lk, ())
             paid = stands + sum(c for _d, c in gone)            # what it paid: what stands plus what was taken back
             now += stands
             if d < mine or (d == mine and pcn == own_pcn):
                 held += paid - sum(c for day, c in gone if day <= mine)
-            elif st in ("2", "3") and first and d < first:
+                if any(day > mine for day, _c in gone):
+                    replaced[int(paid)] += 1
+            elif st in ("2", "3"):
+                seconds.append((lk, d, paid))
+            else:
+                since.add(lk)
+        # a second payer's payment before the first later payment as primary (reversed since or not) is its share of the
+        # item's answer only where that answer held money for it to share (a short payment): after a denial, or a payment
+        # the payer took back by its answer, nothing stood, and what a second payer paid since is part of what came back
+        # (the fx-recover hand trace: a supplement's share paid between a denial and the payer's new payment was taken as held)
+        first_paid = min((d for d, st, pcn, _s in rows.values() if st in ("1", "19") and (d > mine or (d == mine and pcn != own_pcn))),
+                         default=None)
+        for lk, d, paid in seconds:
+            if held > 0 and (first_paid is None or d < first_paid):
                 held += paid
             else:
                 since.add(lk)
-        return now - held, since
+        return now - held, since, replaced
 
     def _recover(self, own: dict | None, mine: str, own_pcn: str | None, wants: list, cap: int | None = None) -> tuple[int, int, list, bool]:
         """What a closure recovered (trace findings T-C5, T-C6): the money the item's own units got after its answer (`mine`,
@@ -2867,17 +2882,27 @@ class Detector:
             part = want[3] if len(want) > 3 else None
             if not evs:
                 continue
+            replaced: Counter = Counter()
             if key[0] is None:
                 # payments on other bills (resolve_elsewhere): all of them came after the item's answer
                 gain, since = float(sum(e[2] for e in evs)), {e[8] for e in evs}
                 if own is not None and own_key != key:
                     gain -= sum(c for p, day, c in self.took.get(own_key, ()) if p["line_key"] == own["line_key"] and day > mine)
             else:
-                gain, since = self._gained([key] + ([own_key] if own is not None and own_key != key else []), part, mine, own_pcn, evs)
+                gain, since, replaced = self._gained([key] + ([own_key] if own is not None and own_key != key else []), part, mine, own_pcn, evs)
             budget = gain - sum(self.used_units.get(lk, (0, 0))[1] for lk in since)
             mods = own.get("modifiers") if own else None
+            charge = own.get("charge_cents") if own else None
+            charges = self.__dict__.get("_line_charges")
+            if charges is None and own:
+                charges = self.__dict__["_line_charges"] = {x["line_key"]: x.get("charge_cents") for x in self.lines}
+            # the item's own payer first, then a line of the item's own modifiers and charge (another line of the service is
+            # another unit's: the fx-recover hand trace), and last a payment that only replaces one the payer held at the
+            # item's answer and took back since (the other unit's, paid again)
             by_payer: dict = defaultdict(list)
-            for e in sorted(evs, key=lambda e: (bool(own) and e[6] != me, bool(own) and e[9] != mods, e[0], e[1] or "", e[8])):
+            for e in sorted(evs, key=lambda e: (bool(own) and e[6] != me, bool(own) and e[9] != mods,
+                                                bool(own) and charge is not None and (charges or {}).get(e[8]) != charge,
+                                                replaced.get(int(e[2]), 0) > 0, e[0], e[1] or "", e[8])):
                 by_payer[(e[6], event_part(e) if part == "" else None)].append(e)
             value, picks = 0.0, []
             for es in by_payer.values():
