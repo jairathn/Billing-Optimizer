@@ -1044,6 +1044,39 @@ def test_a_lone_send_day_twin_of_another_named_patient_does_not_answer_the_claim
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_a_lone_send_day_twin_of_another_patient_never_answers_a_claim_emas_reports_name(tmp_path, kind, ema_env):
+    """(fx-exports-r1-3, own evidence) Annie's claim F.claim_id(61) is in EMA's weekly exports (submitted March 20) under
+    EMA's patient EMA061, whom EMA's reports name (another claim of hers, paired by the A/R). Her own EMA claim is not in
+    Production's dates. Bert's EMA claim 62 of the same content, charged March 20 and paid April 10, is the claim's only
+    send-day twin: it names Bert, not Annie, so it is not her claim's. Her claim stays listed."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay
+    from tests.test_workable import ema
+    s, lg = _ema_store(tmp_path, kind)
+    rows = [charge(F.link_no(62), cpt="99214", amount=200, patient="Twintest, Bert", posted=D(2026, 3, 20)),
+            pay(F.link_no(62), "PAPER-62", 110, cpt="99214", patient="Twintest, Bert", posted=D(2026, 4, 10)),
+            charge(F.link_no(63), cpt="99214", amount=200, patient="Othertest, Carl", posted=D(2026, 3, 3))]
+    tie_rows, tie_ar = _tie(161, "Twintest, Annie")
+    denial_world(s, lg, tmp_path, rows + tie_rows, ar_rows=tie_ar)
+    _volume(s)
+    _tie_claim(s, 161, "EMA061")
+    bc = dict(payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA061")
+    ema(s.conn, F.claim_id(61), service_date="2026-03-02", bill_created="2026-03-20", charges_cents=20000, **bc)
+    ema(s.conn, F.claim_id(61), family="claim_status", claim_status="Submitted", claim_submission_date="2026-03-20",
+        service_date="2026-03-02", **bc)
+    s.conn.commit()
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = {r["patient_control_number"]: r["ema_link"] for r in s.query(
+        "SELECT patient_control_number, ema_link FROM findings WHERE signal='NO_ANSWER' AND COALESCE(stale,0)=0 "
+        "AND patient_control_number=?", (F.claim_id(61),))}
+    s.close()
+    assert got == {F.claim_id(61): None}, f"Annie's claim was answered by Bert's EMA claim, or carries it: {got}"
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_a_lone_send_day_twin_of_a_patient_billed_under_the_claims_member_id_still_answers_it(tmp_path, kind, ema_env):
     """(fx-exports-r1-3, the other side) The same, with Bert billed under Annie's member id elsewhere: he is on her plan, so
     the member id's one remitted name (Annie's) says nothing against EMA claim 62 being the claim's own. The twins rule
