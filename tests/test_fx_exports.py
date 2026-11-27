@@ -1414,3 +1414,33 @@ def test_an_exports_claim_not_due_yet_is_noted_for_the_waiting_view(tmp_path, ki
     Detector(s, run_id="t1").run()
     s.close()
     assert [(a[0], a[2], a[4]) for a in noted] == [("CB0000B92C017", "2026-11-01", 22365)] and noted[0][3] > "2026-11-10", noted
+
+
+# ----------------------------------------------------------------------------------------------- a fold the self-check reads
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_export_claim_listed_before_gives_its_visit_to_a_newer_bill_and_is_not_kept_by_the_self_check(tmp_path, kind):
+    """(the exports' one-visit rule, with the self-check that keeps an item no rule explains) EMA's weekly exports list bill
+    CB0000N81 (a 99214 of September 14, sent September 15, EMA patient P0000N81), never answered: listed. The practice
+    makes the bill again as CB0000N82 for the same patient and visit (sent September 25), which the next exports list. The
+    next run chases the visit under the newer bill only, and records where the older claim's chase went (the newer item's
+    evidence, 'folded'), so the self-check does not keep the older item listed as unexplained."""
+    from remitwatch.detect import _fid
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    ema(s.conn, "CB0000N81C017", patient_id="P0000N81")
+    ema(s.conn, "CB0000N81C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-15",
+        patient_id="P0000N81")
+    s.conn.commit()
+    found = _chased(s, "t1")
+    assert "CB0000N81C017" in found, sorted(found)
+    ema(s.conn, "CB0000N82C017", patient_id="P0000N81", bill_created="2026-09-25")
+    ema(s.conn, "CB0000N82C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-25",
+        patient_id="P0000N81")
+    s.conn.commit()
+    found = _chased(s, "t2")
+    mine = sorted(k for k in found if k.startswith("CB0000N8"))
+    assert mine == ["CB0000N82C017"], f"listed {mine}: {[(k, (found[k]['hint'] or '')[:80]) for k in mine]}"
+    folded = json.loads(found["CB0000N82C017"]["evidence"]).get("folded") or []
+    assert [x["finding_id"] for x in folded] == [_fid("EMA_OPEN_CLAIM", "CB0000N81C017")], folded
+    s.close()

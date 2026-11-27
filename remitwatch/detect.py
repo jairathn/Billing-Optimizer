@@ -6463,11 +6463,14 @@ class Detector:
                     if h not in newest_for or mark > newest_for[h][0]:
                         newest_for[h] = (mark, cd["b"])
         final = []
+        carried: dict[str, set] = {}        # claim id -> the newer claims that carry all its visits
         for cd in cands:
             b, patient = cd["b"], same.get(cd["pcn"], cd["patient"])
             items = [x for x in cd["items"]
                      if not (patient and x[1] and newest_for.get(hash((patient, x[1], x[0], item_part(x))), (None, b))[1] != b)]
             if not items:
+                carried[cd["pcn"]] = {newest_for[hash((patient, x[1], x[0], item_part(x)))][0][1] for x in cd["items"]
+                                      if patient and x[1]}
                 continue                    # chased under the newer bill made for the same visit
             final.append((cd, items))
         if self.ema_on and final:
@@ -6477,6 +6480,13 @@ class Detector:
             self._emit_open_claim(cd, items, newest)
             if cd.get("bill_resent_837"):
                 self._note_resent_bill(cd)
+        for old, tos in sorted(carried.items()):
+            # where the older claim's chase went, for the self-check that keeps an item no rule explains (folded)
+            for to in sorted(tos):
+                if _fid("EMA_OPEN_CLAIM", to) in self.findings:
+                    self._fold_into(_fid("EMA_OPEN_CLAIM", to), _fid("EMA_OPEN_CLAIM", old), "exports_one_visit",
+                                    f"The same visit was billed before on claim {old}: only this newer bill is chased")
+                    break
         # what was listed, for the one-visit rule across the two passes once the 837 pass has listed its own claims
         # (_exports_yield_to_newer_bills, answers-1)
         self._export_final = (final, newest)
@@ -8358,11 +8368,31 @@ class Detector:
             else:
                 self.findings.pop(fid, None)
                 heirs.setdefault(to_fid, []).append((cd.get("id_signal") or "EMA_OPEN_CLAIM", e))
+                self._fold_into(to_fid, fid, "exports_yield_to_newer_bill",
+                                f"The exports' claim {e} of the same visit yields to this newer bill")
             note = (f"This bill went out before as claim {e} (sent {cd.get('sent')}), which EMA's exports list and no payer "
                     f"answered: only this newer submission is chased" if whole else
                     f"This visit was billed before on claim {e} (sent {cd.get('sent')}), which no payer answered either: the "
                     f"practice made the bill again, so only this newer bill is chased")
             f["hint"] = f"{f['hint']}. {note}" if f.get("hint") else note
+
+    def _fold_into(self, into: str, gone: str, rule: str, note: str) -> None:
+        """Record on the item that carries a claim's chase now (`into`) the item that no longer lists it (`gone`), in its
+        evidence's 'folded' list, as archive_rules' folds do: the self-check that keeps an item no rule explains reads
+        it (selfcheck.check_vanished), and so do the decision log and Results."""
+        f = self.findings.get(into)
+        if f is None:
+            return
+        try:
+            ev = json.loads(f.get("evidence") or "{}")
+        except ValueError as exc:
+            from . import runlog
+            runlog.caught(exc, "exports_fold_into", level="warning")
+            return
+        folded = [x for x in ev.get("folded") or [] if not (isinstance(x, dict) and x.get("finding_id") == gone)]
+        folded.append({"finding_id": gone, "rule": rule, "signal": "NO_ANSWER", "note": note})
+        ev["folded"] = folded
+        f["evidence"] = json.dumps(ev, default=str)
 
     def _prior_work(self, fids: set) -> dict[str, dict]:
         """What the store holds for these items before this run's save: {finding id: {'worked': a person recorded something
