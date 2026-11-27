@@ -357,14 +357,17 @@ def test_r1_5_the_next_payers_patient_share_caps_the_bill(sstore):
                      "not the patient's to pay, and put $120.00 on the patient (PR-1): bill no more than that."), first
 
 
-def test_r1_5_a_next_payer_that_put_nothing_on_the_patient_keeps_its_caution(sstore):
-    """The unit's own case stays: a next payer that answered with a contractual adjustment only (nothing paid, nothing on
-    the patient) is said before billing, and the bill is not capped to $0 (the owner's decision bills by default)."""
+def test_r1_5_a_next_payer_that_put_nothing_on_the_patient_settles_it(sstore):
+    """A next payer that answered with a contractual adjustment only (nothing paid, nothing on the patient): the bill is
+    never capped to $0 and sent; decision 2's follow-up (the owner's notes of 2026-11-26 section 5; tests/test_fx_people.py)
+    sends it straight to Done with that payer's answer as the reason, where the unit's first build warned before billing."""
     from remitwatch import story
     _supplement_answer(sstore, co=150, pr=0, allowed=0)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("done", "next_payer_contractual"), st["state_basis"]
     n = story.next_step(sstore.conn, "F1", today=TODAY2)
-    assert n["action"].startswith("Bill the patient $150.00:"), n["action"]
-    assert n["steps"][0].startswith("Before billing:") and "put this service on the practice (CO-45), with nothing paid" in n["steps"][0]
+    assert n["action"].startswith("Nothing to do: Medicare Supplement carriers answered after it") and "(CO-45, $150.00)" in n["action"], n["action"]
+    assert "billed_patient" not in n["buttons"], n["buttons"]
 
 
 def test_r1_5_a_next_payer_that_paid_and_put_nothing_on_the_patient_is_said_plainly(sstore):

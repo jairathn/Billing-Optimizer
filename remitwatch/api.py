@@ -1462,14 +1462,23 @@ def _record_status(ids: list[str], status: str, notes: str | None, recovered_cen
     """Apply a status to one or more findings. On a serverless host the change is also written to the journal in the
     state folder, which is what makes it last."""
     if runtime.serverless():
+        from .actions import heir_of
         from .cloud import SERVING_COPY
         conn = db()
         try:
+            # an id this copy no longer holds is the item that carries its money now (actions.heir_of), as on a server: a
+            # send or a page that began before a run gave the item a new number is recorded on the heir (review people-4)
+            target = {i: heir_of(conn, i) for i in ids}
             # the status each finding has on the copy the person is looking at: logged as what they changed it from
-            seen = {i: r[0] for i in ids for r in [conn.execute("SELECT status FROM findings WHERE finding_id=?", (i,)).fetchone()] if r}
+            seen = {t: r[0] for t in dict.fromkeys(target.values())
+                    for r in [conn.execute("SELECT status FROM findings WHERE finding_id=?", (t,)).fetchone()] if r}
         finally:
             conn.close()
-        known = [i for i in ids if i in seen]
+        known = list(dict.fromkeys(target[i] for i in ids if target[i] in seen))
+        lost = [i for i in ids if target[i] not in seen]
+        if lost:
+            _say(runlog.scrub_text(f"api: a status change to {status} reached no item on this copy: {', '.join(map(str, lost[:5]))}"
+                                   + (f" and {len(lost) - 5} more" if len(lost) > 5 else "")))
         if not known:
             return 0
         if len(known) == 1:
@@ -1481,11 +1490,15 @@ def _record_status(ids: list[str], status: str, notes: str | None, recovered_cen
         return len(known)
     conn = db()
     try:
-        n = sum(1 for i in ids if apply_status(conn, i, status, notes, recovered_cents if len(ids) == 1 else None, actor))
+        done = [i for i in ids if apply_status(conn, i, status, notes, recovered_cents if len(ids) == 1 else None, actor)]
         conn.commit()
-        return n
     finally:
         conn.close()
+    lost = [i for i in ids if i not in done]
+    if lost:
+        _say(runlog.scrub_text(f"api: a status change to {status} reached no item in the store: {', '.join(map(str, lost[:5]))}"
+                               + (f" and {len(lost) - 5} more" if len(lost) > 5 else "")))
+    return len(done)
 
 
 # Let go and Lost take a claim off every list. A claim the payer never answered, or one rejected before it reached the
@@ -1522,9 +1535,18 @@ PAID_TIMES_CHARGE = 10                  # nor more than ten times its line's cha
 IN_FLIGHT = "A fax for this item is going out now. Wait a minute and look at the item again."
 NO_AMOUNT = "Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is."
 PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead."
-# items done with $0 recovered, by their work (remitwatch.states' appeal_block): a payment the 835 made that EMA never posted
-# ('post'), and a credit that is only a takeback EMA never posted ('credit'): the money already came, or none is owed
-ZERO_PAID_BLOCKS = ("post", "credit")
+BULK_PAID = "Paid is recorded one item at a time, with the amount the payer paid: open each item and press Paid there."
+# A line the payer paid after the item was listed: its Paid carries that payment, never $0 (and never Lost or Let go)
+PAID_LATER = "The payer paid {amount} for this on {day} (the remittance on file): type that amount. It counts as recovered."
+# Items closed as Paid with $0.00 recovered, by their work (remitwatch.states: the appeal_block and the rule the run stored):
+# a payment the 835 made that EMA never posted ('post', REMIT_NOT_POSTED, rule post_payment: "Mark posted in EMA", whoever
+# started it), a credit that is only a takeback EMA never posted ('credit', rule credit_unposted_takeback), and a line the
+# run found paid before the item was listed ('paid': its next step says "Close it as Paid with $0.00 recovered"). The money
+# already came, or none is owed: such an item is never told to be marked Lost or Let go (review people-3)
+ZERO_PAID_BLOCKS = ("post", "credit", "paid")
+ZERO_PAID_RULES = ("post_payment", "credit_unposted_takeback")
+# a proof of payment that came after the item was listed, with the amount that arrived (remitwatch.story.CLOSE_RECOVERED)
+RECOVERED_PROOFS = ("paid_later_ema", "paid_later_835", "rebilled_paid", "forwarded_paid", "second_payer_paid", "claim_paid_in_ema")
 # A person's Done (the owner's decision 2): a patient-group denial closed with $0 recovered, with who and when, by the
 # strict JSON true 'done' on a Paid; its note starts with states.DONE_NOTE so the item's history and state say Done
 DONE_ONLY = ("Done is for a service the payer put on the patient (no referral, coverage dates, a plan exclusion). Mark this "
@@ -1585,18 +1607,64 @@ def _status_now(conn: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
     from .actions import LAST_DECISION
     from .states import PATIENT_DENIAL_SIGNALS, patient_denial
     events = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_events'").fetchone())
-    block = "f.appeal_block" if "appeal_block" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else "NULL"
-    sigs = ",".join("'" + x + "'" for x in PATIENT_DENIAL_SIGNALS)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    block = "f.appeal_block" if "appeal_block" in have else "NULL"
+    rule = "f.state_rule" if "state_rule" in have else "NULL"
+    sigs = ",".join("'" + x + "'" for x in PATIENT_DENIAL_SIGNALS + ("REMIT_NOT_POSTED",))
     out: dict[str, dict] = {}
     for k in range(0, len(ids), 500):
         part = ids[k:k + 500]
         for r in conn.execute(f"""SELECT f.finding_id, f.status, f.auto_note, f.charge_cents, {LAST_DECISION if events else "NULL"} last,
-                                         {block} block, f.signal, f.carc, CASE WHEN f.signal IN ({sigs}) THEN f.evidence END
+                                         {block} block, f.signal, f.carc, CASE WHEN f.signal IN ({sigs}) THEN f.evidence END, {rule} rule
                                   FROM findings f WHERE f.finding_id IN ({','.join('?' * len(part))})""", part):
-            out[r[0]] = {"status": r[1], "charge_cents": r[3], "block": r[5],
+            ev = _evidence_of(r[8]) if r[6] == "REMIT_NOT_POSTED" else {}
+            out[r[0]] = {"status": r[1], "charge_cents": r[3], "block": r[5], "signal": r[6], "rule": r[9],
+                         "informational": bool(ev.get("informational")),
                          "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden"),
                          "patient_denial": patient_denial({"signal": r[6], "carc": r[7], "evidence": r[8]})}
     return out
+
+
+def _evidence_of(raw: Any) -> dict:
+    try:
+        v = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except ValueError as exc:
+        runlog.caught(exc, "status:evidence", level="warning")      # unreadable evidence: read as no remittance flag
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _zero_paid_ok(cur: dict) -> bool:
+    """Whether an item's work brings no new money, so Paid with $0.00 recovered closes it (ZERO_PAID_BLOCKS): decided by
+    the item's own work (its signal and the rule the run stored), not only by the stored block, which a person's status
+    leaves empty (a Started unposted payment: states.decide stores no route block for an item a person decided). An
+    informational remittance's payment that never arrived is money to ask for, never a posting."""
+    if cur.get("block") in ZERO_PAID_BLOCKS or cur.get("rule") in ZERO_PAID_RULES:
+        return True
+    return cur.get("signal") == "REMIT_NOT_POSTED" and not cur.get("informational") and cur.get("block") != "call"
+
+
+def _paid_on_file(fid: str) -> dict | None:
+    """For a $0 Paid the stored state does not explain (an item a person decided keeps no route block): the item's state
+    worked out now on the copy at hand (remitwatch.states), and the payment that settles its line if one is on file
+    ({'rule', 'cents', 'date'}), else None. Read before any write: never inside the store's write lock."""
+    from . import states
+    conn = db()
+    try:
+        row = conn.execute("SELECT * FROM findings WHERE finding_id=?", (fid,)).fetchone()
+        if row is None:
+            return None
+        st = states.state_of(conn, dict(row), today=_day(0))
+    except Exception as exc:        # noqa: BLE001  (logged: without the state, a $0 Paid is refused as for any unpaid line)
+        runlog.caught(exc, "status:paid_on_file", level="warning")
+        _say(runlog.scrub_text(f"api: state for a $0 Paid failed for item {fid}: {type(exc).__name__}"))
+        return None
+    finally:
+        conn.close()
+    proof = st.get("proof") or None
+    if not proof or proof.get("rule") == "moved_to_patient_open":
+        return None
+    return {"rule": proof.get("rule"), "cents": int(proof.get("cents") or 0), "date": proof.get("date")}
 
 
 def _sending_now(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
@@ -1622,6 +1690,25 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
     when it must not be made; else the items that must not be changed are left as they are and named. done: a person's
     Done on a patient-group denial (Paid with $0, the owner's decision 2), refused for any other item."""
     out: dict = {"n": 0, "changed": [], "in_flight": []}
+    # a $0 Paid the stored state may not explain (an item a person decided keeps no route block): whether its line is paid
+    # on file, worked out once, before the store's write lock is taken (review people-3)
+    paid_now: dict = {}
+
+    def zero_ok(conn, i: str, cur: dict) -> None:
+        """Paid with $0.00 is taken only where the item's work brings no new money; refused for a line the payer paid
+        after it was listed (that amount, typed) and for an unpaid line (Lost or Let go), never the other way round."""
+        if _zero_paid_ok(cur):
+            return
+        if i not in paid_now:
+            raise Refused(400, "amount", PAID_ZERO)
+        proof = paid_now[i]
+        if proof and proof.get("rule") in RECOVERED_PROOFS and proof.get("cents", 0) > 0:
+            raise Refused(400, "amount", PAID_LATER.format(amount=f"${proof['cents'] / 100:,.2f}", day=proof.get("date") or "a later date"))
+        if not proof:
+            raise Refused(400, "amount", PAID_ZERO)
+
+    if single and status == "resolved" and rec == 0 and not done:
+        paid_now[ids[0]] = _paid_on_file(ids[0])
 
     def sort(conn) -> list[str]:
         now = _status_now(conn, ids)
@@ -1656,8 +1743,8 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                     raise Refused(400, "amount", NO_AMOUNT)
                 if rec < 0:
                     raise Refused(400, "amount", "The amount paid cannot be below zero.")
-                if rec == 0 and not done and cur.get("block") not in ZERO_PAID_BLOCKS:
-                    raise Refused(400, "amount", PAID_ZERO)   # nothing recovered: the item was not paid, it was lost or let go
+                if rec == 0 and not done:
+                    zero_ok(conn, i, cur)       # nothing recovered: only for work that brings no money, or a line paid before
                 if rec > top:
                     raise Refused(400, "amount", f"That is more than {'ten times the charge on this line' if top < MAX_PAID_CENTS else '$1,000,000'}"
                                                  f" (${top / 100:,.2f}). Check the amount on the remittance or in EMA.")
@@ -1750,6 +1837,10 @@ async def bulk_status(request: Request, user: str = Depends(require_auth)):
     twice counts once."""
     body = await _body_object(request)
     status, notes, _rec = _status_fields(body)
+    if status == "resolved":
+        # Paid takes the amount the payer paid for that item (H4, CH-10): a list has no amount to give, and an item's
+        # shortfall recorded as its recovery would be money nobody saw arrive (review people-5)
+        raise Refused(400, "amount", BULK_PAID)
     ids = body.get("ids")
     if not isinstance(ids, list) or not ids or len(ids) > 5000 or not all(isinstance(i, str) and 0 < len(i) <= 200 for i in ids):
         raise HTTPException(400, "Say which items: a list of item ids.")
@@ -2690,6 +2781,57 @@ def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, p
         out.append({"key": k["key"], "n": k["n"], "cents": k["cents"], "piles": [{"payer": g, "n": v[0], "cents": v[1]} for g, v in piles]})
     out.sort(key=lambda k: (-k["cents"], -k["n"]))
     return {"n": sum(k["n"] for k in out), "cents": sum(k["cents"] for k in out), "kinds": out}
+
+
+NEVER_ANSWERED_ROWS = 200          # the waiting claims the never-answered page lists, soonest due first (the meta keeps more)
+
+
+def _waiting_row(r: Any) -> dict | None:
+    """One claim of the waiting view (detect.WAITING_837_META 'claims'): stored as [claim, group, sent, due, billed cents];
+    a row stored as a dict with those names is read the same."""
+    if isinstance(r, dict):
+        claim, grp, sent, due, billed = (r.get("claim") or r.get("pcn"), r.get("payer_group") or r.get("group"), r.get("sent"),
+                                         r.get("due"), r.get("billed_cents", r.get("billed")))
+    elif isinstance(r, (list, tuple)) and len(r) >= 5:
+        claim, grp, sent, due, billed = r[:5]
+    else:
+        return None
+    try:
+        cents = int(billed or 0)
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "never_answered:row", level="warning")          # a damaged row: shown with no amount
+        cents = 0
+    return {"claim": str(claim or ""), "payer_group": str(grp or "Unknown"), "sent": str(sent or "")[:10] or None,
+            "due": str(due or "")[:10] or None, "billed_cents": cents}
+
+
+@app.get("/api/never-answered")
+def never_answered(_: str = Depends(require_auth)):
+    """The never-answered page's two views from the last analysis (F3a's 837 pass, routed to F5): the claims sent that no
+    payer has answered yet and that are not due yet, soonest due first, with their due days (detect.WAITING_837_META: on no
+    list until their due day, so blindness is loud), and the claims listed as never answered by the week they were sent,
+    against what the 837s show sent that week (insights.unanswered_weeks), so a batch that never reached the payers stands
+    out. Read from the store or the dashboard's copy (it carries the meta and the findings)."""
+    from .detect import WAITING_837_META
+    from .insights import _meta, unanswered_weeks
+    conn = db()
+    try:
+        w = _meta(conn, WAITING_837_META)
+        weeks = unanswered_weeks(conn)
+    finally:
+        conn.close()
+    w = w if isinstance(w, dict) else {}
+    rows = [x for x in (_waiting_row(r) for r in (w.get("claims") or [])) if x]
+    rows.sort(key=lambda x: (x["due"] or "9999", x["claim"]))
+    try:
+        n, billed = int(w.get("n") or len(rows)), int(w.get("billed_cents") or 0)
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "never_answered:waiting", level="warning")      # a damaged view: what the rows show
+        n, billed = len(rows), sum(x["billed_cents"] for x in rows)
+    waiting = {"n": n, "billed_cents": billed, "first_due": w.get("first_due"), "last_due": w.get("last_due"), "at": w.get("at"),
+               "claims": rows[:NEVER_ANSWERED_ROWS], "listed": min(len(rows), NEVER_ANSWERED_ROWS)}
+    return {"waiting": waiting, "weeks": weeks.get("weeks") or [], "usual_share": weeks.get("usual_share"),
+            "stand_out": [x.get("week") for x in weeks.get("stand_out") or []]}
 
 
 @app.get("/api/desk")
@@ -4128,12 +4270,13 @@ def _mark_sent_appeal(r: dict, actor: str) -> bool:
     if has_table("finding_events") and one("SELECT 1 FROM finding_events WHERE finding_id=? AND kind='manual' AND at >= ? LIMIT 1",
                                            (fid, (r.get("created_at") or "")[:19])):
         return False
-    _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(r.get('number'))} "
-                                      f"(fax {r.get('provider_id') or 'not settled yet'}).", None, actor)
-    return True
+    return bool(_record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(r.get('number'))} "
+                                                  f"(fax {r.get('provider_id') or 'not settled yet'}).", None, actor))
 
 
 SENT_KEPT = "It was {label} by the time the fax went out, so its status was left as it was. Look at it: the payer has this appeal now."
+SENT_LOST = ("The fax went out, but its item could not be marked Sent here (it has a new number, or this copy of the data does not "
+             "have it yet): open it again from the list and mark it Sent, so its follow-ups start.")
 
 
 def _sent_once_faxed(fid: str, note: str, actor: str, again: bool) -> str | None:
@@ -4151,13 +4294,16 @@ def _sent_once_faxed(fid: str, note: str, actor: str, again: bool) -> str | None
     if runtime.serverless():
         conn = db()
         try:
-            kept = why(conn.execute("SELECT status FROM findings WHERE finding_id=?", (heir_of(conn, fid),)).fetchone())
+            target = heir_of(conn, fid)
+            kept = why(conn.execute("SELECT status FROM findings WHERE finding_id=?", (target,)).fetchone())
         finally:
             conn.close()
         if kept:
-            _record_action({"kind": "event", "event": "fax", "finding_id": fid, "actor": actor, "note": f"{note} {kept}"})
-        else:
-            _record_status([fid], "appealed", note, None, actor)
+            _record_action({"kind": "event", "event": "fax", "finding_id": target, "actor": actor, "note": f"{note} {kept}"})
+        elif not _record_status([target], "appealed", note, None, actor):
+            # nothing journaled: the heir is To do with its appeal out and no follow-up. Never a silent 0 (review people-4)
+            _say(runlog.scrub_text(f"api: the Sent of an appeal that went out reached no item: {fid}"))
+            kept = SENT_LOST
         return kept
     conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
     try:
@@ -4166,8 +4312,9 @@ def _sent_once_faxed(fid: str, note: str, actor: str, again: bool) -> str | None
             kept = why(conn.execute("SELECT status FROM findings WHERE finding_id=?", (heir_of(conn, fid),)).fetchone())
             if kept:
                 apply_event(conn, {"finding_id": fid, "event": "fax", "actor": actor, "note": f"{note} {kept}"})
-            else:
-                apply_status(conn, fid, "appealed", note, None, actor)
+            elif not apply_status(conn, fid, "appealed", note, None, actor):
+                _say(runlog.scrub_text(f"api: the Sent of an appeal that went out reached no item: {fid}"))
+                kept = SENT_LOST
             conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:
@@ -4736,7 +4883,8 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     if f.get("status") in ("open", "in_progress") or again:
         if block in NEVER_APPEALED or (block == "waiting" and not again):
             return held("blocked", f"Not sent: {BLOCK_WORDS[block]}. Its panel says what to do instead.")
-        if block in CHECK_FIRST and not body.get("checked"):
+        # the person's "Checked: still unpaid, fax it" is JSON true, as every other override (H5): "false", "no", 0 or 1 is no check
+        if block in CHECK_FIRST and body.get("checked") is not True:
             return held("check_first", f"Not sent yet: {BLOCK_WORDS[block]}. If it is still unpaid, press \"Checked: still unpaid, fax it\".",
                         block=block)
         if live_state in CLOSED_STATES:
@@ -5772,7 +5920,7 @@ def finding_event(finding_id: str, body: dict = Body(default={}), user: str = De
     if kind not in EVENT_KINDS:
         raise HTTPException(400, "Unknown event.")
     if not one("SELECT 1 FROM findings WHERE finding_id=?", (finding_id,)):
-        raise HTTPException(404, "finding not found")
+        _not_found(finding_id)          # its money has a new number since the panel was drawn: 409 changed with it, else 404
     note = " ".join(str(body.get("note") or "").split())[:300]
     _record_action({"kind": "event", "finding_id": finding_id, "event": kind, "note": f"{EVENT_KINDS[kind]}: {note}" if note else EVENT_KINDS[kind],
                     "actor": user})

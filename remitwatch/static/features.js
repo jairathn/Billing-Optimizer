@@ -441,11 +441,12 @@ function bindDrawerExtras(id, d){
 }
 // The amount a person types for Paid, read the way a remittance or EMA prints it: 1250, 1,250, 1,250.00, $1,250.00, 1250.5.
 // {cents} or {why}: anything else (letters, a minus sign, more than two decimals, 1e9, more than ten times the line's charge
-// or more than $1,000,000) is asked again with the reason.
+// or more than $1,000,000) is asked again with the reason. zeroOk: the item's work brings no new money (paidZeroOk), so 0 is
+// the answer there; anywhere else $0 is no Paid.
 const PAID_EMPTY = 'Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is.';
 const PAID_ZERO = 'Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead.';
 const PAID_TOP = 100000000;
-function paidCents(typed, charge){
+function paidCents(typed, charge, zeroOk){
   const t = String(typed == null ? '' : typed).trim();
   if(!t) return {why: PAID_EMPTY};
   if(/^-|^\$\s*-/.test(t)) return {why: 'The amount paid cannot be below zero.'};
@@ -453,10 +454,31 @@ function paidCents(typed, charge){
   if(!m) return {why: 'That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.'};
   if(m[2] && m[2].length > 2) return {why: 'Use at most two decimals (dollars and cents).'};
   const cents = Number(m[1].replace(/,/g, '')) * 100 + (m[2] ? Number((m[2] + '0').slice(0, 2)) : 0);
-  if(cents === 0) return {why: PAID_ZERO};          // nothing recovered is not a Paid: Lost or Let go says what happened
+  if(cents === 0) return zeroOk ? {cents: 0} : {why: PAID_ZERO};       // nothing recovered is a Paid only where nothing new was owed
   const top = charge > 0 ? Math.min(PAID_TOP, 10 * charge) : PAID_TOP;
   if(!Number.isSafeInteger(cents) || cents > top) return {why: top < PAID_TOP ? `That is more than ten times the charge on this line (${money2(top / 10)}). Check the amount.` : 'That is more than $1,000,000. Check the amount.'};
   return {cents};
+}
+// The items whose Paid can carry $0.00, as the site decides it (api._zero_paid_ok, review people-3): a payment EMA never
+// posted, a credit that is only a takeback EMA never posted, a line the run found paid before the item was listed (its next
+// step says to close it as Paid with $0.00 recovered), or a line whose state shows a payment that settles it. A payment
+// that came after the item was listed is typed: it is what was recovered.
+const PAID_ZERO_BLOCKS = new Set(['post', 'credit', 'paid']), PAID_ZERO_RULES = new Set(['post_payment', 'credit_unposted_takeback']);
+const PAID_RECOVERED = new Set(['paid_later_ema', 'paid_later_835', 'rebilled_paid', 'forwarded_paid', 'second_payer_paid', 'claim_paid_in_ema']);
+function paidZeroOk(f, x){
+  f = f || {};
+  if(PAID_ZERO_BLOCKS.has(f.appeal_block) || PAID_ZERO_RULES.has(f.state_rule)) return true;
+  if(f.signal === 'REMIT_NOT_POSTED' && f.appeal_block !== 'call' && !((f.evidence || {}).informational)) return true;
+  const proof = (((x || {}).explain || {}).state || {}).proof;
+  return !!(proof && proof.rule && proof.rule !== 'moved_to_patient_open' && !(PAID_RECOVERED.has(proof.rule) && (proof.cents || 0) > 0));
+}
+// What the payer paid, asked until it is an amount (or the person backs out: null). The prompt starts empty (H4): the
+// disputed amount is only a hint, never an answer a person can accept by pressing OK.
+function askPaid(shortfall, charge, zeroOk){
+  const ask = `Amount the payer paid, in dollars (from the remittance or EMA).${shortfall!=null ? ` The amount in dispute is ${money2(shortfall)}.` : ''}`
+    + (zeroOk ? ' Type 0 if the money came before this item was listed: nothing was recovered.' : '');
+  let msg = ask;
+  for(;;){ const x = prompt(msg, ''); if(x===null) return null; const got = paidCents(x, charge, zeroOk); if(got.cents != null) return got.cents; msg = got.why + '\n\n' + ask; }
 }
 // A packet built in the panel (attached, pasted or from EMA) can be read and faxed at once: it joins the item's packets
 // (the fax buttons read them when pressed) and the next step's box is drawn again, so its main button moves on to the fax
@@ -473,9 +495,11 @@ async function setFindingStatus(id, status, shortfall, signal, seen, charge){
   const body = {status};
   if(seen) body.seen_status = seen;
   if(status==='resolved'){
-    const ask = `Amount the payer paid, in dollars (from the remittance or EMA).${shortfall!=null ? ` The amount in dispute is ${money2(shortfall)}.` : ''}`;
-    let msg = ask;
-    for(;;){ const x = prompt(msg, ''); if(x===null) return false; const got = paidCents(x, charge); if(got.cents != null){ body.recovered_cents = got.cents; break; } msg = got.why + '\n\n' + ask; }
+    // the open panel's own item: its work says whether $0 is an answer (paidZeroOk); any other is asked an amount above $0
+    const zeroOk = state.detailId === id && paidZeroOk(state.detailF, state.detailX);
+    const cents = askPaid(shortfall, charge, zeroOk);
+    if(cents === null) return false;
+    body.recovered_cents = cents;
   }
   // Let go and Lost take a reason, on every item (letGoNote in desk.js; the server holds to it): asking is the confirmation
   const why = letGoNote(signal, status);
@@ -491,7 +515,7 @@ async function setFindingStatus(id, status, shortfall, signal, seen, charge){
 const XP_STATE = {work_now:['Work now','xs-now'], waiting:['Waiting','xs-wait'], done:['Done','xs-done'], accepted:['Accepted','xs-quiet'],
   expired:['Expired','xs-quiet'], cant_check:["Can't be checked",'xs-warn']};
 const XP_STRENGTH = {proven:'Proven: two sources agree', one_source:'From one source', inferred:'Inferred'};
-const XP_SOURCE = {'835':'835', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
+const XP_SOURCE = {'835':'835', '837':'837 claim file', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
 const XP_BUTTON = {build_packet:'Build the appeal packet', attach_note:'Attach the visit note', find_note:'Find the note in EMA', upload_note:'Upload the note',
   fax_payer:'Fax it to the payer', copy_instructions:'Copy the steps', mark_sent:'Mark sent', log_outcome:'Log what happened', mark_posted:'Mark posted in EMA',
   mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA',
@@ -669,10 +693,13 @@ function xpBind(f, x, r, d, done){
   const url = xpEmaUrl(f, x, nx);
   const err = msg => { const e = d.querySelector('#xpErr'); if(e) e.textContent = msg; };
   const say = msg => { const m = d.querySelector('#xpMsg'); if(m){ m.className = 'small ok'; m.textContent = msg; } };
-  const copy = async (text, what) => { try { await navigator.clipboard.writeText(text); say(`${what} copied.`); } catch(e){ err('Could not copy here: select the text and copy it by hand.'); } };
+  const copy = async (text, what) => { try { await navigator.clipboard.writeText(text); say(`${what} copied.`); return true; } catch(e){ err('Could not copy here: select the text and copy it by hand.'); return false; } };
   // every change carries the status this panel showed (hotfix 2, H3): one made elsewhere since is not undone (409 changed)
   const status = async (st, notes, extra) => { await post('/api/findings/' + f.finding_id + '/status', Object.assign({status: st, seen_status: f.status}, notes ? {notes} : {}, extra || {})); state.brief = null; state.dirty = true; done(st); };
   const event = async (ev, note) => post('/api/findings/' + f.finding_id + '/event', {event: ev, note: note || ''});
+  // a copy's line in the item's history: when the site refuses it (a panel drawn before a run gave the item a new number),
+  // the panel says so; the copy itself stands (review people-6)
+  const logged = async (ev, what) => { try { await event(ev); } catch(e){ err(`${what} copied, but not kept in its history: ${e.message || 'no answer from the site'}`); } };
   const fold = id => { const el = d.querySelector(id); if(el){ el.open = true; el.scrollIntoView({block:'start'}); } };
   const eraText = (nx.steps || []).find(s => /ERA of the check/.test(s)) || '';
   const act = {
@@ -681,10 +708,10 @@ function xpBind(f, x, r, d, done){
     find_note: () => { fold('#builderFold'); if(d.querySelector('#noteEma')) noteFromEma(f.finding_id, d); },
     upload_note: () => { window.open('/upload', '_blank', 'noopener'); },
     fax_payer: () => xpFaxPreview(f, r.packets, d),
-    copy_instructions: async () => { await copy(nx.instructions || nx.action || '', 'The steps'); event('instructions').catch(()=>{}); },
-    request_era: async () => { if(!eraText){ err('No ERA request for this item.'); return; } await copy(eraText, 'The ERA request'); event('era_requested').catch(()=>{}); },
+    copy_instructions: async () => { if(await copy(nx.instructions || nx.action || '', 'The steps')) await logged('instructions', 'The steps'); },
+    request_era: async () => { if(!eraText){ err('No ERA request for this item.'); return; } if(await copy(eraText, 'The ERA request')) await logged('era_requested', 'The ERA request'); },
     mark_sent: async () => { const n = prompt('Mark it sent? Say what went out and how (kept in its history; optional):', ''); if(n === null) return; await status('appealed', n.trim() || 'Sent from the next step'); },
-    log_outcome: () => xpOutcome(f, d, status, err),
+    log_outcome: () => xpOutcome(f, d, status, err, x),
     decide: () => xpDecide(f, d, status, err, act),
     mark_posted: async () => {
       if(nx.route === 'post'){ if(!confirm('Mark it posted in EMA? It leaves the list.')) return; await status('resolved', 'Posted in EMA', {recovered_cents: 0}); return; }
@@ -703,7 +730,8 @@ function xpBind(f, x, r, d, done){
     reopen: async () => { if(!confirm('Reopen it? It goes back on the list as To do.')) return; await status('open', 'Reopened'); },
     open_in_ema: () => { if(url) window.open(url, '_blank', 'noopener,noreferrer'); else err('No EMA address is set for this site.'); },
   };
-  d.querySelectorAll('[data-xp]').forEach(b => b.onclick = async () => { const fn = act[b.dataset.xp]; if(!fn) return; err(''); b.disabled = true;
+  // one press at a time, and none on a panel the walk opened a moment ago (H1: the status bar's walk guard)
+  d.querySelectorAll('[data-xp]').forEach(b => b.onclick = async () => { const fn = act[b.dataset.xp]; if(!fn || b.disabled || xpWalkGuarded()) return; err(''); b.disabled = true;
     try { await fn(); } catch(e){ err('Not done: ' + (e.message || 'no answer from the site') + '. Try again.'); } finally { b.disabled = false; } });
   d.querySelectorAll('a.xp-rows').forEach(a => a.onclick = e => { e.preventDefault(); const st = d.querySelector('#xpStory'); if(!st) return; st.open = true;
     const first = st.querySelector(`tr[data-n="${(a.dataset.rows || '').split(',')[0]}"]`); (first || st).scrollIntoView({block:'center'}); });
@@ -720,18 +748,25 @@ function xpDecide(f, d, status, err, act){
     <input id="xpdNote" maxlength="300" placeholder="What you sent, or why (kept in its history)" style="width:100%;margin:4px 0">
     <div class="actions"><button class="primary" id="xpdSave">Go</button><button class="ghost" id="xpdCancel">Cancel</button></div></div>`;
   box.querySelector('#xpdCancel').onclick = () => { box.innerHTML = ''; };
-  box.querySelector('#xpdSave').onclick = async () => {
+  const save = box.querySelector('#xpdSave');
+  save.onclick = async () => {
+    if(save.disabled || xpWalkGuarded()) return;      // H1: one change per press, none on a panel the walk just opened
+    save.disabled = true;
     const what = (box.querySelector('input[name=xpd]:checked') || {}).value, note = box.querySelector('#xpdNote').value.trim();
     try {
       if(what === 'appeal'){ box.innerHTML = ''; await act.build_packet(); return; }
       if(what === 'let_go'){ if(!note){ err('Say why it is let go: the reason is kept in its history.'); return; } await status('dismissed', note); return; }
       await status('appealed', 'Corrected and sent again' + (note ? ': ' + note : ''));
     } catch(e){ err('Not saved: ' + (e.message || 'no answer from the site')); }
+    finally { save.disabled = false; }
   };
 }
+// the status bar's walk guard (index.html walkGuarded): a panel "open the next" opened a moment ago takes no press, since
+// the second click of a double click lands on the next item's button in the same place
+function xpWalkGuarded(){ return typeof walkGuarded === 'function' && walkGuarded(); }
 // Log what happened: the payer is working on it (it waits on the payer, with the note), the payer paid (Paid), or the payer
 // said no (it stays to do, with the answer in its history)
-function xpOutcome(f, d, status, err){
+function xpOutcome(f, d, status, err, x){
   const box = d.querySelector('#xpMsg'); if(!box) return;
   box.className = 'small';
   box.innerHTML = `<div class="xp-log"><b>What happened?</b>
@@ -741,14 +776,19 @@ function xpOutcome(f, d, status, err){
     <input id="xpoNote" maxlength="300" placeholder="What they said, a reference number" style="width:100%;margin:4px 0">
     <div class="actions"><button class="primary" id="xpoSave">Save</button><button class="ghost" id="xpoCancel">Cancel</button></div></div>`;
   box.querySelector('#xpoCancel').onclick = () => { box.innerHTML = ''; };
-  box.querySelector('#xpoSave').onclick = async () => {
+  const save = box.querySelector('#xpoSave');
+  save.onclick = async () => {
+    if(save.disabled || xpWalkGuarded()) return;      // H1: one change per press, none on a panel the walk just opened
+    save.disabled = true;
     const what = (box.querySelector('input[name=xpo]:checked') || {}).value, note = box.querySelector('#xpoNote').value.trim();
     try {
-      if(what === 'paid'){ const x = prompt('Amount paid, in dollars (blank: the amount at stake):', f.shortfall_cents != null ? (f.shortfall_cents/100).toFixed(2) : ''); if(x === null) return;
-        await status('resolved', note || 'The payer paid', x.trim() && !isNaN(parseFloat(x)) ? {recovered_cents: Math.round(parseFloat(x) * 100)} : {}); }
+      // the payer paid: the amount it paid, read as the remittance prints it, the prompt empty (H4, CH-10: review people-1)
+      if(what === 'paid'){ const cents = askPaid(f.shortfall_cents, f.charge_cents, paidZeroOk(f, x)); if(cents === null) return;
+        await status('resolved', note || 'The payer paid', {recovered_cents: cents}); }
       else if(what === 'no'){ if(!note){ err('Say what the payer said.'); return; } await status('in_progress', 'The payer said no: ' + note); }
       else { if(!note){ err('Say what the payer said, or what you sent.'); return; } await status('appealed', 'Call or portal check: ' + note); }
     } catch(e){ err('Not saved: ' + (e.message || 'no answer from the site')); }
+    finally { save.disabled = false; }
   };
 }
 // Accept a write-off pattern: the write-off policy table (one decision for every item of the pattern), never one item

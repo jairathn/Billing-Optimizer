@@ -327,7 +327,8 @@ def test_d2_a_coverage_date_denial_is_billed_to_the_patient_past_the_payers_wind
     st = _state(sstore)
     assert (st["work_state"], st["rule"], st["route"]) == ("work_now", "bill_patient_denial", "bill_patient"), st["state_basis"]
     n = story.next_step(sstore.conn, "F1", today=TODAY2)
-    assert n["action"] == "Bill the patient $150.00: Anthem / BCBS put this service on the patient (PR-27 $150.00: the coverage had ended).", n["action"]
+    assert n["action"] == ("Bill the patient $150.00: Anthem / BCBS put this service on the patient (PR-27 $150.00: the coverage had ended). "
+                           "Service year: 2026."), n["action"]      # the service year: decision 2's follow-up (fx-people)
     assert any("current insurance" in x for x in n["steps"]) and n["expected_cents"] == 15000 and n["appeal_ok"] is False
     assert {"billed_patient", "mark_done", "mark_sent", "let_go"} <= set(n["buttons"]) and "build_packet" not in n["buttons"]
 
@@ -352,12 +353,20 @@ def test_d2_the_amount_is_what_the_payer_put_on_the_patient_never_more_than_the_
     assert states.patient_share(fx)["cents"] == 11000
 
 
-def test_d2_a_missing_referral_offers_a_retroactive_one_and_medicaid_follows_the_same_rule(sstore):
+def test_d2_a_missing_referral_offers_a_retroactive_one_and_a_medicaid_member_is_never_billed(sstore):
+    """A missing referral (PR-288) is billed to the patient, with a retroactive referral and a corrected claim offered by the
+    payer's date. A member on a Medicaid plan is never billed for it (decision 2's follow-up, the owner's notes of
+    2026-11-26 section 5; tests/test_fx_people.py): the step is the retroactive referral and the corrected claim, or Done."""
     from remitwatch import story
-    _patient_denial(sstore, "288", signal="DENIED_REFERRAL", deadline="2027-01-31", payer_kind="medicaid")
+    _patient_denial(sstore, "288", signal="DENIED_REFERRAL", deadline="2027-01-31")
     n = story.next_step(sstore.conn, "F1", today=TODAY2)
     assert n["action"].startswith("Bill the patient $150.00:") and "no referral on file" in n["action"], n["action"]
     assert any("retroactive referral" in x and "Jan 31, 2027" in x for x in n["steps"]), n["steps"]
+    sstore.conn.execute("UPDATE findings SET payer_kind='medicaid' WHERE finding_id='F1'")
+    sstore.conn.commit()
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Get a retroactive referral and send a corrected claim; if the plan will not take one, mark it Done."), n["action"]
+    assert any("retroactive referral" in x and "Jan 31, 2027" in x for x in n["steps"]) and "billed_patient" not in n["buttons"], n
 
 
 def test_d2_co147_is_a_contractual_reason_never_billed_to_the_patient(sstore):
@@ -461,18 +470,19 @@ def _crossed_over(s, later_status, payer, cfi, adj):
           claims=[{"pcn": F.claim_id(1), "status": later_status, "cfi": cfi, "lines": [ln("99213", 150, 0, [(adj[0], adj[1], 150)])]}])
 
 
-def test_d2_a_later_payer_that_put_the_service_on_the_practice_is_named_before_billing(sstore):
+def test_d2_a_later_payer_that_put_the_service_on_the_practice_settles_it(sstore):
     """Medicare put a routine visit on the patient (PR-49 $150.00) and sent it on; the patient's Medicaid plan answered
-    after it and put it on the practice (CO-45, nothing paid). The next step still bills the patient $150.00 (the owner's
-    decision), but says first that the later payer put it on the practice, so a person checks that payer's terms before
-    billing (a Medicaid member is not billed for what Medicaid puts on the practice) and presses Done when they forbid it."""
+    after it and put it on the practice (CO-45, nothing paid, nothing on the patient). Its contract puts the service on
+    the practice, so billing the patient would break it: decision 2's follow-up (the owner's notes of 2026-11-26 section 5;
+    tests/test_fx_people.py) sends it straight to Done with the reason shown, never "Bill the patient"."""
     from remitwatch import story
     _crossed_over(sstore, "4", "KENTUCKY MEDICAID", "MC", ("CO", "45"))
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("done", "next_payer_contractual"), st["state_basis"]
+    assert st["state_basis"].startswith("Medicaid KY answered after it on Apr 6, 2026 and put the service on the practice under its "
+                                        "contract (CO-45, $150.00), paying nothing"), st["state_basis"]
     n = story.next_step(sstore.conn, "F1", today=TODAY2)
-    assert n["action"].startswith("Bill the patient $150.00:"), n["action"]
-    first = n["steps"][0]
-    assert first.startswith("Before billing: Medicaid KY answered after it and put this service on the practice (CO-45), with nothing paid"), first
-    assert "a Medicaid member is not billed for what Medicaid puts on the practice" in first and "press Done" in first, first
+    assert n["action"].startswith("Nothing to do: Medicaid KY answered after it") and "billed_patient" not in n["buttons"], n
 
 
 def test_d2_a_later_payer_that_put_the_service_on_the_patient_too_adds_no_caution(sstore):

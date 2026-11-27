@@ -2439,6 +2439,37 @@ def patient_denial(f: dict) -> bool:
     return str(f.get("carc_group") or _ev(f).get("carc_group") or "").upper() == "PR"
 
 
+def second_share_back(f: dict) -> bool:
+    """A second payer's share taken back in full (F1's money-2, routed to F5): a TAKEBACK item of a second payer's line
+    (evidence second_payer), never a Medicaid plan's (its payment is payment in full: the share is not its member's). The
+    patient is billed for it as for a patient-group denial: Billed the patient, then the patient's payment in EMA."""
+    return (f.get("signal") or "") == "TAKEBACK" and bool(_ev(f).get("second_payer")) and f.get("payer_kind") != "medicaid"
+
+
+def first_payer_answer(fx: dict) -> dict | None:
+    """The first payer's standing answer of a second payer's line (its code and date): the newest standing answer by
+    another payer on or before the second payer's own payment, with what it put on the patient. {'row', 'group', 'pr',
+    'pr_codes', 'co_codes', 'paid'}, or None when no such answer is on file (the first payer's 835 never reached the
+    store). What a second payer took back is the patient's to pay only as far as the first payer left it on the patient."""
+    f = fx["item"]
+    rows = fx["r835"]["rows"]
+    me = next((x for x in rows if x.get("line_key") and x["line_key"] == f.get("line_key")), None)
+    if me is None:
+        return None
+    mine, svc, code = str(me.get("date") or "")[:10], str(me.get("svc") or "")[:10], me.get("code")
+    who = str(me.get("payer") or "").strip().upper()
+    prior = [x for x in standing_rows(rows) if x.get("line_key") and x["line_key"] != me["line_key"]
+             and str(x.get("payer") or "").strip().upper() != who and x.get("code") == code
+             and str(x.get("svc") or "")[:10] == svc and str(x.get("date") or "")[:10] <= mine]
+    if not prior:
+        return None
+    x = max(prior, key=lambda r: (str(r.get("date") or ""), r.get("line_key") or ""))
+    pr = [(c, a) for g, c, a in x.get("adj") or [] if g == "PR" and a]
+    co = [(c, a) for g, c, a in x.get("adj") or [] if g == "CO" and a > 0]
+    return {"row": x, "group": _grp_kind(x.get("payer"))[0], "pr": sum(a for _c, a in pr), "pr_codes": sorted({f"PR-{c}" for c, _a in pr}),
+            "co_codes": sorted({f"CO-{c}" for c, _a in co}), "paid": int(x.get("paid") or 0)}
+
+
 def patient_share(fx: dict) -> dict:
     """What a patient-group denial asks of the patient: every PR amount the payer set on the item's own line, never more
     than the charge less what any payer paid for the service (the standing payments of its other answers). {'cents', 'pr':
@@ -2451,6 +2482,12 @@ def patient_share(fx: dict) -> dict:
                and (x["paid"] or 0) > 0)
     tot = _ema_line_totals(fx) if fx.get("ema") else None
     by_patient = max(tot["pat_paid"], 0) if tot and tot["n"] and not tot["several"] else 0
+    if second_share_back(f):
+        # the share the second payer paid and took back (its recoupment's cents): no PR adjustment of its own line says it
+        tb = _ev(f).get("taken_back")
+        cents = max(int((tb.get("cents") if isinstance(tb, dict) else None) or f.get("shortfall_cents") or 0), 0)
+        return {"cents": cents, "pr": [], "charge": int(f.get("charge_cents") or 0), "paid": paid, "patient_paid": by_patient,
+                "left": max(cents - by_patient, 0)}
     if not own:
         cents = max(int((_ev(f).get("patient_share") or {}).get("cents") or f.get("shortfall_cents") or 0), 0)
         return {"cents": cents, "pr": [], "charge": int(f.get("charge_cents") or 0), "paid": paid, "patient_paid": by_patient,
@@ -2497,6 +2534,75 @@ def patient_side_settled(tot: dict, owed: int, *, adjusted: bool) -> bool:
     if tot["pat_paid"] >= owed:
         return True
     return tot["balance"] <= 0 and adjusted and tot["pat_paid"] + tot["pat_adj"] >= owed
+
+
+# The owner's decision 2, its follow-ups (plans/owner_notes_2026-11-26.md section 5, built as written there).
+# A Medicaid member is never billed for a missing referral (PR-288): Medicaid's payment is payment in full, and the referral
+# is the practice's to fix, so the work is a retroactive referral and a corrected claim, or Done when the plan will not take
+# one. The member is a Medicaid member when the item's payer group is a Medicaid plan (its kind), or the remittance names
+# one: the plan's name (the 835's contract class, as fix7c reads it) or the payer's name in any spelling the name rules read
+# (codes.normalize_payer, 'Medcaid' too), each line's claim filing indicator read with the name (codes.payer_group_kind).
+# When neither tells the program (a company's plan with no program in its name, no plan named, and a filing indicator
+# that a company's Medicaid plan uses as well as its other plans: an HMO, 'other non-federal', 'mutually defined', none),
+# a person checks the member's coverage before any bill goes out: never a bill on a guess.
+REFERRAL_CARC = "288"
+UNTOLD_CFI = frozenset({"", "ZZ", "HM", "11"})
+UNTOLD_KINDS = frozenset({"", "commercial", "other"})
+
+
+def medicaid_member(fx: dict) -> str:
+    """'yes' (the item's member is on a Medicaid plan), 'no', or 'unclear' (its remittance does not tell which of its
+    company's plans the member is on)."""
+    from .codes import normalize_payer
+    f = fx["item"]
+    if f.get("payer_kind") == "medicaid":
+        return "yes"
+    own = [x for x in own_rows(fx) if x.get("status") != "22"]
+    kinds = {str(f.get("payer_kind") or "")} | {row_group(x)[1] for x in own if x.get("payer")}
+    if "medicaid" in kinds:
+        return "yes"
+    names = [f.get("plan"), f.get("payer_name")] + [x.get("payer") for x in own]
+    if any(normalize_payer(str(n))[1] == "medicaid" for n in names if n and str(n).strip()):
+        return "yes"
+    cfis = {str(x.get("cfi") or "").strip().upper() for x in own} or {str(f.get("claim_filing_indicator") or "").strip().upper()}
+    if kinds <= UNTOLD_KINDS and not str(f.get("plan") or "").strip() and cfis <= UNTOLD_CFI:
+        return "unclear"
+    return "no"
+
+
+def referral_member(fx: dict) -> str:
+    """For a missing-referral denial (PR-288) that the owner's decision 2 would bill: medicaid_member's answer; 'no' for
+    any other patient-group denial (a Medicaid member's other reasons are billed as decided)."""
+    f = fx["item"]
+    return medicaid_member(fx) if str(f.get("carc") or "") == REFERRAL_CARC else "no"
+
+
+def next_payer_settled(fx: dict) -> dict | None:
+    """A patient-group denial whose next payer (next_payer_answer: a supplement, a Medicaid plan) answered the service
+    with a contractual adjustment only: nothing paid and nothing put on the patient, the service put on the practice under
+    that payer's contract. Billing the patient would break that contract, so the item is done with that answer as its
+    proof (the owner's decision 2, its follow-up: straight to Done with the reason shown). Its words name the member, not
+    the patient, and say the other payer settled it, as Results reads a closure's basis (results._closure: "Settled by
+    another payer"). The proof as paid_proof gives one ({'rule', 'cents', 'date', 'payer', 'check_tail', 'source',
+    'text'}), or None."""
+    nxt = next_payer_answer(fx)
+    if not nxt or nxt["co"] <= 0 or nxt["pr"] > 0 or nxt["paid"] > 0:
+        return None
+    x = nxt["row"]
+    # a contractual adjustment only (the owner's words): no other group beside it, and the amount shown is the net the
+    # practice carries (a negative adjustment beside a positive one nets out), so the reason reconciles to the cent
+    co = [(c, a) for g, c, a in x["adj"] if a and g == "CO"]
+    net = sum(a for _c, a in co)
+    if net <= 0 or any(a and g != "CO" for g, _c, a in x["adj"]):
+        return None
+    name, kind = row_group(x)
+    name = name if name and name != "Unknown" else str(x.get("payer") or "the next payer")
+    medicaid = " (a Medicaid plan: what it pays is payment in full)" if kind == "medicaid" else ""
+    text = (f"{name} answered after it on {day(x.get('date'))} and put the service on the practice under its contract "
+            f"({', '.join(sorted({f'CO-{c}' for c, _a in co}))}, {usd(net)}), paying nothing and leaving nothing to the member{medicaid}: "
+            "settled by another payer, so the member is not billed")
+    return {"rule": "next_payer_contractual", "cents": 0, "date": x.get("date"), "payer": x.get("payer"),
+            "check_tail": x.get("check_tail"), "source": "835", "text": text}
 
 
 def _owed(f: dict, fx: dict) -> int:
@@ -2890,7 +2996,7 @@ def _decide(fx: dict, today: str) -> dict:
         if sig == "SECONDARY_NOT_BILLED":
             return _billed_second(res, fx, ev, anchor, who, today, put)
         newest = _newest_work(sent)
-        if newest is not None and newest.get("patient") and patient_denial(f):
+        if newest is not None and newest.get("patient") and (patient_denial(f) or second_share_back(f)):
             return _billed_patient(res, fx, newest, who, today, put)
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
         return _follow(res, fx, ev, anchor, work, f"Marked Sent by {who} on {day(anchor)}", today, deadline, confirmed=True,
@@ -2954,6 +3060,36 @@ def _decide(fx: dict, today: str) -> dict:
                 text = (f"Paid again after the takeback: EMA shows {usd(sum(p['cents'] for p in again))} from {p0['payer'] or 'insurance'} "
                         f"posted {day(p0['posted'])} (check ending {p0['check_tail'] or '?'}, no 835)")
                 return put("done", "repaid_after_takeback", text, [{"source": "production", "kind": "proof", "date": p0["posted"], "text": text}])
+            if _ev(f).get("second_payer"):
+                # a second payer's share taken back in full (F1's money-2; routed to F5): the coinsurance it had paid is the
+                # patient's again unless the takeback is disputed, and no payer's window closes a patient's share (as decision
+                # 2's patient-group denials, below): bill the patient, or dispute the takeback while its window is open. A
+                # Medicaid plan's share is never its member's (payment in full): the work stays the takeback's own. Only as
+                # far as the first payer's standing answer left it on the patient: a first payer that denied the service
+                # (a contractual reason) or whose answer is not on file leaves the takeback's own work, never a bill on a guess
+                owed = int(tb.get("cents") or 0)
+                paid = (f"{grp or 'The second payer'} paid the patient's share as second payer ({usd(owed)}), then took "
+                        f"it back on {day(tb['date'])}")
+                if f.get("payer_kind") != "medicaid":
+                    first = first_payer_answer(fx)
+                    if first is not None and first["pr"] >= owed > 0:
+                        res["appeal_block"] = "bill"
+                        return put("work_now", "bill_patient", paid + (f": bill the patient (the window to dispute the takeback closed on "
+                                                                         f"{day(lastw)})" if past_all else ": bill the patient, or dispute the takeback"))
+                    lead = f"{grp or 'The second payer'} paid {usd(owed)} as second payer, then took it back on {day(tb['date'])}"
+                    if first is None:
+                        why = "; the first payer's answer is not on file, so whether the patient owes it cannot be checked"
+                    else:
+                        said = ", ".join(first["pr_codes"]) or (f"it answered {', '.join(first['co_codes'])}" if first["co_codes"] else "")
+                        why = f"; the first payer ({first['group']}) left {usd(first['pr'])} on the patient" + (f" ({said})" if said else "")
+                    if past_all:
+                        return expired(lead + why)
+                    res["appeal_block"] = "fees"
+                    return put("work_now", "fees", lead + why + ": find out why, then dispute or bill the right payer")
+                if not past_all:
+                    res["appeal_block"] = "fees"
+                    return put("work_now", "fees", paid + ": a Medicaid member is not billed for it; find out why, then dispute the takeback "
+                               "or find the plan that covered the day")
         if past_all:
             return expired()
         res["appeal_block"] = "fees"
@@ -3135,6 +3271,13 @@ def _decide(fx: dict, today: str) -> dict:
     # a patient-group denial (the owner's decision 2 of 2026-11-26): the payer put the service on the patient, so the work is
     # billing the patient, which no payer's window closes (as a payer's reprocessing to the patient's share, above)
     if patient_denial(f):
+        # decision 2's follow-ups (fx-people): a next payer that put the service on the practice settles it (done, its
+        # answer the proof); a Medicaid member's missing referral is fixed with the plan, never billed (below)
+        settled = next_payer_settled(fx)
+        if settled:
+            res["proof"] = settled
+            return put("done", settled["rule"], settled["text"], [{"source": "835", "kind": "proof", "date": settled["date"],
+                                                                   "text": settled["text"]}])
         share = patient_share(fx)
         if share["cents"] > 0:
             res["patient_share"] = share
@@ -3145,6 +3288,14 @@ def _decide(fx: dict, today: str) -> dict:
                 return put("done", "patient_paid", text, [{"source": "production", "kind": "proof", "text": text}])
             res["appeal_block"] = "bill"
             words = ", ".join(f"{g}-{c}" for g, c, _a in share["pr"]) or f"PR-{f.get('carc')}"
+            member = referral_member(fx)
+            if member == "yes":
+                # never billed: the work is a corrected claim with a retroactive referral, which the plan's windows close
+                lead = (f"{f.get('payer_group') or 'The payer'} put this service on the patient ({words}: no referral on file), but "
+                        "the member is on a Medicaid plan, whose payment is payment in full: never a bill to the patient")
+                if past_all:
+                    return expired(lead)
+                return put("work_now", "bill_patient_denial", lead + "; get a retroactive referral and send a corrected claim")
             if not _ema_line_totals(fx)["n"] and not _covered(ctx, f.get("service_date")):
                 # RemitWatch sees the patient's side of a service only on EMA's line for it. With no line and no Production
                 # report covering the date of service it cannot tell whether the patient paid, was billed or had the share
@@ -3158,6 +3309,11 @@ def _decide(fx: dict, today: str) -> dict:
                            "billed or had it written off: check the patient's account in EMA before billing")
             ask = (f"the {usd(share['left'])} left (EMA shows {usd(share['patient_paid'])} of {usd(share['cents'])} paid by the patient)"
                    if share["patient_paid"] > 0 else usd(share["cents"]))
+            if member == "unclear":
+                return put("work_now", "bill_patient_denial", f"{f.get('payer_group') or 'The payer'} put this service on the patient "
+                           f"({words}: no referral on file), and its remittance does not say whether the member's plan is a "
+                           f"Medicaid plan: check the member's coverage before any bill goes out (a Medicaid member is never "
+                           f"billed for it; any other member is billed {ask})")
             return put("work_now", "bill_patient_denial", f"{f.get('payer_group') or 'The payer'} put this service on the patient "
                        f"({words}): bill the patient {ask}")
     # past every window: nothing can be recovered (no grace in the work queue)
