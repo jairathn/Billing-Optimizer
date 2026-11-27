@@ -117,3 +117,28 @@ def test_the_story_names_an_837_send_in_plain_words():
         js = fh.read()
     m = re.search(r"const XP_SOURCE = \{([^}]*)\}", js)
     assert m and re.search(r"'837'\s*:", m.group(1)), m.group(1) if m else "no XP_SOURCE"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_older_exports_bill_stays_given_way_once_the_newer_bill_of_the_visit_is_answered(tmp_path, kind):
+    """F3b need (run_ema_open_claims' newest_for, the exports' side of fx-837-r2-6): one patient's visit of September 14
+    (99214) is on two bills EMA's weekly exports list: CB0000E81 (Submitted September 15, no answer) and the bill made
+    again, CB0000E82 (Submitted September 25). Anthem denies E82 (CO-16, October 30). The visit's answer is on the newest
+    bill: E81, the bill the practice replaced, is not chased as never answered beside E82's denial (the newer bill's
+    answer takes it out of the candidates, so today the older one comes back)."""
+    from tests.test_837_sends import answer
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    for cid, day in (("CB0000E81C017", "2026-09-15"), ("CB0000E82C017", "2026-09-25")):
+        ema(s.conn, cid, bill_created=day, patient_id="P0000E81")
+        ema(s.conn, cid, family="claim_status", claim_status="Submitted", claim_submission_date=day, patient_id="P0000E81")
+    s.conn.commit()
+    _remits(s, tmp_path, [answer("CB0000E82C017", status="1", paid="0.00")], "20261030")
+    _remits(s, tmp_path, _visits(), "20261110")
+    Detector(s, run_id="t1").run()
+    rows = [dict(r) for r in s.query("SELECT patient_control_number, signal FROM findings WHERE COALESCE(stale,0)=0 "
+                                     "AND patient_control_number LIKE 'CB0000E8%'")]
+    print(rows)
+    assert any(r["patient_control_number"] == "CB0000E82C017" for r in rows), "control: E82's denial is listed"
+    assert not any(r["patient_control_number"] == "CB0000E81C017" and r["signal"] == "NO_ANSWER" for r in rows), rows
+    s.close()
