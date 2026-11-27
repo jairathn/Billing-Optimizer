@@ -57,7 +57,8 @@ states.py `paid_proof` and its helpers, `paid_first_elsewhere` (and the branches
     the service all a void status with the charges netting to nothing: a posted void, never a status alone); A17 calls
     the 8 such TAKEBACK items on the tip already done (2 in scope by 837, 6 out of scope by EMA's void).
   - Denials paid on an 835 but routed to note/check_first (residual 4): traced from raw rows (private
-    `trace_r4.txt`): 25 items on the tip (W view, in scope, plus 6 SECONDARY_NOT_BILLED). None is a payment paid_proof
+    `scripts/trace_r4.py`; its output deleted with the world copy): 25 items on the tip (W view, in scope, plus 6
+    SECONDARY_NOT_BILLED). None is a payment paid_proof
     misses on the item's own bill: 13 are 88305 parts (26/TC) or the global whose payment sits on another bill of the
     same patient (A17: paid_as_global / paid_on_other_bill; the facts read one bill); 5 are second payers' denials of
     the patient's share after the primary paid (check_first: the archive rules' 'likely' done, decision 4); 4 are
@@ -80,16 +81,31 @@ states.py `paid_proof` and its helpers, `paid_first_elsewhere` (and the branches
   restored 4 passed).
 
 ## Half done
-- (nothing: the full suite in python3 and in 3.11.1/SQLite 3.40 is running at the time of writing; see "Tests")
+- (nothing)
 
 ## Next
-1. When the suites pass: merge the integration tip again (`git fetch origin && git merge origin/claude/ecstatic-fermi-orfcgo`),
-   rerun tests/test_fx_ledger.py, final push, report.
+- Nothing left for F1 in the brief. The integrator: route "Needs from others" (each with its failing test) and read the
+  open questions. The measurement below was taken before fix7c and deadlines reached the integration branch: a
+  re-measure on the merged tip would show the same F1 moves unless those units changed the same items.
+
+## Tests
+- tests/test_fx_ledger.py: 126 tests, both store kinds (58 ported from the reviewers and verifiers, the rest F1's own edges
+  and the residuals'), all passing. Every fix broken on purpose and restored (`$U/breaks.py`).
+- Full suite before the last merge (commit 741b25e): python3 3.13 / SQLite 3.53: 3016 passed, 29 skipped, 1 xfailed,
+  none failed. 3.11.1 / SQLite 3.40: 109 failed and 24 errors, every one of them the store image's
+  `Connection.serialize` that build lacks (test_cloud, test_ema_intake, test_hotfix2d, test_hotfix2, test_feed_and_day,
+  test_status_and_sends and the like; none in the ledger's or the states' tests), the class CLAUDE.md allows there.
+- After merging the integration tip 7b1937b (fix7c and deadlines; commit eb5c12b): tests/test_fx_ledger.py and the
+  takeback suites 213 passed; full suite in python3 (plans/tools/shard.sh, 4 shards): 3194 passed, 29 skipped, 1 xfailed,
+  none failed; in 3.11.1/SQLite 3.40: 3077 passed, 109 failed and 24 errors, the same 133 tests as before the merge and
+  each the missing `Connection.serialize` (one such error line per failure, the same 24 files). No node check: static/
+  is untouched.
 
 ## Measured
 Final run (2026-11-26 23:10 to 23:19 UTC) on a fresh private world copy (store 11-24 with EMA's reports, server cycle,
 today 2026-11-24). Tip = the integration branch at 993f440 (fix7d merged) with plans 5eb528e; branch = 8bf4493, which
-merged that same tip (624bf75); the integration branch has not moved since, so no other merge is in either side.
+merged that same tip (624bf75). The integration branch moved after the measurement (fix7c and deadlines, merged into
+this branch at eb5c12b): the measurement includes neither, on either side.
 Detection 259 s (tip) and 240 s (branch), peak 1,057 MB both. (A first run at 22:44 measured 6e32766 + the findings
 fixes: the same moves plus one wrong one, the Medicaid denial fixed since; its hand trace is below.)
 - 21 items moved, $2,722.84 (signal, payer group, items, dollars):
@@ -119,7 +135,8 @@ fixes: the same moves plus one wrong one, the Medicaid denial fixed since; its h
   ($1,211.14) the ledger took money from a payment of the same claim for 6, and 2 took nothing and are in the new count.
 - ledger_taken on the real copy: 342 payments a recoupment took from ($32,988.19), 67 of them ($12,309.71) listed on an
   item of their own (58 TAKEBACK line items; the rest under a recoupment's own listing).
-- Hand trace (private, `$U/trace_moves.txt` and `$U/hand_trace_verdicts.txt`): all 22 items the first run moved, from
+- Hand trace (private: the verdicts in `$U/hand_trace_verdicts.txt`; the raw-row dump, `$U/scripts/trace_moves.py`'s
+  output, deleted with the world copy): all 22 items the first run moved, from
   the raw rows (835 lines and CAS, PLB entries naming the claim, 837 sends, EMA's lines), relative days only. 20 right
   (one of them with the amount wrong, F3a's sizing), 1 wrong (the Medicaid denial: fixed by ledger_taken.listed, and the
   final run moves it back to done with the takeback named), 1 unclear (a duplicate denial whose remittance also
