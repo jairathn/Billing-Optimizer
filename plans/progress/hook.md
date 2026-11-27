@@ -1,0 +1,218 @@
+# Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
+
+Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
+Branch: wip/hook. Last updated: 2026-11-27 00:20 UTC (fix round done: 19 findings fixed, break and restore, real-data
+check, suites in four environments; ready for the integrator).
+
+## Done
+- 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
+  tests/test_hooks.py, test_selfcheck.py, test_runlog.py, test_diagnose.py, test_repair.py, test_archive.py: 423 passed;
+  test_cloud.py, test_answer_needs_proof.py, test_ema_checks.py, test_docs.py, test_aws.py: 200 passed, 2 skipped.
+- Earlier (2026-11-24/25, commits 5c75342..71b6971): the hooks of needs_E, needs_G and needs_H on both hosts; the 1 GiB
+  fix in Store.from_bytes; the ceiling budgets (5657a45); api_ops.py, ops.js, the CLI commands (5954bf4); regulation carried
+  over idle Vercel runs; self-check facts count only new input; a left_record check.
+
+- 0ae525a: items 2-6 checked against needs_E/G/H. Gap found and fixed: an archived bill found by Find a claim opened as a
+  404 (api.claim_view now reads the archive's record through an in-memory copy held for the request, api._ARCHIVED_DB);
+  archived search rows carry the page's fields; an archived item's panel (ops.js opArchivedItem) and the claim view say
+  so and offer "Bring it back to the lists". Test: test_hooks.py test_an_archived_claim_found_by_find_a_claim_opens_whole...
+  and the browser check (tests/ops_page.js) opens both at 1400 and 390 px.
+- 8f38502: /api/cron/faxes wraps the fax line's reads in repair.resilient as cli._fax_run does (needs_H L2); test
+  test_the_daily_fax_runs_reads_are_tried_again_and_a_send_never_is on both entries.
+
+- f719f28, dd53d57, 59e7990: the owner's decision 1 is built (server side, pages, docs), with tests on both hosts:
+  - vercel.json: only /api/cron/faxes (15:43 UTC) stays; it runs no analysis and sends nothing unless
+    REMITWATCH_FAX_SENDER=serverless. No cron "only keeps the site healthy", so none other is kept.
+  - POST /api/ops/run (api_ops.ops_run, press_run; cloud.press, run_going, _answer_press, press.json): Vercel only; 404
+    on a server. /api/sync/run on Vercel is the same press (the Feed, Upload and /setup buttons).
+  - Nothing else starts a run on Vercel: freshen, the Dropbox webhook (api._webhook_work removed), an upload's finish
+    (api_uploads._wake), a held report's apply.
+  - cloud.run_cloud_cycle: forced analysis handed on when short of time (counts as progress); status.json "analysed"
+    and "unchecked" (cloud.unchecked_note, _last_detection).
+  - Pages: ops.js opAnalysisHtml/opBindRun ("Analysis on this site"), features.js header line and Feed, upload.js and
+    setup.html (#pressLine). Docs: VERCEL_SETUP.md, OPERATIONS.md, README.md, ARCHITECTURE.md.
+  - Tests: test_hooks.py section 7 (7 API tests, 1 browser test on a serverless site via tests/press_page.js); existing
+    tests updated for the decision (test_cloud webhook and sync/run, test_upload_chunks x3, test_ema_pages held report,
+    test_uploads Vercel answer, test_results note). Each part broken on purpose failed its test; restored.
+  - NOT changed: CLAUDE.md line 87 still says "the daily cron calls /api/cron/cycle (10:17 UTC; vercel.json)". Agents
+    may not edit CLAUDE.md: the owner or integrator should change that line to the press.
+  - Release note line (for the integrator's release message): "The Vercel site no longer analyses on a schedule: a
+    signed-in person presses Run the analysis now on its Data tab. The server analyses every day as before. Billers work
+    on the server's site: what is recorded on the Vercel site is not on the server."
+
+- 71c8c1d: three fixes the real-data runs found in decision 1 (each with a failing test first, broken on purpose and
+  restored): the press button had the same attribute as the owner's "Accept what run ... found" (data-op-run), so on
+  the server's Data tab every Accept also posted /api/ops/run (404); now data-op-press, scoped to #opAnalysis. While a
+  run was going the Vercel header said only "analysing now" (no last analysed time, no press-only line); now it says
+  all three. A deferred press with nothing new read said "N open items were not checked against the files read" and
+  "to keep within memory" whatever the reason; now the pending marker says whether files are behind it ('1') or a press
+  alone ('press'), and the note names what happened and the reason (cloud.unchecked_note, DEFER_REASONS, SPREAD_REASONS).
+
+- a08d8c3, 7620b56, b07466d: three more from the runs, each with a failing test first (both store kinds where the store
+  is read), broken on purpose and restored: the note counts open items a release has not given a state yet by their
+  status (it said "0 open items ($0)" on the first run after this release); a pressed run that stops before it finishes
+  (OutOfTime) is said on the Data tab's panel (why, the open items and dollars that stand as the last analysis left
+  them, what to do) and in the header (cloud.failed_note, cloud.open_items, api_ops.analysis_status(conn),
+  /api/sync/status last_failed); a run that only left the weekly self-audit no longer counts every open item as
+  unchecked (the header said "could not check 7,526 open items").
+- 2ace6ab: merged the integration tip 67cc3d2 (plans, the review, the privacy scan in test_docs): no conflict;
+  tests/test_docs.py 38 passed, 1 skipped.
+
+## Fix round (2026-11-26 22:00 UTC on; reviews hook-r1 and hook-r2, 19 findings)
+- Merged the integration tip fad05c4 (plans only). Each reviewer's failing tests reproduced on this branch first
+  (r1: 14 failed, 2 passed; r2: 22 failed, 7 passed), copied to $S/tk/units/hook/rtests with runners pointed here.
+- Ported into tests/test_hook_review.py (invented data; node scripts tests/hook_accept_page.js, hook_pages.js,
+  hook_upload_buttons.js), plus tests/test_docs.py (settings), tests/test_ema_pages2.py (Today on the real meta).
+- Fixes, by finding (files, functions):
+  - r1-1 (high): cloud.tidy_due, cloud.next_run (used by api.cron_cycle and the tests), out['tidy'] after an analysis:
+    the press's chain ends with one run that does the archive (once a day, or when the regulation asks for the tighter
+    horizon), the provider tables and the weekly self-audit, analysing nothing new. Promises in selfcheck (level 2,
+    NEAR_CEILING) and VERCEL_SETUP hold again.
+  - r1-2: cloud.lock_state(named), cloud.run_killed, cloud.stopped_note (error, killed, halted), api_ops.analysis_status,
+    api._cloud_sync_status (last_failed, stalled_since only for a kill), features.js Feed lines, ops.js heading.
+  - r1-3: the lock names its run (cloud.acquire run_id; status.json run_id), cloud._takeover_kill, runlog.claim_killed
+    and started_near (a kill counted once, by its marker; a finished run's left lock is no kill).
+  - r1-4: selfcheck.plan_next keeps the last measured image size across a run that saved none (not stepping the level).
+  - r1-5: runtime.reset_peak / peak_mb (clear_refs; else the start's mark is not the run's), used by cloud, selfcheck,
+    archive and runlog.memory; run_cloud_cycle resets at its start.
+  - r2-1 (high): ops.js opOwnerPost sends X-Owner-Password and asks for it on a 403 (api_ops._owner wording for Accept).
+  - r2-2: index.html scBar (safe mode above every page), today.js reads meta.banner, selfcheck.banner['safe_mode'].
+  - r2-3: cloud.read_since_analysis (through transactions: the compact store has no file hash on lines), the note's
+    sentence and unchecked['read'], the header chip.
+  - r2-4: five settings named in both runbooks and .env.example; test_docs SETTING_READ widened; selfcheck.budgets reads
+    each budget setting by its own name; REMITWATCH_TODAY named as tests-only.
+  - r2-5: selfcheck.accept_findings text (accepted per check, or nothing accepted); ops.js offers Accept only for failing
+    critical checks not yet accepted for the run shown, and says what was accepted.
+  - r2-6, r1-7: cloud.trigger_cycle returns Asked (why, status); cloud.press says it; api_ops.press_run answers 502/503.
+  - r2-7: api_ops.ops_audit_now under the pipeline lock: 409 with a sentence when a cycle holds the lock or is writing
+    the store (busy_timeout 2 s; any other SQLite error is raised and logged), never a server error.
+  - r2-8: api_ops.ops_accept refuses a stale run at once on Vercel (copy's run newer); selfcheck.apply_request keeps a
+    refusal at the fold in the acceptances (stale), cloud.apply_actions(results=) puts it in status.json
+    (selfcheck_requests); ops.js says "Not accepted". Also: the dashboard's copy no longer works out a journaled
+    self-audit on its partial data (apply_actions copy=True).
+  - r2-9: features.js halted/stalled lines name Run the analysis now. r2-10: VERCEL_SETUP presses, Time, Scheduler.
+  - r2-11: a run id of the runs' shape required at the route (400, both hosts) and in apply_request.
+  - r2-12: status analysed open/open_cents; analysis_status lists (the copy's open items); ops.js shows them.
+  - r1-6: runlog.panel on a serverless host: no stale flag, "nobody has pressed for N days".
+- Docs: VERCEL_SETUP.md, SERVER_RUNBOOK.md, .env.example, ARCHITECTURE.md.
+- Break and restore ($S/tk/units/hook/brk_round.py and brk_round2.py: each break an exact replacement, its tests run,
+  then the files restored with git; the tree was clean after every one). First pass, 33 breaks: 30 failed their tests.
+  The 3 that did not: run_killed's and _takeover_kill's rules for a lock an older build left (it names no run: the
+  first run after this build is deployed may meet one) had no test of their own, and _takeover_kill's check that a
+  run's marker was already counted is backed by the regulation counting each run once by its id. Three tests added
+  (test_an_older_builds_lock_left_by_a_run_that_finished_is_not_said_as_a_stopped_run, ..._is_not_counted_as_a_kill,
+  test_a_kill_found_by_its_marker_and_by_its_lock_in_one_run_is_counted_once). Second pass, 8 breaks: the 6 that
+  must fail did (named and older locks, as a stop and as a kill; the older lock's claim of its marker; both guards
+  off), and with either guard alone off the twice-found kill is still counted once, as designed.
+- Real data after the fix (r1-1), Vercel's image of 11-24 (722 MB in memory), one press with a 900 s budget (load 8
+  to 9 on 4 CPUs here): the press analysed (169 CPU s, 252 s wall, peak 1,933 MB; 19,791 items, 7,696 open on the
+  lists) and built the provider tables. The chain's next run was the tidy run: the archive's pass (15,862 bills,
+  37,530 lines, 852 settled items) and the weekly self-audit, in 65 CPU s (109 s wall), its own peak 1,757 MB,
+  analysing nothing (its status carries the press's analysis); then the chain ended. Before the fix no run did that
+  work after a press. The image stays 722.6 MB (70% of the 1,024 MB ceiling): the archive freed 3.4% of the store,
+  under the 10% at which archive.compact vacuums. Copies deleted.
+
+## Real-data runs (2026-11-26, private copy in $S/tk/units/hook, deleted after; machine load 7 to 15 on 4 CPUs, so wall
+## times are long: CPU seconds are given where they matter)
+- Server, world copy (store 11-24 + EMA reports; its items were made by the live code of 11-24): cycle 1 (first run of
+  this tree) 350 s, peak 1,103 MB, outcome ok; items 17,281 -> 18,514 (2,867 added, 1,634 gone; every gone item had a
+  route except 8). Cycle 2 (nothing new, no analysis) 39 s, changed nothing. Cycle 3 (forced analysis) 556 s, peak
+  1,129 MB: 0 added, 0 gone, 0 changed (status, state, stale, shortfall, deadline): the cycles converge.
+- Self-checks on cycle 1: vanished FAIL 1,892 open items ($203,702) the new rules no longer produce, kept on the
+  worklist (UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
+  SECOND_RATE 29, others 21); left_record 8 record items ($4,594: TAKEBACK 7, G2211_DENIED 1); line_balance 37 of
+  8,050 A/R lines ($17,539) disagree with the postings (EMA's data). Cycle 3: vanished still fails (kept items wait
+  for a person's Accept), left_record passes. Not this unit's: rules changed between the live code of 11-24 and the
+  integration tip; the integrator accepts on the Data tab or the rule owners look at the signals above.
+- Serverless, Vercel's image (722 MB in memory, 70% of the 1,024 MB a run saves in one piece): first press 218 s,
+  peak 1,931 MB, analysis 170 s; idle run 76 s (no analysis; the archive moved 15,862 bills and 852 settled items;
+  the weekly self-audit ran); second press 15 s, analysis handed on (the regulation at "archive" after two runs near
+  memory); the next run analysed in 240 s of the 240 s budget, peak 1,995 MB. With a long budget: 127.7 CPU seconds
+  for the whole run (analysis 179 s wall at load 12), peak 1,934 MB. On a CPU of its own the analysis fits the
+  budget; memory is within about 250 MB of the 2,188 MB budget.
+- Serverless, the image with EMA's A/R and Production tables (893 MB in memory, 87% of the ceiling): with EMA reports
+  'all', and again with 'ar' (Vercel's default), every analysis ran out of time at 240 s (5 runs; nothing saved; the
+  regulation went to "alert", NEAR_LIMIT raised). With a 900 s budget: 280 CPU seconds, peak 2,317 MB. It does not
+  fit one Vercel run (time or memory). NEAR_CEILING raised (high): 893 MB, 87%, 6,426 open items ($2,034,832). Agrees
+  with review hosts-6: a decision for the integrator (keep settled EMA lines off the serverless image, or the A/R
+  only there, orchestrator decision 6).
+- Forced memory (the last peak set to 2,150 MB before each run, on Vercel's image): level shed, then alert, and it
+  stays there; shed: provider tables, report email, export-time backfill, weekly self-audit; NEAR_LIMIT alert (high)
+  with the pressure in plain words; a press at "alert" hands the analysis on (more: true) with its note.
+- Faults on a copy of the converged store: stale_lock: the cycle with a fresh dead lock is skipped, the start-up rule
+  removes it, the next cycle is ok, nothing changed. network: two dropped connections on the Dropbox listing tried
+  again (repair log: 2 retrying, 1 repaired), outcome ok, nothing changed. corrupt_production: a cut-short Production
+  file is held, outcome partial with 1 logged error, nothing changed. ledger (2% of the posting ledger's rows
+  removed): check ledger_store fails, the derived-table rebuild gave up once (repair log), safe mode on (16,627 items
+  held, 0 closures held). codebug (the 837 open-claims rule emits nothing, fresh copy): vanished catches 217 more open
+  items and keeps them on the list (kept 2,109), left_record counts 551 NO_ANSWER record items, CHECK_FAILED alert
+  (high); the open list grew by 101 items ($28,899) as other checks list claims the 837 pass covered.
+- PHI scan of every log, manifest, status file and bundle written (server copies, both state folders, four bundles
+  made by `python -m remitwatch.diagnose`): 135 files, 1.46 MB, against 11,043 name words and 425,191 ids from the
+  store: no patient identifier. Every match is explained: 155 inside the code's own identifiers (signal and alert
+  kinds), 4 in the bundle README's fixed text (code words), 1 numeric token inside the store's transaction keys (an
+  ST control number equal to a patient id by chance).
+
+- 2982485, 1a6d92e, ff7f97c: three contained errors logged through the scrubber (cloud._last_detection, the cron
+  cycle's late-file continuation, the self-check's input position); VERCEL_SETUP says why a run hands the analysis on,
+  what a run that stops says, and the measured limits; review privacy-3 (the integrator's merge blocker) is covered on
+  this branch: selfcheck.has_proof accepts the payer's own dated answer that settled an item (settled_by), and
+  test_a_closure_settled_by_the_payers_own_zero_answer_carries_its_proof_and_holds_no_run runs the S01 and P01
+  scenarios on both store kinds (closure_proof passes, no hold); removing the clause holds the run (checked, restored).
+
+## Suites (fix round, 2026-11-26 and 27, tip after the fix round)
+- python3 (3.13, SQLite 3.5x), whole suite in 3 shards: 2,875 passed, 55 failed, 29 skipped, 1 xfailed. The 55 are the
+  same 55 tests as before the fix round (compared name by name): 34 test_fax.py, 9 test_hotfix2.py, 5
+  test_no_fax_route.py, 4 test_notes_bodies_cli.py, 2 test_hotfix2c.py, 1 test_bulk_pause.py; they fail on the
+  integration tip itself or are review hosts-5's dated fixtures (see below).
+- Python 3.11.1 / SQLite 3.40.0, whole suite in 3 shards: 250 failing tests: 196 fail only for want of
+  Connection.serialize in that build (allowed by CLAUDE.md; 33 of them are test_hook_review.py's Vercel tests), 54 are
+  python3's (the 55th fails there for serialize). No OperationalError in any log.
+- Python 3.12 / SQLite 3.45 and the newest libraries (FastAPI 0.165.0, Starlette 1.10.0), the touched files
+  (test_hook_review, hooks, docs, cloud, selfcheck, diagnose, runlog, archive, repair, ema_pages2): 630 passed, 1
+  skipped in each.
+- node tests/calc_model_check.js (79 checks) and tests/lab_review_check.js (143 checks): none failing.
+- After the last change (the self-audit route's 409): test_hooks and test_hook_review 106 passed (python3); its tests
+  pass in 3.12, the newest libraries and 3.11.1.
+- The reviewers' own tests, run unchanged against this branch: r1 12 of 16 pass; the 4 left
+  (test_r1_press_chain_idle_work.py) follow a press's chain only while a run has more to do, so they never start the
+  tidy run that api.cron_cycle starts (cloud.next_run); the ported tests follow cloud.next_run and pass, and the real
+  data shows the tidy run doing the work. r2 24 of 29 pass; the 5 left test what the fixes changed on purpose: Accept
+  is no longer offered for a warning alone (r2-5), the safe-mode line is above the page (#scBar) not inside it, the
+  status's analysed.findings still counts every item found (the panel shows the open items: lists, analysed.open),
+  an acceptance the checks overtook is refused at once on Vercel rather than journaled (r2-8), and the runbook no
+  longer names presses the Vercel site lacks (r2-10).
+
+## Suites (2026-11-26, this branch)
+- python3 (3.13, SQLite 3.5x), whole suite in 3 shards: 2,823 passed, 55 failed, 29 skipped, 1 xfailed. The 55: 34 in
+  test_fax.py, 9 test_hotfix2.py, 5 test_no_fax_route.py, 4 test_notes_bodies_cli.py, 2 test_hotfix2c.py, 1
+  test_bulk_pause.py. Not this unit's: the same 44 of fax/no_fax_route/notes_bodies/bulk_pause fail on the integration
+  tip itself (35fc020, extracted with git archive), and hotfix2/hotfix2c are review hosts-5 (dated fixtures against the
+  real clock, the stale-feed hold). With the practice's clock pinned to 2026-11-20 (a pytest plugin outside the
+  repository) those six files give 139 passed, 1 failed on this branch; the one
+  (test_fax.py::test_a_decision_on_a_claim_reaches_the_lines_it_names) fails the same way on the tip with the pin.
+- Python 3.12 / SQLite 3.45 (venv2_compat312), the touched files (test_hooks, cloud, selfcheck, runlog, archive,
+  diagnose, repair, upload_chunks, uploads, ema_pages, results, docs): 894 passed, 1 skipped.
+- node tests/calc_model_check.js (79 checks) and node tests/lab_review_check.js (143 checks): none failing.
+
+- Python 3.11.1 / SQLite 3.40.0 (venv_sqlite340), whole suite in 3 shards: 218 failing tests. 55 are the same as
+  python3's (above). 162 fail only for want of Connection.serialize in that build (allowed by CLAUDE.md). 1
+  (test_feed_and_day.py::test_the_pages_say_how_far_the_remittances_reach[server], a browser banner under load) passed
+  when run alone. No SQL error of any kind (no OperationalError in any log).
+
+## Left for others (not this unit's)
+- CLAUDE.md line 87 still says the daily cron calls /api/cron/cycle at 10:17 UTC; agents may not edit CLAUDE.md.
+- The 1,892 vanished open items ($203,702) wait for the final stage's explanation and the owner's Accept.
+- Vercel with EMA's Production in the image does not fit one run (orchestrator decision 6: the A/R only there); the
+  integrator checks 'ar' keeps Production rows out of the image (the img_ema test above put them in by hand).
+- Dated tests (hosts-5 and the fax files above) fail against the real clock on the tip too.
+
+## Next
+1. The integrator merges wip/hook (privacy-3 has its test on this branch; the fix round's 19 findings are fixed).
+
+## Numbers measured so far
+- (from the earlier runs, see plans/HANDOFF.md section 0 item 2): three server cycles converge; five faults detected,
+  contained or repaired; forced high memory sheds to level 4; NEAR_CEILING at 76% of 1,024 MB; PHI scan of 129 files: 0.
+
+## Open questions
+- (none yet)

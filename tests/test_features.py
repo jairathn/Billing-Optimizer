@@ -155,8 +155,11 @@ def test_work_recorded_by_people_survives_reruns_and_later_payment_is_logged(tmp
     Detector(store, run_id="r2").run()
     again = store.query("SELECT * FROM findings WHERE finding_id=?", (f["finding_id"],))[0]
     assert again["status"] == "appealed" and again["appealed_at"].startswith("2026-04-20") and again["notes"] == "sent by fax"
-    legacy = store.query("SELECT status, stale FROM findings WHERE finding_id='legacy1'")[0]
-    assert legacy["status"] == "in_progress" and legacy["stale"] == 1
+    legacy = store.query("SELECT status, stale, hint FROM findings WHERE finding_id='legacy1'")[0]
+    # no rule produces it any more and a person is working it: the self-check (remitwatch.selfcheck, wired into the run) keeps
+    # it listed with the person's status until the owner accepts the change on the Data tab
+    from remitwatch.selfcheck import KEPT_HINT
+    assert legacy["status"] == "in_progress" and legacy["stale"] == 0 and KEPT_HINT in (legacy["hint"] or "")
     # the appeal works: a later remittance pays the line
     p = tmp_path / "later.RMT"
     p.write_bytes(remit(claim(200, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~")), "117.60", seg_count=30, isa_ctrl="000000777", pay_date="20260601"))

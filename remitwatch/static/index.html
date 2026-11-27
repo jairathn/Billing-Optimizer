@@ -18,7 +18,7 @@ button.primary{background:var(--accent);color:var(--accent-ink);border-color:var
 button{cursor:pointer}
 nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
 nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;cursor:pointer}
-#blindBar:empty{display:none}
+#blindBar:empty,#scBar:empty{display:none}
 nav a.active{background:var(--chip);color:var(--ink);font-weight:600}
 main{padding:16px;max-width:1500px;margin:0 auto}
 #swingBar{max-width:1500px;margin:0 auto;padding:0 16px}
@@ -265,6 +265,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 </header>
 <nav id="nav"></nav>
 <div id="swingBar" hidden></div>
+<div id="scBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
 <div id="blindBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
 <main id="view"></main>
 <div id="drawer"></div>
@@ -276,6 +277,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/today.js"></script>
 <script src="/static/results.js"></script>
 <script src="/static/data.js"></script>
+<script src="/static/ops.js"></script>
 <script src="/static/policy.js"></script>
 <script src="/static/desk.js"></script>
 <script src="/static/claim.js"></script>
@@ -392,6 +394,7 @@ async function loadMeta(){
   $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?(typeof practiceTime === 'function' ? practiceTime(runs.finished_at) : String(runs.finished_at).replace('T',' ').slice(0,16) + ' UTC'):'never'} · files ${m.files?m.files.n:0}`;
   $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
   $('#uploadLink').hidden = !(m.uploads || m.report_uploads);     // visit notes by hand on a server; EMA's reports on both hosts
+  scBar();                                                         // safe mode said as soon as the site's settings say it
 }
 async function loadSummary(){
   state.summary = await api('/api/summary?'+qs({year:state.year,status:state.status}));
@@ -408,6 +411,7 @@ async function render(){
   $('#nav').dataset.cur = state.tab;            // between 641 and 1,359 px More stands for Progress, Data and Providers
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
   const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
+  scBar();                                       // safe mode, above everything on every page (the self-check's banner)
   blindBar();                                    // the blind-spot banner on every page; Today and Data draw their own
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
@@ -427,6 +431,14 @@ async function render(){
   const fn = own(pages, state.tab) ? pages[state.tab] : todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
+}
+// Safe mode (the self-check held its last run: the worklist is the one from before it) above everything on every page, from
+// /api/meta's banner (selfcheck.banner). What the app cannot see, the banner's other part, is the blind-spot bar below it.
+function scBar(){
+  const el = $('#scBar'); if(!el) return;
+  const b = (state.meta || {}).banner, safe = b && (b.safe_mode || (b.level === 'safe_mode' ? b.text : ''));
+  el.innerHTML = safe ? `<div class="banner" role="status"><b>${esc(safe)}</b> <a href="#data" class="go-data">The Data tab says why (Running on its own)</a></div>` : '';
+  const go = el.querySelector('.go-data'); if(go) go.onclick = e => { e.preventDefault(); state.tab = 'data'; location.hash = 'data'; render(); };
 }
 // The blind-spot banner (today.js tdBlindBanner, GET /api/ema/blind) under the tabs of every page but Today and the Data tab,
 // which draw their own, so it shows on every page and never twice. Asked once in ten minutes: it changes with a run only.
@@ -696,6 +708,7 @@ async function openDetail(id, opts){
     if(e.code === 'changed' && e.body && e.body.heir && e.body.heir !== id) return openDetail(e.body.heir, opts);
     d.innerHTML = `<div class="dr-head"><div><h2>Item not found</h2><div class="small muted">${e.status === 404 ? 'This item is no longer on the lists.' : 'The site did not answer just now: try again in a moment.'}</div></div><button id="closeD" aria-label="Close">✕</button></div><div class="note">It may have been closed and removed by a newer run. Find a claim (top of the page) finds it by its claim ID.</div>`; const c = d.querySelector('#closeD'); if(c) c.onclick = closeDetail; return; }
   if(seq !== state.detailSeq) return;          // another item was opened meanwhile: the newest open wins
+  if(r.archived && typeof opArchivedItem === 'function') return opArchivedItem(d, r);       // an older settled item the archive took (ops.js)
   const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
   state.detailR = r; state.detailF = f; state.detailX = null;      // the panel's answers: a packet built here redraws its box
   if(!state.brief){ try { await (state.briefP || brief()); } catch(e){} }        // the plain labels and the kinds of work

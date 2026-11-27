@@ -108,7 +108,7 @@ DETECT_RULES = "2.12"           # 2.12: push 2 (2.10, 2.11: EMA's reports, work 
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
 # the files whose rules a run applies: any change re-analyses the archive once (a module not in this release is left out)
 RULE_FILES = ("detect.py", "codes.py", "fees.py", "link.py", "pfs.py", "ema_reports.py", "ema_ledger.py", "ema_checks.py",
-              "states.py", "story.py", "archive_rules.py")
+              "states.py", "story.py", "archive_rules.py", "archive.py")
 
 
 def _rules_hash() -> str:
@@ -264,6 +264,9 @@ EXTRA_FINDING_COLS = {
     # the payer's own limit where the due date shown is a safer, earlier one ("file by appeal_deadline; the payer's limit
     # is legal_deadline"); NULL when the two are the same day
     "legal_deadline": "TEXT",
+    # the worklist's ranking (remitwatch.selfcheck: the item's dollars x its pattern's recovery rate, with the basis), and the
+    # rule states.py decided the state by (the self-check and the decision log name it)
+    "expected_value_cents": "INTEGER", "recovery_rate": "REAL", "recovery_basis": "TEXT", "state_rule": "TEXT",
 }
 EM_SQL = ",".join(f"'{c}'" for c in sorted(EM_CODES))
 AUTO_NOTE_PREFIX = "Paid on a later remittance"
@@ -505,6 +508,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                           CREATE INDEX IF NOT EXISTS ix_f_npi ON findings(rendering_provider_npi);""")
     conn.commit()
     from . import ema_reports; ema_reports.ensure_schema(conn)      # noqa: E702  (EMA's report tables, the dashboard copy's too)
+    from . import repair, runlog; runlog.ensure_schema(conn); repair.ensure_schema(conn)      # noqa: E702  (logs: run_log, item_decisions, repair_log)
 
 
 ORG_NAME_WORDS = ("DERMATOLOG", "ASSOC", " PSC", "CENTER", "CLINIC", "SURGERY", "DERMA")
@@ -1484,6 +1488,8 @@ class Detector:
             snap = min((1.0, 0.75, 0.5, 0.25), key=lambda p: abs(p - med))
             if abs(snap - med) <= 0.08:
                 self.mppr[key] = {"pct": snap, "n": len(vals), "median": round(med, 3)}
+        from . import archive           # unit E: a year the archive took keeps the baselines measured on its whole year
+        archive.apply_frozen_rates(self)
         self.conn.commit()
 
     def _same_day_policy_claim(self, l: dict) -> bool:
@@ -4017,7 +4023,7 @@ class Detector:
                 self.billed_units_of(o) for o in self.lines_by_claim.get(l["claim_key"], [])
                 if o["line_key"] != l["line_key"] and o.get("procedure_code") == code and o.get("service_date") == l.get("service_date")
                 and (o.get("paid_cents") or 0) > 0))
-        copies = self._answer_copies()
+        copies = self.answer_copies = self._answer_copies()
         # a denied visit with a lower level paid in its place is one event: the paid line must not also count as a downcode
         swap_paid: set[str] = set()
         primary_changes: set[tuple] = set()
@@ -7138,10 +7144,12 @@ class Detector:
                 raise
             if os.environ.get("REMITWATCH_EMA_STRICT") == "1":
                 raise
+            from . import runlog
+            runlog.caught(exc, "ema:" + name)
             try:
                 self.conn.rollback()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc2:
+                runlog.caught(exc2, "ema:rollback", level="warning")
             self.ema_errors.append({"step": name, "error": f"{type(exc).__name__}: {str(exc)[:160]}"})
             return None
 
@@ -8093,6 +8101,8 @@ class Detector:
             r["work_state"], r["follow_up_on"] = st.get("work_state"), st.get("follow_up_on")
             r["state_basis"] = (st.get("state_basis") or "")[:300] or None
             r["appeal_block"] = st.get("appeal_block")
+            r["state_rule"] = st.get("rule")
+            getattr(self, "state_rules", {})[r["finding_id"]] = st.get("rule")      # for the decision log
             self.ema_counts["state_" + str(st.get("work_state"))] += 1
 
     def _save_ema_wiring(self) -> None:
@@ -8793,11 +8803,18 @@ class Detector:
             self.events_seen = int(self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM finding_events").fetchone()[0])
         except sqlite3.Error:
             self.events_seen = 0
+        from . import runlog, selfcheck
+        # (H) the items as they are before this run, for the decision log ("Why did this change?"), and the rule of each state
+        self.state_rules: dict[str, str] = {}
+        self._decisions_before = runlog.snapshot_items(self.conn)
+        # (G) the worklist as people see it now, for safe mode, the vanished check and the track record
+        self._selfcheck_ctx = selfcheck.begin_detection(self.conn, run_id=self.run_id, today=self.today)
         try:
             if self.conn.execute("SELECT 1 FROM ema_rows LIMIT 1").fetchone():
                 from .link import build_links
                 build_links(self.store, log=lambda *_a: None)
-        except Exception:
+        except Exception as exc:
+            runlog.caught(exc, "links")
             # the links could not be built: the weeks the exports miss are still measured (they need no links), and if
             # even that fails the old list is dropped rather than served as today's
             from .link import EMA_COVERAGE_KEY, save_ema_coverage
@@ -8805,13 +8822,14 @@ class Detector:
                 self.conn.rollback()
                 save_ema_coverage(self.conn)
                 self.conn.commit()
-            except Exception:
+            except Exception as exc2:
+                runlog.caught(exc2, "links_fallback", level="warning")
                 try:
                     self.conn.rollback()
                     self.conn.execute("DELETE FROM meta WHERE key=?", (EMA_COVERAGE_KEY,))
                     self.conn.commit()
-                except Exception:
-                    pass
+                except Exception as exc3:
+                    runlog.caught(exc3, "links_coverage", level="warning")
         # the order of the tech lead's amendment 4.5 (EMA's steps do nothing on a store without EMA's reports)
         self._ema_prepare()             # 2-3: the map when it is dirty; C1 causes, answer times, posting lag
         self.load()                     # 4
@@ -8835,6 +8853,8 @@ class Detector:
         self.run_ema_writeoffs()        # 11: written off in EMA (C2) and the overlays (W2)
         self.run_more_rules()           #    secondary never billed, credits, EMA-only short payments
         self.hook_fold()
+        from . import archive           # unit E: a locked year's aggregate items stay as measured on its whole year
+        archive.carry_locked_aggregates(self)
         out = self.save()               # 12: heirs, states
         self.run_ema_summaries()        # 13: W4, W3, the reconcile summary, the policy table
         self._save_ema_wiring()
@@ -8853,22 +8873,81 @@ class Detector:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                               (REVERSALS_NOT_ON_FILE_META, json.dumps(getattr(self, "not_on_file", None) or {})))
             self.conn.commit()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "feed_meta", level="warning")
             self.conn.rollback()        # the analysis is saved; the API works the date out from the store, or the newest payment
         try:        # reasons hidden for a payer (actions.apply_hide_rule) hide the new items they cover
             from .actions import apply_hide_rules
             if apply_hide_rules(self.conn):
+                self._restate_closed()  # their state follows at once (states.py), as the next analysis would set it
                 self.conn.commit()
-        except Exception:
+        except Exception as exc:
+            runlog.caught(exc, "hide_rules")
             self.conn.rollback()        # the analysis is saved; the rules run again after the next one
         self.hook_hide()
+        self._after_save_checks()       # (G) ranking, invariants, safe mode, items kept; before the swing alarm reads the list
         if getattr(self, "_open_before", None) is not None:
             try:    # what this run put on the open list and took off it, item by item, for the swing alarm
                 record_moves(self.conn, self.run_id, self._open_before)
                 self.conn.commit()
-            except sqlite3.Error:
+            except sqlite3.Error as exc:
+                runlog.caught(exc, "swing_moves", level="warning")
                 self.conn.rollback()    # the analysis is saved; the alarm then reads the totals alone for this run
+        self._record_decisions()        # (H) every automatic change to an item, with its rule and evidence
         return out
+
+    def _after_save_checks(self) -> None:
+        """(G, remitwatch.selfcheck) After the save: each item's dollars x its pattern's recovery rate (the ranking), then
+        the self-check on what was saved (invariants, items that vanished kept, safe mode, the track record). A held run
+        puts the last good worklist back before the swing alarm and the decision log read it."""
+        from . import runlog, runtime, selfcheck
+        try:
+            self.value_summary = selfcheck.apply_expected_values(self.conn, selfcheck.recovery_rates(self.conn))
+        except Exception as exc:       # noqa: BLE001  (the ranking waits for the next run; the items stand)
+            runlog.caught(exc, "selfcheck:values")
+        # the lines passed by as copies of an answer delivered again the same day: their one item is the other delivery's
+        ctx = dict(getattr(self, "_selfcheck_ctx", None) or {}, delivered_again=sorted(getattr(self, "answer_copies", ()) or ()))
+        try:
+            self.selfcheck = selfcheck.after_detection(self.conn, ctx,
+                                                       mode="serverless" if runtime.serverless() else "server",
+                                                       today=self.today, run_id=self.run_id)
+        except Exception as exc:       # noqa: BLE001  (a self-check that crashes is a guard that is off: said every run, never silent)
+            runlog.caught(exc, "selfcheck")
+            self.selfcheck = selfcheck.crashed(self.conn, exc, run_id=self.run_id, today=self.today)
+        rl = runlog.current()
+        if rl is not None:
+            rl.set("invariants", (self.selfcheck or {}).get("checks"))
+
+    def _restate_closed(self) -> int:
+        """Items a step after the save closed (the hide rules move new items to Let go): their state is decided again
+        (states.py: Let go by a rule is accepted), so no item reads Let go and Work now together until the next analysis
+        (the self-check's open_and_closed check would hold the run for it)."""
+        from . import states
+        cur = self.conn.execute("SELECT * FROM findings WHERE COALESCE(stale,0)=0 AND status IN ('resolved','lost','dismissed') "
+                                "AND work_state IN ('work_now','waiting')")
+        names = [d[0] for d in cur.description]
+        rows = [dict(zip(names, r)) for r in cur.fetchall()]
+        if not rows:
+            return 0
+        got = self._ema_step("restate", states.states_of, self.conn, rows,
+                             outcomes=dict(self.ema_outcomes) if self.ema_on else {}, today=self.today) or {}
+        upd = [(st.get("work_state"), st.get("follow_up_on"), (st.get("state_basis") or "")[:300] or None, st.get("appeal_block"),
+                st.get("rule"), fid) for fid, st in got.items() if st]
+        self.conn.executemany("UPDATE findings SET work_state=?, follow_up_on=?, state_basis=?, appeal_block=?, state_rule=? "
+                              "WHERE finding_id=?", upd)
+        return len(upd)
+
+    def _record_decisions(self) -> None:
+        """(H, remitwatch.runlog) The decision log of this run: one row per item an automatic step changed."""
+        from . import runlog
+        try:
+            self.decisions = runlog.record_decisions(self.conn, self.run_id, self._decisions_before,
+                                                     rules=getattr(self, "state_rules", None), rule_version=DETECT_VERSION)
+            rl = runlog.current()
+            if rl is not None:
+                rl.set("decisions", self.decisions)
+        except Exception as exc:        # noqa: BLE001  (the items are saved; only this run's decision rows are missing, and the log says so)
+            runlog.caught(exc, "decisions")
 
 
 HEIRS_DDL = "CREATE TABLE IF NOT EXISTS finding_heirs (old_id TEXT PRIMARY KEY, new_id TEXT, at TEXT, run_id TEXT)"
@@ -8912,17 +8991,23 @@ def carry_to_heirs(c: sqlite3.Connection, moved: list[tuple[str, str]], at: str,
                 c.execute("UPDATE faxes SET doc=? WHERE fax_key=?", (json.dumps(d, default=str), key))
 
 
-def run_detection(db_path: str, run_id: str | None = None) -> dict:
+def run_detection(db_path: str, run_id: str | None = None, *, skip_activity: bool = False) -> dict:
+    """One analysis of the store at db_path, then the provider tables, unless the self-regulation left them for a calm
+    cycle (skip_activity: remitwatch.selfcheck's plan sheds them; activity.stale keeps the note that they are behind)."""
     import gc
 
-    from .activity import refresh
+    from .activity import mark_pending, refresh
     store = Store(db_path)
     try:
         det = Detector(store, run_id)
         summary = det.run()
         del det                 # the provider tables are built after the detector has given its memory back
         gc.collect()
-        refresh(store, log=lambda *_a: None)
+        if skip_activity:
+            mark_pending(store.conn)
+            store.conn.commit()
+        else:
+            refresh(store, log=lambda *_a: None)
         return summary
     finally:
         store.close()

@@ -4,6 +4,12 @@ Pushing to `main` deploys the site on Vercel. Vercel keeps no files between requ
 on Vercel the app runs in its serverless mode: the store lives in a private folder of the practice's own Dropbox and each
 update is one time-boxed run. Nothing else has to be hosted.
 
+**This site analyses only when someone presses for it** (the owner's decision of 2026-11-26). Nothing on a schedule, no
+Dropbox notification, no upload and no page that opens starts an analysis here: a signed-in person presses "Run the
+analysis now" on the Data tab. The practice's server analyses on its own every day, sends the faxes, reads TriZetto and
+sends the mail, and it is where the billers work: what is recorded on this site (a status, a note, an upload) stays on
+this site and is not on the server. Every page here says when this site last analysed and that it analyses only on a press.
+
 The other way to run it (a small VM with a disk, `docker compose up`) is in [OPERATIONS.md](OPERATIONS.md). The dashboard,
 the detection rules and the numbers are the same in both.
 
@@ -16,7 +22,7 @@ redeploy after every change.
 | --- | --- | --- |
 | `REMITWATCH_PASSWORD` | Made up, 12 or more plain letters and digits. The dashboard password. The site stays locked until it is set and long enough. | Yes |
 | `REMITWATCH_USER` | The dashboard's user name. Left out, the default that `/setup` names is used. | No |
-| `CRON_SECRET` | Made up, 16 characters or more, no spaces. Vercel's scheduler and the site's own follow-up runs present it. | Yes |
+| `CRON_SECRET` | Made up, 16 characters or more, no spaces. The run a press starts, the site's own follow-up runs and the fax line's daily call present it. | Yes |
 | `DROPBOX_APP_KEY` | Dropbox Developer Console, the app's Settings tab | Yes |
 | `DROPBOX_APP_SECRET` | Same tab | Yes |
 | `DROPBOX_REFRESH_TOKEN` | The Connect Dropbox step on the site's `/setup` page | Yes |
@@ -41,6 +47,9 @@ redeploy after every change.
 | `REMITWATCH_EMA_CLOSES`, `REMITWATCH_STALE_APPEAL_DAYS`, `REMITWATCH_FRESHEN_HOURS`, `REMITWATCH_NO_ANSWER_DAYS`, `REMITWATCH_EMA_STALE_DAYS` | `0` keeps EMA's posted payments as a hint instead of closing items; days after which appeals wait for newer remittances (14); hours after which opening the site starts a run (3); days after a claim was sent before it is listed as unanswered (30); days after which EMA's A/R or Production report counts as old, on the Data tab and in an alert (8, for reports pulled every Monday; more if the practice pulls them less often; set the same value on the server). | No |
 | `REMITWATCH_REPORT_EVERY_DAYS`, `REMITWATCH_STALE_DAYS`, `REMITWATCH_ALERT_RECENT_DAYS`, `REMITWATCH_ALERT_BASELINE_DAYS`, `REMITWATCH_NOTE_MODEL`, `REMITWATCH_NOTE_SCRUB`, `REMITWATCH_NOTE_SEND_SCANS` | Tuning, as `.env.example` explains: the weekly summary, the stopped-feed alert, the alert windows, and the note review. | No |
 | `REMITWATCH_DEFER_DETECT_FILES`, `REMITWATCH_BACKFILL_ZIP` | Tuning of the first load on Vercel (`remitwatch/cloud.py`). | No |
+| `REMITWATCH_RETENTION_MONTHS` | The archive's horizon, in months of service: older settled claims leave the store this site holds in memory for an archive in the state folder (`archive/`); Find a claim still opens them. Default 36, never below 24. Set the same value on the server. | No |
+| `REMITWATCH_MEMORY_BUDGET_MB` | The memory a run is measured against, in MB. Leave it out: past 80% of the default (2,188 MB, inside the 2 GB function) the memory regulation spreads the work and sheds optional steps, and the archive takes older claims sooner. | No |
+| `REMITWATCH_AUDIT_WASTED_ITEMS` | How many new items on Work now that look settled the weekly self-audit allows before it raises its alert (default 10). Any new line with money and no item raises it whatever its dollars. | No |
 | `SRFAX_ACCESS_ID`, `SRFAX_ACCESS_PWD`, `SRFAX_CALLER_ID`, `SRFAX_SENDER_EMAIL` | The fax line (SRFax): appeals faxed in one click, payers' answers read and matched, follow-ups every week (OPERATIONS.md, Faxing appeals). `SRFAX_CALLER_ID` is the line's own number; letters give it, so answers come back to it. Faxing also needs every `PRACTICE_` detail. With these set this site shows the Faxes page and opens faxes that came in; it sends only when `REMITWATCH_FAX_SENDER` names it. `SRFAX_URL` only if SRFax gives another address. | To see faxes |
 | `REMITWATCH_SERVER_SITE` | The address of the practice's own server site, if it has one. This site's copy of the data holds only the claims that have items, so when Find a claim finds nothing it says so and names this site (or EMA) as the place to look up a paid claim with no item. | No |
 | `REMITWATCH_FAX_SENDER` | Which site sends faxes: `server` (the default, also when it is left out), `serverless` (this site), or `none` (faxing paused). Exactly one site sends. Leave it out while the practice's server runs: the server sends. Set `serverless` only on a deployment with no server, and then only here. | To fax from here |
@@ -60,8 +69,11 @@ Not on Vercel: `REMITWATCH_ALLOW_OPEN` (it opens a site with no password: a deve
 posting ledger; this site keeps it in the state folder), `REMITWATCH_DB`, `REMITWATCH_DATA_DIR`, `REMITWATCH_COMMIT` (set
 by the server's image), `REMITWATCH_TRIGGER` (set by the server's scheduler), `REMITWATCH_TMP` (a scratch folder for
 tests), `REMITWATCH_EMA_STRICT` (`1` is for tests: a check against EMA's reports that fails then stops the whole
-analysis; unset, the failure is noted on the Data tab). `REMITWATCH_MODE` and `REMITWATCH_STATE_DIR` are only for trying
-the mode on a laptop (below).
+analysis; unset, the failure is noted on the Data tab), `REMITWATCH_ARCHIVE_DIR` (a server's archive folder; this site's
+archive is the state folder's `archive/`), `REMITWATCH_CYCLE_BUDGET_SECONDS` (the time a server's cycle is measured
+against; here a run has `REMITWATCH_MAX_SECONDS`), `REMITWATCH_TODAY` (it stands in for the day in tests and simulations
+only: never on a live site). `REMITWATCH_MODE` and `REMITWATCH_STATE_DIR` are only for trying the mode on a laptop
+(below).
 The `VERCEL*` names the app reads (`VERCEL`, `VERCEL_ENV`, `VERCEL_GIT_COMMIT_SHA`, `VERCEL_PROJECT_PRODUCTION_URL`,
 `VERCEL_FUNCTION_MEMORY`, and `VERCEL_AUTOMATION_BYPASS_SECRET` where the production address is protected) come from
 Vercel itself: never add them by hand.
@@ -83,8 +95,9 @@ Vercel itself: never add them by hand.
 4. **First load.** When every required line on `/setup` has a tick, press Run the first load now. It reads the whole
    folder in several short runs that follow one another. On almost three years of remittances this was two runs and about two minutes
    of computing.
-5. **Instant updates.** `/setup` shows the webhook address. Add it in the Dropbox Developer Console: the app, Settings
-   tab, Webhooks, Add webhook. Without it the site still checks Dropbox once a day.
+5. **No instant updates here.** This site reads Dropbox only when someone presses Run the analysis now (Data tab). The
+   webhook address `/setup` shows is still answered (and checked against the app secret), but a notification starts
+   nothing on this site; the practice's server reads new files on its own.
 
 `/setup` checks every setting live and says what to fix. `/api/health` needs no login and shows the version, the commit
 and what the runtime offers. The practice's server shows the commit it runs at the same address, so the two sites can
@@ -92,11 +105,41 @@ be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
 
 ## How it works
 
-- `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules
-  `/api/cron/cycle` once a day (10:17 UTC; on the Hobby plan Vercel fires it some time in that hour) and
-  `/api/cron/faxes` once a day (15:43 UTC: the faxes going out, the payers' faxes in, the follow-ups due; it does
-  nothing unless this site is the one that sends, `REMITWATCH_FAX_SENDER=serverless`, and never while another fax run is
-  going). `public/` exists so that Vercel serves nothing else from the repository.
+- `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules one
+  call a day: `/api/cron/faxes` (15:43 UTC: the faxes going out, the payers' faxes in, the follow-ups due; it runs no
+  analysis, it does nothing unless this site is the one that sends, `REMITWATCH_FAX_SENDER=serverless`, and never while
+  another fax run is going). The daily analysis (`/api/cron/cycle` at 10:17 UTC) was removed on 2026-11-26: an analysis
+  starts only from a press. No call in `vercel.json` only keeps the site healthy, so none other is kept.
+  `public/` exists so that Vercel serves nothing else from the repository.
+- **The press.** "Run the analysis now" (the Data tab, panel "Analysis on this site"; the first load on `/setup` is the
+  same press) calls `POST /api/ops/run`, which starts the same chain the daily call started: `/api/cron/cycle` with
+  `CRON_SECRET`, the analysis forced so the lists move with the day even when no file arrived. A second press while a run
+  holds `lock.json`, or in the 90 seconds before the asked-for run has taken it (`press.json`), says a run is already
+  going and starts nothing. When the site cannot start the run, the press says why: `CRON_SECRET` not set (503), its
+  own call refused (a protected production address needs `VERCEL_AUTOMATION_BYPASS_SECRET`), the state folder out of
+  reach, or a network error (502). The route is not there on the server, which keeps its own schedule.
+- **The chain's last run.** After a run of the chain has analysed, one more run follows (`tidy`) when the work only a
+  run that does not analyse does is due: the archive's pass (at most once a day; at once when the memory regulation asks
+  for the tighter horizon), the provider tables the analysis had no time left for, and the weekly self-audit. It
+  analyses nothing unless new files arrived meanwhile, and the chain ends there.
+- **What a run could not check.** The memory regulation still applies to a pressed run (it hands the analysis to a fresh
+  run, sheds optional steps, archives older claims sooner). When a run ends with the analysis still to come, its status
+  (`status.json`, `unchecked`) says why it was handed on (memory, time, a large batch, a Production file), how many
+  open items and how many dollars were not checked against the files read since the last analysis, and the remittance
+  claims read since then with the dollars of their charges the payers did not pay (no list shows them until the analysis
+  runs); or, when nothing new was read, that the lists stand as that analysis left them. Every page shows it until a run
+  has analysed. `status.json` also keeps `analysed`: when this site last analysed, by which run, and the open items it
+  left on the lists.
+- **A run that stops before it finishes.** A run that runs out of time or hits an error saves nothing (the store is
+  saved only at a run's end). The Data tab's panel then says so, why, and how many open items and dollars stand as the
+  last analysis left them; the header says it too. So does a run the platform stopped (out of memory, or its 300
+  seconds), which writes no status at all: once its lock is seven minutes old the pages read it as stopped, and the
+  next press takes the lock over and counts the run once in the memory regulation. A chain that stopped after its 30th
+  run is said the same way. No run comes here without a press: press Run the analysis now to carry on. Press Run the analysis now to try again; if it stops again, make
+  the file for Claude in the Logs and diagnostics panel. Measured on 2026-11-26 on a copy of the live image (722 MB in
+  memory): the pressed analysis used about 128 CPU seconds and peaked near 1.9 GB, inside one run. With EMA's A/R and
+  Production tables in the image (893 MB) it needed about 280 CPU seconds and 2.3 GB, more than one run has: keep
+  `REMITWATCH_EMA_REPORTS` at its default here while the server reads Production.
 - Keep `"framework": null` in `vercel.json`. Under Vercel's FastAPI preset the function is given the rewritten path, so
   every request would arrive as `/api/index`.
 - Vercel refuses to build when `CRON_SECRET` has a space or a line break at either end.
@@ -109,21 +152,21 @@ be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
 - The store is saved first because it is the record. If a run dies between the two saves, the next run sees that the
   dashboard's copy is behind, or was made by a different build of the app (`serving.json`), and rebuilds it. Mail goes out after both saves, and what was sent is kept
   in its own small file (`notified.json`), so a failed save or an idle run cannot send the same alert or report twice.
-- A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns.
+- A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns
+  (the chain a press started goes on by itself: that is not a new analysis started on a schedule).
   That relies on Vercel finishing a request's work after the caller hangs up. It does: checked on the live site on
   2026-11-12 (six seconds of work completed after a caller that left at 1.2 seconds).
   Detection is left to a fresh run after a large batch, because a new process starts with clean memory.
 - Runs follow one another only while they are getting somewhere, and at most 30 times in a row. A file that cannot be
   read (a damaged spreadsheet, a file over 60 MB, one Dropbox will not release) is noted on the Data tab, remembered and
   passed over until it changes. A download that merely timed out is tried twice more, a minute and a half apart, and
-  then left to the next daily run.
+  then left to the next press.
 - The dashboard never waits for a run. Each instance downloads the dashboard's copy, looks for a newer one every 45
   seconds, and lays the journal of recent status changes over it. A status change is one small file in `actions/`.
 - Appeal packets are stored as two files each under `packets/`.
-- A Dropbox webhook is verified by its signature, then answered. It starts a run only when no run is going, the last
-  one did not fail in the past six hours, die, or leave work unfinished in the past hour, and the data folder has new
-  files of a kind the app reads. The site's
-  own writes to its state folder never start one. The daily scheduled run is not subject to these conditions.
+- A Dropbox webhook is verified by its signature, then answered. It starts no run on this site (the owner's decision 1);
+  an upload finished in the app waits in `intake/` for the next press, which reads it first, and so does a held EMA
+  report a person applies.
 - A status change recorded for a finding the store does not hold yet is kept in the journal and tried again after
   each detection, for a week.
 - `/api/health` runs a self-test once per process: an empty store held in memory, grown, saved, reopened, and the
@@ -154,13 +197,13 @@ be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
 | Limit | Value | What it means here |
 | --- | --- | --- |
 | Memory | 2 GB on Vercel's standard function (the only size on the Hobby plan). 4 GB with Function CPU set to Performance (Pro plan). | A full re-analysis of the live store (420K service lines, November 2026) peaks at 1.37 GB. It grows with the archive, about 3 KB per line and 13K lines a month: the 2 GB limit is near 640K lines, around early 2028. `/setup` and the Data tab show the last run's peak. |
-| Time | 300 seconds per run | The run budget is 240 seconds and the work is split across runs; a full re-analysis takes about a minute. A statement still running at 240 seconds is stopped and the run ends with an error on `/setup` and the Data tab, rather than being cut off by the platform. |
+| Time | 300 seconds per run | The run budget is 240 seconds and the work is split across runs. A pressed analysis of the live store took 170 to 240 seconds of it in November 2026 (about 128 CPU seconds), so a press often hands the analysis to the chain's next run. A statement still running at 240 seconds is stopped and the run ends with an error on `/setup` and the Data tab, rather than being cut off by the platform. |
 | Upload size | 4.5 MB per request | A visit note uploaded for an appeal packet can be 3 MB at most on Vercel (15 MB on a VM). |
-| Scheduler | Once a day on the Hobby plan | The webhook covers the rest of the day. |
+| Scheduler | Once a day on the Hobby plan | Used only for the fax line's daily call. This site analyses only on a press (the owner's decision 1): neither a schedule nor a Dropbox notification starts an analysis here. |
 | Store size | 1 GB uncompressed (SQLite's limit for a database held this way) | The store is about 0.5 GB today. |
 
-A run that is killed (out of memory or time) leaves its lock behind. The next run takes it over after seven minutes, and
-the setup page and the Data tab say that a run stopped without finishing.
+A run that is killed (out of memory or time) leaves its lock behind. The next press takes it over after seven minutes,
+and the header, the setup page and the Data tab say that a run stopped without finishing.
 
 ## Agreements
 

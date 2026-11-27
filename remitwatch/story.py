@@ -54,7 +54,7 @@ AR_WINDOW = ("The A/R export lists only lines with activity in its last 30 days 
              "from it is not closed or paid.")
 SERVER_ONLY = "Each of EMA's postings is kept on the server; this site shows EMA's summaries of this line."
 # the dashboard's copy keeps every 835 claim of an item's bill (cloud.SERVING_BUILD 8) but not EMA's single postings
-COPY_NOTE = ("This site keeps every remittance of the bill. The daily run works out each item's state from the full store, which also "
+COPY_NOTE = ("This site keeps every remittance of the bill. Each analysis works out each item's state from the full store, which also "
              "keeps each of EMA's postings.")
 _SRC_ORDER = {"835": 0, "production": 1, "weekly": 2, "claim_status": 3, "ar": 4, "remitwatch": 5}
 
