@@ -14,12 +14,12 @@ F3c owns, for these changes only, the functions F3a and F3b owned (detect.py: `r
 keyword `pairs` (default None; every caller but `_who` unchanged); tests/test_fx_exports.py's `_rebill_world` takes
 `worked_newer` and `old_837`, and a helper `_read_before_v2`.
 
-## State (2026-11-27 06:10 UTC)
-Fixes done and pushed (3b4a434, f3e3daa, af586c5, 246e3a2); every fix broken on purpose and restored byte for byte
-(`$S/tk/units/fx-passes/br/breaks.py`: 15 breaks, each made its tests fail). Plain-world measurement done for the tip
-(fe9ad71) and the branch at f3e3daa; the branch at 246e3a2 (the Medicaid name rule narrowed) running. Next: the reread
-world (the 837 files are in `$S/tk/f837/raw`, 5,239 of 5,383 so far), tip and branch; hand-traces; merge the tip again;
-suites.
+## State (2026-11-27 06:15 UTC)
+Fixes done and pushed (3b4a434, f3e3daa, af586c5, 246e3a2, 44e5d44); every fix broken on purpose and restored byte for
+byte (`$S/tk/units/fx-passes/br/breaks.py`: 14 breaks; `br/breaks_eaf.py`: 3 more for the reader change; each made its
+tests fail). Plain-world measurement done (tip fe9ad71 against the branch at 246e3a2). The reread world (all 5,383 837
+files read again, `plans/tools/world/reread_837.py`) is being measured: tip 6fda121 (the same code as fe9ad71) against
+the branch at 44e5d44. The full suite in python3 runs on the branch at 44e5d44 (`$S/tk/units/fx-passes/runs/`).
 
 ## Each item of the brief and its outcome
 | Item | Outcome | Tests (tests/test_fx_passes.py unless named) |
@@ -34,6 +34,7 @@ suites.
 | F8: a Medicaid plan sharing a payer id takes the id's majority group | done in `_run_837`'s group_of: a send whose payer name says Medicaid and names a state is that plan's (after the member's own answered claims, before the id's majority). Measured first without the state condition: 9 sends named '... Medicaid' with no state under a UHC id became 'Medicaid (other)', 4 of them newly listed though A17 says paid: narrowed to names with a state | test_a_send_to_a_medicaid_plan_sharing_a_payer_id_is_that_medicaid_plans (with a no-state control) |
 | F8: a $0 claim of a code the plan never pays listed as never answered (84c6128e241cf91fed4ca54f) | decided: it stays listed (its answer decides what is owed and whether the patient may be billed; decision 4 keeps never-paid codes pursued), and the item says why: a claim no line of which can be priced says "Its size is not known: <group> has paid too few lines on file to price <codes>...". The item itself appears only with F8's codes.py (not on the tip): check it at the batch-2 merge | test_a_claim_no_line_of_which_can_be_priced_says_its_size_is_not_known |
 | F3b's 4 claims ($311) A17 calls paid (twins narrowed, then refused by the day count) | decided: left as is (a wasted check, no money at risk). On the 11-24 copy each is the only listed claim of its send day's group (same payer id and lines): 2 to 6 claims went out that day with those lines and 2 to 8 EMA claims of them were charged (1 to 3 paid); the narrowing kept one twin by the kin rule (the others' patients' bills are other members'), not by the claim's own name, and the day's other claims are untied bills whose EMA claim nothing names: a one-to-one match would assign them without their own evidence. To check on the reread world: the 837's own name may choose their twins (the named path, which the day count does not refuse) | (none: no change) |
+| The brief's check on the reread world: does `other_pr_cents` (CAS*PR) carry what the payer before left the patient? | checked on all 5,383 files, and fixed: 4,441 claims went to a payer after another payer answered; none has an AMT*EAF on its claim loop (the files carry it on each line, 2430), which is why `other_left_cents` was empty. CAS*PR agrees with the lines' AMT*EAF to the cent on 4,326 of them (the 40 tertiary sends agree too, per payer); 63 sends whose payer before left the patient nothing carry no PR adjustment at all, so the sizing had nothing to read and priced them at the payer's full rate; 12 carry neither. The reader now keeps the sum of the lines' AMT*EAF (of each line's own payer, as the PR adjustments are kept) when the claim loop has none, and READ_VERSION 4 reads every host's 837 files again (the release rereads them all anyway: every 837 on file was read before version 2). With it: 4,366 sends carry a left amount equal to their PR adjustments, 63 carry $0 (owes nothing), 12 nothing | test_a_secondary_send_is_sized_by_what_the_primary_left_on_its_lines (with the reread of a version-3 file); tests/test_fx_837.py's builder writes a line's AMT*EAF |
 
 ## Measured so far (world of 2026-11-24, private folder; aggregates here)
 - Plain world, tip fe9ad71 against the branch at f3e3daa: 16 items moved, all from the Medicaid name rule (the two passes'
