@@ -12,8 +12,10 @@ states.py `paid_proof` and its helpers, `paid_first_elsewhere` (and the branches
 ## Fix round (2026-11-27, the two reviews' findings: fx-ledger-r1-1..4, r2-1..10)
 Reviewers' tests: `$S/tk/review/fx-ledger-r1-tests/test_review_fx_ledger_r1.py`, `$S/tk/review/fx-ledger-r2-tests/`. Ported into
 `tests/test_fx_ledger.py` (section "the fix round's review"), with F1's own edges; the three that are not F1's are in
-`plans/progress/fx-ledger_needs/` (below). The integration tip has not moved since 9f58506 (already merged at 316b9d8): the
-round and its measurement are on 9f58506 + this branch (fix7d, fix7c and deadlines merged; decisions, hook, a17 not yet).
+`plans/progress/fx-ledger_needs/` (below). The round was written on 9f58506 + this branch (fix7d, fix7c and deadlines
+merged, at 316b9d8); the integration tip then moved to 59f6822 (hook, decisions, a17's tool and the batch-2 handoffs),
+merged here at 99ff8f7 without a conflict (the related suites and the decisions tests: 1443 passed). The final measurement
+(run 4 below) is on 59f6822 against this branch with it merged.
 
 Outcome per finding (all confirmed on invented data first: each ported test failed on 316b9d8 for the reviewer's reason):
 - r1-3 (high) FIXED. states.paid_proof: paid_before_other_payer never counts an answer carrying CARC 22/23 (processed after
@@ -59,8 +61,15 @@ Outcome per finding (all confirmed on invented data first: each ported test fail
 - r2-9 (low) FIXED. states._r835 reads a PLB entry as naming a claim of the bill by its claim id in any letter case (the longest
   that fits) or by a word that is the payer claim number of exactly one claim of the bill (the ledger's _plb_names reading).
 - r2-10 (low) NEED (F5 and _decide's FEES branch): need_second_payer_share_step.py.
-Every fix broken on purpose and restored: `$U/breaks2.py` (15 breaks, each fails its tests; restored 198 passed), output
-`$U/breaks2.out`.
+- Found by the hand trace of run 3 (r1-1's own residual), FIXED at a97c3c0: a payer's restatement split into pieces (the
+  payment marked B13 on one $0 line, the original CO-45, CO-253 and PR-3 on $0 lines of their own) read as new answers of the
+  service, so the takeback of that payment was listed nowhere and its duplicate denial expired. `Detector._restates` reads
+  the claim's other $0 lines of the same code and date: one restatement. Test
+  `test_a_restatement_split_into_pieces_is_not_the_takebacks_work` (both store kinds; needs line control numbers, REF*6R,
+  for code_once to hold). Run 4 shows it on the real copy: the TAKEBACK is listed, work now in its own window, and the
+  duplicate denial stays done with "took ... of it back later, worked on its own takeback item".
+Every fix broken on purpose and restored: `$U/breaks2.py` (16 breaks, the split restatement included; each fails its tests;
+restored 202 passed, `git status` clean), output `$U/breaks2.out`.
 
 ## Done
 - about 22:14 UTC: ported the reviewers' and verifiers' tests into `tests/test_fx_ledger.py` (58 tests, both store kinds).
@@ -134,18 +143,24 @@ Every fix broken on purpose and restored: `$U/breaks2.py` (15 breaks, each fails
   restored 4 passed).
 
 ## Half done
-- Fix round (2026-11-27 01:40 UTC): every finding fixed or written as a need (above), tests green, breaks done. Running: the
-  measurement on a private world copy, tip 9f58506 (`$U/tiptree`) against the branch at 341af0d (`$U/brtree`), driver
-  `$U/measure_both.sh` (outputs `$U/measure_tip3.out`, `measure_branch3.out`, `compare3.out`, moved items `$U/moves3.json`).
+- Fix round (2026-11-27 03:15 UTC): every finding fixed or written as a need (above), the hand trace's fix in, 16 breaks
+  done, both measurements done (below), world copies deleted. Left: the full suite once in python3 and once in
+  `$S/fix/venv_sqlite340/bin/python`, the integration tip merged again if it moved, the final push.
 
 ## Next
-- If the measurement stopped: `bash $U/measure_both.sh` (deletes its world copy itself), then hand-trace the moved items from
-  the raw rows (`$U/scripts/trace_moves.py`, adapted), merge the integration tip again, the full suite in python3 and
-  `$S/fix/venv_sqlite340/bin/python` (`$U/run_shards.sh`), final push, report.
+- The full suite: `RW_RUNS=$U/runs bash plans/tools/shard.sh $W python3 fxl-py313 4`, then the same with
+  `$S/fix/venv_sqlite340/bin/python` (label fxl-py311); record the failures not caused here (3.11.1: only the store image's
+  `Connection.serialize`). Then `git fetch origin && git merge origin/claude/ecstatic-fermi-orfcgo`, the touched suites
+  again if it moved, `git push origin HEAD:wip/fx-ledger`, remove `$U/tiptree` and `$U/brtree` (git worktree remove) and
+  `$U/p2`.
 - The integrator: route "Needs from others" (each with its failing test) and read the open questions.
 
 ## Tests
-- tests/test_fx_ledger.py: 126 tests, both store kinds (58 ported from the reviewers and verifiers, the rest F1's own edges
+- Fix round: tests/test_fx_ledger.py 202 tests, both store kinds (the reviewers' r1 and r2 tests ported, the hand trace's
+  split restatement, F1's own edges), all passing; 16 breaks each fail their tests and restore exactly. After merging
+  59f6822: the related suites (ledger, states, story, takebacks, archive rules, decisions) 1443 passed. Full suite: see
+  "Full suite (fix round)" below when it has run.
+- tests/test_fx_ledger.py (round 1): 126 tests, both store kinds (58 ported from the reviewers and verifiers, the rest F1's own edges
   and the residuals'), all passing. Every fix broken on purpose and restored (`$U/breaks.py`).
 - Full suite before the last merge (commit 741b25e): python3 3.13 / SQLite 3.53: 3016 passed, 29 skipped, 1 xfailed,
   none failed. 3.11.1 / SQLite 3.40: 109 failed and 24 errors, every one of them the store image's
@@ -158,6 +173,60 @@ Every fix broken on purpose and restored: `$U/breaks2.py` (15 breaks, each fails
   is untouched.
 
 ## Measured
+### Fix round (2026-11-27)
+Two runs, each on a fresh private world copy (store 11-24 with EMA's reports, server cycle, today 2026-11-24), deleted after:
+- Run 3 (01:40 to 01:51 UTC): tip 9f58506 (fix7d, fix7c and deadlines merged) against the branch at 341af0d (every finding
+  fixed, before the hand trace's fix).
+- Run 4 (02:49 to 03:08 UTC), the final one: tip 59f6822 against the branch at a97c3c0, which merged 59f6822 (99ff8f7). The
+  merges it includes, on both sides: fix7d, fix7c, deadlines, hook, decisions and a17's tool (the whole integration branch
+  at 59f6822, which has not moved since).
+Detection: run 3 204.6 s (tip) and 192.6 s (branch); run 4 250.9 s and 378.3 s, peak 1,105 and 1,106 MB. Run 4's branch ran
+under a load average of 12 on 4 CPUs (other units' runs): the steps F1 does not touch slowed as much (activity refresh 18.0
+to 28.8 s, EMA turnaround 7.8 to 10.3 s), and run 3 measured the same F1 code faster than its tip. A rerun with F1's
+functions timed (`$U/timed_cycle.sh`, ready) needs 6 GB free on the disk, which it did not have at the end.
+
+Moved in run 4: 156 items (run 3: the same 156 but two, below).
+- Claim-level recoupment listings removed 124, $440,716.06 (Medicare KY 75 $347,554.69, Medicare IN 43 $87,299.12,
+  UnitedHealthcare 3 $3,515.18, Aetna 2 $1,815.86, UHC Integrated Services 1 $531.21), r2-1: their netted entries
+  withheld nothing (a carried balance FB recovered by WOs, a WO its own CS cancels, or the same remittance's reversal took
+  the claim). Probed from the raw rows in run 3: each removed listing's bill has another live item for the services (91)
+  or was paid again since (33); 2 listings shrink, $9,737.07 less (Medicare IN: a $510.61 face nets to $177.90 withheld;
+  $9,562.33 to the $157.97 twenty WOs took beyond the carried balance).
+- TAKEBACK vanished 8, $1,135.80 (Humana Medicare Advantage 7, UMR 1): charges the practice voided (EMA's void, or an 837
+  void after the payment).
+- TAKEBACK appeared 12, $792.11: second payers' shares taken back in full, Humana 5 $120.89 and Humana Medicare Advantage
+  1 $24.50 (r1-3: the share is no cover for its own takeback); Humana Medicare Advantage 4 $330.81 and UnitedHealthcare
+  Medicare Advantage 1 $255.95 where the payer's duplicate answer on or before the takeback restated the payment (r1-1, one
+  of them the hand trace's fix); Medicare KY 1 $59.96, a re-payment withheld by J1 on its own remittance.
+- Denials carrying a takeback, expired to work now 5, $554.92 (Humana Medicare Advantage 4, Humana 1): the payer paid the
+  service after the denial and took the payment back later; worked until the window to dispute the takeback closes (r1-1).
+- REJECTED_PRE_PAYER done to work now 3, $879.04 (answers-5, round 1); a duplicate denial done to expired 1, $130.23 (its
+  payment taken back by a WO no item carries); a Medicare KY denial the payer reversed, gone 1, $76.47 (its money is on
+  the J1 TAKEBACK above).
+- Run 3 against run 4: the hand trace's fix lists one more TAKEBACK ($23.04, work now) and keeps its duplicate denial done
+  with the takeback named (run 3 moved it to expired).
+A17 (W view, in scope, items and dollars; tip to branch, run 4):
+- Work now: correct 1,407 $237,123.48 to 1,409 $237,581.22; already done 1,007 $135,364.46 to 1,004 $134,303.84;
+  duplicate 20 $2,034.93 to 19 $1,091.82; wrong amount 540 $34,645.78 to 541 $35,067.08; already worked 27 and undecided
+  109 unchanged.
+- Closed: correct 2,579 to 2,575 in scope (10,445 to 10,319 in all: the removed listings); closed wrongly 1 and wrong
+  amount 126 unchanged.
+- Money left on the table (lot W, denied, in scope): 326 claims, 907 units, $47,185.27 to 323, 506, $46,355.03 (the
+  rejected claims' drug units, now listed). Taken-back units on no open item (lot W): in scope 1 ($41.77) on both sides
+  (a TAKEBACK closed as paid again on EMA's posting of a check no 835 carries: A17 does not read EMA-only payments); out of
+  scope 12 $1,574.59 to 7 $856.32.
+Ledger meta (REVERSALS_NOT_ON_FILE_META, run 4): recoupments that take back no payment on file, 18 claims $1,104.44 within
+the archive (as in round 1) and 41 claims $4,408.13 older (round 1: 34, $3,355.62): r2-7 counts 7 more older claims,
+$1,052.51.
+Hand trace (private: `$U/hand_trace_verdicts3.txt`, raw rows `$U/trace3.txt`, both mode 600): all 38 items run 3 moved, from
+the raw rows (835 lines and CAS, PLB entries naming the claim, 837 sends, EMA's lines), relative days only. 37 right (one
+with the amount not F1's, one overlapping a CO-16 denial item), 1 wrong: the split restatement, fixed at a97c3c0 and
+checked in run 4. Notes: A17 calls the second payers' shares taken back "already done" (its units count the share as paid
+or moved to the patient, whatever was taken back); 3 denials carrying a takeback show A17 "wrong amount" (their size is the
+fee table's rate, not what the payer paid and took back); 2 of them are in the check-first block settled_in_ema, which
+cites EMA's posting of the payment taken back (open question below).
+
+### Round 1
 Final run (2026-11-26 23:10 to 23:19 UTC) on a fresh private world copy (store 11-24 with EMA's reports, server cycle,
 today 2026-11-24). Tip = the integration branch at 993f440 (fix7d merged) with plans 5eb528e; branch = 8bf4493, which
 merged that same tip (624bf75). The integration branch moved after the measurement (fix7c and deadlines, merged into
@@ -232,6 +301,16 @@ into tests/ to run it; each fails on this branch for the reason given).
    Detector._after_other_payer read it). Real copy (reviewers): 820 paid supplement answers report status 1, 342 with OA-22/23.
 
 ## Open questions
+- Fix round residuals (none is a closure; each named with its item count on the real copy, run 4):
+  - states.settled_in_ema (a check-first block, F1-adjacent): it counts EMA's posting of a payment the payer took back as
+    "insurance paid", so 2 denials carrying a takeback say "find which payer paid" where the answer is "the payer took it
+    back" (the drawer shows the takeback). The fix would net `_ema_pay_taken`'s gone amounts there, as paid_proof does.
+  - A denial carrying a takeback keeps the fee table's size, not what the payer paid and took back (3 items, A17 wrong
+    amount, within 5% for 2 of them): detect's valuation, not F1's.
+  - A TAKEBACK closed as paid again on EMA's posting of a check no 835 carries (1 item, $41.77): A17 counts the unit still
+    taken back because it reads no EMA-only payment. The proof names the check; only the 835 of that check would settle it.
+  - G2211 and 99024 shares taken back are never listed (as on a denial: nothing to pursue); A17's lot shows 3 G2211 units
+    out of scope.
 - A claim-level REJECTED_PRE_PAYER item and a line-level denial of the same service can both be listed (real copy: a drug
   line J7345, repeatedly denied CO-16 and waiting on a resend, and the claim's latest send rejected; A17 marks the claim
   item "partly duplicate" but correct). One item per bill would be the fold's rule (not F1's).
