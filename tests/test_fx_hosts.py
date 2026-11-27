@@ -832,3 +832,89 @@ def test_the_regulation_reads_a_status_from_before_run_ids_once(sc_store):
     reg.pop("last_run_key", None)                   # as the release before left it
     sc.meta_set(c, sc.K_REGULATE, reg)
     assert sc.plan_next(c, dict(st, run_id="run-20261127T023113Z-bbbb"), mode="serverless", budget_s=240)["level"] == 1
+
+
+# --------------------------------------------------------------------------- F1's need: the copy carries ledger_taken
+# F1's fix round (fx-ledger-r2-4, plans/progress/fx-ledger_needs/need_serving_copy_ledger_taken.py): paid_proof counts
+# only what a recoupment left of a payment (detect._save_taken writes ledger_taken, states._r835 reads it), and the
+# drawer recomputes the live state on the connection it is given. The dashboard's copy did not carry the table, so on
+# Vercel the drawer's proof named the whole payment where the server names what is left of it.
+
+def _taken_world(tmp_path, kind):
+    """F1's case: C017's 99214 is denied (missing information, April 15); the corrected claim C024 is paid $117.60
+    (May 20); in August the payer withholds $30.00 naming C024 from a check that pays another patient, a recoupment under
+    $500 that took the payment only in part, so no item of its own carries it."""
+    from tests.review3.r3helpers import visit_denied_line, visit_paid
+    from tests.test_features import clean_visits
+    from tests.test_fx_ledger import BILL, OTHER, World
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_denied_line(f"{BILL}C017", carc="16")], "20260415")
+    w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*30.00~")
+    w.run("r1", today="2026-09-20")
+    return w, BILL
+
+
+def test_the_drawer_names_the_same_proof_on_the_server_and_on_the_dashboards_copy(tmp_path, kind):
+    """F1's need test, as written: the denial is done on what is left of C024's payment, $87.60, and the drawer says
+    the same on the store and on the dashboard's copy."""
+    from remitwatch import story
+    w, bill = _taken_world(tmp_path, kind)
+    (f,) = w.rows(f"patient_control_number = '{bill}C017' AND COALESCE(stale, 0) = 0")
+    copy = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(w.store.conn, copy)
+    served = Store(copy)
+    try:
+        got = {}
+        for where, conn in (("store", w.store.conn), ("dashboard's copy", served.conn)):
+            st = story.explain(conn, f["finding_id"], today="2026-09-20")["state"]
+            proof = st.get("proof") or {}
+            got[where] = (st["work_state"], proof.get("cents"), proof.get("text"))
+        assert got["store"][0] == "done" and got["store"][1] == 8760, got["store"]
+        assert got["dashboard's copy"] == got["store"], f"the drawer names another proof on the dashboard's copy: {got}"
+    finally:
+        served.close()
+        w.store.close()
+
+
+def test_the_dashboards_copy_carries_the_takebacks_of_its_own_lines_only_and_as_the_store_defines_them(tmp_path, kind):
+    """The copy holds ledger_taken's rows for the lines it holds, every column as the store has it (the 'listed' mark
+    included), and none for a line it does not hold. A store with no ledger_taken (one no detection of this release
+    has run on yet) still makes its copy, without the table, as before."""
+    w, bill = _taken_world(tmp_path, kind)
+    c = w.store.conn
+    mine = [tuple(r) for r in c.execute("SELECT line_key, taken_cents, taken_on, standing_cents, listed FROM ledger_taken")]
+    assert mine and all(r[1] > 0 for r in mine), mine
+    # a takeback of a clean visit's payment (a line with no item, so not in the copy): invented, written beside F1's rows
+    (other,) = c.execute(f"""SELECT l.line_key FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
+                             WHERE cl.patient_control_number NOT LIKE '{bill}%' AND l.line_key NOT IN
+                             (SELECT line_key FROM ledger_taken) ORDER BY l.line_key LIMIT 1""").fetchone()
+    c.execute("INSERT INTO ledger_taken (line_key, taken_cents, taken_on, standing_cents, listed) VALUES (?, 1000, '2026-08-03', 0, 1)",
+              (other,))
+    c.commit()
+    copy = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(c, copy)
+    s = sqlite3.connect(copy)
+    try:
+        in_copy = {r[0] for r in s.execute("SELECT line_key FROM lines")}
+        assert other not in in_copy
+        got = s.execute("SELECT line_key, taken_cents, taken_on, standing_cents, listed FROM ledger_taken ORDER BY line_key").fetchall()
+        assert got == sorted(r for r in mine if r[0] in in_copy) and got, (got, mine)
+        assert [r[1] for r in s.execute("PRAGMA table_info(ledger_taken)")] == \
+               [tuple(r)[1] for r in c.execute("PRAGMA table_info(ledger_taken)")]
+        assert any(r[5] for r in s.execute("PRAGMA table_info(ledger_taken)")), "the copy keeps the store's key"
+    finally:
+        s.close()
+    c.execute("DROP TABLE ledger_taken")
+    c.commit()
+    again = str(tmp_path / "serving2.sqlite")
+    cloud.build_serving(c, again)
+    s = sqlite3.connect(again)
+    try:
+        assert not s.execute("SELECT 1 FROM sqlite_master WHERE name='ledger_taken'").fetchone()
+        assert s.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == c.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
+    finally:
+        s.close()
+        w.store.close()

@@ -55,10 +55,11 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "10"                # bump when SERVING_TABLES changes: a copy made by another build is made again (7: the
+SERVING_BUILD = "11"                # bump when SERVING_TABLES changes: a copy made by another build is made again (7: the
                                     # release's heirs, or push 2's EMA reports; 8: what the A/R's billing notes say, and the
                                     # 835 claims of whole bills; 9: both together; 10: the runs' logs, the decision log, the
-                                    # self-check's lists and the archive's index)
+                                    # self-check's lists and the archive's index; 11: what the payers' recoupments took from
+                                    # each payment, ledger_taken)
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 PRESS = "press.json"                # the owner's decision 1: when someone last pressed "Run the analysis now" (and who, as a
                                     # fingerprint), so a second press before the run has taken its lock starts nothing
@@ -1487,6 +1488,10 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
                      "payment_amount_cents,payment_date,trace_number,production_date,payee_npi,superseded", None),
     ("claims", None, f"{DETAIL} OR {BILLS} OR patient_control_number IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
     ("lines", None, f"{DETAIL} OR {BILLS}"), ("adjustments", None, f"{DETAIL} OR {BILLS}"), ("remarks", None, f"{DETAIL} OR {BILLS}"),
+    # what the payers' recoupments (PLB WO, FB, J1 naming a claim, on any later check) took from each payment of the copy's
+    # own lines (detect._save_taken): the drawer's proof on the copy counts what a takeback left of a payment, as the
+    # server's does (fx-ledger-r2-4). s is the copy build_serving attaches; lines is copied before this table.
+    ("ledger_taken", None, "line_key IN (SELECT line_key FROM s.lines)"),
     ("ema_rows", None, "claim_id IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
     ("line_links", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
     ("line_handling", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
@@ -1555,6 +1560,11 @@ def serving_tables(conn: sqlite3.Connection) -> list[tuple[str, str | None, str 
     return out + list(ema_reports.serving_tables(conn)) + list(archive.SERVING_TABLES)
 
 
+# Tables the detection run makes for itself, with no schema function the empty copy could call (detect._save_taken's
+# ledger_taken). The copy makes each as the store holds it, so a column added to one later reaches the copy too.
+RUN_MADE = ("ledger_taken",)
+
+
 def build_serving(conn: sqlite3.Connection, path: str) -> int:
     """Copy what the dashboard needs out of the full store into a small database file. Returns its size in bytes."""
     empty_serving(path)
@@ -1567,6 +1577,13 @@ def build_serving(conn: sqlite3.Connection, path: str) -> int:
                 continue
             src = [r[1] for r in conn.execute(f"PRAGMA main.table_info({table})")]
             dst = {r[1] for r in conn.execute(f"PRAGMA s.table_info({table})")}
+            if not dst and table in RUN_MADE:
+                # SQLite keeps a table's definition as "CREATE TABLE <name> ..." (keywords upper case, no schema name and
+                # no IF NOT EXISTS), so the same definition makes it in the copy
+                made = conn.execute("SELECT sql FROM main.sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                if made and str(made[0] or "").startswith("CREATE TABLE "):
+                    conn.execute("CREATE TABLE s." + made[0][len("CREATE TABLE "):])
+                    dst = {r[1] for r in conn.execute(f"PRAGMA s.table_info({table})")}
             use = [c for c in (cols.split(",") if cols else src) if c in src and c in dst]
             if not use:
                 continue
