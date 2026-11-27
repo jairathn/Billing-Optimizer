@@ -23,50 +23,20 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-27 04:50 UTC, session on `claude/ecstatic-fermi-orfcgo`)
+### Running now (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
 
-Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
-branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
-a unit from its branch and progress file (the brief says what done means), or start it again from its brief.
+The owner asked (2026-11-27) to stop fanning out agents, finish within the usage limit, and release: merge, fix, test,
+push to main, deploy, and prove the logic by hand on August 2026 claims. No unit workflows run any more.
 
-| Unit | Branch | Brief | State |
-|---|---|---|---|
-| fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | **merged** at 993f440 (22:15 UTC): build, two reviews (10 findings), fix round all done; its code equals the merge's; python3 green, under GMT-14 and GMT+12 too, 3.11.1 only the serialize class |
-| fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | **merged** at ecaef14 (23:55 UTC): build, two reviews (18 findings, all fixed), fix round; its code equals the merge's; full suite on its code merged with fix7d: python3 2,993 passed 0 failed, 3.11.1 only the serialize class. Left: UHC Kentucky PA/NP since late October (owner), a UMR NP review sized at the plan's full rate (about $217 if NPs are paid like PAs), the dependent's own patient loop (F3a), pattern items' reversed lines and Results credit (F2) |
-| hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | **merged** at 98c03ca, then dd04209 (CLAUDE.md: Vercel analyses only on a press, reads the A/R only, tidies after a chain). Full python3 suite on dd04209: one failure, ops.js cutting a run's time to UTC's day, fixed at 99529ab. Two of its tests failed now and then (about one whole-file run in three, on the hook's own commit too): two runs within one second where the code compares times to the second. Fixed at 43a8bac (the Vercel Accept route took a later run of the same second as the page's own) and 5096d62 (the test's timing); 947203b gives every test its own scratch folder. A third, rarer one is F6's |
-| the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | **merged** at d5e445b (three textual conflicts with the hook, resolved as unions). The merge broke 4 decision-4 tests: the hook's vanished self-check kept items the owner had taken off by accepting a period pattern. Fixed at 38ba02f (the check reads the owner's per-period accepts as fold_payer_policy and C5 do, with the billed code and paid amount in its snapshot; tests/test_merge_vanished_policy.py) |
-| review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | **done**: 37 findings, every verdict in; they feed the fix wave |
-| a17, the independent every-claim auditor | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | **merged** at 2874e3d (plans only: the auditor, its sourced window table, the report). After its fix round, Work now (services since 2026-01-01): correct 1,357 ($219,685), already done 165, already worked 27, duplicate 5, wrong amount 190 ($16,814), undecided 37; money left on the table 762 services ($88,179), plus 139 ($27,678) past windows the table could not verify. Score again with the fix wave merged before the final trace |
-| deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | **merged** at 63fc3df (23:40 UTC): build, two reviews (15 findings, all fixed), fix round; merged cleanly on top of fix7c, the shared modules' tests pass on the merge (469); full python3 suite on 63fc3df: 3,068 passed, 0 failed (29 skipped, 1 xfailed). Its leftovers are fix-wave F8 (codes.py) and parts of F4 and F6 |
-| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | **merged** at 47b1ba0 (code equal to its tip 5515357): 14 review findings, 11 fixed, 3 routed (F2, F5, F6); its full suite: python3 one load-sensitive hook test (F6's), 3.11.1 only the serialize class. Real copy: 124 claim-level recoupment listings ($440,716) left the list because their netted entries withheld nothing (traced by the fixer; checked again in the batch-1 merge review) |
-| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | **merged** at 09def4e (fix round tip 8aa94df, code 2b66abf): all 14 findings fixed; full python3 suite on 2b66abf 3,475 passed, 0 failed. Its patient-keyed rules stay dormant until the 837 files are read again (F6); the integrator is fetching the 837 files to test them on real data |
-| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | **merged** at 8cb51f6 (fix round tip 39fbd06, code c41f286): all 12 findings fixed; 61 moved items traced (4 wasted checks, $311, left for F3c). Its needs: F3c (the yield condition at the merge, the waiting view, `_who`), F4 (content bridge), F6 (two vanished-check routes) |
-| fix wave F2 recoveries and closures | `wip/fx-recover` | the same brief, section F2 (with F1's routed needs) | run wf_fa21bf23-007, started 01:54 UTC: building (F1 merged at 47b1ba0, its routed needs can start) |
-| fix wave F4 the EMA side and the bare $0 rule | `wip/fx-ema` | the same brief, section F4 (with F8's and F3b's routed needs) | run wf_ebdf14ed-6fe: built (68713a8), reviewed (13 findings: rule 4.2's first call reads another code's share; copay closures sized at half; second payer already answered), fix round running |
-| fix wave F5 people and decision 2's follow-ups | `wip/fx-people` | the same brief, section F5 (F3a's and F1's routed needs) | run wf_ab3cfbba-d2b, started 01:54 UTC: building |
-| fix wave F6 hosts | `wip/fx-hosts` | the same brief, section F6 (F3a's, F1's and F3b's routed needs) | run wf_53e32423-10f, started 01:54 UTC: building; F3a's host needs prepared on the local branch `stage/fx-hosts-f3a` (adc1428, not on origin), to land once the tip carries the fx-837 merge |
-| fix wave F8 the deadlines follow-ups | `wip/fx-windows` | the same brief, section F8 | run wf_3690391d-bc8: built (152b191; two needs routed to F4), reviews running |
+Done on the integration worktree (`$S/tk/wt/integ`, not yet pushed when this was written):
+- Batch 2 merged onto 47286fd: fx-hosts, fx-windows, fx-recover (one conflict in detect.py, both sides kept), fx-ema,
+  fx-people, fx-passes (fe98814). Every fix-wave test file passes on the merge (881 tests).
+- 5706789: the 18 bugs the batch-1 merge review found (wf_ca69ba12-665), each fixed against its ported failing test
+  (`tests/test_m1_*.py`, invented data, both store kinds). The commit message lists each one.
 
-Merged: fix7d, fix7c, deadlines, hook, decisions, a17's tool, then batch 1 (F1 at 47b1ba0, F3a and F3b at 8cb51f6).
-Next: F3c (the two passes' needs on each other, launched on the batch-1 merge), a review of what batch 1's fix rounds
-changed after their reviews (with a real-data run of the merge), the 837 files fetched into the private folder so F3a's
-patient rules can be measured on real data, then batch 2 (F2, F4, F5, F6, F8) as each ends, then F7. Each merge:
-into the integration commit, the full suite from a frozen worktree of the merge commit (`$S/tk/tools/integ_suite.sh`),
-push to both branch names.
-
-The review (`plans/review_2026-11-26.md`, 37 findings in five areas, every verdict in) feeds the fix wave after the
-merges. Its brief is `plans/briefs/2026-11-26_fixwave.md` (written 21:20 UTC): seven fixers with a table of the functions
-each owns, so they run side by side without editing the same code. F1 ledger and takebacks (money-1, 2, 5, 6, 8, 9,
-hosts-4, answers-5's paid_proof part, the voids, PLB/J1 in paid_proof, unpaired reversals); F2 recoveries and closures
-(money-3, 4, 7, 10, 11, the rest of privacy-3: proof rows that reconcile, privacy-4, J3490, $0 lines, the status-1
-supplement, the second payer's share above Medicaid's rate); F3a the 837 pass and sizing (answers-1, 3, 4, 5, 6 in the
-837 pass, units, SBR01, the dependent's id, the waiting and send-week views, the 837 rows in every story); F3b the
-exports, the twins and G8 (answers-1, 2, 3, 5, 7 on the exports' side and fix7e-c's twins and G8 parts); F4 the EMA side
-and the bare $0 rule everywhere (fix7e-c, C5, C6's copay, the Medicaid catch-all, "already worked" routed to call); F5
-people (people-1 to 6, the Paid amount box first) and decision 2's follow-ups (Medicaid members never billed, CO-only
-second payer to Done, the service year shown); F6 hosts (hosts-1, 2, 3, 5 and the A/R-only image check). F7 runs after
-they merge: privacy-5, every except block logs, with a repository test. Then A17 again, the final every-claim trace and
-the release gates (section 0 below, "Then, in order").
+Next, in order: the four-environment suite on 5706789 (`$S/tk/runs/final1_*`), detection on a private world copy with
+every 837 re-read (`$S/tk/final_world`, `cycle.log`), A17 on it, the August 2026 hand test (`$S/tk/aug/aug_check.py`,
+findings in `plans/final_trace_2026-11-27.md`), then push both branch names, push main, check /api/health on both sites.
 
 ### Integrator's notes on what the units found (2026-11-26 20:45 UTC)
 - **privacy-3 is a merge blocker for the hook.** Its verifier refuted it only because nothing runs the self-check at
