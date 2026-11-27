@@ -42,8 +42,23 @@ answer" now has none of an answer's figures, not only ins_answer_rows = 0).
   for C6). Test to add with it: an 835 Medicaid KY denial, EMA showing a payment posted under a company's Medicaid
   Community Plan name before the denial with the line settled: paid_before_other_payer (today: neither rule fires).
 
-## Measured
-(see the bottom section, written when the measurement ends)
+## Measured (private world copy of 2026-11-24, one server cycle each; tip 59f6822 against the branch b3c06a0; no fixer's
+merge had reached the tip, so the measurement includes none; world copies deleted)
+Items that moved: 8 (every one hand-traced, `$S/tk/units/fx-ema/hand_trace_verdicts.txt`: 7 right, 1 unclear, 0 wrong).
+- appeared, SECONDARY_NOT_BILLED, first payer Medicare KY (CGS J15): 3 items, $48.34 (second payers: Medicare Supplement
+  carriers 2, Humana Medicare Advantage 1): each second payer's only row on the line was a bare $0 row.
+- to done by C6 (a later payment on a check plus the patient's share on the line reaching what the service brings):
+  Anthem / BCBS Medicare Advantage 1 ($55.50), Humana Medicare Advantage 1 ($79.14), Anthem / BCBS 1 ($75.16), United
+  Healthcare Shared Services EMA_DENIED 1 ($660.00, unclear: settled at UHC's allowed, an OA-274 $19.58 write-off on no
+  item), UnitedHealthcare expired -> done 1 ($93.87). Work now loses 4 items ($869.80), expired loses 1 ($93.87).
+- The first branch run (bffe448) also closed 2 items wrongly (a posting that moved a payment between lines without a
+  check; a supplement's item valued at the balance the first payer left): fixed at b3c06a0 with tests, measured again.
+A17 (rules A17), tip -> branch. Work-now view: already done 1,278 units ($424,964.77 -> $424,803.31), correct (closed)
+10,445 -> 10,444, undecided (closed) 170 -> 171, undecided (open) 984 -> 983; closed wrongly 5 ($147.79) unchanged; already
+worked 37, duplicate 66 unchanged. Status view: already done 2,821 -> 2,820, wrong amount (closed) 485 -> 489 (the C6
+closures record the payer's own payment as recovered), undecided (closed) 3 -> 4.
+Not measured on real data (no item moves): the blind dollars, the self-audit's gaps, the answer times, the policy table's
+per-service shares and counts, the C7/C9 inside-the-window cents; their tests are the invented cases in tests/test_fx_ema.py.
 
 ## Left (not done in this round, with what is known)
 - B (bare $0 row followed by the patient's money): on the tip's run 6 never-answered items carry the note (Tricare 2,
@@ -60,6 +75,11 @@ answer" now has none of an answer's figures, not only ins_answer_rows = 0).
   6, Cigna 3, others. Note kinds: call or portal check 20, resubmitted 15, appeal 10, appeal and call 5, call and
   reprocessing 4, others 2. The hand decision from the raw A/R notes and 835s has not been made; next: trace each with
   `$S/tk/units/fx-ema/explore2.py`'s item list, then set the rule in `states._follow` / `_note_or_follow`.
+
+## Suites
+- tests/test_fx_ema.py 25 cases; the touched files' suites (test_ema_checks, test_ema_wiring, test_selfcheck,
+  test_ema_ledger, test_answer_needs_proof, test_ema_reports): 478 passed after the two fixture updates (5 failed before
+  them, all from the bare $0 rule and the audit's own dates, both resolved). Full suites: see the final report.
 
 ## Next command
 Measure: `KEEP_WORLD=1 bash $S/tk/units/fx-ema/measure.sh $S/tk/units/fx-ema/brtree br1` (tip: `... tiptree tip0`, done),
