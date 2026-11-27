@@ -5029,7 +5029,8 @@ class Detector:
         groups: dict[tuple, list] = defaultdict(list)
         for l in self.lines:
             key = (l["patient_control_number"], l.get("payer_id") or l.get("payer_name"), l.get("payment_date") or l.get("txn_payment_date"),
-                   l.get("claim_status_code"), l.get("procedure_code"), l.get("service_date"), l["modifiers"], l.get("charge_cents"))
+                   l.get("claim_status_code"), l.get("procedure_code"), l.get("service_date"), l["modifiers"], l.get("charge_cents"),
+                   (l.get("contract_class") or "").strip() or None)        # under the same plan: an answer under another is no copy
             if (l.get("paid_cents") or 0) > 0 and l.get("claim_status_code") in ("1", "19"):
                 groups[key + (l.get("paid_cents"), l.get("allowed_cents"), l.get("paid_units"))].append(l)
             elif not (l.get("paid_cents") or 0) and l.get("claim_status_code") != "22" and l.get("procedure_code"):
