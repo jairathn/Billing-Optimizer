@@ -302,7 +302,7 @@ def test_a_managed_care_plans_name_that_names_the_state_is_not_the_state_program
                  "Sample Healthy Plans  Samplepath Indiana Medicaid", "Samplewise Indiana Medicaid Sample Wise"):
         grp, kind = codes.payer_group_kind(name, None)
         assert grp != "Medicaid IN" and kind == "medicaid", (name, grp)
-    assert codes.payer_group_kind("Sample WellCare Medcaid of Kentucky", None) == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
+    assert codes.payer_group_kind("WellCare Sample Medcaid of Kentucky", None) == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
 
 
 def test_indiana_medicaid_managed_care_plans_file_within_the_programs_90_days():
@@ -456,7 +456,7 @@ def test_wellcare_kentucky_medicaid_as_second_payer_has_six_months_from_the_firs
     June 20, 2027 (six months from that payment). Paid on February 15, 2026: due January 10, 2027 (12 months from the
     service). Both are the plan's own limit: no later last day. It was the 12 months only, with the first payer's
     remittance plus 12 months (December 20, 2027) as a guessed last day."""
-    r = filing_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="Sample WellCare Medcaid of Kentucky")
+    r = filing_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="WellCare Sample Medcaid of Kentucky")
     safe, last, how = codes.second_claim_window(r, "2026-01-10", "2026-12-20", first_payer="Sample Health Plan")
     assert (safe, last) == ("2027-06-20", None), (safe, last, how)
     assert "6 months from Sample Health Plan's payment (2026-12-20)" in how, how
