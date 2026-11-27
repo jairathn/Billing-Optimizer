@@ -72,7 +72,10 @@ def visits(start: int, n: int, dos: str, paid: str = "117.60") -> list[str]:
 
 
 def denial(i: int, dos: str) -> str:
-    return claim(i, svc("11900", "93.75", "0.00", None, "CAS*CO*50*93.75~", dos=dos), dos=dos)
+    # a non-covered denial (CO-96), which Anthem's plans dispute within two years of the remittance: this year's stays work
+    # to do. (A CO-50 denial is a clinical appeal, 180 days from the notice, so April's would have expired by November;
+    # fx-windows)
+    return claim(i, svc("11900", "93.75", "0.00", None, "CAS*CO*96*93.75~", dos=dos), dos=dos)
 
 
 def world(tmp_path, kind: str) -> Store:

@@ -819,7 +819,9 @@ def test_a_va_claim_named_after_its_administrator_runs_on_the_vas_limits(tmp_pat
     for claim_id in ("CB0000V11C017", "CB0000V12C017"):
         va = found[claim_id]
         assert (va["payer_group"], va["payer_kind"]) == ("VA Community Care", "va"), claim_id
-        assert va["appeal_deadline"] == "2026-12-28" and "VA Community Care Network: 180 days" in va["deadline_basis"]
+        # the statute's words since fx-windows (38 U.S.C. 1703D(b), confirmed)
+        assert va["appeal_deadline"] == "2026-12-28" and "VA Community Care Network (38 U.S.C. 1703D(b))" in va["deadline_basis"]
+        assert "not later than 180 days after the date" in va["deadline_basis"]
         assert "Rejected before reaching VA Community Care" in va["title"]
     commercial = found["CB0000U11C017"]
     assert commercial["payer_group"] == "Optum (UHC)" and commercial["appeal_deadline"] == "2026-09-29"
