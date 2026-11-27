@@ -313,7 +313,8 @@ async function deskTab(v, key){
 }
 // The never-answered page's two views (/api/never-answered): the claims sent that are not due yet, soonest due first, with
 // their due days (on no list until then: blindness is loud), and the claims never answered by the week they were sent,
-// against what the 837s show sent that week, so a batch that never reached the payers stands out
+// newest week first, against what the 837s show sent that week, so a batch that never reached the payers stands out (the
+// note names those weeks, the table marks them). Plain tables in a scroll box: they keep their headings at phone width
 function naPanelHtml(d){
   if(!d) return '';
   const w = d.waiting || {}, weeks = d.weeks || [], stand = new Set(d.stand_out || []), out = [];
@@ -321,18 +322,19 @@ function naPanelHtml(d){
     const listed = Number(w.listed || 0), later = Number(w.n) - listed;
     out.push(`<div class="panel" id="naWaiting"><h2>Sent, waiting for the payer's answer</h2>
       <div class="note">${pl(w.n, 'claim')} sent (${money2(w.billed_cents)} billed) ${w.n == 1 ? 'is' : 'are'} not due yet${w.first_due ? `, due from ${longDate(w.first_due)}` : ''}${w.last_due && w.last_due !== w.first_due ? ` to ${longDate(w.last_due)}` : ''}: on no list until the due day, when a claim still unanswered is listed here to chase.</div>
-      <div class="scroll"><table class="wl"><thead><tr><th>Claim</th><th>Payer</th><th>Sent</th><th>Due</th><th class="num">Billed</th></tr></thead>
+      <div class="scroll na-list"><table><thead><tr><th>Claim</th><th>Payer</th><th>Sent</th><th>Due</th><th class="num">Billed</th></tr></thead>
       <tbody>${(w.claims || []).map(r => `<tr><td>${esc(r.claim)}</td><td>${esc(r.payer_group)}</td><td>${r.sent ? longDate(r.sent) : ''}</td><td>${r.due ? longDate(r.due) : ''}</td><td class="num">${money2(r.billed_cents)}</td></tr>`).join('')}</tbody></table></div>
       ${later > 0 ? `<div class="small muted">The first ${num(listed)} by due day; ${num(later)} more come due later.</div>` : ''}</div>`);
   }
   if(weeks.length){
     const usual = d.usual_share != null ? `In a usual week ${Math.round(d.usual_share * 100)}% of the claims sent get no answer. ` : '';
-    const lead = stand.size ? `${pl(stand.size, 'week')} ${stand.size === 1 ? 'stands' : 'stand'} out: a batch that never reached the payers looks like this. Open the clearinghouse's acceptance report for ${stand.size === 1 ? 'that week' : 'those weeks'} and send again the claims the payers never received.`
+    const standDays = [...stand].sort().map(longDate).join(', ');
+    const lead = stand.size ? `${pl(stand.size, 'week')} ${stand.size === 1 ? 'stands' : 'stand'} out (the week${stand.size === 1 ? '' : 's'} of ${standDays}): a batch that never reached the payers looks like this. Open the clearinghouse's acceptance report for ${stand.size === 1 ? 'that week' : 'those weeks'} and send again the claims the payers never received.`
       : 'No week stands out.';
     out.push(`<div class="panel" id="naWeeks"><h2>Never answered, by the week they were sent</h2>
       <div class="note">${usual}${lead}</div>
-      <div class="scroll"><table class="wl"><thead><tr><th>Week of</th><th class="num">Sent</th><th class="num">Never answered</th><th class="num">Share</th><th>Payers</th></tr></thead>
-      <tbody>${weeks.map(x => `<tr${stand.has(x.week) ? ' class="na-stand"' : ''}><td>${longDate(x.week)}${stand.has(x.week) ? ' <span class="chip sev-high">stands out</span>' : ''}</td><td class="num">${x.sent == null ? '' : num(x.sent)}</td><td class="num">${num(x.unanswered)} · ${money2(x.cents)}</td><td class="num">${x.share == null ? '' : Math.round(x.share * 100) + '%'}</td><td>${(x.payers || []).map(p => `${esc(p[0])} ${num(p[1])}`).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>`);
+      <div class="scroll na-list"><table><thead><tr><th>Week of</th><th class="num">Sent</th><th class="num">Never answered</th><th class="num">Share</th><th>Payers</th></tr></thead>
+      <tbody>${weeks.slice().reverse().map(x => `<tr${stand.has(x.week) ? ' class="na-stand"' : ''}><td>${longDate(x.week)}${stand.has(x.week) ? ' <span class="chip sev-high">stands out</span>' : ''}</td><td class="num">${x.sent == null ? '' : num(x.sent)}</td><td class="num">${num(x.unanswered)} · ${money2(x.cents)}</td><td class="num">${x.share == null ? '' : Math.round(x.share * 100) + '%'}</td><td>${(x.payers || []).map(p => `${esc(p[0])} ${num(p[1])}`).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>`);
   }
   return out.join('');
 }

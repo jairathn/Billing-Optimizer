@@ -1127,8 +1127,11 @@ def test_the_never_answered_page_lists_the_waiting_claims_and_marks_the_week_tha
     assert full.index("CB0000W01C017") < full.index("CB0000W02C017") < full.index("CB0000W03C017"), "soonest due first"
     assert "<td>Dec 5, 2026</td>" in full and "$100.00" in full
     assert "Never answered, by the week they were sent" in full and full.count("stands out</span>") == 1, full
-    assert "In a usual week 10% of the claims sent get no answer. 1 week stands out" in full
+    assert "In a usual week 10% of the claims sent get no answer. 1 week stands out (the week of Oct 5, 2026)" in full, full
     assert "Oct 5, 2026 <span class=\"chip sev-high\">stands out</span>" in full and "83%" in full, full
+    assert full.index("Oct 19, 2026") < full.index("Oct 12, 2026") < full.index("Oct 5, 2026 <span"), "newest send week first"
+    # plain tables: the worklist's phone layout (table.wl) would hide their headings at phone width
+    assert 'class="wl"' not in full and full.count('<div class="scroll na-list"><table>') == 2, full
     assert out["none"] == "" and out["empty"] == "", out
     assert "No week stands out." in out["more"] and "The first 3 by due day; 2 more come due later." in out["more"], out["more"]
     desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()
