@@ -798,3 +798,17 @@ def test_routing_the_va_network_by_its_payer_id_never_shortens_an_unconfirmed_la
     last_id = legal_deadline(start, by_id) or window_end(start, by_id)
     assert last_id >= last_name == "2027-03-01", (last_id, last_name)
     assert appeal_rule("VA Community Care", "va") == by_id
+
+
+def test_a_window_kept_open_to_the_dispute_is_never_counted_from_an_earlier_denial():
+    """states.first_denial counts a window whose label says 'original' or 'initial' from the service's first denial with the
+    same reason. Anthem's clinical appeal of its own member does run from the initial decision; the rows that keep the
+    Claim Payment Dispute's two years as their last day (a BlueCard member, a home plan not known, a denial that may be a
+    clinical decision or a coding edit) must not, or a denial repeated on a later remittance would lose its last day early."""
+    import re
+    own = appeal_rule("Anthem / BCBS", "commercial", "KENTUCKY SAMPLE PPO", carc="50")
+    assert re.search(r"\b(original|initial)\b", own["label"], re.I), own["label"]
+    for plan, carc in (("SAMPLE PPO", "50"), (None, "55"), ("ITS HOST PPO SAMPLE", "56"), ("KENTUCKY SAMPLE PPO", "151"),
+                       ("SAMPLE PPO", "167"), ("FEDERAL EMPLOYEE PROGRAM", "152")):
+        r = appeal_rule("Anthem / BCBS", "commercial", plan, carc=carc)
+        assert not re.search(r"\b(original|initial)\b", r["label"], re.I), (plan, carc, r["label"])

@@ -564,9 +564,12 @@ ANTHEM_BLUECARD_CLINICAL = (
 ANTHEM_MAYBE_CLINICAL = (
     "Anthem commercial, a denial a medical policy's clinical criteria or a coding edit can give (the level, frequency or length of "
     "service; a diagnosis or a coverage guideline; the records; the place of service): the remittance does not say which made it. A "
-    "clinical decision of Anthem's own member takes a clinical appeal, 'one hundred eighty (180) calendar days ... from the date they "
-    "receive notice of Anthem's initial decision', the date shown here, counted from the remittance; a coding edit, a payment issue or "
-    "a BlueCard member's denial goes in the Claim Payment Dispute, two years from the EOP, the last day used")
+    "clinical decision of Anthem's own member takes a clinical appeal within 180 calendar days of the notice, the date shown here, "
+    "counted from this remittance; a coding edit, a payment issue or a BlueCard member's denial goes in the Claim Payment Dispute, two "
+    "years from the EOP, the last day used")
+# (No 'initial' or 'original' in this label or the others that keep the dispute's two years: states.first_denial counts a
+# window whose label says so from the service's first denial with the same reason, which would move the dispute's last day
+# earlier for a denial repeated on a later remittance.)
 # The words of the payer's own process for the next step and the appeal letter (story._appeal_channel and
 # appeals._process read 'channel' and 'process' where a rule has them): a clinical appeal is not a Claim Payment Dispute
 # (fx-windows review r2-3)
