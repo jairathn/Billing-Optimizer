@@ -7095,6 +7095,14 @@ class Detector:
             hints.append(ec.bare_zero_note(cd["ema_bare_zero"]))
         if unsent:
             hints.append("EMA shows it waiting in its print batch, with no date it was sent: print and mail it, or send it electronically")
+        if expected is None:
+            # no line could be priced (the payer has paid too few lines on file to measure, for these codes or at all). The
+            # claim is listed all the same: its answer decides what is owed and whether the patient may be billed (a code a
+            # plan never pays stays pursued, the owner's decision 4); the item says its size is not known, never that
+            # nothing is owed (observed by the fix wave's F8: a G2211 claim to a Medicaid plan with few paid lines)
+            hints.append(f"Its size is not known: {grp} has paid too few lines on file to price {label}. It is listed all the same: "
+                         "the payer's answer (a payment, or a denial with its reason) decides what is owed, and whether the patient "
+                         "may be billed")
         if cd.get("added_after_answer"):
             hints.append(f"This bill was answered on {cd['bill_answered']}; it went out again on {sent} with "
                          f"{'this service' if len(codes) == 1 else 'these services'} ({label}), which no remittance of the bill has "

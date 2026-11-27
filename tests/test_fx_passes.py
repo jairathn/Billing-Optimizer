@@ -364,3 +364,22 @@ def test_a_send_to_a_medicaid_plan_sharing_a_payer_id_is_that_medicaid_plans(tmp
     assert found["CB0000P02C017"]["payer_group"] == "Medicaid IN", found["CB0000P02C017"]["payer_group"]
     assert found["CB0000P03C017"]["payer_group"] == "Ambetter (Centene)", found["CB0000P03C017"]["payer_group"]
     s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_no_line_of_which_can_be_priced_says_its_size_is_not_known(tmp_path, kind):
+    """(Observed by F8 on the 11-24 copy: a G2211 claim to a Medicaid plan, listed at '$0') Claim CB0000G01 bills a G2211 at
+    $30 to SAMPLE COMMUNITY PLAN, sent September 15; no payer answered it. The plan's remittances reach November 10, but it
+    has paid nothing on file (three answers, each a denial), so nothing prices the claim. It is listed all the same (its
+    answer decides what is owed and whether the patient may be billed; decision 4 keeps a never-paid code pursued), and the
+    item says its size is not known rather than showing it owes nothing."""
+    s = _store(tmp_path, kind)
+    plan = ("SAMPLE COMMUNITY PLAN", "TST98")
+    send(s, tmp_path, [clm837("CB0000G01C017", [("G2211", "30.00", "20260914")], payer=plan)], "20260915")
+    _remits(s, tmp_path, [answer(f"CB0000G1{n}C017", paid="0.00") for n in range(3)], "20261110",
+            payer="SAMPLE COMMUNITY PLAN", payer_id="TST98")
+    found = _chased(s, "t1")
+    f = found["CB0000G01C017"]
+    assert f["signal"] == "NO_ANSWER" and f["shortfall_cents"] is None, (f["signal"], f["shortfall_cents"])
+    assert "Its size is not known" in (f["hint"] or "") and "G2211" in f["hint"], f["hint"]
+    s.close()
