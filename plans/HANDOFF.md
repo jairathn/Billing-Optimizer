@@ -34,9 +34,14 @@ Done on the integration worktree (`$S/tk/wt/integ`, not yet pushed when this was
 - 5706789: the 18 bugs the batch-1 merge review found (wf_ca69ba12-665), each fixed against its ported failing test
   (`tests/test_m1_*.py`, invented data, both store kinds). The commit message lists each one.
 
-Next, in order: the four-environment suite on 5706789 (`$S/tk/runs/final1_*`), detection on a private world copy with
-every 837 re-read (`$S/tk/final_world`, `cycle.log`), A17 on it, the August 2026 hand test (`$S/tk/aug/aug_check.py`,
-findings in `plans/final_trace_2026-11-27.md`), then push both branch names, push main, check /api/health on both sites.
+- c10f9cf and 330f4b5: two bugs the real-data run and the August 2026 hand test found (a negative line inside a processed
+  answer now takes back that service's payment; the content bridge chooses a claim's EMA claim by its patient when several
+  share its content). The hand test and what it shows: `plans/final_trace_2026-11-27.md`.
+
+Release state: python3 suite on 330f4b5 green (4,306 passed); the other three environments ran from
+`$S/tk/tools/integ_suite.sh 330f4b5 final3 all` (`$S/tk/runs/final3_*`); both node checks pass. Then push both branch
+names and main, and check /api/health on both sites (both ran f601b6c before). After the deploy the owner accepts the
+vanished change on the Data tab (the trace file says why and what to look at first).
 
 ### Integrator's notes on what the units found (2026-11-26 20:45 UTC)
 - **privacy-3 is a merge blocker for the hook.** Its verifier refuted it only because nothing runs the self-check at
