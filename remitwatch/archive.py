@@ -248,19 +248,10 @@ def settings(env: dict | None = None, today: Any = None) -> dict:
 
 
 def peak_mb() -> int | None:
-    """The most memory this process has held so far, in MB (the high-water mark of the resident set)."""
-    try:
-        with open("/proc/self/status") as fh:
-            for line in fh:
-                if line.startswith("VmHWM:"):
-                    return int(line.split()[1]) // 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    try:
-        import resource
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
-    except Exception:       # noqa: BLE001  (no measure on this platform: the run records none)
-        return None
+    """The most memory this run has held so far, in MB (the high-water mark of the resident set since the run's start:
+    remitwatch.runtime.peak_mb)."""
+    from .runtime import peak_mb as run_peak
+    return run_peak()
 
 
 # -------------------------------------------------------------------------------------------------------- dates
@@ -2746,10 +2737,20 @@ def measure(conn: sqlite3.Connection, *, peak: int | None = None, mode: str | No
     tables, exact = _table_sizes(conn, top, use_dbstat)
     mode = mode or ("serverless" if serverless(env) else "server")
     bud = budget if budget is not None else budget_mb(mode, limit_mb=limit_mb, env=env)
-    share = round(peak / bud, 3) if peak and bud else None
+    mem_share = round(peak / bud, 3) if peak and bud else None
+    # a serverless store is saved through one block SQLite caps at 1,024 MB (store.MEMDB_CEILING_MB): its size against
+    # that ceiling is a budget too, and the larger share decides (a server's store is a file, with no such ceiling)
+    ceiling = ceiling_share = None
+    if mode == "serverless":
+        from . import store as store_mod
+        ceiling = store_mod.MEMDB_CEILING_MB
+        ceiling_share = round(ps * pc / 1048576 / ceiling, 3)
+    shares = [s for s in (mem_share, ceiling_share) if s is not None]
+    share = max(shares) if shares else None
     level = "ok" if share is None or share < WARN_SHARE else ("over" if share >= 1 else "warn")
     return {"hot_bytes": ps * pc, "free_bytes": ps * fl, "tables": tables, "exact": exact, "peak_mb": peak, "budget_mb": bud,
-            "limit_mb": limit_mb, "share": share, "level": level, "mode": mode}
+            "limit_mb": limit_mb, "share": share, "memory_share": mem_share, "ceiling_mb": ceiling,
+            "ceiling_share": ceiling_share, "level": level, "mode": mode}
 
 
 def record_run(conn: sqlite3.Connection, *, run_id: str | None, measured: dict, result: dict | None = None,
@@ -2761,6 +2762,7 @@ def record_run(conn: sqlite3.Connection, *, run_id: str | None, measured: dict, 
     entry = {"at": _now(), "day": _today(today), "run_id": run_id, "mode": measured.get("mode"),
              "hot_mb": mb(measured.get("hot_bytes")), "free_mb": mb(measured.get("free_bytes")),
              "peak_mb": measured.get("peak_mb"), "budget_mb": measured.get("budget_mb"), "share": measured.get("share"),
+             "ceiling_mb": measured.get("ceiling_mb"), "ceiling_share": measured.get("ceiling_share"),
              "level": measured.get("level"), "largest": [[t["table"], mb(t["bytes"])] for t in (measured.get("tables") or [])[:5]],
              "exact": measured.get("exact"), "seconds": seconds}
     if result:
@@ -2789,8 +2791,8 @@ def budget_state(conn: sqlite3.Connection) -> dict | None:
     """The last recorded run's memory against its budget ({'peak_mb', 'budget_mb', 'share'}), or None: what run() takes as
     `budget_state`, so a run after one that came within 20% of its budget archives more on its own."""
     for h in reversed(history(conn)):
-        if h.get("peak_mb") and h.get("budget_mb"):
-            return {"peak_mb": h["peak_mb"], "budget_mb": h["budget_mb"], "share": h.get("share")}
+        if (h.get("peak_mb") and h.get("budget_mb")) or h.get("ceiling_share") is not None:
+            return {"peak_mb": h.get("peak_mb"), "budget_mb": h.get("budget_mb"), "share": h.get("share")}
     return None
 
 
@@ -2817,8 +2819,12 @@ def data_health(conn: sqlite3.Connection) -> list[dict]:
         share = last.get("share") or (last["peak_mb"] / last["budget_mb"])
         ok = share < WARN_SHARE
         largest = ", ".join(f"{t} {_mb_text(m)}" for t, m in (last.get("largest") or [])[:3])
+        mem_share = last["peak_mb"] / last["budget_mb"]
+        by_ceiling = last.get("ceiling_share") is not None and last["ceiling_share"] > mem_share
         items.append({"key": "store_memory", "ok": ok, "share": share, "peak_mb": last["peak_mb"], "budget_mb": last["budget_mb"],
-                      "title": (f"The daily run used {_mb_text(last['peak_mb'])} of its {_mb_text(last['budget_mb'])} memory budget"
+                      "title": (f"The store is {_mb_text(last.get('hot_mb'))} in memory, of the {_mb_text(last.get('ceiling_mb'))} a run "
+                                f"can save in one piece ({share:.0%})" if by_ceiling else
+                                f"The last run used {_mb_text(last['peak_mb'])} of its {_mb_text(last['budget_mb'])} memory budget"
                                 f" ({share:.0%})"),
                       "detail": "" if ok else (f"The largest tables: {largest}. RemitWatch moves older settled claims to the "
                                                "archive by itself and takes more when a run comes this close to its limit."),

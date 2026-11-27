@@ -391,19 +391,12 @@ def _run_going(store) -> bool:
 
 
 def _wake(store, base: str | None) -> bool:
-    """Ask for the file to be read soon: the server's cycle reads its intake folder (remitwatch.intake.kick); a
-    serverless host asks for a run the way the Sync button does (`base`: this site's own address)."""
+    """Ask for the file to be read soon: the server's cycle reads its intake folder (remitwatch.intake.kick). A
+    serverless host starts nothing (the owner's decision 1: it analyses only when someone presses Run the analysis now);
+    the next press reads the file first."""
     if not store.serverless:
         return uploads.kick_intake(store.db_path)
-    if runtime.preview():
-        return False
-    try:
-        from . import cloud
-        ok = cloud.trigger_cycle(base, "upload")
-        cloud.SERVING_COPY._status = (0.0, None)
-        return bool(ok)
-    except Exception:
-        return False
+    return False
 
 
 def _finished(store, rec: dict, woke: bool | None, busy: bool = False):
@@ -419,8 +412,8 @@ def _finished(store, rec: dict, woke: bool | None, busy: bool = False):
         if store.serverless and busy:
             view["lines"].append("A run is going now. When it ends, the next run starts and reads this file first.")
         elif store.serverless:
-            view["lines"].append("The next run was asked to start now; it reads the file first." if woke else
-                                 "The next run reads it: the daily run, or press Sync and analyse now on the Data tab.")
+            view["lines"].append("The next analysis reads it first. This site analyses only when someone presses Run the "
+                                 "analysis now on the Data tab.")
         else:
             view["lines"].append("The cycle was asked to read it now." if woke else "The next cycle reads it.")
         if rec.get("checked") is False:

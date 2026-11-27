@@ -36,7 +36,7 @@ async function findClaim(text){
     : `<div class="note">Nothing in the remittance files or the EMA exports matches “${esc(text)}”. Check the claim ID in EMA, or try the payer's claim number from the payer's portal.</div>`); return; }
   const d = claimShell('Find a claim', r.more ? `More than 25 claims start with “${esc(text)}”: type more of the ID. The 25 most recently paid of those found:` : `${pl(r.items.length, 'claim')} match`,
     `<div class="scroll"><table class="small"><thead><tr><th>Claim</th><th>Patient</th><th>Payer</th><th>Last paid</th><th class="num">Remittances</th><th class="num">Open items</th></tr></thead>
-     <tbody>${r.items.map(x=>`<tr class="row" tabindex="0" data-bill="${esc(x.bill)}"><td class="code"><b>${esc(x.bill)}</b>${x.claim_ids.length>1?`<div class="small muted">${pl(x.claim_ids.length,'submission')}</div>`:''}</td><td>${esc(x.patient||'')}</td><td>${esc(x.payers.join(', ') || 'no remittance yet')}</td><td class="day">${x.last_payment ? esc(longDate(x.last_payment)) : '–'}</td><td class="num">${num(x.remits)}</td><td class="num">${x.open_findings ? num(x.open_findings) : '–'}</td></tr>`).join('')}</tbody></table></div>`);
+     <tbody>${r.items.map(x=>`<tr class="row" tabindex="0" data-bill="${esc(x.bill)}"><td class="code"><b>${esc(x.bill)}</b>${x.claim_ids.length>1?`<div class="small muted">${pl(x.claim_ids.length,'submission')}</div>`:''}</td><td>${esc(x.patient||'')}</td><td>${esc(x.archived ? 'in the archive (an older, settled claim)' : ((x.payers||[]).join(', ') || 'no remittance yet'))}</td><td class="day">${x.last_payment ? esc(longDate(x.last_payment)) : '–'}</td><td class="num">${num(x.remits)}</td><td class="num">${x.open_findings ? num(x.open_findings) : '–'}</td></tr>`).join('')}</tbody></table></div>`);
   d.querySelectorAll('tr[data-bill]').forEach(tr=>{ tr.onclick = () => openClaim(tr.dataset.bill); tr.onkeydown = e => { if(e.key==='Enter'){ e.preventDefault(); openClaim(tr.dataset.bill); } }; });
 }
 function adjText(list){ return (list||[]).map(a=>`<div>${esc(a.group_code)}-${esc(a.reason_code)} ${money2(a.amount_cents)} <span class="muted">${esc(a.text||'')}</span></div>`).join(''); }
@@ -79,6 +79,7 @@ async function openClaim(id, backTo){
   const body = `${backTo ? `<button class="ghost" id="claimBack">‹ Back to the item</button>` : ''}
     ${emaOnly ? `<div class="note">No remittance in the files yet${lastEma && lastEma.claim_status ? `; EMA says ${esc(lastEma.claim_status)}${lastEma.posted_date||lastEma.transaction_date ? ' as of '+esc(longDate(String(lastEma.posted_date||lastEma.transaction_date).slice(0,10))) : ''}` : ''}.</div>` : ''}
     ${unanswered.length && !emaOnly ? `<div class="small muted">In EMA with no remittance in the files: ${unanswered.map(esc).join(', ')}.</div>` : ''}
+    ${c.archived && typeof opArchivedHtml === 'function' ? opArchivedHtml(c.reopen, c.archived_at) : ''}
     ${c.story && typeof xpStoryHtml === 'function' ? xpStoryHtml(c.story, []) : ''}${c.story_error ? `<div class="small muted">${esc(c.story_error)}</div>` : ''}
     ${c.ema_block && typeof xpEmaHtml === 'function' ? xpEmaHtml(c.ema_block) : ''}
     <h3 class="small">Items found on this claim${open ? ` (${num(open)} open)` : ''}</h3>
@@ -97,6 +98,7 @@ async function openClaim(id, backTo){
   dd.querySelectorAll('tr[data-fid], a.line-item').forEach(el=>{ const go = e => { if(e) e.preventDefault(); openDetail(el.dataset.fid); };
     el.onclick = go; el.onkeydown = e => { if(e.key==='Enter'){ go(e); } }; });
   const csv = dd.querySelector('#claimCsv'); if(csv) csv.onclick = () => claimCsv(c);
+  if(c.archived && typeof opBindReopen === 'function') opBindReopen(dd, {claim_id: c.bill});      // ops.js: back to the lists
 }
 // the line under the claim's title: who it is about, how many remittances, its submissions. A bill no payer has answered
 // can have a member ID from EMA's rows and no name (names shown): each part is left out when it is blank

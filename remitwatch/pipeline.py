@@ -87,8 +87,9 @@ def acquire_lock(conn) -> str | None:
                 if datetime.now(timezone.utc) - beat < timedelta(minutes=LOCK_STALE_MINUTES):
                     conn.execute("ROLLBACK")
                     return None
-            except Exception:
-                pass
+            except Exception as exc:        # a lock that cannot be read is taken over: said in the run's log
+                from . import runlog
+                runlog.caught(exc, "lock", level="warning")
         token = secrets.token_hex(8)
         _meta_set(conn, LOCK_KEY, {"started": _now(), "heartbeat": _now(), "pid": os.getpid(), "token": token, "host": _host()})
         conn.execute("COMMIT")
@@ -261,7 +262,19 @@ def _ema_step(out: dict, key: str, fn, *a, **kw):
     try:
         return fn(*a, **kw)
     except Exception as exc:       # noqa: BLE001
+        from . import runlog
+        runlog.caught(exc, key)
         out[key] = {"error": type(exc).__name__}
+        return None
+
+
+def _meta_json_or_none(conn, key: str):
+    """A meta value written as JSON (the last cycle's summary), or None."""
+    try:
+        return json.loads(_meta_get(conn, key) or "null")
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        from . import runlog
+        runlog.caught(exc, "meta:" + key, level="warning")
         return None
 
 
@@ -408,8 +421,9 @@ def drop_kept_copies(store, ledger, db_path: str, log=print) -> int:
     try:
         from .uploads import upload_dir
         roots.append(os.path.abspath(upload_dir(db_path)) + os.sep)
-    except Exception:       # noqa: BLE001
-        pass
+    except Exception as exc:       # noqa: BLE001  (the intake folder's copies only)
+        from . import runlog
+        runlog.caught(exc, "upload_dir", level="warning")
     n = 0
     for fid in ledger.copies_to_drop():
         r = store.conn.execute("SELECT origin FROM ema_report_files WHERE file_id=?", (fid,)).fetchone()
@@ -451,20 +465,46 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         log(f"RemitWatch: {why}")
         _store_alert(db_path, why, log)
         return {"started": _now(), "trigger": os.environ.get("REMITWATCH_TRIGGER", "manual"), "skipped": why, "error": why, "finished": _now()}
-    store = Store(db_path)
-    mark_store(db_path)
-    out: dict = {"started": _now(), "trigger": os.environ.get("REMITWATCH_TRIGGER", "manual")}
-    token = acquire_lock(store.conn)
+    from . import repair, runlog
+    from . import selfcheck as sc
+    trigger = os.environ.get("REMITWATCH_TRIGGER", "manual")
+    try:
+        store = Store(db_path)
+        mark_store(db_path)
+        out: dict = {"started": _now(), "trigger": trigger}
+        held = _lock_owner(store.conn)          # a lock left by a cycle that was killed is taken over below: its evidence
+        token = acquire_lock(store.conn)
+    except Exception as exc:        # a store that cannot be opened or brought up to date: no run log yet, so say so
+        runlog.record_early_failure(exc, "open_store", trigger=trigger, db_path=db_path)
+        raise
     if not token:
         store.close()
         return {"skipped": "another cycle is running"}
+    # (H) the run's manifest and event log, the self-repair registry; each progress line is an event (scrubbed), and the
+    # console still sees it
+    rl = runlog.start_run("cycle", trigger=out["trigger"], db_path=db_path, conn=store.conn, host="server")
+    reg = repair.registry_for(rl, conn=store.conn)
+    if rl.manifest["sections"].get("killed_runs"):
+        repair.note_killed_runs(reg, rl.manifest["sections"]["killed_runs"])
+    log = rl.echo_to(log).log
+    # (G) self-regulation: the last cycle's figures (and a cycle the platform killed) decide what this one spreads or sheds
+    t_cycle = time.time()
+    killed = rl.manifest["sections"].get("killed_runs") or None     # their open markers; else a lock this cycle took over
+    if not killed and held.get("started") and held.get("token") != token:
+        killed = [{"started_at": held["started"], "last_step": None}]
+    plan = sc.plan_next(store.conn, _meta_json_or_none(store.conn, LAST_KEY), mode="server", killed=killed)
+    out["plan"] = {k: plan[k] for k in ("level", "name", "skip", "overdue")}
+    rl.set("self_regulation", plan)
+    if plan["actions"]:
+        out["self_regulation"] = plan["actions"]
+        repair.note_pressure(reg, [{"action": a} for a in plan["actions"]], reading=plan["pressure"])
 
     def beat_log(*a) -> None:           # long downloads report progress; each report also proves the cycle is alive
         log(*a)
         try:
             heartbeat(store.conn, token)
-        except Exception:
-            pass
+        except Exception as exc:
+            runlog.caught(exc, "heartbeat", level="warning")
 
     lg_box: list = []
 
@@ -496,16 +536,21 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                 # a Dropbox failure (a revoked token, an outage) must not stop TriZetto, the uploads, the analysis, the
                 # backup or the faxes: it is noted, and shown as the cycle's error once the rest is done
                 try:
-                    st = dropbox_sync(store, full=full, log=beat_log)
+                    from .dropbox_sync import DropboxClient
+                    with rl.step("dropbox_sync"):
+                        # (H) a network error on a read is tried again (remitwatch.repair); a refused token is not
+                        client = repair.resilient(DropboxClient(), "dropbox", registry=reg, until=time.time() + 1800)
+                        st = dropbox_sync(store, client=client, full=full, log=beat_log)
                     new_files = st.pop("new_files", [])
                     out["sync"] = st
                 except Exception as exc:
+                    runlog.caught(exc, "dropbox_sync")
                     new_files = list(getattr(exc, "new_files", None) or [])     # what it fetched before it failed
                     out["sync"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
                     try:
                         store.conn.rollback()
-                    except Exception:
-                        pass
+                    except Exception as exc2:
+                        runlog.caught(exc2, "dropbox_sync:rollback", level="warning")
                 if "error" not in out["sync"]:
                     refound = _ema_step(out, "ema_refind", refind_reports, store, log=beat_log) or []
             else:
@@ -533,9 +578,16 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         from . import trizetto
         if trizetto.configured():         # the remittances straight from TriZetto's SFTP (remitwatch.trizetto)
             from .cloud import _ingest_batch
+            dl = time.time() + 3000
             try:
-                tz = trizetto.pull(store.conn, lambda items: _ingest_batch(store, items, beat_log), deadline=time.time() + 3000, log=beat_log)
+                # (H) a whole pull is safe to repeat (files read are skipped); a refused sign-in, and anything the ingest
+                # raises (repair.not_retried: a code bug), are raised at once
+                with rl.step("trizetto"):
+                    tz = repair.retry_call(trizetto.pull, store.conn,
+                                           repair.not_retried(lambda items: _ingest_batch(store, items, beat_log)),
+                                           deadline=dl, log=beat_log, target="trizetto", registry=reg, until=dl - 900)
             except Exception as exc:
+                runlog.caught(exc, "trizetto")
                 tz = {"error": str(exc)[:300]}
             out["trizetto"] = {k: v for k, v in tz.items() if k != "seen_changed"}
             for k in ("remits", "ema", "claims_837"):
@@ -546,8 +598,10 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         try:
             import inspect
             takes_ledger = "ledger" in inspect.signature(uploads.ingest_queued).parameters
-            up = uploads.ingest_queued(store, log=beat_log, **({"ledger": ledger} if takes_ledger else {}))
+            with rl.step("uploads"):
+                up = uploads.ingest_queued(store, log=beat_log, **({"ledger": ledger} if takes_ledger else {}))
         except Exception as exc:
+            runlog.caught(exc, "uploads")
             up = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
         if up.get("uploads") or up.get("error"):
             out["uploads"] = up
@@ -559,6 +613,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         if rr.get("read") or rr.get("gone"):
             out["ema_waiting"] = rr
         out["ingest"] = ingested
+        sc.mark(out, "ingest", t_cycle)
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
         changed = changed or bool(up_in.get("changed")) or bool(rr.get("applied"))
         # a release that changed which copies of a remittance stand decides them again once, new files or not, and the
@@ -579,7 +634,31 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                 out["ema_turnaround"] = tat
             if lg_box:
                 _ema_step(out, "ema_copies", drop_kept_copies, store, lg_box[0], db_path, log=beat_log)
+            # (G) the money checks every cycle: the ledger against the store's summaries, money conservation, EMA's A/R
+            # against the postings, and money posted in a closed month that a newer export dropped. (H) Summaries that
+            # no longer match the ledger are rebuilt from it once and checked again (repair.rebuild_if_failing)
+            def ledger_check() -> dict:
+                got = sc.check_ledger(store.conn, ledger())
+                st = {c["id"]: c["status"] for c in got.get("checks") or []}
+                return {"ok": st.get("ledger_store") != "fail", "checks": st, "gaps": got.get("gaps")}
+            money = _ema_step(out, "selfcheck_money", repair.rebuild_if_failing, "ledger_summaries", ledger_check,
+                              lambda: ema_ledger.refresh(store, ledger(), parts="AB", log=beat_log), registry=reg)
+            if money:
+                got = money.get("after") or money.get("before") or {}
+                out["money_checks"] = got.get("checks")
+                out["money_gaps"] = got.get("gaps")
+                if money.get("rebuilt"):
+                    out["ledger_rebuilt"] = {"ok": bool(money.get("ok"))}
+                    changed = True          # the rebuilt summaries are analysed in this cycle
             heartbeat(store.conn, token)
+        # (E) reopenings asked in the app, and archived bills new data arrived for, come back before detection
+        from . import archive
+        arc_sink = archive.sink_for(db_path=db_path)
+        back = [_ema_step(out, "archive_requests", archive.process_requests, store.conn, sink=arc_sink, log=beat_log) or {},
+                _ema_step(out, "archive_touched", archive.restore_touched, store.conn, sink=arc_sink, log=beat_log) or {}]
+        if any(b.get("changed") for b in back):
+            changed = True
+            out["archive_back"] = {"asked": back[0].get("restored", 0), "new_data": back[1].get("restored", 0)}
         has_run = bool(store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='detection_runs'").fetchone()) and \
             bool(store.conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone())
         rules_changed = False
@@ -595,9 +674,13 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                 out["people_changed"] = True
         store.close()
         if changed or force_detect or not has_run or rules_changed or people:
-            summary = run_detection(db_path)
+            t_det = time.time()
+            with rl.step("detect"):     # the detection run and the run log share one id
+                summary = run_detection(db_path, run_id=rl.run_id, skip_activity="activity" in plan["skip"])
             out["detect"] = {"findings": sum(summary.values())}
+            sc.mark(out, "detect", t_det)
         store = Store(db_path)
+        reg.conn = store.conn           # the registry writes to the store as it is now (the first connection is closed)
         heartbeat(store.conn, token)
         if "detect" in out and store.conn.execute("SELECT 1 FROM meta WHERE key=?", (ema_ledger.META_KEEP_DIRTY,)).fetchone() \
                 and (lg_box or os.path.exists(ema_ledger.ledger_path(db_path))):
@@ -607,37 +690,83 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             if r and r.get("part_a"):
                 out["ema_refresh_after"] = {"seconds": r.get("seconds")}
             heartbeat(store.conn, token)
-        if "detect" not in out:         # detection rebuilds the provider tables itself; this covers an upgrade with no new files
+        # (E) retention after detection (the items' states are fresh), then this run's size and memory
+        from . import runtime
+        arc = _ema_step(out, "archive", archive.run, store.conn, sink=arc_sink, budget_state=sc.archive_budget_state(plan),
+                        run_id=rl.run_id, mode="server", log=beat_log)
+        if arc and (arc.get("bills") or (arc.get("ar") or {}).get("files") or arc.get("errors")):
+            out["archive"] = {k: arc.get(k) for k in ("bills", "lines", "findings", "cutoff", "errors")}
+        if arc:
+            rl.set("archive", {k: arc.get(k) for k in ("bills", "claims", "lines", "findings", "files", "cutoff", "seconds")})
+        _ema_step(out, "archive_measure", lambda: archive.record_run(
+            store.conn, run_id=rl.run_id, result=arc,
+            measured=archive.measure(store.conn, peak=archive.peak_mb(), mode="server", limit_mb=runtime.memory_mb())))
+        heartbeat(store.conn, token)
+        ran = []                        # the optional steps this cycle ran (an optional step's deferral ends once it has)
+        if "detect" not in out and "activity" not in plan["skip"]:
+            # detection rebuilds the provider tables itself; this covers an upgrade with no new files
             from . import activity
             if activity.stale(store.conn):
-                out["activity"] = activity.refresh(store, log=log)
+                with rl.step("activity"):
+                    out["activity"] = activity.refresh(store, log=log)
                 heartbeat(store.conn, token)
+        if "activity" not in plan["skip"]:
+            ran.append("activity")
         if "detect" in out:             # new items can be the visits of uploaded notes not matched yet
             try:
                 matched = uploads.rematch(store.conn)
                 if matched:
                     out["notes_matched"] = matched
             except Exception as exc:
+                runlog.caught(exc, "notes_matched")
                 out["notes_matched"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        # (G) the track record, money given up without a decision, what the app cannot see (in dollars), the weekly
+        # self-audit, housekeeping; then what this cycle shed and ran
+        today = sc.today_of()
+        for step, fn in (("selfcheck_track", lambda: sc.track_record(store.conn, today=today)),
+                         ("selfcheck_given_up", lambda: sc.given_up(store.conn, today=today)),
+                         ("selfcheck_blind", lambda: sc.blindness(store.conn, today=today))):
+            _ema_step(out, step, fn)
+        if sc.audit_due(store.conn, today) and "audit" not in plan["skip"]:
+            audit = _ema_step(out, "selfcheck_audit", sc.self_audit, store.conn, today=today)
+            if audit and not audit.get("skipped"):
+                out["self_audit"] = {k: audit.get(k) for k in ("gaps_n", "gaps_cents", "wasted_n", "alert")}
+                ran.append("audit")
+        out["housekeeping"] = _ema_step(out, "housekeeping_error", sc.housekeeping, mode="server", db_path=db_path,
+                                        conn=store.conn, archive_result=out.get("archive_compact"), uploads=False)
+        store.conn.commit()
         from .runtime import practice_today
-        out["alerts"] = run_alerts(store.conn, today=practice_today())          # deadlines close at midnight where the practice is
+        with rl.step("alerts"):
+            out["alerts"] = run_alerts(store.conn, run_id=rl.run_id, today=practice_today())   # deadlines close at midnight where the practice is
         out["notified"] = notify(store.conn, log=log) if email else {"sent": 0, "skipped": True}
         every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))
         last_report = _meta_get(store.conn, REPORT_KEY)
         due = not last_report or (datetime.now(timezone.utc) - datetime.fromisoformat(last_report)) >= timedelta(days=every)
-        if report or (report is None and due):
+        # (G) a cycle under pressure leaves the weekly report for a calm one (never more than a week: plan_next); asked
+        # for by hand, it goes out
+        if report or (report is None and due and "report" not in plan["skip"]):
             from .report import build_report, email_report, save_report
             text = build_report(store, sync_stats=out.get("sync") if isinstance(out.get("sync"), dict) else None, ingest_stats=ingested)
             out["report"] = save_report(build_report(store, sync_stats=out.get("sync") if isinstance(out.get("sync"), dict) else None,
                                                      ingest_stats=ingested, detail=True), report_dir)
             out["report_emailed"] = email_report(text) if email else False
             _meta_set(store.conn, REPORT_KEY, _now())
+            ran.append("report")
+        _ema_step(out, "selfcheck_did", sc.record_did, store.conn, {"shed": plan["skip"], "level": plan["level"], "ran": ran})
         if isinstance(out.get("sync"), dict) and out["sync"].get("error"):
             out["error"] = "Dropbox: " + out["sync"]["error"]          # the rest ran; the feed's failure still shows
         mark_store(db_path)             # notes, once, that the store holds the practice's remittances
+        # (H) reports the readers held, the steps that went well (a killed run's count clears), old log rows
+        _ema_step(out, "repair_sweep", repair.sweep_reports, store.conn, reg, rl.manifest["started_at"])
+        repair.note_run_finished(reg, rl.manifest["steps"])
+        _ema_step(out, "log_prune", runlog.prune_store, store.conn)
+        _ema_step(out, "repair_prune", repair.prune, store.conn)
+        if reg.dirty:
+            reg.save()
         out["finished"] = _now()
         return out
     except Exception as exc:
+        rl.fail(exc, "cycle")
         out["error"] = f"{type(exc).__name__}: {exc}"
         out["finished"] = _now()
         raise
@@ -645,24 +774,29 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         for lg in lg_box:
             try:
                 lg.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                runlog.caught(exc, "ledger_close", level="warning")
         try:
             store.conn.execute("SELECT 1")
-        except Exception:
+        except Exception as exc:
+            runlog.caught(exc, "store_reopen", level="warning")
             store = Store(db_path)
         try:        # the lock goes first and on its own, so a failure to write the summary can never leave it behind
             try:
                 store.conn.rollback()
-            except Exception:
-                pass
+            except Exception as exc:
+                runlog.caught(exc, "rollback", level="warning")
             release_lock(store.conn, token)
         finally:
             try:
                 _meta_set(store.conn, LAST_KEY, out)
                 store.conn.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                runlog.caught(exc, "last_cycle", level="warning")
+            try:
+                rl.finish(conn=store.conn, out=out)
+            except Exception as exc:        # noqa: BLE001  (the cycle's own summary is already in LAST_KEY)
+                print(f"RemitWatch: the run's log could not be finished ({type(exc).__name__}).", file=sys.stderr, flush=True)
             store.close()
 
 
@@ -796,24 +930,30 @@ class Scheduler:
     def run_child(self, trigger: str) -> int:
         env = dict(os.environ, REMITWATCH_TRIGGER=trigger)
         db_path, started = self.db_path, time.time()
+        from . import runlog
         try:
+            # stdout and stderr stay closed: the child's own run log has the detail, scrubbed (raw stderr could hold a cell)
             proc = subprocess.Popen(self.argv(db_path), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
+        except Exception as exc:
+            runlog.record_early_failure(exc, "start_child", trigger=trigger, db_path=db_path)
             return -1
         with self._guard:
             self._children[proc.pid] = (proc, started, db_path)
+        rc = -9
         try:
-            return proc.wait(timeout=CHILD_TIMEOUT_SECONDS)
+            rc = proc.wait(timeout=CHILD_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            return -9
         finally:
             with self._guard:
                 self._children.pop(proc.pid, None)
             # a child that ended without releasing its locks (killed: the time limit above, the system's memory limit, a
             # stop) left them behind: the cycle's, and the fax run's or the backup's when it was in one
             _release_child(db_path, proc.pid, started)
+        if rc:
+            runlog.note_child_exit(db_path, rc, trigger=trigger, started=started)     # never raises; noted once
+        return rc
 
 
 def _end_child(proc: subprocess.Popen) -> None:
@@ -825,15 +965,19 @@ def _end_child(proc: subprocess.Popen) -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=STOP_WAIT_SECONDS)
-    except Exception:
-        pass
+    except Exception as exc:
+        from . import runlog
+        runlog.caught(exc, "end_child", level="warning")
 
 
 def _release_child(db_path: str, pid: int, started: float) -> None:
     try:
-        clear_lock_of_pid(db_path, pid, since=started)
-    except Exception:
-        pass            # a lock that cannot be removed now is removed at the next start, or goes stale
+        if clear_lock_of_pid(db_path, pid, since=started):
+            from . import repair
+            repair.log_stale_locks([f"locks of process {pid}"], "pipeline.clear_lock_of_pid", db_path=db_path)
+    except Exception as exc:        # a lock that cannot be removed now is removed at the next start, or goes stale
+        from . import runlog
+        runlog.caught(exc, "release_child", level="warning")
 
 
 SCHEDULER = Scheduler()
@@ -854,6 +998,8 @@ def start_scheduler_from_env(db_path: str) -> bool:
         if gone:
             print(f"RemitWatch: removed the lock of a run that ended with the server's last container ({', '.join(gone)}).",
                   file=sys.stderr, flush=True)
+            from . import repair
+            repair.log_stale_locks(gone, "pipeline.clear_locks_left_behind", db_path=db_path)
     except Exception as exc:     # never in the way of the server's start: a lock left behind still goes stale by itself
         print(f"RemitWatch: the run locks could not be checked at start ({type(exc).__name__}).", file=sys.stderr, flush=True)
     try:

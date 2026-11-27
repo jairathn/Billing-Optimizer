@@ -15,23 +15,29 @@ of which 491 items ($154,318) sit on Work now.
 | Fixable on the claim (enrollment, referral, modifiers, drug details) | 75 | $25,419 |
 | Unclear (the payer's rule is not public; ask the payer) | 26 | $43 |
 
+The table was measured before the decisions unit's review round. Since then UnitedHealthcare's G6001 is in the "fixable on
+the claim" row, because its source excludes G6001 only when the listed criteria were not met: on the 11-24 data that is
+553 items, $61,650.82, of which 115 ($13,965.95) are on Work now. The final stage measures the table again.
+
 The big ones:
 - Hyperthermia (77600) billed with the 2026 surface radiation codes (77436 to 77439). CPT 2026 says not to report them
   together. Anthem bundles or recodes it (206 items, $73,283); Optum's VA network denies it as not covered (101 items,
   $49,705, plus 45 items, $20,172, that depend on the VA referral). Medicare still pays the pair in 2026. That is a
   compliance question for your coding advisor, not money to chase: a payment for codes CPT says not to report together
   can be an overpayment to refund.
-- G6001 (image guidance) with superficial radiation at UnitedHealthcare, Medicare Advantage and commercial (550 items,
-  $61,330): prior authorization was required through 2025 and UHC's policy called it not medically necessary for
-  superficial skin cancer treatment until 2026-03-01. G6001 ended in 2026; the 2026 code is 77439, once per course,
-  with 77437 or 77438. Before letting these go, check whether an approved authorization listed G6001.
+- G6001 (image guidance) with superficial radiation at UnitedHealthcare, Medicare Advantage and commercial (553 items,
+  $61,650.82): prior authorization was required through 2025 and UHC's policy called it not medically necessary for
+  superficial skin cancer treatment until 2026-03-01, unless the listed criteria were met. G6001 ended in 2026; the 2026
+  code is 77439, once per course, with 77437 or 77438. The product now treats these as fixable: resubmit with the
+  authorization number when an approved authorization listed G6001, and appeal a coverage denial only with a note that
+  shows the criteria were met.
 - G2211: not paid by Anthem or UnitedHealthcare commercial plans at all; Medicare and UHC Medicare Advantage do not pay
   it when the visit carries modifier 25 for a procedure.
 - Kentucky and Indiana Medicaid denials for enrollment, affiliation and taxonomy (fixable on the claim).
 - Humana Medicare Advantage G0127 needs Q7, Q8 or Q9 and the class findings in the note.
 
 My recommendation: accept the "not payable" patterns on the policy page (they leave Work now with their reason kept),
-keep the 75 fixable items on Work now, change the billing going forward (77439 instead of G6001; no 77600 with
+keep the fixable items on Work now (G6001 among them), change the billing going forward (77439 instead of G6001; no 77600 with
 77436 to 77439 for payers that follow CPT; no G2211 to Anthem and UHC commercial), and have the coding advisor look at
 the Medicare 77600 payments. Until you say so, every one of them stays on Work now as you asked.
 
@@ -70,10 +76,13 @@ the Medicare 77600 payments. Until you say so, every one of them stays on Work n
 
 ## 5. Bill the patient (your decision 2): three cases where the law or a contract says no
 
-Built as you asked: 188 patient-group denials (plan exclusion, missing referral, coverage ended) now stay on Work now
-with "Bill the patient $X", X being the share the payer put on the patient, less what EMA shows the patient already
-paid; "Billed the patient" and "Done" are one click each. Measured on the 11-24 data: 140 items on Work now, $15,243 to
-bill. Three groups need your call, and my recommendation for each:
+Built as you asked: patient-group denials (plan exclusion, missing referral, coverage ended) stay on Work now with
+"Bill the patient $X", X being the share the payer put on the patient, less what EMA shows the patient already paid;
+"Billed the patient" and "Done" are one click each. A bill is never sent on a guess: when no EMA line or Production
+report covers the visit, the step says to check the patient's account in EMA first. Measured on the 11-24 data after
+the review round: 188 open patient-group denials ($17,057.43). 79 are to bill the patient ($7,596.15); 43 need that
+check first ($3,126.20); 46 the patient already settled; 19 are work with the payer; 1 another payer paid; 9 have a next
+payer that answered with a contractual adjustment only. Three groups need your call, and my recommendation for each:
 - Medicaid members (21 items, all a missing referral, Humana's Medicaid plans): federal Medicaid rules require the
   practice to take Medicaid's payment as payment in full, and a missing referral is the practice's to fix, so these
   members should not get a bill. Recommendation: for Medicaid members the step becomes "Get a retroactive referral and

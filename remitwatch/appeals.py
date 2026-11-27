@@ -543,11 +543,18 @@ def build_packet(d: dict, show_phi: bool = False, clinical: list[str] | None = N
     if (f.get("payer_group") or "").startswith("Anthem") and f.get("payer_kind") in ("commercial", "supplement", "other"):
         attachments.append("Anthem asks every dispute to include: a position statement (this letter), the provider name, address, phone, email and NPI or TIN, "
                            "the member's name and Anthem ID, the Anthem claim number and date of service, and all supporting documentation")
+    # a code its payer almost never pays (the owner's decision 4): the payer's published rule and what the note or the claim
+    # must show, for the biller before it goes (never sent: the PDF's enclosures are what goes); the rule itself is
+    # enclosed only with an appeal it supports
+    from . import rarely_paid
+    rules_at_hand = d.get("payer_rules") if isinstance(d.get("payer_rules"), list) else None
+    checklist = rarely_paid.checklist(f, d.get("lines"), rules_at_hand)
+    attachments += [a for a in rarely_paid.enclosures(f, d.get("lines"), rules_at_hand) if a not in attachments]
     return {
         "finding_id": f.get("finding_id"), "signal": sig, "subject": subject, "letter": letter,
         "deadline_basis": f.get("deadline_basis") or rule["label"], "process": _process(f),
         "corrected_claim_instructions": corrected_claim,
-        "attachments": attachments,
+        "attachments": attachments, "checklist": checklist,
         "evidence": _evidence_block(d),
         "deadline": f.get("appeal_deadline"),
         "payer_contact": {"phone": (d.get("remit") or {}).get("payer_contact_phone"), "url": (d.get("remit") or {}).get("payer_contact_url")},

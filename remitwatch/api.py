@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 from contextvars import ContextVar
 
-from . import __version__, runtime
+from . import __version__, runlog, runtime
 from .actions import STATUSES, apply_alert_ack, apply_status
 from .codes import CARC, RARC, member_number
 from .detect import DOWNCODE_SIGNALS, EM_SQL, PATTERN_SQL, ensure_schema, pattern_windows
@@ -362,7 +362,17 @@ def require_owner(request: Request = None, credentials: Optional[HTTPBasicCreden
                         else "These figures open with the owner's password.")
 
 
+# One archived bill's rows (remitwatch.archive.claim_db), held in memory while the claim view reads them: every helper the
+# view calls asks db() for its connection, so for that one request they read the archived bill and nothing else.
+_ARCHIVED_DB: ContextVar[str | None] = ContextVar("_ARCHIVED_DB", default=None)
+
+
 def db() -> sqlite3.Connection:
+    held = _ARCHIVED_DB.get()
+    if held is not None:
+        conn = sqlite3.connect(held, uri=True, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
     if runtime.serverless():
         from .cloud import SERVING_COPY, StorageUnavailable
         try:
@@ -490,6 +500,19 @@ def meta(_: str = Depends(require_auth)):
                            "bulk_appeal": bulk_appeals_on(),
                            # whether this build has the run's decision log for an item ("Why did this change?" in its panel)
                            "decisions": _route_here("/api/findings/probe/decisions")}
+    # the self-check's banner (safe mode, what the app cannot see, a red check): every page shows it above everything and
+    # never "all clear" while it is set (remitwatch.selfcheck; it reads meta only, so the dashboard's copy shows it too)
+    try:
+        from . import selfcheck
+        c = db()
+        try:
+            out["banner"] = selfcheck.banner(c)
+        finally:
+            if not runtime.serverless():
+                c.close()
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        runlog.caught(exc, "meta:banner", level="warning")
+        out["banner"] = None
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -1343,8 +1366,15 @@ def finding_detail(finding_id: str, _: str = "ok"):
 @app.get("/api/findings/{finding_id}")
 def finding_page(finding_id: str, story: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
     """An item's panel: finding_detail. story=1 adds what /api/findings/{id}/explain gives, in the same answer. The state
-    is the one the lists show: a status a person set since the newest run decides it (state_by_status says so)."""
-    out = finding_detail(finding_id, "ok")
+    is the one the lists show: a status a person set since the newest run decides it (state_by_status says so). An item
+    the archive took (an older settled claim) opens from the archive, its history ending in why it left."""
+    try:
+        out = finding_detail(finding_id, "ok")
+    except HTTPException as exc:
+        got = api_ops.archived_finding(finding_id) if exc.status_code == 404 and re.fullmatch(r"[0-9a-f]{8,64}", finding_id) else None
+        if got is None:
+            raise
+        return got
     f = out["finding"]
     anchor = _run_anchor()
     if anchor and "work_state" in f and str(f.get("status_changed_at") or "") > anchor:
@@ -1364,6 +1394,8 @@ def finding_explain(finding_id: str, _: str = Depends(require_auth)):
     f = one("SELECT finding_id, patient_control_number, ema_link FROM findings WHERE finding_id=?", (finding_id,)) \
         if "ema_link" in _columns() else one("SELECT finding_id, patient_control_number FROM findings WHERE finding_id=?", (finding_id,))
     if not f:
+        if api_ops.is_archived_finding(finding_id):     # its panel opens from the archive (ops.js) and needs no story
+            return {"finding_id": finding_id, "archived": True, "explain": None}
         raise HTTPException(404, "finding not found")
     return dict(_explained(f), finding_id=finding_id)
 
@@ -1493,6 +1525,11 @@ PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it L
 # items done with $0 recovered, by their work (remitwatch.states' appeal_block): a payment the 835 made that EMA never posted
 # ('post'), and a credit that is only a takeback EMA never posted ('credit'): the money already came, or none is owed
 ZERO_PAID_BLOCKS = ("post", "credit")
+# A person's Done (the owner's decision 2): a patient-group denial closed with $0 recovered, with who and when, by the
+# strict JSON true 'done' on a Paid; its note starts with states.DONE_NOTE so the item's history and state say Done
+DONE_ONLY = ("Done is for a service the payer put on the patient (no referral, coverage dates, a plan exclusion). Mark this "
+             "one Paid with the amount, or Let go with a reason.")
+DONE_STRICT = "Done is sent as true, or not at all. Reload the page."
 
 
 async def _body_object(request: Request) -> dict:
@@ -1543,18 +1580,22 @@ def _seen_ok(v: Any) -> bool:
 
 def _status_now(conn: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
     """Each item's status on this copy, whether the daily run set it by itself (a payment it found, a reason hidden for a
-    payer), and its charge (the bound on a Paid amount)."""
+    payer), its charge (the bound on a Paid amount), and whether it is a patient-group denial a person may mark Done (the
+    owner's decision 2: states.patient_denial)."""
     from .actions import LAST_DECISION
+    from .states import PATIENT_DENIAL_SIGNALS, patient_denial
     events = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_events'").fetchone())
     block = "f.appeal_block" if "appeal_block" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else "NULL"
+    sigs = ",".join("'" + x + "'" for x in PATIENT_DENIAL_SIGNALS)
     out: dict[str, dict] = {}
     for k in range(0, len(ids), 500):
         part = ids[k:k + 500]
         for r in conn.execute(f"""SELECT f.finding_id, f.status, f.auto_note, f.charge_cents, {LAST_DECISION if events else "NULL"} last,
-                                         {block} block
+                                         {block} block, f.signal, f.carc, CASE WHEN f.signal IN ({sigs}) THEN f.evidence END
                                   FROM findings f WHERE f.finding_id IN ({','.join('?' * len(part))})""", part):
             out[r[0]] = {"status": r[1], "charge_cents": r[3], "block": r[5],
-                         "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden")}
+                         "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden"),
+                         "patient_denial": patient_denial({"signal": r[6], "carc": r[7], "evidence": r[8]})}
     return out
 
 
@@ -1574,10 +1615,12 @@ def _sending_now(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
     return out | _preparing(conn, ids)
 
 
-def _person_status(ids: list[str], status: str, notes: str | None, rec: int | None, actor: str, seen: dict, single: bool) -> dict:
+def _person_status(ids: list[str], status: str, notes: str | None, rec: int | None, actor: str, seen: dict, single: bool,
+                   done: bool = False) -> dict:
     """A person's status change, checked and applied in one step: on a server inside one transaction on the store, on a
     serverless host against the copy it serves, then journaled. single: one item's change, refused as a whole (Refused)
-    when it must not be made; else the items that must not be changed are left as they are and named."""
+    when it must not be made; else the items that must not be changed are left as they are and named. done: a person's
+    Done on a patient-group denial (Paid with $0, the owner's decision 2), refused for any other item."""
     out: dict = {"n": 0, "changed": [], "in_flight": []}
 
     def sort(conn) -> list[str]:
@@ -1604,6 +1647,8 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                                                   f"{STATUS_LABELS.get(cur['status'], cur['status'])}. It was not changed.", status=cur["status"])
                 out["changed"].append(i)
                 continue
+            if single and done and not cur.get("patient_denial"):
+                raise Refused(400, "done", DONE_ONLY)
             if single and status == "resolved":
                 charge = cur.get("charge_cents") or 0
                 top = min(MAX_PAID_CENTS, PAID_TIMES_CHARGE * charge) if charge > 0 else MAX_PAID_CENTS
@@ -1611,7 +1656,7 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                     raise Refused(400, "amount", NO_AMOUNT)
                 if rec < 0:
                     raise Refused(400, "amount", "The amount paid cannot be below zero.")
-                if rec == 0 and cur.get("block") not in ZERO_PAID_BLOCKS:
+                if rec == 0 and not done and cur.get("block") not in ZERO_PAID_BLOCKS:
                     raise Refused(400, "amount", PAID_ZERO)   # nothing recovered: the item was not paid, it was lost or let go
                 if rec > top:
                     raise Refused(400, "amount", f"That is more than {'ten times the charge on this line' if top < MAX_PAID_CENTS else '$1,000,000'}"
@@ -1674,6 +1719,16 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
     and Lost take a reason (LET_GO_REASON), kept in the item's history."""
     body = await _body_object(request)
     status, notes, rec = _status_fields(body)
+    done = body.get("done")
+    if done is not None and done is not True:
+        raise HTTPException(400, DONE_STRICT)       # an override is strict JSON true (the hotfix rule): never "true" or 1
+    if done is True:
+        # Done (the owner's decision 2): Paid with $0.00, its note starting with Done so the history and the state say so
+        from .states import DONE_NOTE
+        if status != "resolved" or rec not in (None, 0):
+            raise HTTPException(400, "Done closes the item with nothing recovered: send it as Paid with $0.00.")
+        rec = 0
+        notes = DONE_NOTE + (f": {notes.strip()}" if notes and notes.strip() else "")
     seen = body.get("seen_status")
     if not _seen_ok(seen):
         raise HTTPException(400, "The status your page showed could not be read. Reload the page.")
@@ -1684,7 +1739,7 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
             raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
                                      "only with a note. Say why.")
         raise HTTPException(400, LET_GO_REASON)
-    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True)
+    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True, done is True)
     return {"ok": True}
 
 
@@ -1798,11 +1853,33 @@ def volume(_: str = Depends(require_auth)):
 
 
 # --------------------------------------------------------------------------- appeal packet
+def _with_payer_rules(detail: dict) -> dict:
+    """The item's "Why <payer> does not pay <code>" blocks (remitwatch.rarely_paid, the owner's decision 4), as the drawer
+    shows them from the newest run, for the packet's checklist and the note review's input. Without them (a store that
+    cannot be read just now) the packet falls back on the rules that name the item's payer group, and the log says why."""
+    if "payer_rules" in detail:
+        return detail
+    try:
+        from . import rarely_paid
+        conn = db()
+        try:
+            blocks = rarely_paid.why(conn, detail.get("finding") or {})
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:        # noqa: BLE001  (logged; the packet is built with the rules at hand)
+        from .runlog import caught
+        caught(exc, "api.payer_rules")
+        return detail
+    return dict(detail, payer_rules=[{k: v for k, v in b.items() if k != "evidence"} for b in blocks])
+
+
 @app.get("/api/appeal/{finding_id}")
 def appeal(finding_id: str, _: str = Depends(require_auth)):
     from .appeals import build_packet
 
-    detail = finding_detail(finding_id, "ok")
+    detail = _with_payer_rules(finding_detail(finding_id, "ok"))
     f = detail["finding"]
     if not f.get("claim_key") and f.get("signal") not in ("TAKEBACK", "FEE_SKIM"):
         # context rows (sequestration, MIPS) and contract-level findings have no letter: there is nothing to reprocess
@@ -2000,6 +2077,11 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
                           charge_cents=max(((x["charge_cents"] or 0) for x in rem), default=0), paid_cents=sum((x["paid_cents"] or 0) for x in rem),
                           open_findings=len(open_ids), exact=(b == up)))
     items.sort(key=lambda x: (not x["exact"], -(int((x["last_payment"] or "0000-00-00").replace("-", "")))))
+    if len(items) < 25:
+        try:        # older settled claims the archive took (remitwatch.archive): by claim id, bill or payer claim number
+            items += api_ops.archived_search(text, {x["bill"] for x in items})[:25 - len(items)]
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "claims_search:archive", level="warning")
     out = {"items": items, "more": len(bills) > len(items) and len(items) >= 25}
     if not items and runtime.serverless():
         # this host's copy holds the claims of bills with items only: "nothing matches" would be a guess
@@ -2022,11 +2104,49 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
     bill = bill_of(raw) if raw else ""
     if not _bill_ok(bill):
         raise HTTPException(400, "That is not a claim ID.")
+    out = _claim_view(bill)
+    if out is None:     # an older settled bill the archive took (remitwatch.archive): opened whole from its record
+        out = _archived_claim_view(bill)
+    if out is None:
+        raise HTTPException(404, "No remittance in the files and no EMA row has that claim ID.")
+    return out
+
+
+def _archived_claim_view(bill: str) -> dict | None:
+    """The claim view of an archived bill, or None: the archive's record of it is put in an in-memory database of its own
+    for this request (the store is not touched, and the copy is gone when the answer is), the same view is read from it,
+    and the answer says since when it is archived and how to bring it back."""
+    from . import api_ops
+    held = api_ops.archived_claim(bill)
+    if held is None:
+        return None
+    adb, where = held
+    name = f"file:rw-archived-{secrets.token_hex(8)}?mode=memory&cache=shared"
+    anchor = sqlite3.connect(name, uri=True, check_same_thread=False)      # keeps the request's copy alive
+    try:
+        try:
+            adb.backup(anchor)
+        finally:
+            adb.close()
+        token = _ARCHIVED_DB.set(name)
+        try:
+            out = _claim_view(where["bill"])
+        finally:
+            _ARCHIVED_DB.reset(token)
+    finally:
+        anchor.close()
+    if out is None:
+        return None
+    return dict(out, archived=True, archived_at=where.get("archived_at"), reopen=api_ops.REOPEN_TEXT)
+
+
+def _claim_view(bill: str) -> dict | None:
+    """claim_view's answer for one bill from the store at hand (db()), or None when nothing there names it."""
     pcns = _bill_ids(bill)
     rem = _bill_remits(pcns)
     ema_ids = _ema_ids(bill)
     if not rem and not ema_ids:
-        raise HTTPException(404, "No remittance in the files and no EMA row has that claim ID.")
+        return None
     keys = [r["claim_key"] for r in rem] or [""]
     qk = ",".join("?" * len(keys))
     lines = rows(f"""SELECT claim_key, line_key, line_seq, procedure_code, modifiers, original_procedure_code, original_modifiers, original_units,
@@ -2360,7 +2480,8 @@ def _activity(fn, *args):
         state = activity.status(conn) if has_table("meta") else {"ready": False, "built_at": None, "error": None}
         if not state["ready"] or not has_table("provider_days"):
             return {"ready": False, "error": state.get("error"),
-                    "message": "The provider figures are built by the next analysis run. Press Sync and analyse now on the Data tab."}
+                    "message": "The provider figures are built by the next analysis run. Press "
+                               + ("Run the analysis now" if runtime.serverless() else "Sync and analyse now") + " on the Data tab."}
         with _ACTIVITY_LOCK:
             out = fn(conn, *args)
         if out is None:
@@ -2912,12 +3033,18 @@ async def activity_assumptions_save(request: Request, user: str = Depends(requir
 
 # --------------------------------------------------------------------------- progress: are we winning
 MONEY = "category IN ('downcoding','bundling','denial','underpayment') AND COALESCE(stale,0)=0"
+# a person's Done (the owner's decision 2: Paid with $0.00, its note starting with Done, as states.py reads it): nothing came
+# back from the payer, so Progress never counts it as paid later or as money recovered (review r2-4)
+DONE_SQL = "(status='resolved' AND COALESCE(recovered_cents,0)=0 AND substr(COALESCE(notes,''),1,4)='Done')"
+PAID_SQL = f"(status='resolved' AND NOT {DONE_SQL})"
 
 
 @app.get("/api/progress")
 def progress(_: str = Depends(require_auth)):
     out: dict[str, Any] = {}
-    out["pipeline"] = rows(f"SELECT status, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, COALESCE(SUM(recovered_cents),0) recovered_cents FROM findings WHERE {MONEY} GROUP BY 1")
+    # a person's Done is its own row ('done'): "Paid back" counts what the payers paid, never a service the patient was billed for
+    out["pipeline"] = rows(f"SELECT CASE WHEN {DONE_SQL} THEN 'done' ELSE status END status, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, "
+                           f"COALESCE(SUM(recovered_cents),0) recovered_cents FROM findings WHERE {MONEY} GROUP BY 1")
     # window open and window closed, counted as the Worklist's tiles count them (a routine-rate pattern is open while one
     # of its claims is, with those claims' cents), so the figures here are the ones a click on those tiles lists
     token = _WINDOWS_MEMO.set({})
@@ -2927,22 +3054,22 @@ def progress(_: str = Depends(require_auth)):
     finally:
         _WINDOWS_MEMO.reset(token)
     out["recovered_by_month"] = rows(f"""SELECT substr(recovered_date,1,7) month, category, COUNT(*) n, COALESCE(SUM(recovered_cents),0) cents
-                                         FROM findings WHERE {MONEY} AND status='resolved' AND recovered_date >= '2023-01' GROUP BY 1,2 ORDER BY 1""")
-    out["cohorts"] = rows(f"""SELECT month, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n,
-                                     COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
+                                         FROM findings WHERE {MONEY} AND {PAID_SQL} AND recovered_date >= '2023-01' GROUP BY 1,2 ORDER BY 1""")
+    out["cohorts"] = rows(f"""SELECT month, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n,
+                                     COALESCE(SUM(CASE WHEN {PAID_SQL} THEN recovered_cents END),0) recovered_cents,
                                      SUM(status IN ('appealed','in_progress')) working_n, SUM(status='lost') lost_n
                               FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL AND month >= '2024-01' GROUP BY 1 ORDER BY 1""")
-    out["by_payer"] = rows(f"""SELECT payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n,
-                                      COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
+    out["by_payer"] = rows(f"""SELECT payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n,
+                                      COALESCE(SUM(CASE WHEN {PAID_SQL} THEN recovered_cents END),0) recovered_cents,
                                       SUM(status='lost') lost_n, SUM(status IN ('appealed','in_progress')) working_n,
                                       COALESCE(SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END),0) open_cents,
                                       COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= ? THEN shortfall_cents END),0) live_cents,
-                                      ROUND(AVG(CASE WHEN status='resolved' AND recovered_date IS NOT NULL THEN julianday(recovered_date) - julianday(payment_date) END)) avg_days
+                                      ROUND(AVG(CASE WHEN {PAID_SQL} AND recovered_date IS NOT NULL THEN julianday(recovered_date) - julianday(payment_date) END)) avg_days
                                FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL
                                GROUP BY 1 HAVING n >= 25 ORDER BY cents DESC LIMIT 30""", (_day(0),))
     out["downcode_trend"] = rows(f"SELECT month, payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {FAMILY['downcoding'][0]} AND status != 'dismissed' AND COALESCE(stale,0)=0 AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1")
     out["visit_lines"] = rows(f"SELECT month, payer_group, SUM(lines) lines FROM exposure WHERE code IN ({EM_LIST}) AND month >= '2024-01' GROUP BY 1,2") if has_table("exposure") else []
-    out["family_trend"] = rows(f"""SELECT month, category, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n
+    out["family_trend"] = rows(f"""SELECT month, category, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM({PAID_SQL}) resolved_n
                                    FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1""")
     out["all_lines"] = rows("SELECT month, SUM(lines) lines FROM exposure WHERE month >= '2024-01' GROUP BY 1 ORDER BY 1") if has_table("exposure") else []
     out["snapshots"] = rows("SELECT at, status, SUM(n) n, SUM(cents) cents FROM progress_snapshots WHERE category IN ('downcoding','bundling','denial','underpayment') GROUP BY run_id, status ORDER BY at") if has_table("progress_snapshots") else []
@@ -2996,11 +3123,18 @@ def _cloud_sync_status() -> dict:
     return {"mode": "serverless", "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
             "interval_minutes": 0, "scheduler_running": False, "next_run": None, "cron_ready": bool(os.environ.get("CRON_SECRET")),
             "running": bool(st.get("running")), "running_since": (st.get("running") or {}).get("since"), "last_cycle": lc or None,
-            "stalled_since": (st.get("stalled") or {}).get("since"), "memory_mb": lc.get("memory_mb"),
+            # a lock left by a run the platform stopped (one left by a run that finished is only taken over: run_killed)
+            "stalled_since": (st.get("stalled") or {}).get("since") if cloud.run_killed(st.get("stalled"), lc) else None,
+            "memory_mb": lc.get("memory_mb"),
             "last_sync": lc.get("finished"), "newest_payment_date": newest, "feed_date": feed, "days_behind": behind, "has_data": st.get("has_data"),
             "last_file_ingested": files.get("last"), "last_remit_ingested": files.get("last835"), "storage_error": st.get("error"),
             "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
-            "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+            "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            # the owner's decision 1: this site analyses only on a press; every page says when it last did, and that the
+            # last run did not finish its work: an error, the platform stopping it (its lock left, no status of its own:
+            # cloud.run_killed), or the chain stopping after its last allowed run
+            "press_only": True, "analysed": lc.get("analysed"), "unchecked": lc.get("unchecked"),
+            "last_failed": bool(lc.get("error") or lc.get("halted") or cloud.run_killed(st.get("stalled"), lc)) and not st.get("running")}
 
 
 @app.get("/api/sync/status")
@@ -3043,30 +3177,20 @@ def sync_freshen(request: Request, _: str = Depends(require_auth)):
     if hours is not None and hours < FRESHEN_HOURS:
         return {"started": False, "hours": round(hours, 1)}
     if runtime.serverless():
-        from . import cloud
-        if runtime.preview():
-            return {"started": False, "reason": "preview"}
-        st = cloud.SERVING_COPY.status()
-        if st.get("running"):
-            return {"started": False, "running": True}
-        ok = cloud.trigger_cycle(base_url(request), "freshen")
-        cloud.SERVING_COPY._status = (0.0, None)
-        return {"started": bool(ok), "hours": None if hours is None else round(hours, 1)}
+        # the owner's decision 1: this site analyses only when someone presses Run the analysis now; opening a page on
+        # old data starts nothing (every page says when the site last analysed)
+        return {"started": False, "reason": "press", "hours": None if hours is None else round(hours, 1)}
     from .pipeline import run_once_in_background
     run_once_in_background(DB_PATH, "freshen")
     return {"started": True, "hours": None if hours is None else round(hours, 1)}
 
 
 @app.post("/api/sync/run", dependencies=[Depends(require_xhr)])
-def sync_run(request: Request, _: str = Depends(require_auth)):
+def sync_run(request: Request, user: str = Depends(require_auth)):
     if runtime.serverless():
-        from . import cloud
-        if runtime.preview():
-            raise HTTPException(409, "This is a preview deployment. Only the production site reads and writes the practice's data.")
-        if not cloud.trigger_cycle(base_url(request), "button"):
-            raise HTTPException(400, "The site cannot start a run: CRON_SECRET is not set. Add it in Vercel and redeploy.")
-        cloud.SERVING_COPY._status = (0.0, None)
-        return {"started": True}
+        # a signed-in person's press (the Feed's button, the Upload page's Read them now, the first load on /setup): the
+        # same press as the Data tab's Run the analysis now (the owner's decision 1), a run going said rather than doubled
+        return api_ops.press_run(request, user, "button")
     from .pipeline import run_once_in_background
     run_once_in_background(DB_PATH, "button")
     return {"started": True}
@@ -3112,29 +3236,30 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
     out = cloud.run_cloud_cycle(st, client, budget_s=max(60, runtime.max_seconds() - delay), trigger=trigger[:24], full=bool(full),
                                 force_detect=bool(force), delay_s=delay)
     # A run starts the next one only while it is getting somewhere, and only so many times in a row. Whatever goes
-    # wrong, the chain ends; the daily run or a person starts a new one.
+    # wrong, the chain ends; a person's press starts a new one (the owner's decision 1: nothing on a schedule). After an
+    # analysis, one more run does what only a run that does not analyse does (the archive, the provider tables, the weekly
+    # self-audit: cloud.tidy_due). A file that could not be fetched is tried twice more, a minute and a half apart:
+    # notifications start nothing on this host, so without this the file would wait for a press. cloud.next_run decides.
     hop = max(int(hop), 0)
-    if hop >= cloud.MAX_HOPS:
-        if out.get("more"):
-            out["halted"] = f"{hop} runs in a row without finishing"
-            cloud.write_status(st, out)
-    elif out.get("more") and out.get("progress"):
-        out["continued"] = cloud.trigger_cycle(base_url(request), "continue", hop=hop + 1)
-    elif (out.get("ingest") or {}).get("download_errors"):
-        # a file could not be fetched (a timeout, a busy server): try twice more, a minute and a half apart, then leave
-        # it to the daily run. Notifications start nothing in the meantime, so without this the file would wait a day.
-        if hop < 2:
-            out["continued"] = cloud.trigger_cycle(base_url(request), "retry", delay=90, hop=hop + 1)
-    elif not out.get("skipped") and not out.get("more"):
+    nxt = cloud.next_run(out, hop)
+    if nxt.get("halted"):
+        out["halted"] = nxt["halted"]
+        cloud.write_status(st, out)
+    elif nxt.get("trigger"):
+        out["continued"] = bool(cloud.trigger_cycle(base_url(request), nxt["trigger"], delay=nxt.get("delay") or 0, hop=hop + 1))
+        if nxt["trigger"] == "tidy":
+            out["continued_for"] = "tidy"
+    elif not nxt.get("end"):
         # files that landed while this cycle ran: new in the Dropbox folder, or an upload finished into the state folder's
-        # intake/ (its own cron call was skipped while this run held the lock), so it is read now, not by tomorrow's run
+        # intake/ (its own call was skipped while this run held the lock), so it is read now, by the chain the press started
         try:
             from .intake import state_pending
             late = "uploads" if state_pending(st) else ("files" if client is not None and cloud.has_new_files(st, client) else None)
             if late:
-                out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)
+                out["continued"] = bool(cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1))
                 out["continued_for"] = late
-        except Exception as exc:        # noqa: BLE001  (the daily run reads them; the answer says why none was started)
+        except Exception as exc:        # noqa: BLE001  (the next press reads them; the answer says why none was started)
+            runlog.caught(exc, "cron_cycle:continue", level="warning")
             out["continue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     return out
 
@@ -3143,23 +3268,6 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
 def dropbox_webhook_verify(challenge: str = ""):
     """Dropbox checks the address once by asking for its challenge to be echoed back."""
     return PlainTextResponse(challenge, headers={"X-Content-Type-Options": "nosniff"})
-
-
-def _webhook_work(origin: str) -> None:
-    """After a signed notification on a serverless host: start a cycle only when the data folder really has something
-    new. The app's own writes to its state folder raise notifications too, and those must not start one."""
-    try:
-        from . import cloud
-        from .dropbox_sync import DropboxClient
-        from .state import state_from_env
-        st = state_from_env(fast=True)
-        if st is None or runtime.preview():
-            return
-        # a run in progress looks for late arrivals itself when it ends; a run that failed is not retried from here
-        if cloud.webhook_should_start(st, getattr(st, "client", None) or DropboxClient(attempts=1, timeout=8)):
-            cloud.trigger_cycle(origin, "webhook", delay=45)
-    except Exception:
-        pass        # the daily scheduled run picks up anything a failed notification missed
 
 
 @app.post("/api/dropbox/webhook", include_in_schema=False)
@@ -3173,12 +3281,8 @@ async def dropbox_webhook(request: Request):
     if not secret or not hmac.compare_digest(sig.encode("utf-8", "replace"), expected.encode()):
         raise HTTPException(status_code=403, detail="bad signature")
     if runtime.serverless():
-        # A serverless host may freeze the process once the reply is sent, so the check runs before it: three short
-        # calls, well inside Dropbox's ten seconds. If it ever runs long the reply goes out anyway.
-        try:
-            await asyncio.wait_for(asyncio.to_thread(_webhook_work, base_url(request)), timeout=8)
-        except Exception:
-            pass
+        # the owner's decision 1: this site analyses only when someone presses Run the analysis now, so a new file in
+        # Dropbox starts nothing here (the server's own cycle reads it; the next press here reads it too)
         return PlainTextResponse("ok")
     from .pipeline import SCHEDULER, run_once_in_background
     if SCHEDULER.is_alive():
@@ -3342,6 +3446,7 @@ def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes |
     two identifiers; one uploaded or attached by a person ('upload', 'person') only by what its text shows."""
     from .notes import build_from_note, lesson
     ident = {"ok": True} if source == "ema" else _note_identity(detail, raw_claim, name, data, text)
+    detail = _with_payer_rules(detail)          # the payer's rule for the code goes to the review and the checklist
 
     def build(conn):
         out = build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
@@ -3589,7 +3694,11 @@ def uploads_list(_: str = Depends(require_auth)):
     """The Upload page: what was uploaded and what became of each file, what waits for the cycle, and the visit notes."""
     from . import uploads
     if runtime.serverless():
-        return {"server": False, "message": uploads.SERVER_ONLY}
+        # the owner's decision 1: this site analyses only on a press; the page says when it last did
+        a = api_ops.analysis_status()
+        return {"server": False, "message": uploads.SERVER_ONLY,
+                "cycle": {"press_only": True, "text": a.get("text"), "analysed": a.get("analysed"), "running": a.get("running"),
+                          "unchecked": a.get("unchecked")}}
     from .pipeline import LAST_KEY, LOCK_KEY, SCHEDULER
     conn = db()
     try:
@@ -4489,7 +4598,8 @@ BULK_RULE = ("status='open' AND COALESCE(stale,0)=0 AND work_state='work_now' AN
 BLOCK_WORDS = {"paid": "it was paid or settled", "credit": "the line carries a credit (money owed back)",
                "reprocessed": "the payer reprocessed the line after this answer", "waiting": "it waits on the payer's answer to work already done",
                "settled_in_ema": "EMA shows the line settled: find which payer paid before appealing it",
-               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)"}
+               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)",
+               "never_payable": "the payer's published rule does not pay this code, and no appeal changes that (its panel says what to check)"}
 # never appealed, whoever asks and whatever the item's status: a line paid, credited or reprocessed (amendment 14); one EMA
 # shows settled, or the archive shows likely paid (orchestrator decision 4), goes only after a person checked it is unpaid
 NEVER_APPEALED = ("paid", "credit", "reprocessed")
@@ -4502,7 +4612,8 @@ CLOSED_STATES = {"done": "it was found paid or settled", "accepted": "it is acce
                  "expired": "every window to appeal it has closed"}
 # why an open item a letter settles is not on the bulk list, in the "Left out" line's words and order
 LEFT_OUT = (("paid", "paid"), ("waiting", "waiting"), ("credit", "credit"), ("reprocessed", "reprocessed"), ("settled", "settled in EMA"),
-            ("likely_paid", "likely paid"), ("no_date", "no filing date"), ("no_state", "state not worked out yet"), ("other", "other"))
+            ("likely_paid", "likely paid"), ("never_payable", "never payable under the payer's rule"), ("no_date", "no filing date"),
+            ("no_state", "state not worked out yet"), ("other", "other"))
 LEFT_OUT_WORDS = dict(BLOCK_WORDS, settled="EMA shows it settled: find which payer paid", no_date="no filing date on file: its panel says what to check",
                       no_state="the run has not worked out its state yet", other="not an item to appeal now")
 
@@ -4514,10 +4625,10 @@ def _bulk_ready(cols: set[str]) -> bool:
 
 def _left_out_reason(r: dict) -> str:
     """Why an open item an appeal letter would settle is not on the bulk list (LEFT_OUT): paid, waiting, credit,
-    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), no filing date,
-    no state worked out yet, or other."""
+    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), never payable
+    under the payer's published rule (the owner's decision 4), no filing date, no state worked out yet, or other."""
     block = r.get("appeal_block")
-    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid"):
+    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid", "never_payable"):
         return block
     if block in ("settled_in_ema", "patient_paid"):
         return "settled"
@@ -4743,7 +4854,8 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
         packet_id = pk["packet_id"]
     elif kind == "rate":
         from .notes import build_letter_only
-        packet_id = _keep_packet(lambda conn: build_letter_only(conn, detail, raw_claim, reveal=SHOW_PHI))["packet_id"]
+        rated = _with_payer_rules(detail)
+        packet_id = _keep_packet(lambda conn: build_letter_only(conn, rated, raw_claim, reveal=SHOW_PHI))["packet_id"]
     else:
         from . import modmed
         key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))
@@ -5582,6 +5694,10 @@ def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = D
     prov = fax.provider()
     if prov is None:
         return {"skipped": fax.not_here() or "The fax line is not set up."}
+    # the line's reads are tried again after a dropped connection (remitwatch.repair), as in the cycle's fax run; a send
+    # is never wrapped: it may have gone out
+    from . import repair
+    prov = repair.resilient(prov, "srfax", only=("status", "inbox", "fetch", "check", "find_sent"))
     budget = max(60.0, runtime.max_seconds() - 60.0) if runtime.serverless() else 3600.0
     try:
         with fax_run("daily run") as lock:
@@ -5623,10 +5739,10 @@ def ema_report_decision(file_id: str, request: Request, body: dict = Body(defaul
         cloud.SERVING_COPY.record({"kind": "ema_report_decision", "file_id": file_id, "decision": decision, "actor": user})
         if decision == "apply":
             ema_ledger.LedgerHandle(st).clear_attempt(file_id)
-            started = cloud.trigger_cycle(base_url(request), trigger="decision")
-        else:
-            started = False
-        return {"ok": True, "file_id": file_id, "decision": decision, "run_started": bool(started)}
+        # the owner's decision 1: nothing starts a run on this site but a press; the next press reads the report again
+        return {"ok": True, "file_id": file_id, "decision": decision, "run_started": False,
+                **({"text": "Applied: the next analysis reads it again. Press Run the analysis now on the Data tab."}
+                   if decision == "apply" else {})}
     from . import ema_reports
     conn = db()
     try:
@@ -5973,3 +6089,5 @@ from . import api_ema  # noqa: E402  (unit C2: Today's EMA figures, the Data tab
 app.include_router(api_ema.router)
 from . import api_results  # noqa: E402  (unit R: the Results tab, the scoreboard Today shows, the daily spot checks)
 app.include_router(api_results.router)
+from . import api_ops  # noqa: E402  (the Data tab's operations panels, the diagnostic bundle, the decision log, the archive)
+app.include_router(api_ops.router)

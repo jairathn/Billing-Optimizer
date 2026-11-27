@@ -1,5 +1,10 @@
 # Data (contains PHI): never commit
 data/
+# except the public payer rules the app reads (facts about payers and codes, no practice data: tests/test_payer_code_rules.py);
+# anything else put in that folder stays ignored
+!remitwatch/data/
+remitwatch/data/*
+!remitwatch/data/payer_code_rules.json
 uploads/
 *.sqlite
 *.sqlite-wal

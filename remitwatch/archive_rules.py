@@ -881,14 +881,18 @@ def _act(action: str, rule: str, f: Mapping | None, strength: str, proof: list[d
 
 
 def _close(rule: str, f: Mapping, pay: Ans, paid_cents: int, note: str, how: str, proof: list[dict], *, recovery: bool,
-           strength: str = "proven") -> dict:
+           strength: str = "proven", arrived_cents: int | None = None) -> dict:
     """A closure in the shape Detector._mark_paid takes: the payment's date, amount, a note and the paid_later detail. The
     detail names the paying line and its units: each unit of a payment counts as recovered on one item only (trace finding
-    T-C5: counted by date, trace and claim, a second line paid on the same claim recorded $0)."""
+    T-C5: counted by date, trace and claim, a second line paid on the same claim recorded $0). arrived_cents: what actually
+    arrived after the item's answer when less than the payment (the payer took back an earlier payment of the service
+    with it); the recovery is never more."""
     detail = {"payment_date": pay.paid_on or None, "claim": pay.pcn, "trace": pay.trace, "paid_cents": paid_cents,
               "claim_status": pay.status, "how": how, "rule": rule, "line_key": pay.line_key, "units": pay.unit_count}
+    if arrived_cents is not None:
+        detail["arrived_cents"] = arrived_cents
     return _act("close_with_proof", rule, f, strength, proof, paid_date=pay.paid_on or None, paid_cents=paid_cents, note=note,
-                detail=detail, counts_as_recovery=recovery)
+                detail=detail, counts_as_recovery=recovery, arrived_cents=arrived_cents)
 
 
 def _reclass(rule: str, f: Mapping, reclass: str, label: str, hint: str, shortfall: int | None, state: str, proof: list[dict],
@@ -946,6 +950,55 @@ def _owed_once(allowed: int, expected: int, share: int) -> int:
     """What a payer owes for one service: its own allowed amount (else the expected one), less the patient's share. A
     payer that paid more than that has overpaid by its own reckoning, which is what it will take back."""
     return max((allowed or expected or 0) - (share or 0), 0)
+
+
+def owed_in_second_role(lines: Sequence[Mapping], others_paid: int, expected: int | None,
+                        others_left: int | None = None) -> dict | None:
+    """What a payer owes for a service it answered in another role than the one it denied it in (as secondary after a
+    denial as primary), and what is left once its payment is counted (the owner's decision 3 of 2026-11-26: the recovery
+    is what arrived; what the payer still owes stays listed). lines: the payer's answer lines in that role, as
+    {'allowed', 'charge', 'paid', 'adj': [(group, reason, cents)]} ('paid' what still stands of each); others_paid: what
+    the other payers paid for the service, by their remittances on file (standing).
+    The rule: its allowed amount (else the item's expected amount, sized as the item is), never above the charge, less what
+    the other payers paid (their remittances on file; with none on file, the prior payer's answer as the payer itself
+    applied it, OA-23), less the patient's share it set (PR), and never more than the other payers left on the line when
+    their remittances are on file (`others_left`: the patient share they set; what they took off as contractual is no
+    one's to pay, whatever this payer's own allowed amount: review r1-7). With neither, nothing tells what the other payers
+    paid and the remainder cannot be sized: None, never a guess. Integer cents throughout."""
+    allowed = sum(max(int(x.get("allowed") or 0), 0) for x in lines)
+    charge = sum(max(int(x.get("charge") or 0), 0) for x in lines)
+    paid = sum(int(x.get("paid") or 0) for x in lines)
+    stated = sum(int(c or 0) for x in lines for g, r, c in (x.get("adj") or []) if g == "OA" and r == "23")
+    share = sum(int(c or 0) for x in lines for g, _r, c in (x.get("adj") or []) if g == "PR")
+    if (others_paid or 0) > 0:
+        prior, prior_from = int(others_paid), "on_file"
+    elif stated > 0:
+        prior, prior_from = stated, "stated"
+    else:
+        return None
+    base = allowed if allowed > 0 else max(int(expected or 0), 0)
+    if charge > 0:
+        base = min(base, charge)
+    owed = max(base - prior - share, 0)
+    capped = None
+    if prior_from == "on_file" and others_left is not None and max(int(others_left), 0) < owed:
+        owed = capped = max(int(others_left), 0)
+    return {"owed_cents": owed, "paid_cents": paid, "left_cents": max(owed - paid, 0), "allowed_cents": allowed or None,
+            "base_cents": base, "prior_cents": prior, "prior_from": prior_from, "patient_cents": share, "left_by_others_cents": capped}
+
+
+def second_role_words(due: Mapping, who: str, role: str, day: str | None) -> str:
+    """One plain sentence for a payment in another role short of what the payer owes in it (owed_in_second_role)."""
+    prior = ("the other payers' payments on file" if due.get("prior_from") == "on_file"
+             else "the prior payer's answer as it applied it (OA-23)")
+    allowed = due.get("allowed_cents")
+    base = (f"its allowed amount {_usd(due['base_cents'])}" if allowed and allowed == due["base_cents"] else
+            f"the charge {_usd(due['base_cents'])}" if allowed else f"the expected {_usd(due['base_cents'])}")
+    share = f" and the patient's share {_usd(due['patient_cents'])}" if due.get("patient_cents") else ""
+    cap = (f", at most the {_usd(due['left_by_others_cents'])} the other payers left on the line"
+           if due.get("left_by_others_cents") is not None else "")
+    return (f"{who} paid {_usd(due['paid_cents'])} {role} on {day}; it owes {_usd(due['owed_cents'])} for the service in that role "
+            f"({base}, less {prior} {_usd(due['prior_cents'])}{share}{cap}), so {_usd(due['left_cents'])} is left to ask it for.")
 
 
 def same_payer_paid_before(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
@@ -1356,14 +1409,42 @@ def units_split(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: 
             p = later[0]
             amt = sum(x.standing for x in later)
             # the payer answering in another role (the claim it denied as primary, paid as secondary once the primary's
-            # answer came) is the usual course of the claim, not money recovered by working the denial
+            # answer came). The owner's decision 3 (2026-11-26): what arrived after the denial is the recovery, and what
+            # the payer still owes for the service in that role stays listed, with its proof
             switched = (p.status in PRIMARY_STATUSES) != (a.status in PRIMARY_STATUSES)
+            arrived_later = (p.paid_on or "") > (a.paid_on or "")
             others_unpaid = len(groups) > 1 and not any(tag[x.line_key] == "other" and x.standing > 0 for x in same)
+            role = "as secondary" if switched and p.status in SECONDARY_STATUSES else "as primary" if switched else ""
+            # what actually arrived after the denial (decision 3): the payer's answers of the service after it, its takebacks
+            # (reversals) included. A payment that came with the payer's takeback of an earlier payment of the service (often
+            # one the archive does not hold: the payer processed again a claim it had paid before the denial) brought only
+            # the difference
+            arrived, taken = amt, 0
+            if switched and arrived_later:
+                after = [x for x in ans if x.line_key != a.line_key and _after(x, a) and _same_payer_loose(x, p)]
+                taken = -sum(x.paid or 0 for x in after if x.status == REVERSAL_STATUS and (x.paid or 0) < 0)
+                if taken > 0:
+                    net = sum(x.paid or 0 for x in after if x.status == REVERSAL_STATUS or (x.status in PAYMENT_STATUSES and (x.paid or 0) > 0))
+                    arrived = max(0, min(amt, net))
+            if switched and arrived_later:
+                firsts = [x for x in ans if x.line_key != a.line_key and x.standing > 0 and x.status in PAYMENT_STATUSES and not _same_payer(x, a)]
+                others = sum(x.standing for x in firsts)
+                due = owed_in_second_role([{"allowed": x.allowed, "charge": x.charge, "paid": x.standing, "adj": x.adj} for x in later],
+                                          others, f.get("expected_cents"), sum(x.pr_cents() for x in firsts) if firsts else None)
+                if due and due["left_cents"] > 0:
+                    hint = second_role_words(due, p.payer_name or "The payer", role, p.paid_on)
+                    # what arrived after the denial goes with it (proof; the Results tab counts the payment: review r1-8)
+                    out.append(_reclass(R_UNITS, f, "second_role_short", f"Paid in part {role}", hint, due["left_cents"], "work_now",
+                                        proof, "proven", second_role=dict(due, date=p.paid_on, role=role, text=hint, arrived_cents=arrived)))
+                    continue
             note = (f"Paid on this line: {p.payer_name or 'the payer'} paid it {_usd(amt)}"
-                    + (" as secondary" if switched and p.status in SECONDARY_STATUSES else "") + f" on {p.paid_on}"
+                    + (f" {role}" if role == "as secondary" else "") + f" on {p.paid_on}"
                     + ("; the unit it denied was another line of the claim." if others_unpaid else "."))
-            out.append(_close(R_UNITS, f, p, amt, note, "paid on the item's own line",
-                              proof, recovery=(p.paid_on or "") > (a.paid_on or "") and not switched))
+            if arrived < amt:
+                note += (f" It took back {_usd(taken)} it had paid for the service before, so "
+                         + ("nothing new arrived after the denial." if arrived <= 0 else f"{_usd(arrived)} arrived after the denial."))
+            out.append(_close(R_UNITS, f, p, amt, note, "paid on the item's own line", proof, recovery=arrived_later and arrived > 0,
+                              arrived_cents=arrived if arrived < amt else None))
             continue
         if any(tag[x.line_key] == "own" and _after(x, a) and x.to_patient_only() for x in same):
             continue                    # the payer answered this very line again, onto the patient's deductible: rule 5's
@@ -2149,20 +2230,26 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
 
 
 # ------------------------------------------------------------------------------- 8. PR-group denials and CO-147
-# reason -> (signal, severity, actionable, who should pay, what to fix); the Medicaid wording is in _pr_words
+# reason -> (signal, severity, actionable, who should pay, what to fix). The patient-group reasons follow the owner's decision 2
+# of 2026-11-26: the payer put the service on the patient, so the patient is billed (Medicare's and Medicaid's alike: the
+# payer itself assigned the amount to the patient), and the fix names what else can still be done
 PR_REASONS: dict[str, tuple] = {
-    "288": ("DENIED_REFERRAL", "high", "correct_and_resubmit", "the payer, once a referral from the patient's primary care doctor is on file",
-            "Get the referral (a retroactive one if the plan allows it) and send a corrected claim with the referral number."),
-    "27": ("DENIED_COVERAGE_DATES", "high", "review", "the plan that covered the patient on the date of service, else the patient",
-           "Check the patient's coverage on the date of service, update the insurance in EMA and bill the plan that covered that day."),
-    "26": ("DENIED_COVERAGE_DATES", "high", "review", "the plan that covered the patient on the date of service, else the patient",
-           "Check the patient's coverage on the date of service, update the insurance in EMA and bill the plan that covered that day."),
-    "200": ("DENIED_COVERAGE_DATES", "high", "review", "the plan that covered the patient on the date of service, else the patient",
-            "The coverage had lapsed on that day: check for other coverage, bill it, or bill the patient."),
-    "49": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, when the visit was routine",
-           "If the visit treated a problem, correct the diagnosis and send a corrected claim; if it was routine, bill the patient."),
-    "204": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, under the plan's exclusion",
-            "Check the patient's benefits: bill the patient, or send a corrected claim if a covered code or diagnosis applies."),
+    "288": ("DENIED_REFERRAL", "high", "correct_and_resubmit", "the patient, as the payer set it (no referral on file)",
+            "Bill the patient; or get a referral from the patient's primary care office (a retroactive one if the plan allows it) "
+            "and send a corrected claim with the referral number."),
+    "27": ("DENIED_COVERAGE_DATES", "high", "review", "the patient, as the payer set it (the coverage had ended)",
+           "Bill the patient, and ask for their current insurance: a plan that covered that day pays more than the patient does, "
+           "and the claim then goes to it within its filing window."),
+    "26": ("DENIED_COVERAGE_DATES", "high", "review", "the patient, as the payer set it (the coverage had not started)",
+           "Bill the patient, and ask for their current insurance: a plan that covered that day pays more than the patient does, "
+           "and the claim then goes to it within its filing window."),
+    "200": ("DENIED_COVERAGE_DATES", "high", "review", "the patient, as the payer set it (the coverage had lapsed)",
+            "Bill the patient, and ask for their current insurance: a plan that covered that day pays more than the patient does, "
+            "and the claim then goes to it within its filing window."),
+    "49": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, as the payer set it (a routine service)",
+           "Bill the patient; if the visit treated a problem rather than a routine check, correct the diagnosis and send a corrected claim."),
+    "204": ("DENIED_PLAN_EXCLUSION", "low", "review", "the patient, as the payer set it (not covered by the plan)",
+            "Bill the patient; send a corrected claim only if a covered code or diagnosis applies."),
     "147": ("DENIED_CONTRACT_RATE", "high", "review", "the payer, at the contracted rate, once the clinician is loaded on the agreement",
             "Ask the payer to link the clinician to the practice's agreement (credentialing), then to reprocess the claim."),
 }
@@ -2170,14 +2257,28 @@ PR_GROUP_CODES = frozenset({"288", "27", "26", "200", "49", "204"})
 
 
 def _pr_words(reason: str, kind: str | None) -> tuple[str, str]:
+    """Who should pay and what to fix. A Medicaid plan's referral answer names the member's assigned primary care office;
+    the patient is billed as for any payer (the owner's decision 2)."""
     signal, _sev, _act_, who, fix = PR_REASONS[reason]
-    if kind == "medicaid" and reason != "147":
-        who = "the payer: a Medicaid member cannot be billed for a covered service"
-        if reason == "288":
-            fix = "Get a referral from the member's assigned primary care office (a retroactive one if needed) and send a corrected claim with it."
-        elif reason in ("27", "26", "200"):
-            fix = "Check the member's eligibility on the date of service and bill the plan that covered that day; never bill the member."
+    if kind == "medicaid" and reason == "288":
+        fix = ("Bill the patient; or get a referral from the member's assigned primary care office (a retroactive one if needed) and "
+               "send a corrected claim with it.")
     return who, fix
+
+
+def patient_share_of(a: Ans, svc: Sequence[Ans]) -> tuple[int, int]:
+    """(what the payer put on the patient for the line: every PR amount on it, never more than the charge less what any
+    payer paid for the service; what the payers paid). The size of a patient-group denial (the owner's decision 2)."""
+    paid = sum(x.standing for x in svc if x.line_key != a.line_key and x.standing > 0 and x.status in PAYMENT_STATUSES)
+    share = max(min(a.pr_cents(), (a.charge or 0) - paid), 0)
+    # a payer that answered the service after this one (the next payer) set the patient's part itself: never more than the
+    # patient share it left, its contractual part being no one's to bill (review r1-5; states.patient_share the same)
+    later = [x for x in svc if x.line_key != a.line_key and _after(x, a) and x.status != REVERSAL_STATUS and not _void(x)]
+    if later:
+        nxt = max(later, key=lambda x: (x.paid_on or "", x.line_key or ""))
+        if nxt.pr_cents() > 0:
+            share = min(share, nxt.pr_cents())
+    return share, paid
 
 
 COVERAGE_CODES = frozenset({"27", "26", "200"})        # coverage dates: the fix is to bill the plan that covered the day
@@ -2325,8 +2426,13 @@ def _pr_actions(conn: sqlite3.Connection, items: list, arch: Archive, cand: Mapp
             if shortfall is not None and shortfall <= 0:
                 continue
         else:
-            expected = usual or priced
-            shortfall = expected
+            # the owner's decision 2 (2026-11-26): the payer put the service on the patient, so the item is worth what the
+            # patient owes as the payer set it (patient_share_of); the payer's usual rate stays in the evidence for the
+            # other ways out (a retroactive referral, the plan that covered the day)
+            share, _paid_by = patient_share_of(a, svc)
+            if share <= 0:
+                continue                    # the payers paid the whole charge: the patient owes nothing
+            expected = shortfall = share
         label = {"288": "referral absent", "27": "coverage had ended", "26": "coverage had not started", "200": "coverage had lapsed",
                  "49": "routine service not covered", "204": "not covered by the plan", "147": "clinician not on the payer's contract"}[reason]
         rarc = ",".join(a.rem) if a.rem else None
@@ -2355,6 +2461,13 @@ def _pr_actions(conn: sqlite3.Connection, items: list, arch: Archive, cand: Mapp
                         usual_basis or "no baseline for this code"),
               "carc_group": g, "who_should_pay": who, "what_to_fix": fix,
               "archive_rule": {"rule": R_PR, "action": "raise_item", "strength": "proven"}}
+        if reason in PR_GROUP_CODES:
+            pr = [[f"{gg}-{rr}", c] for gg, rr, c in (a.adj or []) if gg == "PR" and c]
+            ev["basis"] = (f"what the payer put on the patient on its 835 ({', '.join(f'{k} {_usd(c)}' for k, c in pr)}), at most the "
+                           "charge less what any payer paid")
+            ev["patient_share"] = {"cents": shortfall, "pr": pr, "charge_cents": a.charge, "payers_paid_cents": _paid_by}
+            if usual or priced:
+                ev["payer_rate_cents"], ev["payer_rate_basis"] = usual or priced, (usual_basis if usual else "the payer's allowed amount on the line")
         if older:
             ev["replaces"] = [f["finding_id"] for f, _x in older]
         hint = f"Who should pay: {who}. What to fix: {fix}"
@@ -3043,6 +3156,12 @@ def apply_actions(det, actions: Iterable[Mapping]) -> dict:
                 else:
                     info["proposed_shortfall_cents"] = new      # a likely reading changes no dollars until a person confirms it
             _merge_evidence(f, "archive_rule", info)
+            if act.get("second_role"):
+                # what the payer owes in the role it paid in, and what is left (the owner's decision 3): the item's state
+                # and next step read it from here, as they read the settled-as-secondary closure's (detect.py). What arrived
+                # (arrived_cents, dated) is kept with it as proof; the Results tab counts that payment as money returned on
+                # the item, while recovered_cents stays a closure's amount (the save clears it on an item still open)
+                _merge_evidence(f, "second_role", act["second_role"])
             n[kind] += 1
         elif kind == "fold_into" and f is not None:
             into = det.findings.get(act["into"])

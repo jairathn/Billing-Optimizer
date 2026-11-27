@@ -84,11 +84,14 @@ REMITWATCH_SYNC_INTERVAL_MINUTES, on a Dropbox webhook, or from Sync now), under
 uploads from the intake folder, the Dropbox delta, TriZetto, the reports waiting to be read again, the ledger refresh,
 detection (when anything changed or the rules changed), alerts, mail, the daily backup and the fax run.
 
-Serverless (Vercel): the daily cron calls /api/cron/cycle (10:17 UTC; vercel.json). One run takes lock.json in the
-state folder, loads the store image into memory (2 GB function, 300 s), folds in the journal, reads the intake folder,
-TriZetto (only when switched on there), the Dropbox delta and one Production file at most, then detection (or hands it to
-a fresh invocation), saves the store, then the dashboard's copy, mails, writes status.json and releases the lock. A run
-that has more to do starts the next one itself (at most 30 in a row).
+Serverless (Vercel): no daily analysis (the owner's decision 1). A run starts only when someone presses "Run the
+analysis now" (the Data tab), which calls /api/cron/cycle; vercel.json's only cron is the fax line's (15:43 UTC). One run
+takes lock.json in the state folder, loads the store image into memory (2 GB function, 300 s), folds in the journal,
+reads the intake folder, TriZetto (only when switched on there) and the Dropbox delta (EMA's A/R report only: Production
+waits for the server, REMITWATCH_EMA_REPORTS), then detection (or hands it to a fresh invocation), saves the store, then
+the dashboard's copy, mails, writes status.json and releases the lock. A run that has more to do starts the next one
+itself (at most 30 in a row), and once the chain has analysed, one more run does what is due of the archive pass, the
+provider tables and the weekly self-audit (cloud.tidy_due) and analyses nothing.
 
 Both hosts write the run's logs (remitwatch.runlog), keep the decision log of every automatic change to an item, run
 the self-checks (remitwatch.selfcheck) and the self-repair rules (remitwatch.repair). The software repairs operational

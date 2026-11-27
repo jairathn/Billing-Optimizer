@@ -245,7 +245,8 @@ def test_a_file_sent_in_pieces_lands_in_the_intake_folder_with_its_exact_sidecar
         assert not [f for f in os.listdir(os.path.dirname(site.intake_dir())) if f.endswith(".part")]
         assert site.kicked == [site.db] and "The next cycle reads it." in fin["lines"]
     else:
-        assert site.triggered == ["upload"] and "The next run was asked to start now; it reads the file first." in fin["lines"]
+        # Vercel starts no run by itself (the owner's decision 1): the next press reads it first
+        assert site.triggered == [] and any("Run the analysis now" in x for x in fin["lines"]), fin["lines"]
     st = status(site, up.uid)
     assert st["state"] == "finished" and st["chunks"] == [hashlib.sha256(p).hexdigest() for p in up.pieces]
     assert st["name"] == NAME and st["report_hint"] == "production"
@@ -519,7 +520,7 @@ def test_finishing_twice_answers_the_same(site):
     assert b.json()["state"] == "finished" and b.json()["lines"][0] == a.json()["lines"][0]
     assert len(site.intake()) == 2
     if site.mode != "server":
-        assert site.triggered == ["upload"]           # one run asked for, not two
+        assert site.triggered == []                   # no run asked for: the next press reads it (decision 1)
 
 
 def test_what_the_cycle_made_of_a_report_is_said_from_the_catalog(tmp_path):
@@ -718,11 +719,13 @@ def test_the_cycle_is_asked_to_read_the_file_when_intake_can_be_asked(build, mon
 _real_kick = uploads.kick_intake
 
 
-def test_a_serverless_site_asks_for_a_run_and_a_preview_takes_nothing(build, monkeypatch):
+def test_a_serverless_site_waits_for_a_press_and_a_preview_takes_nothing(build, monkeypatch):
+    """Vercel starts no run when an upload finishes (the owner's decision 1, 2026-11-26: it analyses only when someone
+    presses Run the analysis now; until then the upload asked for a run); a preview deployment takes nothing."""
     for mode in ("local", "dropbox"):
         site = build(mode)
         r = Up(site, text_report()).send()
-        assert r.status_code == 200 and site.triggered == ["upload"]
+        assert r.status_code == 200 and site.triggered == []
         monkeypatch.setenv("VERCEL_ENV", "preview")
         r = Up(site, text_report(seed=5)).start()
         assert r.status_code == 409 and "preview deployment" in r.json()["detail"]
@@ -1585,8 +1588,9 @@ def test_a_run_going_now_is_said_when_an_upload_finishes(build):
         assert r.status_code == 200
         assert "A run is going now. When it ends, the next run starts and reads this file first." in r.json()["lines"]
         site.state.delete(cloud.LOCK)
-        r = Up(site, text_report(seed=32)).send()
-        assert "The next run was asked to start now; it reads the file first." in r.json()["lines"]
+        r = Up(site, text_report(seed=32)).send()       # no run going: the next press reads it (the owner's decision 1)
+        assert ("The next analysis reads it first. This site analyses only when someone presses Run the analysis now on "
+                "the Data tab.") in r.json()["lines"]
 
 
 def test_the_cycles_clean_up_needs_no_page_and_never_raises(build, monkeypatch):

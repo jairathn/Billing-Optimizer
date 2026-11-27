@@ -932,7 +932,17 @@
     recent();
     let h;
     try { h = await apiCall('/api/uploads'); } catch (e) { $('#hist').textContent = e.message; return; }
-    if (!h.server) { $('#away').hidden = false; $('#awayMsg').textContent = h.message; $('#here').hidden = true; return; }
+    if (!h.server) {
+      $('#away').hidden = false; $('#awayMsg').textContent = h.message; $('#here').hidden = true;
+      const c0 = h.cycle || {};          // the Vercel site analyses only on a press (the owner's decision 1)
+      if (c0.press_only) {
+        const an = c0.analysed || {};
+        $('#pressLine').hidden = false;
+        $('#pressLine').textContent = (c0.text || '') + ' ' + (an.at ? 'It last analysed ' + when(an.at) + '.' : 'It has not analysed yet.')
+          + (c0.running ? ' A run is going now.' : '') + (c0.unchecked && c0.unchecked.text ? ' ' + c0.unchecked.text : '');
+      }
+      return;
+    }
     info = Object.assign(info, h); $('#here').hidden = false;
     const c = h.cycle || {};
     $('#cycle').innerHTML = (h.queued ? `<b>${h.queued} file${h.queued === 1 ? '' : 's'}</b> to be read by the next cycle. ` : 'Nothing is waiting. ')

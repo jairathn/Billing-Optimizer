@@ -32,7 +32,15 @@ async function refreshHeader(){
     const behind = st.days_behind;      // from the day the remittances reach for most payers, not one stray newer file
     const cls = behind==null ? 'muted' : (behind>14 ? 'sev-high' : (behind>7 ? 'sev-medium' : 'ok'));
     const reach = st.feed_date && st.newest_payment_date && st.feed_date < st.newest_payment_date ? ` · remittances reach ${esc(st.feed_date)} for most payers` : '';
-    const how = st.running ? 'syncing now' : (st.dropbox_configured ? (st.mode==='serverless' ? 'checks Dropbox daily and when files arrive' : (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand')) : 'Dropbox not connected');
+    // the Vercel site analyses only on a press (the owner's decision 1): every page says when it last did, and what its
+    // last run could not check
+    const an = st.analysed || {}, un = st.unchecked;
+    // (while a run is going too: it says so, and still when the site last analysed and that it analyses only on a press)
+    // what the last run could not check: the open items, and the remittance claims it read and did not analyse, in dollars
+    const rd = un && un.read && un.read.claims ? `${esc(String(un.read.claims))} remittance claim${un.read.claims===1?'':'s'} read since (${money(un.read.cents)} not paid)` : '';
+    const notChecked = un && un.read_since !== false && (un.n || rd) ? [un.n ? `${esc(String(un.n))} open item${un.n===1?'':'s'} (${money(un.cents)})` : '', rd].filter(Boolean).join(' and ') : '';
+    const press = st.press_only ? `${st.running ? 'analysing now · ' : ''}${an.at ? 'last analysed ' + esc(String(an.at).slice(0,16).replace('T',' ')) + ' UTC' : 'not analysed yet'} · analyses only when someone presses Run the analysis now (Data tab)${st.last_failed && !st.running ? ' · <span class="sev-high">the last run stopped before it finished (Data tab)</span>' : ''}${notChecked ? ` · <span class="sev-medium">the last run could not check ${notChecked}</span>` : ''}` : '';
+    const how = st.press_only ? press : (st.running ? 'syncing now' : (st.dropbox_configured ? (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand') : 'Dropbox not connected'));
     $('#feedChip').innerHTML = reach ? `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${reach}${behind!=null?` (${behind} days ago)`:''} · ${how}`
       : `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${behind!=null?` (${behind} days ago)`:''} · ${how}`;
   } catch(e){ /* older store without these tables */ }
@@ -187,7 +195,8 @@ async function progressTab(v){
     ${kpi('Being worked', money(g('appealed').cents+g('in_progress').cents), (g('appealed').n+g('in_progress').n).toLocaleString()+' sent or started', 'working')}
     ${kpi('Window open', money(p.live.cents), p.live.n.toLocaleString()+' items you can still get back', 'open')}
     ${kpi('Window closed', money(p.expired.cents), p.expired.n.toLocaleString()+' items (filing rules partly estimated)', 'closed')}
-    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', '') : ''}</div>
+    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', '') : ''}
+    ${g('done').n ? kpi('Marked done', money(g('done').cents), g('done').n.toLocaleString()+' closed by a person with nothing from the payer (the patient billed, or given up)', '') : ''}</div>
     <div class="grid two">
       <div class="panel"><h2>Recovered by month</h2><div class="note">Money paid on a later remittance for lines that were first denied, bundled or cut. Counted automatically when the payment arrives.</div><canvas id="cRec"></canvas></div>
       <div class="panel"><h2>Share recovered, by month of the first payment</h2><div class="note">Of what went wrong in each month, how much has been won back so far. Recent months are still in play.</div><canvas id="cCoh"></canvas></div>
@@ -227,22 +236,23 @@ async function feedPanel(el){
   const yes = (b, t, f) => b ? `<span class="ok">${t}</span>` : `<span class="sev-medium">${f}</span>`;
   el.innerHTML = `<div class="panel"><h2>Feed</h2><table>
     <tr><td>Dropbox connection</td><td>${yes(s.dropbox_configured,'connected','not configured: set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN')}</td></tr>
-    ${cloud ? `<tr><td>Automatic sync</td><td>${yes(s.cron_ready,'once a day (between 10 and 11 UTC, early morning Central), and when Dropbox reports a new file','off: CRON_SECRET is not set')} · <a href="/setup">setup checklist</a></td></tr>
+    ${cloud ? `<tr><td>Analysis</td><td>only when someone presses Run the analysis now (below, in Analysis on this site)${s.analysed && s.analysed.at ? `; last analysed ${esc(String(s.analysed.at).replace('T',' ').slice(0,16))} UTC` : ''}${s.cron_ready ? '' : ' · <span class="sev-medium">off: CRON_SECRET is not set</span>'} · <a href="/setup">setup checklist</a></td></tr>
     ${s.storage_error?`<tr><td>Storage</td><td><span class="sev-high">${esc(s.storage_error)}</span></td></tr>`:''}
-    ${s.stalled_since?`<tr><td>Last run</td><td><span class="sev-high">A run that started ${esc(String(s.stalled_since).replace('T',' ').slice(0,16))} UTC stopped without finishing (out of memory or time). The next run picks up where it left off.</span></td></tr>`:''}
+    ${s.stalled_since?`<tr><td>Last run</td><td><span class="sev-high">A run that started ${esc(String(s.stalled_since).replace('T',' ').slice(0,16))} UTC stopped without finishing (out of memory or time). No run comes here without a press: press Run the analysis now (below, in Analysis on this site) to carry on from where it stopped.</span></td></tr>`:''}
     ${(lc.ingest&&lc.ingest.failed&&lc.ingest.failed.length)?`<tr><td>Files the last run could not use</td><td><span class="sev-medium">${lc.ingest.failed.map(esc).join(', ')}</span><div class="small muted">Each is skipped until it changes in Dropbox. Replace the file there to have it read.</div></td></tr>`:''}
-    ${lc.halted?`<tr><td>Last run</td><td><span class="sev-high">Stopped after ${esc(lc.halted)}. Press Sync and analyse now to continue.</span></td></tr>`:''}
+    ${lc.halted?`<tr><td>Last run</td><td><span class="sev-high">Stopped after ${esc(lc.halted)}. Press Run the analysis now (below, in Analysis on this site) to carry on.</span></td></tr>`:''}
     ${mem.peak?`<tr><td>Memory used by the last run</td><td>${fmtInt(mem.peak)} MB at its peak${mem.limit?` of ${fmtInt(mem.limit)} MB available`:''}</td></tr>`:''}`
     : `<tr><td>Automatic sync</td><td>${s.interval_minutes?`every ${s.interval_minutes} minutes${s.next_run?', next about '+s.next_run.replace('T',' ').slice(0,16)+' UTC':''}`:'off (set REMITWATCH_SYNC_INTERVAL_MINUTES, for example 60)'} ${s.scheduler_running?'<span class="ok">· scheduler running</span>':''}</td></tr>`}
-    <tr><td>Instant sync on upload</td><td>${yes(s.webhook_ready,'ready: point the Dropbox app webhook at /api/dropbox/webhook','needs DROPBOX_APP_SECRET')}</td></tr>
+    ${cloud ? '' : `<tr><td>Instant sync on upload</td><td>${yes(s.webhook_ready,'ready: point the Dropbox app webhook at /api/dropbox/webhook','needs DROPBOX_APP_SECRET')}</td></tr>`}
     <tr><td>Newest payment in the store</td><td>${esc(s.newest_payment_date||'–')} ${s.days_behind!=null?`(${s.days_behind} days ago)`:''}</td></tr>
     <tr><td>Last new remittance file</td><td>${s.last_remit_ingested ? esc(atTime(s.last_remit_ingested)) : '–'}</td></tr>
     <tr><td>Last cycle</td><td>${lc.finished?`${esc(String(lc.finished).replace('T',' ').slice(0,16))} UTC (${esc(lc.trigger||'')})${lc.error?' <span class="sev-high">failed: '+esc(lc.error)+'</span>':''} · ${lc.ingest?`${num(lc.ingest.remits)} remits, ${num(lc.ingest.ema)} EMA exports, ${num(lc.ingest.claims_837)} claim files`:''}${lc.alerts?` · ${num(lc.alerts.new)} new alerts`:''}`:'never'}</td></tr>
     <tr><td>Email (alerts and weekly summary)</td><td>${yes(s.smtp_configured,'configured','not configured: set SMTP_HOST and REPORT_TO')}</td></tr>
     <tr><td>Alert webhook</td><td>${s.alert_webhook?'<span class="ok">configured</span>':'off (optional: ALERT_WEBHOOK_URL)'}</td></tr>
     <tr><td>Clinical note review</td><td>${yes(s.note_review,'on','off: set ANTHROPIC_API_KEY to turn it on; packets are still built from the template without it')}</td></tr>
-    </table><div class="actions" style="margin-top:8px"><button class="primary" id="syncNow" ${s.running?'disabled':''}>${s.running?'Running…':'Sync and analyse now'}</button><span class="small muted">Pulls new files from Dropbox, ingests them, re-runs detection and the alert checks. Safe to press at any time.</span></div></div>`;
-  el.querySelector('#syncNow').onclick = async e => { e.target.disabled = true; e.target.textContent = 'Started…'; await post('/api/sync/run'); setTimeout(()=>{ refreshHeader(); feedPanel(el); }, 4000); };
+    </table>${cloud ? '' : `<div class="actions" style="margin-top:8px"><button class="primary" id="syncNow" ${s.running?'disabled':''}>${s.running?'Running…':'Sync and analyse now'}</button><span class="small muted">Pulls new files from Dropbox, ingests them, re-runs detection and the alert checks. Safe to press at any time.</span></div>`}</div>`;
+  const sn = el.querySelector('#syncNow');     // on the Vercel site the press is in Analysis on this site (ops.js)
+  if(sn) sn.onclick = async e => { e.target.disabled = true; e.target.textContent = 'Started…'; await post('/api/sync/run'); setTimeout(()=>{ refreshHeader(); feedPanel(el); }, 4000); };
 }
 
 // ---------------------------------------------------------------- finding detail: facts, history, note-based appeal builder
@@ -317,6 +327,7 @@ function packetHtml(p){
       ${(a.gaps||[]).length?`<div class="small"><b>Gaps:</b> ${a.gaps.map(esc).join(' · ')}</div>`:''}${(a.documentation_tips||[]).length?`<div class="small"><b>For next time:</b> ${a.documentation_tips.map(esc).join(' · ')}</div>`:''}`:''}
     <div class="actions" style="margin-top:8px"><a href="/api/packets/${p.packet_id}/pdf"><button class="primary">Download the packet (PDF)</button></a><button id="pkCopy">Copy letter</button>
       <input id="pkTo" placeholder="email the PDF to…" style="min-width:220px"><button id="pkSend">Send</button><span id="pkMsg" class="small muted"></span></div>
+    ${(p.checklist||[]).length ? `<div class="note sev-medium"><b>Before you send it</b>${p.checklist.map(c => `<div>${esc(c)}</div>`).join('')}</div>` : ''}
     <div class="note">The PDF contains the patient's name, member ID and the note. Email it only to a mailbox inside the practice or a payer address that accepts appeals.</div>
     ${p.corrected_claim_instructions?`<div class="small"><b>Correction instead of appeal:</b> ${esc(p.corrected_claim_instructions)}</div>`:''}
     <pre>${esc(p.letter)}</pre></div>`;
@@ -483,9 +494,10 @@ const XP_STRENGTH = {proven:'Proven: two sources agree', one_source:'From one so
 const XP_SOURCE = {'835':'835', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
 const XP_BUTTON = {build_packet:'Build the appeal packet', attach_note:'Attach the visit note', find_note:'Find the note in EMA', upload_note:'Upload the note',
   fax_payer:'Fax it to the payer', copy_instructions:'Copy the steps', mark_sent:'Mark sent', log_outcome:'Log what happened', mark_posted:'Mark posted in EMA',
-  mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA'};
+  mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA',
+  billed_patient:'Billed the patient', mark_done:'Done'};
 // the one button that moves the item on, the first of these its next step offers (fax only once a packet can be read first)
-const XP_FIRST = ['fax_payer','build_packet','mark_posted','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
+const XP_FIRST = ['fax_payer','build_packet','mark_posted','billed_patient','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
 const XP_OUTCOME = {auto_written_off:'Auto write-off', written_off_while_pending:'Written off while pending', lost_to_timely_filing:'Lost to late filing'};
 // what stops an appeal outright (the server holds to it): a line paid, credited, reprocessed or waiting on the payer. A line
 // EMA shows settled, or the archive shows likely paid, is checked first: its fax stays under More and asks for the check
@@ -496,6 +508,8 @@ XP_BUTTON.decide = 'Decide what to do';
 function xpPrimary(nx, hasPacket){
   const b = xpButtons(nx);
   if(b.includes('fax_payer') && hasPacket && !XP_CHECK_FIRST.has(nx.appeal_block)) return 'fax_payer';
+  // a payer's published rule that never pays the code leads: no appeal, and nothing to send first; the steps say what to check
+  if(nx.payer_rule === 'never_payable' && nx.appeal_ok === false) return b.includes('copy_instructions') ? 'copy_instructions' : null;
   // a correction made in EMA: read the steps, do it there, then mark it sent
   if(['corrected','eob_first'].includes(nx.route) && b.includes('mark_sent')) return 'mark_sent';
   // a decision first (fix, appeal or let go): the three choices, never "what did the payer do"
@@ -519,7 +533,9 @@ const XP_BY_STATUS = {waiting: ["Wait for the payer's answer. The next run dates
   work_now: ['Work it as its reason says; the next run gives its exact next step.', ['mark_sent', 'log_outcome', 'let_go']]};
 function xpEffective(f, x){
   const ex = (x && x.explain) || {}, told = (ex.verdict || {}).state || (ex.state || {}).work_state;
-  if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state]) return x;
+  // a state the server worked out from the person's own newer action (Billed the patient, Done: by_person) is newer than
+  // any status words here, and says whom the item waits on (the patient, never the payer)
+  if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state] || (ex.state || {}).by_person) return x;
   const when = f.status_changed_at ? ` on ${longDate(practiceDate(f.status_changed_at))}` : '';
   const [action, buttons] = XP_BY_STATUS[f.work_state];
   return Object.assign({}, x, {explain: Object.assign({}, ex, {
@@ -602,6 +618,39 @@ function xpEmaHtml(b){
     ${b.postings_note ? `<div class="note">${esc(b.postings_note)}</div>` : ''}
     <div class="small muted">EMA's claim status is context only: what happened to this line is in the story.</div></details>`;
 }
+// "Why <payer> does not pay <code>" (remitwatch.rarely_paid, the owner's decision 4): what the newest run found in the
+// remittances (lines answered and paid, the reasons, remarks, modifiers, places of service and codes billed with it), the
+// payer's published rule with its sources (each fetched twice), what the note or the claim must show, and the verdict in
+// plain words. Open when no note can change it; folded otherwise.
+const XP_RULE_CLS = {never_payable: 'sev-high', claim: 'sev-medium', note: 'ok', unclear: 'muted'};
+function xpRuleSources(list){
+  const by = [];
+  (list || []).forEach(s => { if(!s || !s.title) return; let g = by.find(x => x.title === s.title);
+    if(!g){ g = {title: s.title, url: s.url, date: s.date, quotes: []}; by.push(g); } if(s.quote && g.quotes.length < 2) g.quotes.push(s.quote); });
+  return by.map(g => `<div>${/^https:\/\//.test(String(g.url || '')) ? `<a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">${esc(g.title)}</a>` : esc(g.title)}${g.date ? ', ' + esc(g.date) : ''}${g.quotes.map(q => `<div class="muted"><i>“${esc(q)}”</i></div>`).join('')}</div>`).join('');
+}
+function xpPayerRuleHtml(blocks){
+  // a rule shown in full once: a later code under the same rule (one state's enrollment rule for several codes of a
+  // claim, say) points back to it instead of repeating it
+  const told = [];
+  const sameAs = b => told.find(t => t.payer_group === b.payer_group && t.verdict === b.verdict && t.rule === b.rule
+    && (t.what_to_show || '') === (b.what_to_show || '') && (t.condition || '') === (b.condition || ''));
+  return (blocks || []).map(b => {
+    const same = b.rule ? sameAs(b) : null;
+    if(b.rule && !same) told.push(b);
+    return `<details class="dfold xp-rule"${b.verdict === 'never_payable' ? ' open' : ''}>
+    <summary>${esc(b.title || '')}${b.period ? ` <span class="muted small">(services ${esc(b.period)})</span>` : ''}</summary>
+    <div class="small ${XP_RULE_CLS[b.verdict] || 'muted'}"><b>${esc(b.verdict_text || '')}</b></div>
+    ${(b.evidence_text || []).length ? `<div class="small" style="margin-top:4px"><b>What the remittances show</b>${b.as_of ? ` <span class="muted">(the run of ${esc(longDate(String(b.as_of).slice(0,10)))})</span>` : ''}<ul>${b.evidence_text.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`
+      : (b.evidence_note ? `<div class="small muted">${esc(b.evidence_note)}</div>` : '')}
+    ${same ? `<div class="small muted" style="margin-top:4px">The payer's rule and what the note or the claim must show: the same as for ${esc(same.code)} above.</div>` : `
+    ${b.rule ? `<div class="small" style="margin-top:4px"><b>The payer's rule:</b> ${esc(b.rule)}</div>` : ''}
+    ${b.what_to_show ? `<div class="small" style="margin-top:4px"><b>What the note or the claim must show:</b> ${esc(b.what_to_show)}</div>` : ''}
+    ${b.condition ? `<div class="small sev-medium">${esc(b.condition)}</div>` : ''}
+    ${(b.sources || []).length ? `<div class="small" style="margin-top:4px"><b>Sources</b> <span class="muted">(each read twice${b.researched ? ', researched ' + esc(b.researched) : ''})</span>${xpRuleSources(b.sources)}</div>` : ''}`}
+  </details>`;
+  }).join('');
+}
 // "Why did this change?": the run's decisions on this item (built later, GET /api/findings/{id}/decisions); hidden until it answers
 async function xpDecisions(id, el){
   if(!el) return;
@@ -643,6 +692,11 @@ function xpBind(f, x, r, d, done){
       await event('posted', n.trim()); say('Noted in its history.'); },
     mark_billed: async () => { const n = prompt(`Who was billed, and when? (${nx.route === 'bill_patient' ? 'the patient' : 'the other payer'}; kept in its history)`, ''); if(n === null) return;
       if(!n.trim()){ err('Not changed: say who was billed.'); return; } await event('billed', n.trim()); await status('appealed', 'Billed: ' + n.trim()); },
+    // a service the payer put on the patient (the owner's decision 2): one change each, the server's own words in its history
+    billed_patient: async () => { const n = prompt('Billed the patient? It waits for the patient\'s payment in EMA and closes when EMA shows it.\n\nHow, and anything to remember (kept in its history; optional):', ''); if(n === null) return;
+      await status('appealed', 'Billed the patient' + (n.trim() ? ': ' + n.trim() : '')); },
+    mark_done: async () => { const n = prompt('Mark it done? It leaves the list and counts as done by you, with nothing recovered.\n\nWhy (kept in its history; optional):', ''); if(n === null) return;
+      await status('resolved', n.trim(), {recovered_cents: 0, done: true}); },
     accept_pattern: () => xpAccept(f, nx, err, say),
     let_go: async () => { const n = prompt('Let it go? It leaves the list and counts as let go.\n\nWhy (kept in its history; required):', ''); if(n === null) return;
       if(!n.trim()){ err('Not changed: letting an item go needs a reason.'); return; } await status('dismissed', n.trim()); },
@@ -703,7 +757,9 @@ function xpOutcome(f, d, status, err){
 async function xpAccept(f, nx, err, say){
   const pattern = nx.pattern;
   if(!pattern){ state.tab = 'policy'; location.hash = 'policy'; if(typeof closeDetail === 'function') closeDetail(); render(); return; }
-  if(!confirm(`Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
+  const pp = pattern.endsWith('|payer_policy') ? pattern.split('|') : null;
+  if(!confirm(pp ? `Accept that ${pp[0]} does not pay ${pp[1]}${pp[2] ? ' (services ' + pp[2] + ')' : ''}? Every such denial leaves Work now at the next run and stays counted on the Write-off policy page, with who decided, where Pursue brings them back.`
+                 : `Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
   const where = document.querySelector('#xpMsg');
   if(typeof faxOwnerPost === 'function') await faxOwnerPost('/api/ema/policy', {pattern, decision: 'accept'}, where);
   else await post('/api/ema/policy', {pattern, decision: 'accept'});
@@ -720,10 +776,14 @@ async function xpFaxPreview(f, packets, d){
     if(m){ m.className = 'small sev-medium'; m.textContent = text; } else alert(text);
     return;
   }
-  let letter = '';
-  try { letter = pk ? ((await api('/api/packets/' + encodeURIComponent(pk.packet_id))).letter || '') : ((await api('/api/appeal/' + encodeURIComponent(f.finding_id))).letter || ''); } catch(e){}
+  // the packet's "Before you send it" checklist (the payer's published rule for the code, the owner's decision 4): shown
+  // here, where the fax goes out, never in what is faxed
+  let letter = '', checklist = [];
+  try { const got = pk ? await api('/api/packets/' + encodeURIComponent(pk.packet_id)) : await api('/api/appeal/' + encodeURIComponent(f.finding_id));
+        letter = (got && got.letter) || ''; checklist = (got && Array.isArray(got.checklist)) ? got.checklist : []; } catch(e){}
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Fax to ${esc(f.payer_group || 'the payer')}</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">Read what goes, then send it. It goes as it is to the payer's confirmed appeal fax number, and the item is marked Sent.</div>
+    ${checklist.length ? `<div class="note sev-medium" id="xpFaxCheck"><b>Before you send it</b>${checklist.map(c => `<div>${esc(c)}</div>`).join('')}</div>` : ''}
     <div class="actions">${pk ? `<a href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf" target="_blank" rel="noopener"><button>Open the PDF</button></a>` : ''}<button class="primary" id="xpFaxGo">Send the fax</button></div>
     <div id="xpFaxMsg" class="small"></div><pre>${esc(letter)}</pre>`;
   $('#modal').classList.add('open');

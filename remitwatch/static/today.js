@@ -153,10 +153,10 @@ async function todayTab(v){
 }
 
 // the plan's steps from the brief. Step 1 is ticked "nothing closes this week" only once the blind spot is known to be
-// clear (look.blind === false) and the self-check's line is not up
+// clear (look.blind === false) and the self-check's line (/api/meta banner: safe mode, or what the app cannot see) is not up
 function tdSteps(b, look){
   const blind = look.blind === true;
-  const held = look.blind !== false || !!((state.meta || {}).selfcheck_banner);
+  const held = look.blind !== false || !!((state.meta || {}).banner);
   const w = b.work.total, top = b.batches[0], dec = b.decide, fu = b.follow_ups;
   const byKind7 = (b.work.types||[]).filter(t=>t.due7_n).sort((x,y)=>y.due7_cents-x.due7_cents);
   const steps = [];

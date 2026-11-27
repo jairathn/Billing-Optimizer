@@ -18,6 +18,12 @@
     python -m remitwatch.cli ema-reports [--status | --summarize | --reread FILE_ID|all | --decide FILE_ID apply|discard
                                           | --retain-force]
                                                          EMA's A/R and Production reports and the posting ledger
+    python -m remitwatch.cli diagnose [--days N] [--run RUN_ID] [--out ZIP]
+                                                         the diagnostic bundle: run logs, errors, checks (no patient data)
+    python -m remitwatch.cli self-audit                  the weekly self-audit now (money with no item, settled items listed)
+    python -m remitwatch.cli archive --dry-run|--run [--horizon N]
+                                                         older settled claims to the archive (what would move, or move it)
+    python -m remitwatch.cli archive-restore CLAIM_ID    an archived bill back in the store, whole
 """
 from __future__ import annotations
 
@@ -489,6 +495,10 @@ def _fax_run(db: str, budget_s: float = 3600) -> dict:
     prov = fax.provider()
     if prov is None:
         return {"skipped": fax.not_here() or "The fax line is not set up."}
+    # the fax line's reads (status, inbox, fetch, check, find_sent) are tried again after a dropped connection
+    # (remitwatch.repair); a send is never wrapped: it may have gone out
+    from . import repair
+    prov = repair.resilient(prov, "srfax", only=("status", "inbox", "fetch", "check", "find_sent"))
     try:
         with api.fax_run("scheduled run") as lock:
             return {"refresh": api._fax_refresh(prov, budget_s=budget_s / 2, lock=lock),
@@ -1000,6 +1010,88 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
     return 0 if not bad else 2
 
 
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """The diagnostic bundle (remitwatch.diagnose): run logs, errors, self-checks and repairs, no patient data."""
+    from . import diagnose
+    return diagnose.main(["--db", args.db, "--days", str(args.days)] + (["--run", args.run] if args.run else [])
+                         + (["--out", args.out] if args.out else []))
+
+
+def cmd_self_audit(args: argparse.Namespace) -> int:
+    """The weekly self-audit now (remitwatch.selfcheck): lines with money to recover and no item, and items on Work now
+    that look settled. Prints counts and dollars only."""
+    from . import selfcheck
+    from .pipeline import acquire_lock, release_lock
+    from .store import Store
+    store = Store(args.db)
+    try:
+        token = acquire_lock(store.conn)
+        if not token:
+            print("A cycle is running: try again when it has finished.")
+            return 1
+        try:
+            au = selfcheck.self_audit(store.conn, force=True, why="by hand") or {}
+            store.conn.commit()
+        finally:
+            release_lock(store.conn, token)
+        print(json.dumps({k: au.get(k) for k in ("today", "gaps_n", "gaps_cents", "wasted_n", "alert")}, default=str))
+        return 0
+    finally:
+        store.close()
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    """Retention (remitwatch.archive): --dry-run says what would move (counts only), --run moves it, under the cycle's
+    lock. Older settled claims go to the archive folder beside the store; Find a claim still opens them."""
+    from . import archive
+    from .pipeline import acquire_lock, release_lock
+    from .store import Store
+    store = Store(args.db)
+    try:
+        if not args.run:
+            got = archive.plan(store.conn, horizon=args.horizon)
+            bills = got.get("bills") or []          # (bill, newest, lines, claims, years): counted, never printed
+            print(json.dumps({"cutoff": got.get("cutoff"), "horizon": got.get("horizon"), "bills": len(bills),
+                              "claims": sum(int(b[3] or 0) for b in bills), "lines": sum(int(b[2] or 0) for b in bills),
+                              "held": got.get("held"), "waiting_rates": got.get("waiting_rates"), "blocked": got.get("blocked")},
+                             default=str))
+            return 0
+        token = acquire_lock(store.conn)
+        if not token:
+            print("A cycle is running: try again when it has finished.")
+            return 1
+        try:
+            got = archive.run(store.conn, horizon=args.horizon, sink=archive.sink_for(db_path=args.db), mode="server",
+                              log=lambda *a: print(*a, flush=True))
+        finally:
+            release_lock(store.conn, token)
+        print(json.dumps({k: got.get(k) for k in ("cutoff", "bills", "claims", "lines", "findings", "files", "errors")}, default=str))
+        return 0 if not got.get("errors") else 2
+    finally:
+        store.close()
+
+
+def cmd_archive_restore(args: argparse.Namespace) -> int:
+    """An archived bill back in the store, whole (by a claim id or the bill), under the cycle's lock."""
+    from . import archive
+    from .pipeline import acquire_lock, release_lock
+    from .store import Store
+    store = Store(args.db)
+    try:
+        token = acquire_lock(store.conn)
+        if not token:
+            print("A cycle is running: try again when it has finished.")
+            return 1
+        try:
+            got = archive.restore(store.conn, args.claim, sink=archive.sink_for(db_path=args.db), actor="cli", reason=args.reason)
+        finally:
+            release_lock(store.conn, token)
+        print(json.dumps({k: v for k, v in (got or {}).items() if isinstance(v, (int, bool, str)) and k != "bill"}, default=str))
+        return 0 if got and not got.get("missing") else 1
+    finally:
+        store.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="remitwatch")
     ap.add_argument("--db", default=DEFAULT_DB)
@@ -1049,6 +1141,21 @@ def main(argv: list[str] | None = None) -> int:
     bk = sub.add_parser("backup", help="a consistent, gzipped copy of the store, taken while the site runs")
     bk.add_argument("--dir", default=None, help="where (default: a backups folder beside the store)")
     bk.add_argument("--keep", type=int, default=7, help="how many copies to keep"); bk.set_defaults(fn=cmd_backup)
+    dg = sub.add_parser("diagnose", help="a diagnostic bundle: run logs, errors, self-checks and repairs (no patient data)")
+    dg.add_argument("--days", type=int, default=7, help="the runs of the last N days")
+    dg.add_argument("--run", default=None, help="only this run id")
+    dg.add_argument("--out", default=None, help="where to write the zip (default: a diagnostics folder beside the store)")
+    dg.set_defaults(fn=cmd_diagnose)
+    sub.add_parser("self-audit", help="the weekly self-audit now: money with no item, and items that look settled").set_defaults(fn=cmd_self_audit)
+    arc = sub.add_parser("archive", help="older settled claims to the archive (--dry-run says what would move; --run moves it)")
+    mode = arc.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="say what would move, counts only")
+    mode.add_argument("--run", action="store_true", help="move it now, under the cycle's lock")
+    arc.add_argument("--horizon", type=int, default=None, help="months of service kept in the store (never below 24)")
+    arc.set_defaults(fn=cmd_archive)
+    ar_ = sub.add_parser("archive-restore", help="an archived bill back in the store, whole")
+    ar_.add_argument("claim", help="a claim id of the bill, or the bill"); ar_.add_argument("--reason", default="reopened by hand")
+    ar_.set_defaults(fn=cmd_archive_restore)
     args = ap.parse_args(argv)
     return args.fn(args)
 
