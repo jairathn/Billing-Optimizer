@@ -245,6 +245,16 @@ NO_RUN_TEXT = "Say which run's findings to accept: reload the Data tab and press
 STALE_TEXT = "The checks ran again after this page was opened: look at the new results, then accept them."
 
 
+def checks_overtook(latest: Any, run_id: str) -> bool:
+    """Whether the dashboard's copy holds the checks of a run later than the one the page showed (`run_id`): another run
+    started in a later second, or in the same second (runs on a site follow one another, so a second run that shares the
+    page's second started after it). A copy behind the page, or of the page's own run, is not: the acceptance is
+    journaled and the next run, which holds the newest checks, folds it (selfcheck.accept_findings)."""
+    if not isinstance(latest, str) or not RUN_ID.match(latest) or latest == run_id:
+        return False
+    return latest[4:20] >= run_id[4:20]
+
+
 @router.post("/api/ops/selfcheck/accept")
 def ops_accept(request: Request, body: dict = Body(...), user: str = Depends(_owner)):
     """The owner accepts exactly the offenders of the run the page showed (`run_id`, required); a later run's are never
@@ -262,7 +272,7 @@ def ops_accept(request: Request, body: dict = Body(...), user: str = Depends(_ow
         from .cloud import record_action
         with _Conn() as c:
             latest = selfcheck.meta_get(c, "selfcheck:offenders_run")
-        if isinstance(latest, str) and RUN_ID.match(latest) and latest[4:20] > run_id[4:20]:
+        if checks_overtook(latest, run_id):
             return {"accepted": {}, "stale": True, "run_id": latest, "text": STALE_TEXT}
         record_action(_state(), {"kind": "selfcheck_request", "what": "accept", "checks": checks, "run_id": run_id, "user": user})
         return {"asked": True, "text": "Accepted: the next run takes it (press Run the analysis now)."}
