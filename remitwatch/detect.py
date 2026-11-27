@@ -2534,14 +2534,19 @@ class Detector:
                             FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
                             WHERE c.transaction_key IN ({','.join('?' * len(part))})""", part):
                     in_tk[tk].append((pcn, st, paid_ or 0, who_))
-            for pcn, who_, tk in held:
+            # what the remittance carried is shared by the claims it reversed, in one order (the remittance, then the claim id),
+            # so their budgets never add up to more than it carried (fx-ledger-r2-8)
+            spare = dict(carried)
+            for pcn, who_, tk in sorted(held, key=lambda h: (h[2], h[0], str(h[1]))):
                 root = find((pcn, "K", who_))
                 if (pcn, ("payer", root), tk) in deferred:
                     continue
                 rev = sum(-paid_ for p, st, paid_, w in in_tk[tk] if p == pcn and st == "22" and paid_ < 0 and find((pcn, "K", w)) == root)
                 again = sum(paid_ for p, st, paid_, w in in_tk[tk] if bill_of(p) == bill_of(pcn) and st in ("1", "2", "3", "19") and paid_ > 0
                             and one_payer(who_, w, (pcn, p)))
-                deferred[(pcn, ("payer", root), tk)] = max(0, min(rev - again, carried[tk]))
+                use = max(0, min(rev - again, spare.get(tk, 0)))
+                spare[tk] = spare.get(tk, 0) - use
+                deferred[(pcn, ("payer", root), tk)] = use
             budget: dict[tuple, int] = defaultdict(int)
             for (pcn, by_, _tk), cents in deferred.items():
                 budget[(pcn, by_)] += cents
@@ -2634,6 +2639,7 @@ class Detector:
             dos = dos_of.get(name) or min((l.get("service_date") or l.get("statement_from") or "" for ck in by_id.get(name, set())
                                            for l in self.lines_by_claim.get(ck, [])), default="")
             not_applied.append((name, cents, len(ents), ents[0][2] if ents else None, dos))
+        not_applied += self._recouped_not_on_file(plb_rows, names, named)
         self._count_not_on_file(lost, not_applied)
         self._save_taken(left)
         return {k: v for k, v in left.items() if v > 0}
@@ -2713,11 +2719,42 @@ class Detector:
             names.append(name or x)
         return names, named
 
+    def _recouped_not_on_file(self, rows: list, names: list, named: set) -> list[tuple]:
+        """The recoupments naming a claim id no remittance on file answers (a claim paid and recouped outside the archive):
+        PLB entries whose reference holds exactly one claim id (CLAIM_ID_IN_TEXT) that is not on file, netted by claim id and
+        payer (WO, FB and J1 with the CS and 72 entries naming it, as the ledger nets a claim's entries). A positive net with a
+        WO, FB or J1 entry took money no payment on file shows: (claim id, cents, entries, payer, the first date of service of
+        the bill's claims on file, older), counted for the Data tab beside the rest (fx-ledger-r2-7). With nothing of the bill
+        on file it is counted as older than the archive."""
+        off: dict[tuple, list] = {}
+        for (ref, amount, _day, who, _tk, code, _pname), name in zip(rows, names):
+            if name in named:
+                continue
+            ids = set(CLAIM_ID_IN_TEXT.findall(str(ref or "").upper()))
+            if len(ids) != 1:
+                continue
+            g = off.setdefault((next(iter(ids)), who), [0, 0, False])
+            g[0] += amount or 0
+            if code in ("WO", "FB", "J1") and (amount or 0) > 0:
+                g[1] += 1
+                g[2] = True
+        out = []
+        for (cid, who), (cents, n, took_money) in sorted(off.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
+            if cents <= 0 or not took_money:
+                continue
+            b = bill_of(cid)
+            row = self.conn.execute("""SELECT MIN(statement_from) FROM claims WHERE patient_control_number >= ? AND patient_control_number < ?""",
+                                    (b, b + "~")).fetchone() if b else None
+            dos = row[0] if row and row[0] else ""
+            out.append((cid, cents, n, who, dos, not dos))
+        return out
+
     def _count_not_on_file(self, lost: list[tuple], recouped: list[tuple] | None = None) -> None:
         """REVERSALS_NOT_ON_FILE_META's counts: the takebacks of payments that are not on file. From the line reversals that
         found no payment of their amount, (claim id, cents, date of service, payer), and the recoupments (PLB WO, FB or J1)
-        naming a claim whose money the ledger could not apply, (claim id, cents, entries, payer, date of service): a payer
-        took the money back and no payment on file shows what it took (money-1). A service dated on or after the payer's
+        naming a claim whose money the ledger could not apply, (claim id, cents, entries, payer, date of service[, older]):
+        a payer took the money back and no payment on file shows what it took (money-1; a claim id no remittance on file
+        answers comes with older set when nothing of its bill is on file: _recouped_not_on_file). A service dated on or after the payer's
         first remittance on file was paid in a remittance that should be on file too: that one is missing. The rest take
         back payments made before the remittances on file begin. "claims" and "cents" count both kinds (a claim once);
         "lines" counts the reversals' lines and "entries" the recoupments' entries, with "recouped_claims" and
@@ -2735,8 +2772,8 @@ class Detector:
             claims[pre].add(pcn)
             self.not_on_file[pre + "lines"] += 1
             self.not_on_file[pre + "cents"] += cents
-        for pcn, cents, n, who, dos in recouped or []:
-            pre = "older_" if dos and dos < (first.get(who) or "") else ""
+        for pcn, cents, n, who, dos, *older in recouped or []:
+            pre = "older_" if (older and older[0]) or (dos and dos < (first.get(who) or "")) else ""
             claims[pre].add(pcn)
             took[pre].add(pcn)
             self.not_on_file[pre + "entries"] += n
@@ -8342,9 +8379,12 @@ class Detector:
             second = p.get("claim_status_code") in ("2", "3")
             line_of = {x["line_key"]: x for x in answers.get((bill, code, dos), [])}
             if second:
-                # a second payer's share: only that payer's own standing payments of the service pay it again (money-2)
-                cover = [e for e in self.paid_events.get((bill, code, dos), []) if e[3] in ("2", "3") and e[8] != lk
-                         and (e[6] == payer(p) or (bool(p.get("payer_group")) and (line_of.get(e[8]) or {}).get("payer_group") == p.get("payer_group")))]
+                # a second payer's share: the second payers' standing payments of the service pay it again, that payer's own
+                # or another supplement's that paid the same coinsurance, before or after (the recoupment recovers a double
+                # payment: fx-ledger-r2-5); never the primary's payment (money-2). A status-1 answer processed after another
+                # payer's is a second payer's too (fx-ledger-r1-3)
+                cover = [e for e in self.paid_events.get((bill, code, dos), []) if e[8] != lk
+                         and (e[3] in ("2", "3") or (e[3] in ("1", "19") and e[8] in line_of and self._after_other_payer(line_of[e[8]])))]
             else:
                 # a primary's payment taken back: a payment processed after another payer's (CARC 22 or 23, a supplement
                 # answering with claim status 1) is a second payer's share, which covers it only as paid_cover counts a

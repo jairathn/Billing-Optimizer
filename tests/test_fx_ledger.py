@@ -1301,6 +1301,17 @@ def test_a_resend_paid_in_full_since_its_send_is_done_though_it_bills_a_zero_dol
     s.close()
 
 
+@pytest.mark.parametrize("lines,zero", [
+    ([["99024", "2026-07-30", 0, None], ["99214", "2026-07-30", 22365, 11760]], {("2026-07-30", "99024")}),
+    ([["99024", "2026-07-30", None, None]], set()),             # a charge not known is not a $0.00 charge
+    ([["2026-07-30", "99024", 0]], set()),                      # the exports' [date, code, ...] shape says nothing of a charge
+    ([{"cpt": "99024", "svc": "2026-07-30", "charges": 0}, {"cpt": "99214", "svc": "2026-07-30", "charges": 22365}], {("2026-07-30", "99024")}),
+])
+def test_the_services_a_claim_item_bills_at_nothing(lines, zero):
+    """(r2-6) Which services a claim-level item bills at $0.00 (states._zero_billed): only a known charge of nothing."""
+    assert states._zero_billed({"evidence": json.dumps({"lines": lines}), "service_date": "2026-07-30"}) == zero
+
+
 # ------------------------------------------------------------------------------------------------ fx-ledger-r2-7 (money-1)
 @pytest.mark.parametrize("claim", ["on_file_denied", "not_on_file"])
 def test_a_small_recoupment_naming_a_claim_id_no_remittance_answers_is_counted(tmp_path, kind, claim):

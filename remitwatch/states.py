@@ -693,12 +693,26 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     plb_by_bill: dict[str, list] = {}
     if _table(conn, "plb") and "reference" in _cols(conn, "plb"):
         pcns = sorted({r[2] for rs in rows_by_bill.values() for r in rs if r[2]})
+        # a payer's own claim number that names one claim of a bill: a recoupment written 'WO:<that number>' names that claim
+        # (the ledger reads it so: detect._plb_names; fx-ledger-r2-9)
+        by_number: dict[str, set] = {}
+        for rs in rows_by_bill.values():
+            for r in rs:
+                if r[10] and r[2]:
+                    by_number.setdefault(str(r[10]).strip().upper(), set()).add(r[2])
         if pcns:
             _temp(conn, "st_pc", ["pcn TEXT PRIMARY KEY"], [(p,) for p in pcns])
+            upper = sorted(((x.upper(), x) for x in pcns if x), key=lambda t: -len(t[0]))
             for ref, rc, amt, paid_on, payer, tr in conn.execute(
                     """SELECT p.reference, p.reason_code, p.amount_cents, p.payment_date, p.payer_name, p.trace_number FROM plb p
                        WHERE p.reference IS NOT NULL AND p.reason_code IN ('WO','FB','72','J1','L6','CS')"""):
-                hit = next((x for x in pcns if x and x in str(ref or "")), None) if ref else None
+                text = str(ref or "").upper()
+                # the claim id in any letter case (the longest that fits: C1 is no match for C17), else the payer's number
+                hit = next((x for u, x in upper if u in text), None) if text else None
+                if not hit and text:
+                    words = {w for w in re.split(r"[^0-9A-Z]+", text) if len(w) >= 6}
+                    found = {x for w in words for x in by_number.get(w, ()) if len(by_number[w]) == 1}
+                    hit = next(iter(found)) if len(found) == 1 else None
                 if hit:
                     plb_by_bill.setdefault(bill_of(hit), []).append({"reason": rc, "cents": amt or 0, "date": paid_on, "payer": payer,
                                                                       "check_tail": tail(tr), "claim_id": hit})
@@ -1729,6 +1743,22 @@ def _after_other_payer(x: dict) -> bool:
     return any(c in AFTER_OTHER_CARCS and g != "PR" for g, c, _a in list(x.get("adj") or []) + list(x.get("cadj") or []))
 
 
+def _zero_billed(item: dict) -> set[tuple]:
+    """The (date, code) services a claim-level item bills at $0.00: its evidence lines in the [code, date, charge, ...] shape
+    the never-answered claims carry, with a known charge of nothing (a post-operative visit beside the service). A line
+    whose charge is unknown is not one."""
+    out: set[tuple] = set()
+    for ln in _list(_ev(item).get("lines")):
+        if isinstance(ln, (list, tuple)) and len(ln) >= 3 and isinstance(ln[1], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", ln[1][:10] or "") \
+                and isinstance(ln[2], (int, float)) and not isinstance(ln[2], bool) and ln[2] == 0 and ln[0]:
+            out.add((ln[1][:10], ln[0]))
+        elif isinstance(ln, dict) and (ln.get("cpt") or ln.get("code")):
+            ch = ln.get("charge_cents", ln.get("charges"))
+            if isinstance(ch, (int, float)) and not isinstance(ch, bool) and ch == 0:
+                out.add((ln.get("service_date") or ln.get("svc") or item.get("service_date"), ln.get("cpt") or ln.get("code")))
+    return out
+
+
 def _ema_pay_taken(fx: dict, p: dict) -> dict:
     """What the payer took back since of one insurance payment EMA posted, by the 835s: {'gone': cents no item of its own
     carries, 'listed': cents worked on an item of its own, 'rows': the 835 payment lines it posts, 'date': their remittance's
@@ -1880,7 +1910,9 @@ def paid_proof(fx: dict) -> dict | None:
             paid = sum(x["paid"] or 0 for x in prim)
             floor = thr if thr > 1 else _close_floor(own, prim)
             if whole_claim:
-                keys = set(_service_keys(f))
+                # a service the claim bills at $0.00 (a post-operative visit no payer pays) needs no payment of its own
+                # (T-N7; fx-ledger-r2-6)
+                keys = set(_service_keys(f)) - _zero_billed(f)
                 got = {(x["svc"], c) for x in prim for c in (x["code"], x["ocode"]) if c}
                 if not keys <= got:
                     prim = []           # a service of the claim has no payment of its own since the send: not paid
