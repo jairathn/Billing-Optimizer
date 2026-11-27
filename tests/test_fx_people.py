@@ -575,3 +575,289 @@ def test_people6_copy_the_steps_says_when_its_history_line_did_not_land(xp):
     r = xp["copy_steps_history_refused"]
     assert r["copied"] == ["Call the payer (invented steps)."] and r["said"] == ["The steps copied."], r
     assert r["errors"] and "not kept in its history" in r["errors"][-1] and "new number" in r["errors"][-1], r
+
+
+# =========================================================================================== decision 2's follow-ups
+# The owner's notes of 2026-11-26, section 5 (built as written there): a Medicaid member is never billed for a missing
+# referral; a later payer that answered with a contractual adjustment only settles the service (Done, its reason shown);
+# the bill-the-patient step names the service year and the lists filter by it. Both store kinds (test_decisions' sstore:
+# the server's file store and the compact in-memory store of the serverless host); invented payers, members and amounts.
+from tests.test_decisions import TODAY2, _crossed_over, _patient_denial, _production_covers, _state, sstore  # noqa: E402,F401
+from tests.test_decisions_review import _supplement_answer  # noqa: E402
+
+MEDICAID_GRP = "Testcare Health Medicaid"
+MEDCAID_NAME = "WELLCARE SAMPLE MEDCAID OF KENTUCKY"      # the shape of a name EMA and the 837s carry: 'Medcaid'
+
+
+def _referral(s, *, kind="commercial", deadline="2027-01-31", group=None, cfi=None, payer=None, plan=None, covered=True):
+    """A missing referral (PR-288) as archive rule 8 raises it: the payer put the visit's $150.00 on the patient on March 28.
+    `cfi`, `payer` and `plan` change what the remittance says about the member's plan."""
+    _patient_denial(s, "288", signal="DENIED_REFERRAL", deadline=deadline, payer_kind=kind, covered=covered)
+    if group:
+        s.conn.execute("UPDATE findings SET payer_group=? WHERE finding_id='F1'", (group,))
+    if plan:
+        s.conn.execute("UPDATE findings SET plan=? WHERE finding_id='F1'", (plan,))
+    if cfi is not None:
+        s.conn.execute("UPDATE claims SET claim_filing_indicator=?", (cfi,))
+    if payer:
+        for t in ("transactions", "claims", "lines"):
+            s.conn.execute(f"UPDATE {t} SET payer_name=?", (payer,))
+    s.conn.commit()
+
+
+def test_d2f_a_medicaid_members_missing_referral_is_never_billed(sstore):
+    """PR-288 for a member on a Medicaid plan (the item's group is a Medicaid plan): Medicaid's payment is payment in full
+    and the referral is the practice's to fix. Work now, never "Bill the patient": the next step gets a retroactive
+    referral and sends a corrected claim by the plan's date, or marks it Done when the plan will not take one; no Billed the
+    patient button and no statement step."""
+    from remitwatch import story
+    _referral(sstore, kind="medicaid", group=MEDICAID_GRP)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    assert st["state_basis"] == (f"{MEDICAID_GRP} put this service on the patient (PR-288: no referral on file), but the member is on a "
+                                 "Medicaid plan, whose payment is payment in full: never a bill to the patient; get a retroactive "
+                                 "referral and send a corrected claim"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"] == ("Get a retroactive referral and send a corrected claim; if the plan will not take one, mark it Done. The member "
+                           f"is on a Medicaid plan ({MEDICAID_GRP}): a missing referral is never billed to the patient. Service year: 2026."), n["action"]
+    assert "Bill the patient" not in n["action"] and not any("statement" in x for x in n["steps"]), n
+    assert n["steps"][0].startswith("Ask the member's primary care office for a retroactive referral") and "by Jan 31, 2027" in n["steps"][0], n["steps"]
+    assert {"mark_sent", "mark_done"} <= set(n["buttons"]) and "billed_patient" not in n["buttons"] and "build_packet" not in n["buttons"], n["buttons"]
+    assert n["deadline"] == "2027-01-31" and n["expected_cents"] == 15000, (n["deadline"], n["expected_cents"])
+
+
+def test_d2f_a_medicaid_members_missing_referral_past_the_plans_windows_is_expired_not_billed(sstore):
+    """The same denial past every window of the plan (its date was Sep 24): the corrected claim can no longer go, and the
+    member is never billed, so nothing can be recovered: expired, with the reason. A member of a commercial plan in the
+    same case is still billed (the owner's decision: a patient's share is not closed by a payer's window)."""
+    from remitwatch import story
+    _referral(sstore, kind="medicaid", group=MEDICAID_GRP, deadline="2026-09-24")
+    st = _state(sstore)
+    assert st["work_state"] == "expired", st["state_basis"]
+    assert st["state_basis"].startswith(f"{MEDICAID_GRP} put this service on the patient (PR-288: no referral on file), but the member is "
+                                        "on a Medicaid plan, whose payment is payment in full: never a bill to the patient. The last "
+                                        "window closed on"), st["state_basis"]
+    assert "Bill the patient" not in story.next_step(sstore.conn, "F1", today=TODAY2)["action"]
+
+
+def test_d2f_a_commercial_members_missing_referral_past_the_windows_is_still_billed(sstore):
+    from remitwatch import story
+    _referral(sstore, deadline="2026-09-24")
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    assert story.next_step(sstore.conn, "F1", today=TODAY2)["action"].startswith("Bill the patient $150.00:")
+
+
+def test_d2f_a_plan_named_with_medicaid_misspelt_is_a_medicaid_plan(sstore):
+    """The remittance's payer is a company's Kentucky Medicaid plan named with 'Medcaid' (as EMA and the 837s spell it), the
+    item stored by an older run as a commercial plan: the name rules read it as Medicaid (codes.normalize_payer, after the
+    deadlines merge), so the member is never billed. A plan named on the remittance (fix7c's contract class) with the same
+    spelling does the same."""
+    from remitwatch import codes, story
+    assert codes.normalize_payer(MEDCAID_NAME) == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
+    assert codes.payer_group_kind(MEDCAID_NAME, "HM") == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
+    _referral(sstore, payer=MEDCAID_NAME, cfi="HM")
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Get a retroactive referral and send a corrected claim;"), n["action"]
+    assert "billed_patient" not in n["buttons"], n["buttons"]
+
+
+def test_d2f_a_plan_named_on_the_remittance_tells_the_member_is_on_medicaid(sstore):
+    from remitwatch import story
+    _referral(sstore, plan="SAMPLE STATE MEDCAID PLAN", cfi="HM")
+    assert story.next_step(sstore.conn, "F1", today=TODAY2)["action"].startswith("Get a retroactive referral and send a corrected claim;")
+
+
+def test_d2f_a_remittance_that_cannot_tell_the_companys_plans_apart_asks_for_the_coverage_first(sstore):
+    """A company's plan with no program in its name, no plan named and an HMO filing indicator (which a company's Medicaid
+    plan uses too): the step asks the biller to check the member's coverage before any bill goes out, never a bill on a
+    guess. Its buttons let the person act on what the check finds: Billed the patient, Done, or Mark sent for a corrected
+    claim with a retroactive referral."""
+    from remitwatch import story
+    _referral(sstore, cfi="HM")
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    assert st["state_basis"] == ("Anthem / BCBS put this service on the patient (PR-288: no referral on file), and its remittance does not "
+                                 "say whether the member's plan is a Medicaid plan: check the member's coverage before any bill goes "
+                                 "out (a Medicaid member is never billed for it; any other member is billed $150.00)"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"] == ("Check the member's coverage before any bill goes out: Anthem / BCBS's remittance does not say whether the "
+                           "member is on its Medicaid plan. A Medicaid member is never billed for a missing referral; any other member "
+                           "is billed $150.00 (PR-288 $150.00: no referral on file). Service year: 2026."), n["action"]
+    assert {"billed_patient", "mark_done", "mark_sent"} <= set(n["buttons"]), n["buttons"]
+    assert any("retroactive referral" in x for x in n["steps"]), n["steps"]
+
+
+def test_d2f_a_coverage_check_comes_first_when_the_patients_account_cannot_be_seen_either(sstore):
+    from remitwatch import story
+    _referral(sstore, cfi="", covered=False)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("cant_check", "cant_check_patient"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["steps"][0].startswith("First check the member's coverage: Anthem / BCBS's remittance does not say whether the member is "
+                                    "on its Medicaid plan"), n["steps"]
+    assert n["action"].endswith("Service year: 2026."), n["action"]
+
+
+@pytest.mark.parametrize("cfi,payer,plan,kind,want", [
+    ("MC", "TESTCARE HEALTH", None, "commercial", "yes"),              # the filing indicator says Medicaid
+    ("HM", MEDCAID_NAME, None, "commercial", "yes"),                   # the name, misspelt
+    ("HM", "TESTCARE HEALTH", "SAMPLE MEDCAID PLAN", "other", "yes"),  # the plan the remittance names
+    ("12", "TESTCARE HEALTH", None, "medicaid", "yes"),                # the item's own kind
+    ("HM", "TESTCARE HEALTH", None, "other", "unclear"),
+    ("ZZ", "TESTCARE HEALTH", None, "commercial", "unclear"),
+    ("", "TESTCARE HEALTH", None, "commercial", "unclear"),
+    ("11", "TESTCARE HEALTH", None, "", "unclear"),
+    ("12", "TESTCARE HEALTH", None, "commercial", "no"),               # a PPO: a commercial product
+    ("CI", "TESTCARE HEALTH", None, "commercial", "no"),
+    ("HM", "TESTCARE HEALTH", "SAMPLE GOLD PPO", "commercial", "no"),  # a plan is named, and it is not Medicaid
+    ("HM", "TESTCARE MEDICARE ADVANTAGE", None, "medicare_advantage", "no"),
+    ("MB", "MEDICARE TEST", None, "medicare", "no"),
+])
+def test_d2f_which_members_are_on_a_medicaid_plan(cfi, payer, plan, kind, want):
+    """states.medicaid_member on the item and its own 835 lines alone: what the remittance says decides, and only a
+    remittance that names no program at all asks for the coverage. A reversal (status 22) of another payer's answer is not
+    the item's plan."""
+    from remitwatch import states
+    own = {"line_key": "L1", "claim_key": "C1", "status": "1", "payer": payer, "cfi": cfi, "charge": 15000, "paid": 0, "adj": [("PR", "288", 15000)]}
+    rev = {"line_key": "L1", "claim_key": "C1", "status": "22", "payer": "KENTUCKY MEDICAID", "cfi": "MC", "charge": -15000, "paid": 0, "adj": []}
+    fx = {"item": {"line_key": "L1", "claim_key": "C1", "carc": "288", "payer_kind": kind, "plan": plan, "payer_name": payer},
+          "r835": {"rows": [own, rev]}}
+    assert states.medicaid_member(fx) == want
+    assert states.referral_member(fx) == want
+    fx["item"]["carc"] = "27"
+    assert states.referral_member(fx) == "no"          # a Medicaid member's other reasons are billed as decided
+
+
+def test_d2f_a_person_who_billed_a_medicaid_member_is_told_the_plan_is_the_way_before_another_statement(sstore):
+    """A person pressed Billed the patient for a Medicaid member's missing referral before this rule: their choice stands
+    (it waits, then is work again with nothing paid), and the step says first that another statement is not the way."""
+    from remitwatch import actions, story
+    _referral(sstore, kind="medicaid", group=MEDICAID_GRP)
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-09-01T15:00:00+00:00")
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "patient_unpaid"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["steps"][0].startswith(f"Before another statement: the member is on a Medicaid plan ({MEDICAID_GRP})"), n["steps"]
+    assert sstore.conn.execute("SELECT status FROM findings WHERE finding_id='F1'").fetchone()[0] == "appealed"
+
+
+SETTLED_BASIS = ("Medicaid KY answered after it on Apr 6, 2026 and put the service on the practice under its contract (CO-45, $150.00), "
+                 "paying nothing and leaving nothing to the member (a Medicaid plan: what it pays is payment in full): settled by another "
+                 "payer, so the member is not billed")
+
+
+def test_d2f_a_later_payer_that_answered_with_a_contractual_adjustment_only_settles_it(sstore):
+    """Medicare put a routine visit on the patient (PR-49 $150.00) and sent it on; the member's Medicaid plan answered after
+    it with CO-45 on all of it, nothing paid and nothing on the member. Its contract puts the service on the practice, so
+    billing the patient would break it: straight to Done, with the reason shown and the later payer's remittance as the
+    proof (its row named in the verdict). The step offers Done to close it, never Billed the patient or a Paid amount."""
+    from remitwatch import story
+    _crossed_over(sstore, "4", "KENTUCKY MEDICAID", "MC", ("CO", "45"))
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("done", "next_payer_contractual"), st["state_basis"]
+    assert st["state_basis"] == SETTLED_BASIS, st["state_basis"]
+    assert {k: st["proof"][k] for k in ("rule", "cents", "date", "source")} == {"rule": "next_payer_contractual", "cents": 0,
+                                                                              "date": "2026-04-06", "source": "835"}, st["proof"]
+    ex = story.explain(sstore.conn, "F1", today=TODAY2)
+    n, v = ex["next_step"], ex["verdict"]
+    assert n["route"] == "nothing" and n["action"] == f"Nothing to do: {SETTLED_BASIS}.", n["action"]
+    assert "mark_done" in n["buttons"] and not {"billed_patient", "log_outcome", "mark_billed"} & set(n["buttons"]), n["buttons"]
+    assert any(x.startswith("Nothing to bill: press Done") for x in n["steps"]), n["steps"]
+    decisive = [r for r in ex["story"]["rows"] if r.get("decisive")]
+    assert v["strength"] == "proven" and decisive and all(r["source"] == "835" and r["date"] == "2026-04-06" for r in decisive), (v, decisive)
+    assert v["sentence"].startswith(SETTLED_BASIS) and "(row" in v["sentence"], v["sentence"]
+
+
+def test_d2f_results_count_it_as_settled_by_another_payer_never_moved_to_the_patient(sstore):
+    from remitwatch import results
+    _crossed_over(sstore, "4", "KENTUCKY MEDICAID", "MC", ("CO", "45"))
+    st = _state(sstore)
+    f = {"work_state": st["work_state"], "status": "open", "state_basis": st["state_basis"], "ema_outcome": None}
+    assert results._closure({}, f, 0) == "secondary"
+    assert results.CLOSURE_LABELS["secondary"] == "Settled by another payer"
+
+
+def test_d2f_a_supplement_that_answered_with_a_contractual_adjustment_only_settles_it_too(sstore):
+    from remitwatch import story
+    _supplement_answer(sstore, co=150, pr=0, allowed=0)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("done", "next_payer_contractual"), st["state_basis"]
+    assert st["state_basis"] == ("Medicare Supplement carriers answered after it on Apr 6, 2026 and put the service on the practice under "
+                                 "its contract (CO-45, $150.00), paying nothing and leaving nothing to the member: settled by another "
+                                 "payer, so the member is not billed"), st["state_basis"]
+    assert "Bill the patient" not in story.next_step(sstore.conn, "F1", today=TODAY2)["action"]
+
+
+def test_d2f_a_later_payer_that_paid_or_put_some_on_the_patient_does_not_settle_it(sstore):
+    """Only a contractual adjustment with nothing paid and nothing on the member settles it: a later payer that paid part or
+    put part on the patient leaves the bill (capped, with its caution: review r1-5)."""
+    _supplement_answer(sstore, co=30, pr=120, allowed=120)
+    assert (_state(sstore)["work_state"], _state(sstore)["rule"]) == ("work_now", "bill_patient_denial")
+    _supplement_answer(sstore, co=50, pr=0, allowed=100, paid=100)
+    assert _state(sstore)["rule"] != "next_payer_contractual"
+
+
+def test_d2f_a_persons_billed_the_patient_stands_over_a_later_contractual_answer(sstore):
+    """A person's decision is never overwritten by an automatic one: Billed the patient before the later answer was read
+    keeps the item waiting for the patient's payment."""
+    from remitwatch import actions
+    _crossed_over(sstore, "4", "KENTUCKY MEDICAID", "MC", ("CO", "45"))
+    actions.apply_status(sstore.conn, "F1", "appealed", "Billed the patient", actor="Biller One", at="2026-11-19T15:00:00+00:00")
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("waiting", "billed_patient"), st["state_basis"]
+
+
+@pytest.mark.parametrize("svc,year", [("2024-03-02", "2024"), ("2025-12-31", "2025")])
+def test_d2f_the_bill_the_patient_step_names_the_service_year(sstore, svc, year):
+    """How old a bill to a patient would be is plain on its step (the owner decides the older ones as a batch: nothing in
+    the code decides them). Year-end dates keep their own year."""
+    from remitwatch import story
+    _patient_denial(sstore, "204", signal="DENIED_PLAN_EXCLUSION")
+    _production_covers(sstore, "2024-01-01", "2026-11-20")
+    sstore.conn.execute("UPDATE findings SET service_date=?, year=? WHERE finding_id='F1'", (svc, year))
+    sstore.conn.execute("UPDATE lines SET service_date=?", (svc,))
+    sstore.conn.commit()
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    n = story.next_step(sstore.conn, "F1", today=TODAY2)
+    assert n["action"].startswith("Bill the patient $150.00:") and n["action"].endswith(f" Service year: {year}."), n["action"]
+
+
+DESK_YEARS_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/].map(re => grab(html, re)).join('\n');
+const ctx = { console, state: { summary: null, filt: {}, lim: {} } };
+vm.createContext(ctx);
+for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js')]) vm.runInContext(src, ctx);
+const out = {};
+out.none = ctx.serviceYears({ today: '2026-11-27' }, '');
+ctx.state.summary = { years: ['2023', 2024, '2025', '2026'] };
+out.held = ctx.serviceYears({ today: '2026-11-27' }, '');
+out.linked = ctx.serviceYears({ today: '2026-11-27' }, '2021');
+out.chosen = ctx.serviceYears({ today: '2026-11-27' }, '2025');
+console.log(JSON.stringify(out));
+"""
+
+
+def test_d2f_the_lists_filter_by_service_year(tmp_path):
+    """The lists' More filters carry a Service year picker (desk.js serviceYears: the years the site holds, newest first;
+    a year a link chose stays in the picker), its chip says "Services of <year>", and the findings the list asks for are
+    filtered by the service year the run stores (findings.year)."""
+    if not _node_ok():
+        pytest.skip("needs node")
+    static = os.path.join(os.path.dirname(HERE), "remitwatch", "static")
+    js = tmp_path / "desk_years.js"
+    js.write_text(DESK_YEARS_JS, encoding="utf-8")
+    r = subprocess.run(["node", str(js), static], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-3000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["none"] == ["2026", "2025", "2024", "2023"], out
+    assert out["held"] == ["2026", "2025", "2024", "2023"] and out["chosen"] == out["held"], out
+    assert out["linked"] == ["2021", "2026", "2025", "2024", "2023"], out
+    desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()
+    assert "sel('year','Service year',[['','Any service year'],...years.map(y=>[y,'Services of '+y])],f.year||'')" in desk
+    assert "chip('year', `Services of ${esc(f.year)}`)" in desk and "year:f.year" in desk

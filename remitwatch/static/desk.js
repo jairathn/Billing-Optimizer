@@ -74,6 +74,14 @@ function shortOf(b, sig){ const l = labelOf(b, sig); return l.short || l.label; 
 function kindLine(b, k){ return kindOf(b, k).short || KIND_SHORT[k] || ''; }
 function foldIsOpen(key){ try { return localStorage.getItem('rw:fold:'+key) === '1'; } catch(e){ return false; } }
 function foldRemember(key, open){ try { localStorage.setItem('rw:fold:'+key, open ? '1' : '0'); } catch(e){} }
+// the service years a list can be filtered by: the years the site holds (the summary's), else this year back to 2023; a
+// year chosen elsewhere (a link) is kept so the picker shows it
+function serviceYears(b, cur){
+  const held = ((state.summary || {}).years || []).map(String);
+  const now = Number(String((b && b.today) || new Date().toISOString()).slice(0, 4)) || 2026;
+  const ys = held.length ? held.slice().sort().reverse() : Array.from({length: Math.max(1, now - 2022)}, (_, i) => String(now - i));
+  return cur && !ys.includes(String(cur)) ? [String(cur)].concat(ys) : ys;
+}
 function tileOf(f){ return DESK_TILES.find(([k, l, s]) => s.deadline === (f.deadline||'') && s.status === f.status && s.state === (f.state||'')); }
 function viewName(f){
   const d = (WL_DEADLINES.find(x=>x[0]===(f.deadline||''))||['',''])[1], s = (WL_STATUSES.find(x=>x[0]===f.status)||['',f.status])[1];
@@ -191,7 +199,7 @@ async function deskTab(v, key){
   if(f.signal) chips.push(chip('signal', esc(shortOf(b, f.signal))));
   if(f.payer) chips.push(chip('payer', esc(f.payer)));
   if(f.paid) chips.push(chip('paid', `Paid in the last ${esc(f.paid)} days`));
-  if(f.year) chips.push(chip('year', `Year ${esc(f.year)}`));
+  if(f.year) chips.push(chip('year', `Services of ${esc(f.year)}`));
   if(f.handling === 'written_off') chips.push(chip('handling', 'Written off in EMA, still workable'));
   if(f.ema) chips.push(chip('ema', esc((WL_EMA.find(x=>x[0]===f.ema)||['',f.ema])[1])));
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
@@ -200,6 +208,9 @@ async function deskTab(v, key){
   if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Work now">✕</button></span>`);
   const sel = (name, label, opts, cur) => `<select data-f="${name}" aria-label="${label}">${opts.map(([val,l])=>`<option value="${esc(val)}" ${String(cur)===val?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
   const plist = payers.concat(f.payer && !payers.includes(f.payer) ? [f.payer] : []);
+  // the service year (the owner's decision 2, its follow-up: how old a bill to a patient would be shows on its step, and
+  // the lists filter by it; what to do with the older ones is the owner's call, never the page's)
+  const years = serviceYears(b, f.year);
   const orders = [['value','Worth most first'],['deadline','Soonest first'],['shortfall','Largest first'],['payer','By payer']].concat(waiting?[['sent','Oldest sent first']]:[]);
   const startLbl = closed || !res.items.length ? '' : f.sort === 'sent' ? 'Start with the oldest sent' : f.sort === 'shortfall' ? 'Start with the largest' : f.sort === 'deadline' ? 'Start with what closes first' : f.sort === 'value' ? 'Start with what is worth most' : 'Start with the first item';
   const moreOpen = !!(state.moreF && state.moreF[key]);
@@ -225,7 +236,7 @@ async function deskTab(v, key){
     <div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>${chips.join('')}<span id="hiddenLine" class="small muted"></span>
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
-    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('state','State',WL_STATES,f.state||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
+    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('state','State',WL_STATES,f.state||'')}${sel('year','Service year',[['','Any service year'],...years.map(y=>[y,'Services of '+y])],f.year||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
     <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting || !bulk ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
     <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item shown"></th><th>Closes</th><th>Patient</th>${f.payer?'':'<th>Payer</th>'}<th>What happened</th><th class="num">Amount</th></tr></thead>
     <tbody>${res.items.map(r=>rowHtml(b, r, {oneKind, onePayer: !!f.payer, oneSignal: !!f.signal})).join('')}</tbody></table></div>

@@ -1076,6 +1076,11 @@ def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: s
             ns = _mark(rows, "rw:manual", limit=1)
             sent = f"{st['state_basis']} {_refs(ns)}."
             why = "a person's status"
+        elif rule == "next_payer_contractual":
+            # decision 2's follow-up (fx-people): the later payer's own remittance is the proof, named by its row
+            ns = _decide_rows(rows, [r["n"] for r in rows if r["source"] == "835" and proof.get("date") and r["date"] == proof.get("date")])
+            sent = proof.get("text", "Settled by another payer") + f" {_refs(ns)}."
+            strength = "proven" if ns else "one_source"
         else:
             sent = (st.get("state_basis") or "Done") + "."
     elif state == "waiting":
@@ -1954,13 +1959,18 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         if state == "done":
             action = "Nothing to do: " + (proof.get("text") or st.get("state_basis") or "it is settled") + "."
             if f.get("status") == "open" and rule not in ("stale", "auto_closed", "person_paid"):
-                if proof.get("rule") in CLOSE_RECOVERED and (proof.get("cents") or 0) > 0:
+                if rule == "next_payer_contractual":
+                    # decision 2's follow-up: the next payer's contract put it on the practice; nothing to bill or recover
+                    steps.append("Nothing to bill: press Done to close it yourself (it counts as done, with nothing recovered).")
+                    buttons.append("mark_done")
+                elif proof.get("rule") in CLOSE_RECOVERED and (proof.get("cents") or 0) > 0:
                     steps.append(f"Close it as Paid, recovered {usd(proof.get('cents'))} (the payment of {day(proof.get('date'))}): Log what "
                                  "happened > The payer paid.")
                 else:
                     steps.append("Close it as Paid with $0.00 recovered: the money came before this item was listed (Log what happened > "
                                  "The payer paid, amount 0).")
-                buttons.append("log_outcome")
+                if rule != "next_payer_contractual":
+                    buttons.append("log_outcome")
             if proof.get("watch"):
                 steps.append("Watch for a takeback: if the payer recoups the payment, dispute it with the remittance that paid it.")
             if proof.get("source") == "production" or proof.get("rule") in ("paid_later_ema", "rebilled_paid", "claim_paid_in_ema", "forwarded_paid"):
@@ -1968,7 +1978,11 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                 if era:
                     steps.append(era)
                     buttons.append("request_era")
-            if tot["n"] and tot["balance"] > 0 and rule != "stale":
+            if tot["n"] and tot["balance"] > 0 and rule == "next_payer_contractual":
+                # the later payer's contract put it on the practice: the open balance comes off, never onto a statement
+                steps.append(f"EMA still shows {usd(tot['balance'])} open on this line: take it off as the later payer's contractual "
+                             "adjustment (its remittance is the proof), never onto the patient's statement.")
+            elif tot["n"] and tot["balance"] > 0 and rule != "stale":
                 unj = [r for r in story.get("rows") or [] if "patient_unjoined" in r["tags"] and (r["amount_cents"] or 0) > 0]
                 if unj:
                     steps.append(f"EMA still shows {usd(tot['balance'])} open on this line, but the patient paid {usd(sum(r['amount_cents'] for r in unj))} "
@@ -2019,9 +2033,13 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
     elif route == "bill_patient" and rule in ("bill_patient_denial", "patient_unpaid"):
         action, steps, who, owed, extra = _bill_patient_denial_step(f, fx, st, tot, deadline, t)
         buttons += extra
-        expected, expected_basis = owed, ("what the payer put on the patient on its 835, at most the charge less what any payer paid, "
-                                          "less what EMA shows the patient paid")
-        deadline, basis = None, "the next statement cycle"
+        if S.referral_member(fx) == "yes" and rule != "patient_unpaid":
+            # a Medicaid member's missing referral is fixed with the plan by a corrected claim, inside its window
+            expected, expected_basis = owed, "what the plan put on the patient for the missing referral: what it pays once the referral is on the claim"
+        else:
+            expected, expected_basis = owed, ("what the payer put on the patient on its 835, at most the charge less what any payer paid, "
+                                              "less what EMA shows the patient paid")
+            deadline, basis = None, "the next statement cycle"
     elif route == "bill_patient":
         action, steps, who, owed, extra = _bill_patient_step(f, fx, st, tot)
         buttons += extra
@@ -2441,14 +2459,29 @@ def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: 
     carc = str(f.get("carc") or "")
     pr = ", ".join(f"{g}-{c} {usd(a)}" for g, c, a in share.get("pr") or []) or f"PR-{carc}"
     why = PATIENT_DENIAL_WORDS.get(carc, "not the payer's to pay")
-    if st.get("rule") == "patient_unpaid" and not tot["n"]:
+    # decision 2's follow-ups (fx-people): a Medicaid member's missing referral is fixed with the plan, never billed; a
+    # remittance that cannot tell the company's plans apart asks for the member's coverage before any bill goes out
+    member = S.referral_member(fx)
+    if member == "yes" and st.get("rule") != "patient_unpaid":
+        return _medicaid_referral_step(f, fx, whole, deadline, today)
+    if member == "unclear" and st.get("rule") != "patient_unpaid":
+        action = (f"Check the member's coverage before any bill goes out: {_poss(grp)} remittance does not say whether the member "
+                  f"is on its Medicaid plan. A Medicaid member is never billed for a missing referral; any other member is billed "
+                  f"{usd(owed)}{so_far} ({pr}: {why}).")
+    elif st.get("rule") == "patient_unpaid" and not tot["n"]:
         action = (f"Check the patient's account in EMA, then send the patient another statement for {usd(owed)} or mark it Done: "
                   f"{_lower(st.get('state_basis') or '')}.")
     elif st.get("rule") == "patient_unpaid":
         action = f"Send the patient another statement for {usd(owed)}, or mark it Done: {_lower(st.get('state_basis') or '')}."
     else:
         action = f"Bill the patient {usd(owed)}{so_far}: {grp} put this service on the patient ({pr}: {why})."
+    action += _service_year(f)
     steps: list[str] = []
+    if member == "yes":
+        # a person billed a Medicaid member before (their choice stands): another statement is not the way, the plan is
+        steps.append(f"Before another statement: the member is on a Medicaid plan ({grp}), whose payment is payment in full, and a "
+                     "missing referral is the practice's to fix: get a retroactive referral and send a corrected claim instead, or "
+                     "press Done.")
     # a payer that answered after it on the same service (the next payer) and put it on the practice (CO), paying nothing
     # and putting nothing on the patient: billing the patient may break that payer's terms, so the step says so first. The
     # owner's decision still bills the patient by default; a person who finds the terms forbid it presses Done
@@ -2491,6 +2524,29 @@ def _bill_patient_denial_step(f: dict, fx: dict, st: dict, tot: dict, deadline: 
     return action, steps, "Patient accounts", owed, _patient_denial_buttons(carc)
 
 
+def _service_year(f: dict) -> str:
+    """The service's year at the end of a bill-the-patient step (the owner's decision 2, its follow-up: how old a bill
+    would be is plain on the step, and the lists filter by it; what to do with the older ones is the owner's call)."""
+    y = str(f.get("service_date") or "")[:4]
+    return f" Service year: {y}." if y.isdigit() else ""
+
+
+def _medicaid_referral_step(f: dict, fx: dict, owed: int, deadline: str | None, today: str):
+    """A missing referral (PR-288) for a member on a Medicaid plan (states.medicaid_member): never billed to the patient,
+    since Medicaid's payment is payment in full and the referral is the practice's to fix. A retroactive referral and a
+    corrected claim inside the plan's window, or Done when the plan will not take one (the owner's decision 2, its
+    follow-up). Worth what the plan put on the patient for it: what it pays once the referral is on the claim."""
+    grp = f.get("payer_group") or "the plan"
+    by = f" by {day(deadline)}" if deadline and str(deadline) >= today else ""
+    action = ("Get a retroactive referral and send a corrected claim; if the plan will not take one, mark it Done. The member "
+              f"is on a Medicaid plan ({grp}): a missing referral is never billed to the patient." + _service_year(f))
+    steps = [f"Ask the member's primary care office for a retroactive referral for this visit, send {grp} a corrected claim with "
+             f"the referral number{by}, then press Mark sent.",
+             f"If {grp} will not take a retroactive referral, press Done and say so: the member is not billed, since Medicaid's "
+             "payment is payment in full."]
+    return action, steps, "Biller", int(owed or 0), ["mark_sent", "mark_done", "copy_instructions"]
+
+
 def _patient_denial_other_way(carc: str, deadline: str | None, today: str) -> str | None:
     """The other way out of a patient-group denial, by its reason: a plan that covered the day, a retroactive referral, a
     corrected diagnosis or code."""
@@ -2522,10 +2578,14 @@ def _cant_check_patient_step(f: dict, fx: dict, st: dict, facts: str, today: str
     pr = ", ".join(f"{g}-{c} {usd(a)}" for g, c, a in share.get("pr") or []) or f"PR-{carc}"
     why = PATIENT_DENIAL_WORDS.get(carc, "not the payer's to pay")
     action = (f"Check the patient's account in EMA before billing {owed}: {grp} put this service on the patient ({pr}: {why}), but "
-              "RemitWatch cannot see that account for this date of service.")
+              "RemitWatch cannot see that account for this date of service." + _service_year(f))
     steps = [f"If EMA shows the {owed} still open on the patient, put it on the patient's next statement and press Billed the patient: "
              "the item then waits for the patient's payment.",
              "If the patient paid it, or the share was settled or written off, press Done and say what EMA shows."]
+    if S.referral_member(fx) == "unclear":
+        # decision 2's follow-up: the remittance cannot tell the company's plans apart, so the coverage comes first
+        steps.insert(0, f"First check the member's coverage: {_poss(grp)} remittance does not say whether the member is on its "
+                        "Medicaid plan, and a Medicaid member is never billed for a missing referral.")
     alt = _patient_denial_other_way(carc, st.get("deadline"), today)
     if alt:
         steps.append(alt)
