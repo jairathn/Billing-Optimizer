@@ -161,6 +161,9 @@ COST_SHARE = {"1": "deductible", "2": "coinsurance", "3": "copay"}
 TIMELY_CARCS = {"29"}
 PROVIDER_CARCS = {"B7", "170", "171", "185", "208", "242", "54", "147"}
 DUP_CARCS = {"18", "B13"}
+# CARC 22 (covered by another payer) and 23 (the prior payer's adjudication) on an answer: processed after another payer's
+# answer, whatever claim status it reports (fx-ledger-r1-3; states.AFTER_OTHER_CARCS)
+AFTER_OTHER_CARCS = frozenset({"22", "23"})
 CONTRACT_REMARKS = {"N381"}         # "consult our contractual agreement": a CO-45 the contract explains, not a denial
 PAIR_ORDER_MIN, PAIR_ORDER_SHARE = 5, 0.8   # a payer's own ranking of two procedures: claims needed, share ranked first
 IGNORE_CARCS = {"45", "253", "144", "23", "94", "187", "59", "131", "237", "A2", "P1", "W1", "3", "2", "1"}
@@ -8319,13 +8322,18 @@ class Detector:
             bill, code, dos = bill_of(p["patient_control_number"]), p.get("procedure_code"), p["service_date"]
             exp, _basis = self.expected_allowed(p, code)
             second = p.get("claim_status_code") in ("2", "3")
+            line_of = {x["line_key"]: x for x in answers.get((bill, code, dos), [])}
             if second:
                 # a second payer's share: only that payer's own standing payments of the service pay it again (money-2)
-                grp_of = {x["line_key"]: x.get("payer_group") for x in answers.get((bill, code, dos), [])}
                 cover = [e for e in self.paid_events.get((bill, code, dos), []) if e[3] in ("2", "3") and e[8] != lk
-                         and (e[6] == payer(p) or (bool(p.get("payer_group")) and grp_of.get(e[8]) == p.get("payer_group")))]
+                         and (e[6] == payer(p) or (bool(p.get("payer_group")) and (line_of.get(e[8]) or {}).get("payer_group") == p.get("payer_group")))]
             else:
-                cover = self.paid_cover(bill, code, dos, exp)
+                # a primary's payment taken back: a payment processed after another payer's (CARC 22 or 23, a supplement
+                # answering with claim status 1) is a second payer's share, which covers it only as paid_cover counts a
+                # secondary, at half the expected amount (fx-ledger-r1-3)
+                cover = [e for e in self.paid_cover(bill, code, dos, exp)
+                         if not (e[3] in ("1", "19") and e[8] in line_of and self._after_other_payer(line_of[e[8]]))
+                         or (exp and (e[2] or 0) >= 0.5 * exp)]
             # the units the claim's payment of the service paid (its paid lines of the code and date: a payer's restatement of
             # an earlier payment lists more lines of the code, paid nothing, which are no units of their own), still paid by
             # what stands
@@ -8381,6 +8389,14 @@ class Detector:
                 judged[key] = judged.get(key, 0) + share
                 cents -= share
         return judged
+
+    def _after_other_payer(self, l: dict) -> bool:
+        """This answer was processed after another payer's: CARC 22 (covered by another payer) or 23 (the prior payer's
+        adjudication) on its line or its claim, by the payer, whatever claim status it reports. A supplement answering with
+        claim status 1 pays its share as second payer, never the primary's payment (fx-ledger-r1-3; states._after_other_payer
+        reads the same for paid_proof)."""
+        return any(rc in AFTER_OTHER_CARCS and g != "PR" for g, rc, _a in self.adj.get(l["line_key"], [])) \
+            or any(rc in AFTER_OTHER_CARCS and g != "PR" for g, rc, _a in self.claim_adj.get(l.get("claim_key"), []))
 
     def _voided_services(self, svcs: set[tuple]) -> set[tuple]:
         """The services (bill, code, date) of these taken-back payments (bill, code, date, the payment's day) that the practice

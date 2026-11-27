@@ -944,8 +944,10 @@ def test_a_payment_medicare_withheld_by_j1_is_on_a_work_item_not_closed_on_the_s
 
 def test_a_supplements_status_1_answer_after_medicare_is_no_other_plans_primary_payment(tmp_path, kind):
     """(r1-3, paid_proof alone) Medicare paid C017's 99214, the supplement paid the coinsurance with claim status 1 and OA-23,
-    then Medicare reversed its payment and denied the service (bundled). Nothing else happened: the denial is Medicare's
-    money to pursue, never 'another plan's answer' on the supplement's $29.40."""
+    then Medicare reversed its payment and denied the service (bundled). paid_proof never reads the supplement's $29.40 as
+    another plan's primary payment ('another plan's answer and owes nothing'): it processed the claim after Medicare's.
+    (The archive rule other_payer_paid_first reads it the same wrong way; that rule is not F1's: see the progress file's
+    'Needs from others', need_status_1_supplement_not_primary.py.)"""
     w = World(tmp_path, kind)
     pcn = f"{BILL}C017"
     w.remit(clean_visits(1, 25, "99214", "223.65", "147.00"), "20260301", **KY)
@@ -957,13 +959,47 @@ def test_a_supplements_status_1_answer_after_medicare_is_no_other_plans_primary_
                                                      allowed="-147.00"), payer_ctl="MC1"),
              clm(pcn, "1", "223.65", "0.00", sv("99214", "223.65", "0.00", 1, "CAS*CO*97*223.65~"), payer_ctl="MC2")], "20260520", **KY)
     w.run("r1", today="2026-09-20")
-    rows = w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0")
-    print([(r["signal"], r["payer_group"], r["work_state"], r["state_basis"]) for r in rows])
-    den = [r for r in rows if r["signal"] != "TAKEBACK" and "Supplement" not in (r["payer_group"] or "")]
-    assert den, brief(rows)
-    assert not [r for r in den if r["work_state"] == "done" and "another plan" in (r["state_basis"] or "")], (
-        "the supplement's coinsurance (status 1, OA-23) is read as another plan's primary payment: "
-        + repr([(r["work_state"], r["state_basis"]) for r in den]))
+    (f,) = [r for r in w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0") if r["signal"] != "TAKEBACK"]
+    fx = states.facts_of(w.store.conn, [f], today="2026-09-20")[f["finding_id"]]
+    proof = states.paid_proof(fx)
+    print(proof)
+    assert not proof or proof["rule"] != "paid_before_other_payer", (
+        f"the supplement's coinsurance (status 1, OA-23) is read as another plan's primary payment: {proof}")
+    w.store.close()
+
+
+@pytest.mark.parametrize("carc,group", [("23", "OA"), ("22", "OA"), ("22", "CO")])
+def test_paid_proof_reads_a_status_1_answer_after_another_payer_as_a_second_payers_share(tmp_path, kind, carc, group):
+    """(r1-3, the edges) The supplement's status-1 answer carries CARC 22 or 23 (OA or CO): never another plan's primary
+    payment. Control below: another plan's status-1 payment with no such reason is one (two plans each taking itself for
+    primary: the right one paid)."""
+    w = World(tmp_path, kind)
+    pcn = f"{BILL}C017"
+    w.remit(clean_visits(1, 25, "99214", "223.65", "147.00"), "20260301", **KY)
+    w.remit([clm(pcn, "1", "223.65", "29.40", sv("99214", "223.65", "29.40", 1, f"CAS*CO*45*76.65~CAS*{group}*{carc}*117.60~", allowed="147.00"),
+                 payer_ctl="GP1")], "20260425", **GAP)
+    w.remit([visit_denied_line(pcn, carc="97", payer_ctl="MC2")], "20260520", **KY)
+    w.run("r1", today="2026-09-20")
+    (f,) = [r for r in w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0") if "Supplement" not in (r["payer_group"] or "")]
+    proof = states.paid_proof(states.facts_of(w.store.conn, [f], today="2026-09-20")[f["finding_id"]])
+    print(carc, group, proof)
+    assert not proof or proof["rule"] != "paid_before_other_payer", proof
+    w.store.close()
+
+
+def test_paid_proof_control_another_plans_primary_payment_still_answers_the_denial(tmp_path, kind):
+    """The control: another plan paid C017's 99214 as primary ($117.60, status 1, no CARC 22 or 23), then Anthem, which also
+    took itself for primary, denied it: Anthem's denial is another plan's answer and owes nothing."""
+    w = World(tmp_path, kind)
+    pcn = f"{BILL}C017"
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    w.remit([visit_paid(pcn, payer_ctl="AE1")], "20260425", payer="AETNA", payer_id="AETN1")
+    w.remit([visit_denied_line(pcn, carc="97", payer_ctl="AN2")], "20260520")
+    w.run("r1", today="2026-09-20")
+    (f,) = [r for r in w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0") if r["payer_name"] == "ANTHEM"]
+    proof = states.paid_proof(states.facts_of(w.store.conn, [f], today="2026-09-20")[f["finding_id"]])
+    print(proof)
+    assert proof and proof["rule"] == "paid_before_other_payer", proof
     w.store.close()
 
 
