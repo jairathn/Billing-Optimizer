@@ -893,6 +893,24 @@ def test_a_never_answered_primary_claim_that_lists_its_secondary_is_chased_as_th
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_a_primary_claim_the_version_2_reader_read_is_not_called_a_second_payers_claim(tmp_path, kind):
+    """(fx-837-r1-4, r2-1: the rule the item and its story apply, whatever the reader kept.) The reader of READ_VERSION 2
+    kept the secondary a claim to the primary lists in loop 2320 as its 'other payer' (other_payer_name HUMANA, place S,
+    nothing paid). Such a row is a claim to the primary all the same (SBR01 P): no 'sent_as', and the story never says
+    Humana answered it."""
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000Q13C017", V, others=[{"resp": "S", "payer": HUMANA}])], "20260915")
+    s.conn.execute("UPDATE claims_837 SET other_payer_name='HUMANA', other_payer_id='61101', other_payer_resp='S', read_version=2")
+    s.conn.commit()
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    f = found["CB0000Q13C017"]
+    assert "sent_as" not in json.loads(f["evidence"])
+    assert not any("HUMANA answered" in t for t in _story_837(s, f["finding_id"]))
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_a_secondary_claim_that_also_lists_the_tertiary_is_sized_by_what_the_primary_left(tmp_path, kind):
     """(fx-837-r2-2.) CB0000Q15 went to Humana as the secondary (SBR01 S) on September 15 after Anthem paid $94.08 and
     left the patient $23.52 (AMT*EAF); it also lists the tertiary (nothing adjudicated). Humana pays 99214 at $117.60 as a
@@ -1196,37 +1214,54 @@ def _rates_17110() -> list[str]:
 
 
 @pytest.mark.parametrize("kind", KINDS)
-@pytest.mark.parametrize("on_837", [True, False])
-@pytest.mark.parametrize("mods", ["59", None])
-def test_an_older_837_bill_yields_to_an_exports_bill_only_for_the_same_service(tmp_path, kind, on_837, mods):
+@pytest.mark.parametrize("ema_mods,mods", [("59", "59"), (None, "59"), (None, None)])
+def test_an_older_837_bill_yields_to_an_exports_bill_only_for_the_same_service(tmp_path, kind, ema_mods, mods):
     """(fx-837-r2-4.) Two bills carry one service only when the date, code, part and the modifiers that mark a separate
     service agree. Bill CB0000M71 (837 only, September 15) carries one patient's 17110 of September 14 with no modifier.
-    Bill CB0000M72, which EMA's weekly exports chase (with its 837 on file, sent September 25, or without), carries a
-    17110 of the same day with modifier 59: another lesion, another service. No payer answered either: both are owed, so
-    M71 stays chased. (Control, mods=None: M72's 17110 has no modifier, the same service billed again: only M72.)"""
+    Bill CB0000M72, which EMA's weekly exports chase (its 837 on file too, sent September 25), carries a 17110 of the same
+    day with modifier 59 on its 837 (and on EMA's charge row, or not: the 837 is what was sent): another lesion, another
+    service. No payer answered either: both are owed, so M71 stays chased. (Control, no modifier anywhere: the same
+    service billed again: only M72.)"""
     from tests.test_workable import ema
     s = _store(tmp_path, kind)
     member = "WDUP000071"
     line = [("17110", "200.00", "20260914")]
     send(s, tmp_path, [clm837("CB0000M71C017", line, member=member)], "20260915")
-    ema(s.conn, "CB0000M72C017", cpt="17110", charges_cents=20000, modifiers=mods, bill_created="2026-09-25")
+    ema(s.conn, "CB0000M72C017", cpt="17110", charges_cents=20000, modifiers=ema_mods, bill_created="2026-09-25")
     ema(s.conn, "CB0000M72C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-25")
     s.conn.commit()
-    if on_837:
-        send(s, tmp_path, [clm837("CB0000M72C017", [("17110", "200.00", "20260914", mods)] if mods else line, member=member)],
-             "20260925")
-    else:
-        # no 837 of the exports' claim: its patient is the one EMA names, the same patient as M71's remittance-less bill;
-        # the 837's own patient loop names M71's patient, and EMA's rows name M72's (P0000M72 by the helper)
-        pass
+    send(s, tmp_path, [clm837("CB0000M72C017", [("17110", "200.00", "20260914", mods)] if mods else line, member=member)], "20260925")
     _remits(s, tmp_path, _rates_17110() + _visits(), "20261110")
     found = _chased(s, "t1")
     print({k: (v["source"], v["shortfall_cents"], v["hint"]) for k, v in found.items()})
     assert "CB0000M72C017" in found
     if mods:
         assert "CB0000M71C017" in found, "M71's 17110 gave way to the exports' 17110-59 of another lesion"
-    elif on_837:
+    else:
         assert "CB0000M71C017" not in found
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_exports_carrier_keeps_its_lines_separate_service_modifiers_without_an_837(tmp_path, kind):
+    """(fx-837-r2-4, when the exports' claim's 837 is not on file.) EMA's weekly exports chase CB0000M75, which no 837 on
+    file carries: a 17110 of September 14 with modifier 59 and a plain 17110 the same day. Its item is then the only record
+    of its lines the one-visit rule reads: as a carrier of a visit, its two lines keep their separate-service modifiers
+    (59 on one, none on the other), so a plain 17110 on an older bill matches only the plain one."""
+    from remitwatch.detect import _visit_line
+    from tests.test_workable import ema
+    s = _store(tmp_path, kind)
+    ema(s.conn, "CB0000M75C017", cpt="17110", charges_cents=20000, modifiers="59", bill_created="2026-09-25")
+    ema(s.conn, "CB0000M75C017", cpt="17110", charges_cents=20000, bill_created="2026-09-25")
+    ema(s.conn, "CB0000M75C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-25")
+    s.conn.commit()
+    _remits(s, tmp_path, _rates_17110() + _visits(), "20261110")
+    det = Detector(s, run_id="t1")
+    det.run()
+    got = det._837_export_carriers({})
+    print(got)
+    assert sorted(_visit_line(x) for x in got["CB0000M75C017"]["lines"]) == [("2026-09-14", "17110", "", ()),
+                                                                            ("2026-09-14", "17110", "", ("59",))]
     s.close()
 
 
