@@ -2553,12 +2553,6 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         res["patient_after"] += ln["pat_after_denial"] or 0
         res["patient_paid"] = res.get("patient_paid", 0) + (ln["pat_paid_joined"] or 0)
     res["anchor"], res["anchor_basis"] = anchors[0] if anchors else (None, None)
-    # what the patient paid on the line (the copay, coinsurance or deductible the payer put on the patient) is part of what
-    # a service brings: a payer's later payment of its own part, the patient's share beside it, pays the item (an Anthem
-    # Medicare Advantage 99212 paid in full with the copay is paid, not half paid). Never for a short payment, whose
-    # shortfall already leaves the patient's share out
-    cover = 0 if f.get("category") in SHORT_CATEGORIES else max(0, res.get("patient_paid") or 0)
-    res["patient_cover"] = cover
     # what was paid before the item and still stands: takebacks (by the item's own remittance, or later) net it out
     res["taken_back"] = takeback
     res["paid_before"] = max(0, res["paid_before"] - takeback)
@@ -2569,6 +2563,17 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         res["paid_before"] = 0
     if not res["paid_before"]:
         paid_before_rows = []
+    # what the patient paid on the line (the copay, coinsurance or deductible the payer put on the patient) is part of what
+    # a service brings: the item's own payer's later payment of its part on a check, the patient's share beside it, pays the
+    # item (an Anthem Medicare Advantage 99212 paid in full with the copay is paid, not half paid). Never for a short
+    # payment (its shortfall already leaves the patient's share out), never beside another payer's payment or a posting
+    # that only moved a payment from another line (no check), and never for an item valued at the balance a first payer
+    # left (that patient's money is the first payer's share, not this payer's)
+    balance_left = ema_item and any("balance left" in str(b) for b in _ev(f).get("expected_basis") or [])
+    checked = any(r["same"] and r["check"] and r["cents"] > 0 for r in after_ema)
+    cover = (max(0, res.get("patient_paid") or 0) if checked and not balance_left and f.get("category") not in SHORT_CATEGORIES
+             else 0)
+    res["patient_cover"] = cover
     after_ema.sort(key=lambda r: (r["posted"] or "", r["check"] or ""))
     if after_ema:
         a = after_ema[0]
@@ -2617,7 +2622,7 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     on = None
     if res["paid_after_same"] > 0 and res["paid_after_same"] + cover >= thr:
         out, on = "paid_after", (res["first_paid_after"] or {}).get("date")
-    elif res["paid_after_other"] > 0 and res["paid_after_other"] + cover >= thr:
+    elif res["paid_after_other"] > 0 and res["paid_after_other"] >= thr:
         out, on = "paid_after_other", (res["first_paid_after"] or {}).get("date")
     elif moved:
         out, on = "patient", res["written_off_on"]
@@ -2804,7 +2809,7 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
                 out[fid].update(recover_cents=0, duplicate=True, note=dup, hint=dup)
             if not closes:
                 out[fid]["note"] = out[fid]["hint"]
-        elif other > 0 and other + cover >= thr:
+        elif other > 0 and other >= thr:
             first = min((p for p in rows if not p["same"]), key=lambda p: (p["posted"] or "", p["check"] or ""))
             payer = first["payer"] or first["group"]
             hint = (f"EMA shows {_usd(other)} paid by {payer}, another payer, on {first['posted']} (check ending "

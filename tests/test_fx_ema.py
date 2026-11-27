@@ -396,19 +396,28 @@ def test_a_later_payment_with_the_patients_copay_pays_the_item(tmp_path, kind):
     paid (before: $15.50 was under half of $55.50 and the item stayed in Work now as 'partly paid'). With no copay on the
     line the same payment is a partial payment."""
     s, lg = _world(tmp_path, kind)
-    for n in (81, 82):
+    for n in (81, 82, 83, 84):
         last, first = _last_first(n)
         remit(s, trace=f"91000{n}", paid_on="2026-03-28",
               claims=[{"pcn": F.claim_id(n), "last": last, "first": first, "lines": [(S, "99212", 90, 0, [("CO", "16", 90)])]}])
     rows, ar = [], []
-    for n in (81, 82):
+    for n in (81, 82, 83, 84):
         rows += [charge(F.link_no(n), cpt="99212", amount=90, patient=_name(n)),
                  pay(F.link_no(n), f"91000{n}", 0, cpt="99212", patient=_name(n), posted=D(2026, 3, 31)),
-                 adj(F.link_no(n), "CO-16", 90, cpt="99212", patient=_name(n), posted=D(2026, 3, 31)),
-                 pay(F.link_no(n), f"PAPER{n}", 15.50, cpt="99212", patient=_name(n), posted=D(2026, 4, 20))]
+                 adj(F.link_no(n), "CO-16", 90, cpt="99212", patient=_name(n), posted=D(2026, 3, 31))]
+        if n in (81, 82):
+            rows.append(pay(F.link_no(n), f"PAPER{n}", 15.50, cpt="99212", patient=_name(n), posted=D(2026, 4, 20)))
+        elif n == 83:
+            # no check: a posting that moved $15.50 of another line's payment onto this one, not a payment
+            rows += [pay(F.link_no(n), None, 15.50, cpt="99212", patient=_name(n), posted=D(2026, 4, 20)),
+                     pay(F.link_no(n), None, -15.50, cpt="99213", patient=_name(n), posted=D(2026, 4, 20))]
+        else:
+            # another payer's payment (a second payer), the patient's copay beside it
+            rows.append(pay(F.link_no(n), f"PAPER{n}", 15.50, cpt="99212", patient=_name(n), posted=D(2026, 4, 20), payer=P["commercial"]))
         ar.append(F.ar_row(claim=F.claim_id(n), link=F.link_no(n), status="Payment Pending", current=0, svc=SVC, patient=_name(n),
                            cpt="99212"))
-    rows.append(F.production_row(link=F.link_no(81), cpt="99212", pat_paid=40, patient=_name(81), svc=SVC, posted=SVC, payer="Patient"))
+    for n in (81, 83, 84):
+        rows.append(F.production_row(link=F.link_no(n), cpt="99212", pat_paid=40, patient=_name(n), svc=SVC, posted=SVC, payer="Patient"))
     denial_world(s, lg, tmp_path, rows, ar_rows=ar)
     lg.close()
     findings = [{"finding_id": "c6-81", "signal": "DENIED_MISSING_INFO", "category": "denial", "payer_group": "Anthem / BCBS",
@@ -417,8 +426,12 @@ def test_a_later_payment_with_the_patients_copay_pays_the_item(tmp_path, kind):
                 {"finding_id": "c6-82", "signal": "DENIED_MISSING_INFO", "category": "denial", "payer_group": "Anthem / BCBS",
                  "payer_name": "BLUE CROSS TEST", "patient_control_number": F.claim_id(82), "service_date": S, "procedure_code": "99212",
                  "line_key": "LK82", "expected_cents": 5550, "shortfall_cents": 5550, "paid_cents": 0, "payment_date": "2026-03-28"}]
+    findings += [dict(findings[1], finding_id=f"c6-{n}", patient_control_number=F.claim_id(n), line_key=f"LK{n}") for n in (83, 84)]
     outcomes = ec.line_outcomes(s.conn, findings, code_once=lambda f: True, today=TODAY)
     got = ec.paid_in_ema(s.conn, findings, outcomes)
     assert outcomes["c6-81"]["outcome"] == "paid_after" and got["c6-81"]["action"] == "close", (outcomes["c6-81"], got.get("c6-81"))
     assert got["c6-81"]["paid_cents"] == 1550
     assert got["c6-82"]["action"] == "hint_partial", got.get("c6-82")
+    # no check (a payment moved from another line), or another payer's payment: the copay does not make it paid
+    assert outcomes["c6-83"]["outcome"] != "paid_after" and (got.get("c6-83") or {}).get("action") != "close", got.get("c6-83")
+    assert outcomes["c6-84"]["outcome"] != "paid_after" and (got.get("c6-84") or {}).get("action") not in ("close", "hint_other_payer"), got.get("c6-84")
