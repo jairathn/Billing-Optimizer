@@ -177,12 +177,51 @@ class _SlowClock:
 
 def test_presses_rebuild_the_provider_tables_when_the_analysis_fills_the_run(box, monkeypatch):
     """Each analysis leaves the provider tables behind (activity.mark_pending) and rebuilds them when it has 45 s left; on
-    Vercel's real image it does not, so the chain's last run rebuilds them, on the fast and the slow analysis alike."""
+    Vercel's real image it does not, so the chain's last run rebuilds them, on the fast and the slow analysis alike: a
+    press that analyses itself, and one that hands its analysis on. Two slow chains: each slow analysis (200 s of 240) is
+    pressure the self-regulation counts (selfcheck.plan_next), and a third in a row would leave the provider tables for a
+    calm run by design (level 'shed'; the test below). The three chains this test ran before passed only while two runs
+    started within one second were taken for one (so the analysing run's pressure was missed): on a fast machine; on a
+    loaded one each run had its own second and the third chain's last run shed them."""
     from remitwatch import activity, cloud, detect
     root, client, state = box
     write_remits(root / DATA, visits_with_downcodes())
     first = _chain(state, client)
     assert any("activity" in r for r in first), _shape(first)            # a fresh site: built once, with time to spare
+    clock = _SlowClock(200)
+    monkeypatch.setattr(cloud, "time", clock)
+    real = detect.Detector.run
+
+    def slow(self):
+        out = real(self)
+        clock.offset += clock.seconds
+        return out
+    monkeypatch.setattr(detect.Detector, "run", slow)
+    chains = [_chain(state, client, budget_s=240) for _ in range(2)]
+    runs = chains[0] + chains[1]
+    conn = raw_conn(state)
+    try:
+        stale = activity.stale(conn)
+    finally:
+        conn.close()
+    assert [r["trigger"] for r in chains[0]] == ["press", "tidy"], _shape(runs)                 # the press analysed itself
+    assert [r["trigger"] for r in chains[1]] == ["press", "continue", "tidy"], _shape(runs)     # it handed the analysis on
+    for chain in chains:
+        assert "activity" not in chain[-2] and "activity" in chain[-1], _shape(runs)    # the analysis had no time; tidy did
+    assert not any("activity" in ((r.get("plan") or {}).get("skip") or []) for r in runs), _shape(runs)
+    assert not stale, (_shape(runs), stale)
+    _no_analysis_without_a_press(runs)
+
+
+def test_three_slow_analyses_in_a_row_leave_the_provider_tables_for_a_calm_run(box, monkeypatch):
+    """The third pressured analysis in a row steps the self-regulation to 'shed': the chain's last run leaves the provider
+    tables (an optional step) for a calm run and says so in its plan, whatever second each run started in; the tables are
+    stale until then (selfcheck.plan_for: never one optional step for more than MAX_DEFER_DAYS)."""
+    from remitwatch import activity, cloud, detect
+    from remitwatch import selfcheck as sc
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    _chain(state, client)
     clock = _SlowClock(200)
     monkeypatch.setattr(cloud, "time", clock)
     real = detect.Detector.run
@@ -200,7 +239,11 @@ def test_presses_rebuild_the_provider_tables_when_the_analysis_fills_the_run(box
         stale = activity.stale(conn)
     finally:
         conn.close()
-    assert any(r.get("trigger") == "tidy" and "activity" in r for r in runs) and not stale, (_shape(runs), stale)
+    last = runs[-1]
+    plan = last.get("plan") or {}
+    assert last["trigger"] == "tidy" and plan.get("level", 0) >= 3 and "activity" in plan.get("skip", []), (_shape(runs), plan)
+    assert "activity" not in last and stale, (_shape(runs), stale)
+    assert sc.LEVELS[plan["level"]] in ("shed", "alert")
     _no_analysis_without_a_press(runs)
 
 

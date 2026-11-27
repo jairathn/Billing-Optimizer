@@ -510,6 +510,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
     # (H) the run's manifest and event log, the self-repair registry; each progress line is an event (scrubbed), and the
     # console still sees it
     rl = runlog.start_run("cycle", trigger=out["trigger"], db_path=db_path, conn=store.conn, host="server")
+    out["run_id"] = rl.run_id           # the self-regulation knows each cycle by it (selfcheck.plan_next)
     reg = repair.registry_for(rl, conn=store.conn)
     if rl.manifest["sections"].get("killed_runs"):
         repair.note_killed_runs(reg, rl.manifest["sections"]["killed_runs"])

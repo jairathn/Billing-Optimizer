@@ -737,3 +737,38 @@ console.log(JSON.stringify({with: ctx.opAnalysisHtml(Object.assign({ema: process
     out = json.loads(got.stdout.strip().splitlines()[-1])
     assert AR_ONLY in out["with"] and "data-op-ema" in out["with"]
     assert "data-op-ema" not in out["without"]
+
+
+# --------------------------------------------------------------------------- the self-regulation counts every run once
+
+@pytest.mark.parametrize("mode", ["serverless", "server"])
+def test_the_regulation_counts_each_run_once_even_two_that_started_in_the_same_second(sc_store, mode):
+    """Runs of a chain start back to back: a press that hands its analysis on in a fraction of a second, then the run
+    that analyses. Two runs that started within the same second are two runs: the second's pressure (200 s of a 240 s
+    budget) steps the level too, and each run's status is counted once whatever arrives again (the third flaky test of
+    the merges: on a fast machine the analysing run's pressure was taken for the run before it and never counted, so
+    the chain's last run rebuilt the provider tables on a fast machine and shed them on a loaded one)."""
+    from remitwatch import selfcheck as sc
+    c = sc_store.conn
+    same = "2026-11-27T02:31:13+00:00"
+    calm = {"started": same, "finished": same, "seconds": 0.4, "budget_seconds": 240, "trigger": "press", "run_id": "run-20261127T023113Z-aaaa"}
+    pressured = {"started": same, "finished": "2026-11-27T02:34:35+00:00", "seconds": 202.7, "budget_seconds": 240, "trigger": "continue",
+                 "run_id": "run-20261127T023113Z-bbbb"}
+    assert sc.plan_next(c, calm, mode=mode, budget_s=240)["level"] == 0
+    assert sc.plan_next(c, pressured, mode=mode, budget_s=240)["level"] == 1, "the analysing run's pressure is counted"
+    assert sc.plan_next(c, pressured, mode=mode, budget_s=240)["level"] == 1, "a status already counted is not counted again"
+    again = dict(pressured, run_id="run-20261127T023113Z-cccc")
+    assert sc.plan_next(c, again, mode=mode, budget_s=240)["level"] == 2
+
+
+def test_the_regulation_reads_a_status_from_before_run_ids_once(sc_store):
+    """A regulation state written by the release before (its last status known by its start alone) does not count that
+    status a second time when it comes back with its run id."""
+    from remitwatch import selfcheck as sc
+    c = sc_store.conn
+    st = {"started": "2026-11-27T02:31:13+00:00", "finished": "2026-11-27T02:34:35+00:00", "seconds": 202.7, "budget_seconds": 240}
+    assert sc.plan_next(c, st, mode="serverless", budget_s=240)["level"] == 1
+    reg = sc.meta_get(c, sc.K_REGULATE, {})
+    reg.pop("last_run_key", None)                   # as the release before left it
+    sc.meta_set(c, sc.K_REGULATE, reg)
+    assert sc.plan_next(c, dict(st, run_id="run-20261127T023113Z-bbbb"), mode="serverless", budget_s=240)["level"] == 1

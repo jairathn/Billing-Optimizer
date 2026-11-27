@@ -623,9 +623,14 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
             hist = list(reg.get("changes") or [])[-19:]
             hist.append({"at": now_of(now), "from": LEVELS[before], "to": LEVELS[level], "why": pressure.get("text")})
             reg["changes"] = hist
-    if prev and prev.get("started") and prev.get("started") != reg.get("last_started") and not prev.get("skipped"):
+    # a run is known by its run id (two runs of a chain can start within one second: by the start alone, the second was
+    # taken for the first and its pressure never counted); a regulation state from before run ids knows the start alone
+    key = str((prev or {}).get("run_id") or (prev or {}).get("started") or "")
+    counted = (key == reg.get("last_run_key")) if reg.get("last_run_key") else \
+        bool(prev) and prev.get("started") == reg.get("last_started")
+    if prev and prev.get("started") and not counted and not prev.get("skipped"):
         step(prev, budgets(mode, budget_s=prev.get("budget_seconds") or budget_s))
-        reg.update(last_started=prev.get("started"),
+        reg.update(last_started=prev.get("started"), last_run_key=key,
                    last_run={k: prev.get(k) for k in ("started", "finished", "seconds", "budget_seconds", "trigger", "more",
                                                       "error", "deferred")})
     seen = list(reg.get("killed_seen") or [])
