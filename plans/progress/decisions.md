@@ -269,6 +269,29 @@ lows r2-2 to r2-5 (this section's commit).
   payable" (550 items, $61,330; 115 on Work now, $13,966, research counts of the 11-24 world): they move to fixable on
   the claim.
 
+## Numbers of this round (world of 2026-11-24, today 2026-11-24; base a07a5a6 against the branch at fb3ddf3)
+
+One server cycle of each tree on a fresh private copy (`cycle_run.py 2026-11-24`): base 490 s, peak 1,055 MB; branch
+353 s, peak 1,056 MB (the machine was shared, so the times differ by load); no EMA step error in either; 16,632 items in
+both. 84 items changed, every one explained by a fix and checked against its own rows with plain SQL (`check_moved.py`):
+
+| Fix | Items | What changed |
+|---|---|---|
+| r1-1 | 43 | Work now (bill the patient) to Can't check: no EMA line of the service and no Production report covering its date (32 plan exclusions $1,695.90, 11 coverage dates $1,430.30). |
+| r1-4 | 12 | Patient-group denials whose work is with the payer, resized from the patient's share to the payer's rate (11 Work now, 1 Waiting): $3,874.94 to $1,397.36. Each size equals the evidence's payer rate. |
+| r1-5 | 3 | Shares capped by the next payer's patient share, $14.07 less in all (one of them is also among the 43). |
+| r2-1 | 27 | Work-now bundled items a never-payable rule leads now store the block `never_payable` (out of the bulk appeal). |
+
+Decision 4 on the same runs (`d4_measure.py`, the corrected count of led items for both trees): base 305 led, 116
+denials only EMA saw with a never-payable block but told to get the EOB (r1-3), 28 led items still offering a packet or
+a fax with `appeal_ok` true (r2-1); branch 306 led, 0 left unled, 0 offering an appeal. The 100 G6001 items the base
+led (Denied auth 87, medical necessity 13) are no longer led (r2-5: fixable on the claim), and 101 EMA-only denials now
+are. UnitedHealthcare G6001 to 2025: 553 items, $61,650.82 (115 on Work now, $13,965.95) carry the `claim` verdict.
+
+Open patient-group denials on the branch: 188, $17,057.43 (bill the patient 79, $7,596.15; can't check 43, $3,126.20;
+settled by the patient 46; work with the payer 19; paid before by another payer 1). Next payers that answered with a contractual part only: 9 (the
+caution stays). Open second-role remainders: none in this world (r1-7 and r1-8 change no item here).
+
 ## Tests of this round
 
 - `tests/test_decisions_review.py`: every finding's ported test (r1-1 to r1-8, r2-1 to r2-5), both store kinds where

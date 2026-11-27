@@ -35,3 +35,11 @@ Decision 4 (codes a payer almost never pays; run on a world after a cycle of the
   code is the rule's, nothing paid on the line, the service date inside the rule's period, the payer group the rule's;
   for a denial only EMA saw, one EMA line of that code with no insurance payment). Prints the checks and the failures.
 - `d4_show.py <tree> <world>`: what the drawer's "Why" block and the next step say for one item of a few kinds.
+
+The fix round of 2026-11-26 (the two reviews of decisions 2, 3 and 4):
+- `fix_measure.py <tree> <world> <today>`: the open patient-group denials by live state and rule (count, dollars), the
+  shares the next payer's patient share capped, the next payers that answered with a contractual part only, the
+  work-now appeal blocks, the open second-role remainders and the open G6001 items by payer group and state.
+- `check_moved.py <world> <moved.json>`: every item `diff_ba.py` lists as moved, checked against its own rows with plain
+  SQL (no remitwatch code): a can't-check has no EMA line of the service and no Production report covering its date; a
+  resized payer-side item's size is its evidence's payer rate; a capped share is at most the next payer's patient share.
