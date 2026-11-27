@@ -79,21 +79,19 @@ def test_an_anthem_commercial_clinical_denial_is_appealed_within_180_days_of_the
     eighty (180) calendar days to file a clinical appeal from the date they receive notice of Anthem's initial decision'; a
     clinical appeal is 'a situation in which an authorization or Claim for a service was denied as not medically necessary
     or experimental/investigational', and the Claim Payment Dispute 'does not apply to appeals regarding a clinical
-    decision denial'. A denial on a March 1, 2026 remittance for one of Anthem's own plans: 180 days, August 28, 2026, is
-    the date shown; receipt is presumed 5 days after the remittance (as for KRS 205.534), so September 2 is the last day. It
-    was the two-year dispute, March 1, 2028, called confirmed."""
+    decision denial'. A denial on a March 1, 2026 remittance for one of Anthem's own plans (the plan names Kentucky or
+    Indiana): 180 days, August 28, 2026, is the date shown; receipt is presumed 5 days after the remittance (as for KRS
+    205.534), so September 2 is the last day. It was the two-year dispute, March 1, 2028, called confirmed."""
     for kind in ("commercial", "supplement", "other"):
         for carc in CLINICAL:
-            for plan in ("SAMPLE PPO", "KENTUCKY SAMPLE HSA", "IN SAMPLE HRA PPO", "INDIANA SAMPLE PPO"):
+            for plan in ("KENTUCKY SAMPLE HSA", "IN SAMPLE HRA PPO", "INDIANA SAMPLE PPO", "SAMPLE PLAN OF KY"):
                 r = appeal_rule("Anthem / BCBS", kind, plan, carc=carc)
                 assert dates("2026-03-01", r) == ("2026-08-28", "2026-09-02"), (kind, carc, plan, r["label"])
                 assert r["verified"] and "one hundred eighty (180) calendar days" in r["label"], r["label"]
                 assert "Clinical Appeals" in r["source"], r["source"]
-    # a payment dispute keeps the two years; a reason that is not known keeps them too (an underpayment has none); so do the
-    # level-of-service, frequency and length denials (150, 151, 152): Anthem reviews an E&M level 'in accordance with correct
-    # coding requirements and/or reimbursement policy', a 'Claim code editing' matter for the Claim Payment Dispute
-    for carc in ("45", "97", "29", "16", "150", "151", "152", None):
-        for plan in (None, "SAMPLE PPO"):
+    # a payment dispute keeps the two years; a reason that is not known keeps them too (an underpayment has none)
+    for carc in ("45", "97", "29", "16", None):
+        for plan in (None, "SAMPLE PPO", "KENTUCKY SAMPLE PPO"):
             assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", plan, carc=carc)) == ("2028-03-01", "2028-03-01"), \
                 (carc, plan)
     # the Federal Employee Program keeps its own clinical row: the member's 6 months
@@ -135,9 +133,11 @@ def test_a_bluecard_members_clinical_denial_keeps_the_claim_payment_disputes_las
 
 @pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
 def test_detection_dates_an_anthem_commercial_clinical_denial_by_its_180_days(tmp_path, compact):
-    """A CO-50 (not medically necessary) denial of a May 20, 2026 visit on Anthem's June 1 remittance, for a PPO plan: due
-    November 28, 2026 (180 days), last day December 3 (receipt 5 days after the remittance). It was dated June 1, 2028."""
-    got = _run(tmp_path, compact, _book("12", "PPO", "20260520", [NECESSITY]), "20260601", "ANTHEM", "ANTHM", today="2026-07-15")
+    """A CO-50 (not medically necessary) denial of a May 20, 2026 visit on Anthem's June 1 remittance, for one of Anthem's
+    own Kentucky plans: due November 28, 2026 (180 days), last day December 3 (receipt 5 days after the remittance). It was
+    dated June 1, 2028."""
+    got = _run(tmp_path, compact, _book("12", "KENTUCKY SAMPLE PPO", "20260520", [NECESSITY]), "20260601", "ANTHEM", "ANTHM",
+               today="2026-07-15")
     got.pop("_store").close()
     f = got["DENIED_MEDICAL_NECESSITY"]
     assert f["payer_group"] == "Anthem / BCBS", f["payer_group"]
@@ -280,12 +280,12 @@ def test_a_plan_that_names_its_state_by_the_code_after_of_is_read_as_that_states
 
 
 def test_a_managed_care_plans_name_that_names_the_state_is_not_the_state_program():
-    """A Medicaid managed care plan's name starts with the plan's own ('Anthem Indiana Medicaid Hoosier Healthwise', '<plan>
-    Pathways Indiana Medicaid', '<plan> Medicaid of Kentucky'): it is never the state's fee-for-service program, whose rules
+    """A Medicaid managed care plan's name starts with the plan's own ('Anthem <state> Medicaid <program>', '<plan> <program>
+    Indiana Medicaid', '<plan> Medicaid of Kentucky'): it is never the state's fee-for-service program, whose rules
     (Indiana's 180 days and 60-day review, Kentucky's no appeal) are not the plan's. Anthem's Medicaid names are Anthem's
     Medicaid group, the one its 835s get from CLP06 MC: Indiana's plan files within 90 days and disputes within 60, its
     Kentucky plan within 365 days. WellCare's Kentucky plan keeps WellCare's group."""
-    for name in ("Anthem Indiana Medicaid Hoosier Healthwise", "Anthem Pathways Indiana Medicaid", "Anthem Indiana Medicaid HIP"):
+    for name in ("Anthem Indiana Medicaid Sample Wise", "Anthem Samplepath Indiana Medicaid", "Anthem Indiana Medicaid SMP"):
         grp, kind = codes.payer_group_kind(name, None)
         assert (grp, kind) == ("Anthem / BCBS Medicaid", "medicaid"), name
         f, a = filing_rule(grp, kind, payer_name=name), appeal_rule(grp, kind, payer_name=name)
@@ -294,15 +294,15 @@ def test_a_managed_care_plans_name_that_names_the_state_is_not_the_state_program
     assert grp == "Anthem / BCBS Medicaid" and filing_rule(grp, kind, payer_name="Anthem Kentucky Medicaid")["days"] == 365
     assert not appeal_rule(grp, kind, payer_name="Anthem Kentucky Medicaid")["no_appeal"]
     for name in ("Sample Health Plan Medicaid of Kentucky", "Sample Better Health Medicaid of Ky", "Sample Kentucky Medicaid Plan",
-                 "Humana Healthy Horizons Medicaid of Kentucky"):
+                 "Sample Healthy Plans Medicaid of Kentucky"):
         grp, kind = codes.payer_group_kind(name, None)
         assert grp != "Medicaid KY" and kind == "medicaid", (name, grp)
         assert not appeal_rule(grp, kind, payer_name=name)["no_appeal"], name
     for name in ("Sample Health Indiana Medicaid Plan", "Sample Hoosier Healthwise Indiana Medicaid",
-                 "Humana Healthy Horizons  Pathways Indiana Medicaid", "Samplewise Indiana Medicaid Hoosier Healthwise"):
+                 "Sample Healthy Plans  Samplepath Indiana Medicaid", "Samplewise Indiana Medicaid Sample Wise"):
         grp, kind = codes.payer_group_kind(name, None)
         assert grp != "Medicaid IN" and kind == "medicaid", (name, grp)
-    assert codes.payer_group_kind("WellCare Medcaid of Kentucky", None) == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
+    assert codes.payer_group_kind("Sample WellCare Medcaid of Kentucky", None) == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
 
 
 def test_indiana_medicaid_managed_care_plans_file_within_the_programs_90_days():
@@ -456,7 +456,7 @@ def test_wellcare_kentucky_medicaid_as_second_payer_has_six_months_from_the_firs
     June 20, 2027 (six months from that payment). Paid on February 15, 2026: due January 10, 2027 (12 months from the
     service). Both are the plan's own limit: no later last day. It was the 12 months only, with the first payer's
     remittance plus 12 months (December 20, 2027) as a guessed last day."""
-    r = filing_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="WellCare Medcaid of Kentucky")
+    r = filing_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="Sample WellCare Medcaid of Kentucky")
     safe, last, how = codes.second_claim_window(r, "2026-01-10", "2026-12-20", first_payer="Sample Health Plan")
     assert (safe, last) == ("2027-06-20", None), (safe, last, how)
     assert "6 months from Sample Health Plan's payment (2026-12-20)" in how, how
@@ -480,3 +480,309 @@ def test_anthem_medicaid_as_second_payer_counts_from_the_other_payers_remittance
     assert codes.second_claim_window(unknown, "2026-01-10", "2026-03-02")[:2] == ("2026-05-31", None)
     _s, _l, how = codes.second_claim_window(ind, "2026-01-10", "2026-03-02", first_payer="Sample Health Plan")
     assert "Sample Health Plan's remittance (2026-03-02)" in how, how
+
+
+# ============================================================ 6. the fix round: the reviewers' findings (fx-windows r1, r2)
+def _claim_of(i: int, member: str, plan: str, lines: str, dos: str = "20260215", status: str = "1") -> str:
+    """tests/test_features.claim with the member id given (NM1*QC ... MI): invented ids only."""
+    from tests.test_features import NPI
+    return (f"CLP*CB{i:07d}C017*{status}*500.00*100.00*0.00*12*PC{i}*11~NM1*QC*1*SAMPLE*PAT****MI*{member}~"
+            f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~REF*CE*{plan}~DTM*232*{dos}~{lines}")
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_a_denial_of_another_states_member_keeps_two_years_when_the_plan_name_gives_no_state(tmp_path, compact):
+    """Review r1-1 (high). The plan's name does not say whose member it is: Anthem's plans and other Blue plans give their
+    products the same names, and the state shows only on some of a home plan's plan names. 25 visits of members whose ids
+    start ZQX on a plan naming Ohio, then a ZQX member whose plan names no state ('SAMPLE ACCESS PPO') denied CO-55 on a
+    March 1, 2026 remittance, seen on November 24, 2026 (268 days later): the denial keeps the Claim Payment Dispute's two
+    years as its last day (March 1, 2028) and is not expired. It expired on September 2, 2026 (the clinical appeal's 185
+    days), as if the member were Anthem's own."""
+    visits = [_claim_of(i, f"ZQX{100000000 + i}", "OHIO SAMPLE HSA",
+                        svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20260215")) for i in range(1, 26)]
+    denied = _claim_of(300, "ZQX100000099", "SAMPLE ACCESS PPO", svc("11102", "150.00", "0.00", None, "CAS*CO*55*150.00~", dos="20260215"))
+    got = _run(tmp_path, compact, visits + [denied], "20260301", "ANTHEM", "ANTHM", today="2026-11-24")
+    store = got.pop("_store")
+    try:
+        items = [f for f in got.values() if str(f.get("carc") or "") == "55"]
+        assert len(items) == 1, sorted(got)
+        f = items[0]
+        assert f["payer_group"] == "Anthem / BCBS" and f["payer_kind"] == "commercial"
+        assert f["appeal_deadline"] == "2026-08-28", (f["appeal_deadline"], f["deadline_basis"])
+        assert (f["legal_deadline"] or f["appeal_deadline"]) == "2028-03-01", (f["appeal_deadline"], f["legal_deadline"])
+        assert f["work_state"] != "expired", (f["work_state"], f["appeal_deadline"], f["legal_deadline"])
+    finally:
+        store.close()
+
+
+def test_only_a_plan_that_names_kentucky_or_indiana_shows_anthems_own_member():
+    """Reviews r1-1 and r2-6. A plan whose name gives no state ('SAMPLE PPO') may be a BlueCard member's: its clinical denial
+    is worked by the clinical appeal's 180 days and stays open to the dispute's two years, as a plan that is not known. A
+    plan naming Kentucky or Indiana is Anthem's own member's: 185 days is its last day. The payer's name is not read for it:
+    the local plan sends the 835 for its own members and BlueCard members alike, so a payer named for Kentucky does not make
+    a state-free plan Anthem's own."""
+    for plan in ("SAMPLE PPO", "SAMPLE BLUE ACCESS PPO", "SAMPLE HSA", "PPO"):
+        for carc in CLINICAL:
+            r = appeal_rule("Anthem / BCBS", "commercial", plan, carc=carc)
+            assert dates("2026-03-01", r) == ("2026-08-28", "2028-03-01"), (plan, carc, r["label"][:90])
+            assert "not known" in r["label"] and "no state" in r["label"], r["label"]
+        r = appeal_rule("Anthem / BCBS", "commercial", plan, carc="50", payer_name="SAMPLE BLUE CROSS OF KENTUCKY")
+        assert dates("2026-03-01", r) == ("2026-08-28", "2028-03-01"), (plan, r["label"][:90])
+    for plan in ("KENTUCKY SAMPLE PPO", "INDIANA SAMPLE PPO", "IN SAMPLE HSA"):
+        r = appeal_rule("Anthem / BCBS", "commercial", plan, carc="50")
+        assert dates("2026-03-01", r) == ("2026-08-28", "2026-09-02"), plan
+        assert "Anthem's own member" in r["label"], r["label"]
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_detection_keeps_a_clinical_denial_of_a_plan_naming_no_state_listed_past_185_days(tmp_path, compact):
+    """Review r2-6. A CO-50 denial on Anthem's June 1, 2026 remittance, plan 'SAMPLE PPO' (no state, no BlueCard words),
+    seen on December 10, 2026: past the 185 days, inside the two-year dispute a BlueCard member still has. The item is not
+    expired: its last day is June 1, 2028."""
+    got = _run(tmp_path, compact, _book("12", "SAMPLE PPO", "20260520", [NECESSITY]), "20260601", "ANTHEM", "ANTHM", today="2026-12-10")
+    got.pop("_store").close()
+    f = got["DENIED_MEDICAL_NECESSITY"]
+    assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-11-28", "2028-06-01"), (f["appeal_deadline"], f["legal_deadline"])
+    assert f.get("work_state") != "expired", (f.get("work_state"), f.get("state_basis"))
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_an_ema_denial_of_an_indiana_medicaid_plan_named_with_the_state_keeps_its_60_days(tmp_path, ema_env, compact):
+    """Review r2-1. EMA names an Indiana Medicaid managed care plan 'Sample Health Indiana Medicaid': 'Medicaid (other)' by
+    the name rules, Indiana's by the state its name gives. EMA's check passed no payer name to the window rules, so the
+    plan's state was lost and the EMA-only denial fell to the Medicaid default, 90 days: 30 days later than the plan's 60
+    (and than the same plan's 835 denial)."""
+    from remitwatch import ema_checks as ec, ema_ledger as el
+    from tests import test_ema_checks as TC
+    st = _ema_store(tmp_path, compact)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        name = "Sample Health Indiana Medicaid"
+        TC.denial_world(st, lg, tmp_path, TC.c5_rows(link=2, reason="CO-197", payer=name, posted=dt.date(2026, 4, 10)))
+        items = ec.ema_denials(st.conn, today="2026-05-03")
+        assert len(items) == 1, [i.get("title") for i in items]
+        it = items[0]
+        ev = it["evidence"]
+        start = _add(ev["first_denial_posted"], -int(ev["posting_lag_days"]))
+        assert it["claim"]["payer_group"] == "Medicaid (other)", it["claim"]
+        assert it["appeal_deadline"] == _add(start, 60), (it["appeal_deadline"], start, it["deadline_basis"])
+        assert "Indiana Medicaid managed care plan" in it["deadline_basis"], it["deadline_basis"]
+    finally:
+        lg.close()
+        st.close()
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_an_ema_denial_of_a_kentucky_plan_named_medicaid_of_ky_gets_kentuckys_120_days(tmp_path, ema_env, compact):
+    """Review r2-1. '<plan> Medicaid of Ky' is a Kentucky managed care plan (the state's code after 'of'): a denial EMA posted
+    June 10, 2026 (after April 14, 2026) has KRS 205.534's 120 days, its last day 125. It was dated by the 90-day Medicaid
+    default, which would close it 30 days early. Detection's item keeps the same dates (detect._emit_proto)."""
+    from remitwatch import ema_checks as ec, ema_ledger as el
+    from remitwatch.detect import Detector
+    from tests import test_ema_checks as TC
+    st = _ema_store(tmp_path, compact)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        name = "Sample Health Plan Medicaid of Ky"
+        TC.denial_world(st, lg, tmp_path, TC.c5_rows(link=2, reason="CO-197", payer=name, posted=dt.date(2026, 6, 10)))
+        items = ec.ema_denials(st.conn, today="2026-07-01")
+        assert len(items) == 1, items
+        it = items[0]
+        ev = it["evidence"]
+        start = _add(ev["first_denial_posted"], -int(ev["posting_lag_days"]))
+        assert start >= codes.KRS_205_534_SINCE, start
+        assert it["appeal_deadline"] == _add(start, 120), (it["claim"]["payer_group"], it["appeal_deadline"], start, it["deadline_basis"])
+        det = Detector(st, run_id="t", today="2026-07-01")
+        det.ema_on = True
+        det.load()
+        det._emit_proto(it)
+        f = [x for x in det.findings.values() if x["signal"] == "EMA_DENIED"]
+        assert len(f) == 1 and f[0]["appeal_deadline"] == _add(start, 120) and f[0]["legal_deadline"] == _add(start, 125), \
+            (f[0]["appeal_deadline"], f[0]["legal_deadline"], start)
+    finally:
+        lg.close()
+        st.close()
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_a_claim_ema_shows_a_medicaid_of_ky_plan_never_answered_runs_kentuckys_120_days_past_its_limit(tmp_path, ema_env, compact):
+    """Review r2-1. EMA's never-answered check dates a claim charged on time past its first-filing limit by the payer's appeal
+    window. For '<plan> Medicaid of Ky', Kentucky's managed care window (120 days), as the 837 pass gives it; it was the
+    90-day default. A March 6, 2026 visit charged March 9: first-filing limit March 6, 2027 (365 days), then 120 days:
+    July 4, 2027."""
+    import datetime as dtm
+    from remitwatch import ema_checks as ec, ema_ledger as el
+    from tests import ema_fixtures as F, test_ema_checks as TC
+    st = _ema_store(tmp_path, compact)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        ky = "Sample Health Plan Medicaid of Ky"
+        rows = [TC.charge(F.link_no(41), svc=dtm.date(2026, 3, 6), posted=dtm.date(2026, 3, 9), status="Payment Pending", payer=ky,
+                          primary=ky),
+                TC.charge(F.link_no(98), cpt="99212", patient=3, payer=ky, primary=ky),
+                TC.pay(F.link_no(98), "PAPER-41", 20, cpt="99212", patient=3, posted=dtm.date(2026, 4, 28), payer=ky, primary=ky),
+                TC.charge(F.link_no(99), cpt="99212", patient=3, svc=dtm.date(2026, 3, 20), posted=dtm.date(2026, 5, 1))]
+        TC.load(st, lg, tmp_path, rows)
+        items = {i["key_parts"]: i for i in ec.unanswered_claims(st.conn, today=TC.TODAY)}
+        it = items[(f"link:{F.link_no(41)}",)]
+        assert it["signal"] == "NO_ANSWER", it["signal"]
+        assert it["appeal_deadline"] == "2027-07-04", (it["claim"]["payer_group"], it["appeal_deadline"], it["deadline_basis"])
+    finally:
+        lg.close()
+        st.close()
+
+
+def test_an_items_denial_reasons_together_give_the_earliest_date_and_the_latest_last_day():
+    """Review r2-2. An item carrying several denial reasons whose windows differ is dated by the earliest of them and kept to
+    the latest: an Anthem own-plan claim denied CO-96 (the two-year dispute) and CO-50 (the clinical appeal) shows the
+    clinical appeal's 180 days and keeps the dispute's two years; one reason, or reasons with one window, are as before."""
+    plan = "KENTUCKY SAMPLE PPO"
+    r = appeal_rule("Anthem / BCBS", "commercial", plan, carc="96", carcs=["96", "50"])
+    assert (window_end("2026-06-01", r), legal_deadline("2026-06-01", r)) == ("2026-11-28", "2028-06-01"), r["label"][:120]
+    assert r["days"] == 180 and "more than one denial reason" in r["label"] and "two years" in r["label"], r["label"]
+    assert codes.rule_at("2026-06-01", r)["days"] == 180
+    # the reasons in any spelling ('CO-50'), and the top reason left out of the list, read the same
+    r2 = appeal_rule("Anthem / BCBS", "commercial", plan, carc="96", carcs=["CO-50"])
+    assert (window_end("2026-06-01", r2), legal_deadline("2026-06-01", r2)) == ("2026-11-28", "2028-06-01")
+    # one window for every reason: that window, unchanged
+    same = appeal_rule("Anthem / BCBS", "commercial", plan, carc="96", carcs=["96", "97", "16"])
+    assert same == appeal_rule("Anthem / BCBS", "commercial", plan, carc="96")
+    assert appeal_rule("Anthem / BCBS", "commercial", plan, carc="50", carcs=["50"]) == appeal_rule("Anthem / BCBS", "commercial", plan, carc="50")
+    # WellCare of Kentucky's Medicaid plan: a payment appeal reason (24 months) beside a clinical one (60 days, 125 by the statute)
+    w = appeal_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="Sample WellCare Medicaid of Kentucky",
+                    carc="96", carcs=["96", "50"])
+    assert (window_end("2026-06-01", w), legal_deadline("2026-06-01", w)) == ("2026-07-31", "2028-06-01"), w["label"][:120]
+    # an item that carries no list of reasons reads as before
+    assert codes.rule_facts({"carc": "50"}) == {"plan": None, "payer_name": None, "payer_id": None, "cfi": None, "carc": "50", "paid": None}
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_a_whole_anthem_claim_with_a_clinical_line_among_other_denials_shows_the_clinical_appeals_date(tmp_path, compact):
+    """Review r2-2. Anthem's own plan (KENTUCKY SAMPLE PPO) denies a whole claim of a May 20, 2026 visit on its June 1
+    remittance: two lines CO-96 (non-covered: the Claim Payment Dispute, two years) and one line CO-50 (a clinical appeal,
+    180 days from the notice). The one item (CLAIM_DENIED_UNPAID) took the most frequent reason (96) and was dated June 1,
+    2028: the CO-50 service's clinical appeal was shown nowhere. Its date is now November 28, 2026, and the dispute's two
+    years stay its last day for the other lines."""
+    from tests.test_features import claim, clean_visits
+    lines = (svc("11102", "150.00", "0.00", None, "CAS*CO*96*150.00~", dos="20260520")
+             + svc("11103", "150.00", "0.00", None, "CAS*CO*96*150.00~", dos="20260520")
+             + svc("11104", "150.00", "0.00", None, "CAS*CO*50*150.00~", dos="20260520"))
+    denied = claim(300, lines, status="4", cfi="12", plan="KENTUCKY SAMPLE PPO", dos="20260520")
+    book = clean_visits(1, 25, "99214", "223.65", "117.60", cfi="12", plan="KENTUCKY SAMPLE PPO", dos="20260520") + [denied]
+    got = _run(tmp_path, compact, book, "20260601", "ANTHEM", "ANTHM", today="2026-07-15")
+    got.pop("_store").close()
+    f = got["CLAIM_DENIED_UNPAID"]
+    assert f["payer_group"] == "Anthem / BCBS" and f["carc"] == "96", (f["payer_group"], f["carc"])
+    assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-11-28", "2028-06-01"), (f["appeal_deadline"], f["legal_deadline"],
+                                                                                      f["deadline_basis"][:120])
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_an_ema_item_with_a_co55_line_beside_a_bigger_co96_line_shows_the_clinical_appeals_date(tmp_path, ema_env, compact):
+    """Review r2-2. EMA's denials are one item per claim and reason class; CO-96 and CO-55 are both 'noncovered'. An Anthem
+    commercial claim with a $300 CO-96 line and a $100 CO-55 (experimental) line: the item takes the reason with the most
+    money (96), and was dated by the two-year dispute; the CO-55 line's clinical appeal now dates it (180 days from the
+    remittance), with the two years as its last day, in EMA's check and in detection's item."""
+    from remitwatch import ema_checks as ec, ema_ledger as el
+    from remitwatch.detect import Detector
+    from tests import ema_fixtures as F, test_ema_checks as TC
+    st = _ema_store(tmp_path, compact)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        rows = (TC.c5_rows(link=2, reason="CO-96", amount=300, cpt="99213", payer=F.PAYERS["bcbs"])
+                + TC.c5_rows(link=2, reason="CO-55", amount=100, cpt="11102", payer=F.PAYERS["bcbs"]))
+        TC.denial_world(st, lg, tmp_path, rows)
+        items = [i for i in ec.ema_denials(st.conn, today=TC.TODAY) if i["key_parts"][0] == F.link_no(2)]
+        assert len(items) == 1, [(i["key_parts"], i["carc"]) for i in items]
+        it = items[0]
+        assert it["carc"] == "96" and {x[3] for x in it["evidence"]["lines"]} == {"CO-96", "CO-55"}, it["evidence"]["lines"]
+        ev = it["evidence"]
+        start = _add(ev["first_denial_posted"], -int(ev["posting_lag_days"]))
+        assert it["appeal_deadline"] == _add(start, 180), (it["carc"], it["appeal_deadline"], start)
+        det = Detector(st, run_id="t", today=TC.TODAY)
+        det.ema_on = True
+        det.load()
+        det._emit_proto(it)
+        f = [x for x in det.findings.values() if x["signal"] == "EMA_DENIED"]
+        assert len(f) == 1 and f[0]["appeal_deadline"] == _add(start, 180), f
+        assert f[0]["legal_deadline"] == window_end(start, {"months": 24}), (f[0]["legal_deadline"], start)
+    finally:
+        lg.close()
+        st.close()
+
+
+def test_anthem_level_frequency_and_length_denials_are_worked_by_the_clinical_appeals_date():
+    """Review r2-4. The brief lists Anthem's clinical denials as 'CARC 50, 55, 56, 150, 151, 152': the two-year dispute as
+    the date shown is 'Too long: a biller could miss the real deadline'. A level, frequency or length denial (150, 151, 152)
+    may rest on a medical policy's clinical criteria or on a coding edit, and the remittance does not say which; so may the
+    rest of the product's medical-necessity class (a diagnosis not covered, coverage guidelines, the records, the place of
+    service, a review organization's findings). For any Anthem commercial member: 180 days is the date shown, the dispute's
+    two years the last day. The Federal Employee Program reads them the same way (its 6 months only for 50, 55 and 56)."""
+    for carc in ("150", "151", "152", "167", "B22", "272", "B5", "B12", "58", "216", "A1"):
+        for plan in ("KENTUCKY SAMPLE PPO", "SAMPLE PPO", "ITS HOST PPO SAMPLE", None):
+            r = appeal_rule("Anthem / BCBS", "commercial", plan, carc=carc)
+            assert dates("2026-03-01", r) == ("2026-08-28", "2028-03-01"), (carc, plan, r["label"][:80])
+        fep = appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM", carc=carc)
+        assert dates("2026-03-01", fep) == ("2026-08-28", "2028-03-01"), (carc, fep["label"][:80])
+        assert "clinical denial" in fep["label"] and "6 months" in fep["label"], fep["label"][:120]
+    # a level-of-care change on a downcode (186) is Anthem's coding review: the dispute's two years as before
+    assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "KENTUCKY SAMPLE PPO", carc="186")) == ("2028-03-01", "2028-03-01")
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_an_anthem_frequency_denial_item_is_dated_no_later_than_the_clinical_appeal(tmp_path, compact):
+    """Review r2-4. A CO-151 (frequency) denial of a May 20, 2026 visit on Anthem's own Kentucky plan's June 1 remittance
+    (DENIED_FREQUENCY): dated November 28, 2026 (the clinical appeal's 180 days, if the plan's medical policy made the
+    decision), its last day June 1, 2028 (the dispute's two years, if a coding edit did). It was dated June 1, 2028."""
+    freq = svc("11102", "150.00", "0.00", None, "CAS*CO*151*150.00~", dos="20260520")
+    got = _run(tmp_path, compact, _book("12", "KENTUCKY SAMPLE PPO", "20260520", [freq]), "20260601", "ANTHEM", "ANTHM",
+               today="2026-07-15")
+    got.pop("_store").close()
+    f = got["DENIED_FREQUENCY"]
+    assert f["payer_group"] == "Anthem / BCBS" and f["carc"] == "151", (f["payer_group"], f["carc"])
+    assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-11-28", "2028-06-01"), (f["appeal_deadline"], f["legal_deadline"])
+
+
+def test_an_anthem_clinical_rule_names_its_own_process_for_the_letter_and_the_next_step():
+    """Review r2-3 (codes.py's part; the letter and the next step read these words: plans/progress/fx-windows.md, Needs from
+    others). The clinical appeal of Anthem's own member is not a Claim Payment Dispute; a denial whose route is not known
+    names both, and the dispute's general rule names neither."""
+    own = appeal_rule("Anthem / BCBS", "commercial", "KENTUCKY SAMPLE PPO", carc="50")
+    assert "clinical appeal" in own["process"] and "Claim Payment Reconsideration" not in own["process"], own["process"]
+    assert "one hundred eighty (180) calendar days" in own["process"] and "two years" not in own["process"], own["process"]
+    assert "clinical appeal" in own["channel"] and "not as a Claim Payment Dispute" in own["channel"], own["channel"]
+    for plan, carc in (("SAMPLE PPO", "50"), (None, "55"), ("ITS HOST PPO SAMPLE", "56"), ("KENTUCKY SAMPLE PPO", "151")):
+        r = appeal_rule("Anthem / BCBS", "commercial", plan, carc=carc)
+        assert "clinical appeal" in r["process"] and "Claim Payment Dispute" in r["process"], (plan, carc, r["process"])
+        assert "BlueCard" in r["channel"], r["channel"]
+    assert "process" not in appeal_rule("Anthem / BCBS", "commercial", "KENTUCKY SAMPLE PPO", carc="96")
+
+
+def test_wellcare_kentucky_medicaid_second_claim_with_no_date_of_service_is_not_dated_a_year_from_the_payment():
+    """Review r2-5. WellCare of Kentucky's Medicaid plan as the second payer: 12 months from the service or 6 months from the
+    first payer's payment, whichever is later. With no date of service the 12 months were counted from the payment and the
+    words called the payment the date of service. The service came before the payment, so the plan's limit lies between 6
+    and 12 months from the payment: 6 months is the date shown, 12 the last day, and the words say the date of service is
+    not known."""
+    r = filing_rule("WellCare / Ambetter (Centene) Medicaid", "medicaid", payer_name="Sample WellCare Medicaid of Kentucky")
+    assert r.get("cob") == {"later": {"months": 6}}, r.get("cob")
+    safe, last, how = codes.second_claim_window(r, None, "2026-12-20", first_payer="Sample Health Plan")
+    assert (safe, last) == ("2027-06-20", "2027-12-20"), (safe, last, how)
+    assert "date of service (2026-12-20)" not in how and "date of service is not known" in how, how
+    assert codes.second_claim_window(r, None, None) == (None, None, "")
+
+
+def test_routing_the_va_network_by_its_payer_id_never_shortens_an_unconfirmed_last_day():
+    """Review r2-8. A claim carrying the VA network's payer id gets the VA's windows; its reconsideration window is not
+    confirmed (no source for the region), and 90 days stays the date shown. The same claim named after its administrator
+    had the UnitedHealthcare-administered plans' 12 months (not confirmed either): the payer id must not move its last day
+    earlier on a guess, so 12 months is the VA's last day."""
+    start = "2026-03-01"
+    by_name = appeal_rule("Optum (UHC)", "commercial", payer_name="Sample Optum Network")
+    by_id = appeal_rule("Optum (UHC)", "commercial", payer_name="Sample Optum Network", payer_id="VACCN")
+    assert not by_id["verified"] and not by_name["verified"], (by_id["label"][:60], by_name["label"][:60])
+    assert window_end(start, by_id) == "2026-05-30", by_id["label"]
+    last_name = legal_deadline(start, by_name) or window_end(start, by_name)
+    last_id = legal_deadline(start, by_id) or window_end(start, by_id)
+    assert last_id >= last_name == "2027-03-01", (last_id, last_name)
+    assert appeal_rule("VA Community Care", "va") == by_id

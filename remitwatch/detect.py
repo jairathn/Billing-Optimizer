@@ -5543,8 +5543,10 @@ class Detector:
                 part = {code: v[0] for (code, _d), v in novel.items() if code != "*" and v[0] < need.get((code, _d), [0])[0]}
                 if part:
                     ev["units_unpaid"] = part
+                # every denial reason of the claim reaches the window rules (codes 'carcs'): a clinical line among other denials
+                # dates the item by its own shorter window (fx-windows review r2-2)
                 self._emit("CLAIM_DENIED_UNPAID", "denial", sev, act, f"Claim denied ({top or 'no CARC'}) and never paid: {', '.join(codes[:6]) or 'no service lines'}",
-                           None, exp or None, exp or None, top, rarc, ev, key_parts=(cl["claim_key"],), claim=cl)
+                           None, exp or None, exp or None, top, rarc, ev, key_parts=(cl["claim_key"],), claim=dict(cl, carcs=sorted(carcs)))
                 f = self.findings.get(_fid("CLAIM_DENIED_UNPAID", cl["claim_key"]))
                 if f is not None:
                     later_lines = [o for o in bill_lines.get(bill, []) if at(o) > when and o["patient_control_number"] != cl["patient_control_number"]]
@@ -7729,8 +7731,10 @@ class Detector:
         f["appeal_deadline"], f["deadline_basis"] = p.get("appeal_deadline"), p.get("deadline_basis")
         legal_p = p.get("legal_deadline")           # the payer's own limit a check worked out beside its safe date
         f["legal_deadline"] = legal_p if (legal_p and f["appeal_deadline"] and legal_p > f["appeal_deadline"]) else None
-        # the same window the check dated it by: the denial's reason picks the plan's (Anthem's clinical appeal; fx-windows)
-        rule = appeal_rule(claim.get("payer_group"), claim.get("payer_kind"), carc=p.get("carc")) if p["signal"] == "EMA_DENIED" else None
+        # the same window the check dated it by: the denial's reasons and the payer's name pick the plan's (Anthem's clinical
+        # appeal, a state's managed care plan named '<plan> Medicaid of Ky'; fx-windows, review r2-1, r2-2)
+        rule = (appeal_rule(claim.get("payer_group"), claim.get("payer_kind"), **rule_facts(claim, carc=p.get("carc")))
+                if p["signal"] == "EMA_DENIED" else None)
         if rule and f["appeal_deadline"] and not rule.get("no_appeal"):     # a no-appeal payer's item is dated by its new claim's limit
             legal = legal_deadline(_add_days(f["appeal_deadline"], -rule["days"]), rule)
             f["legal_deadline"] = legal if legal and legal != f["appeal_deadline"] else None

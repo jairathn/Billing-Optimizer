@@ -103,9 +103,16 @@ def test_an_fep_underpayment_is_not_expired_on_the_members_6_months():
 def test_an_fep_clinical_denial_keeps_the_members_6_months():
     """The same manual: the Claim Payment Dispute 'does not apply to appeals regarding a clinical decision denial, such as
     ... a Claim that has been denied as not medically necessary or experimental/investigational'; the FEP's disputed claims
-    process takes those within 6 months of the notice (5 CFR 890.105(b)(1)), filed for the member with written consent."""
-    for carc in ("50", "55", "56", "150", "151", "152"):
+    process takes those within 6 months of the notice (5 CFR 890.105(b)(1)), filed for the member with written consent. A
+    level-of-service, frequency or length denial (150, 151, 152) may rest on a clinical decision or a coding edit (a Claim
+    Payment Dispute): the remittance does not say which, so it keeps the dispute's two years as its last day, as Anthem's
+    commercial plans' do (fx-windows review r2-4)."""
+    for carc in ("50", "55", "56"):
         assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", FEP, carc=carc)) == ("2026-08-28", "2026-09-01"), carc
+    for carc in ("150", "151", "152"):
+        r = appeal_rule("Anthem / BCBS", "commercial", FEP, carc=carc)
+        assert dates("2026-03-01", r) == ("2026-08-28", "2028-03-01"), carc
+        assert "6 months from the date of the notice" in r["label"] and "two (2) years" in r["label"], r["label"]
     for carc in ("45", "97", "29", None):
         assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", FEP, carc=carc)) == ("2026-08-28", "2028-03-01"), carc
 

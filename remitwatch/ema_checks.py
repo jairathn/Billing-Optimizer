@@ -1990,7 +1990,7 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
         legal = legal if legal and file_by and legal > file_by else None
         deadline, basis = file_by, f"If the payer has no record of the claim, it must reach the payer by this date: {limit}"
         if kind != "medicare" and file_by and c["fc"] and c["fc"] <= (early or file_by):
-            ap = appeal_rule(grp, kind)
+            ap = appeal_rule(grp, kind, payer_name=c["payer"])     # the plan's state by its name, as the 837 pass reads it (fx-windows r2-1)
             start = max(file_by, c["due"] or file_by)
             deadline = _add(start, ap["days"])
             legal = _legal_deadline(start, ap)
@@ -3254,13 +3254,16 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         grp, kind = it["group"], it["kind"]
         lag = _lag(lags, grp, "p95")
         start = _add(it["first"], -lag) if it["first"] else None
-        rule = appeal_rule(grp, kind, carc=carc)     # the reason picks the plan's window (Anthem's clinical appeal; fx-windows)
+        # the reasons and the payer's name pick the plan's window: Anthem's clinical appeal for a clinical line among others, a
+        # state's managed care plan EMA names '<plan> Medicaid of Ky' (fx-windows, review r2-1, r2-2)
+        item_carcs = sorted({k.split("-", 1)[1] for k in it["reasons"] if "-" in k})
+        rule = appeal_rule(grp, kind, carc=carc, payer_name=it["payer"], carcs=item_carcs)
         used = rule_at(start, rule) or rule         # the rule the date is counted by: the one before an effective date if earlier
         deadline = _add(start, used["days"]) if start else None
         unconfirmed = "" if used["verified"] else " (not confirmed against the payer's current manual)"
         dbasis = (f"{used['label']}{unconfirmed}. Counted from EMA's posting ({it['first']}) less its usual delay of {lag} days; "
                   "the EOB's date can be earlier")
-        fix = corrected_rule(grp, kind) if rule.get("no_appeal") else None
+        fix = corrected_rule(grp, kind, carc=carc, payer_name=it["payer"]) if rule.get("no_appeal") else None
         if fix and ls and ls[0][1]:
             # a payer that takes no appeal of an ordinary denial (Kentucky Medicaid, 907 KAR 1:671): a corrected or new claim
             # within its filing limit from the date of service is the way, so the item is dated by it
@@ -3281,7 +3284,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             _actionable(cls), title, key_parts=(lk, cls),
             claim={"patient_control_number": pcn, "payer_name": it["payer"], "payer_group": grp, "payer_kind": kind,
                    "service_date": ls[0][1], "year": (ls[0][1] or "")[:4] or None, "procedure_code": top_line[0],
-                   "charge_cents": it["charge"] or None, "payment_date": it["first"]},
+                   "charge_cents": it["charge"] or None, "payment_date": it["first"], "carcs": item_carcs},
             expected=it["expected"], shortfall=it["expected"], carc=carc, deadline=deadline, basis=dbasis,
             evidence={"lines": [[x[0], x[1], x[2], x[3], x[4], x[5]] for x in ls], "ema_link": lk, "reason_class": cls,
                       "first_denial_posted": it["first"], "expected_basis": sorted(it["bases"]), "posting_lag_days": lag,
