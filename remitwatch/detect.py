@@ -2424,6 +2424,7 @@ class Detector:
         left: dict[str, int] = {}
         pos: dict[tuple, list] = defaultdict(list)
         revs = []
+        inline: set[str] = set()     # negative lines inside a processed claim: the payer's own correction of a payment
         for l in self.lines:
             st, amt = l.get("claim_status_code"), l.get("paid_cents") or 0
             if st in ("1", "19", "2", "3") and amt > 0:
@@ -2431,6 +2432,12 @@ class Detector:
                 pos[(bill_of(l["patient_control_number"]), l.get("procedure_code"), l.get("service_date"))].append(l)
             elif st == "22" and amt < 0:
                 revs.append(l)
+            elif st in ("1", "19", "2", "3") and amt < 0:
+                # a payment and a negative line of the same service in a processed answer net to nothing: the negative line
+                # takes that payment back, the same day allowed (the release's real-data run: such services were closed as
+                # paid on a later remittance)
+                revs.append(l)
+                inline.add(l["line_key"])
         # (bill, code, date) -> [(the payment's line, the day it was taken, cents)]: what each reversal and recoupment took,
         # when (a closure's recovery is the money its units got after its denial less what stood then and was taken since)
         self.took: dict[tuple, list] = defaultdict(list)
@@ -2519,7 +2526,8 @@ class Detector:
                                               part).fetchall())
             for r in sorted(revs, key=when):
                 need = amount = -r["paid_cents"]
-                cands = [p for p in pos.get(svc(r), []) if left[p["line_key"]] > 0 and when(p) < when(r)
+                same_day = r["line_key"] in inline
+                cands = [p for p in pos.get(svc(r), []) if left[p["line_key"]] > 0 and (when(p) < when(r) or (same_day and when(p) == when(r)))
                          and (not payer(r) or one_payer(payer(r), payer(p), (r["patient_control_number"], p["patient_control_number"])))]
                 # only a payment of the reversal's own amount: one of another amount is another version's payment (T-I5)
                 cands = [p for p in cands if p["paid_cents"] == amount or left[p["line_key"]] == amount]
@@ -2527,7 +2535,7 @@ class Detector:
                     # a payer that reverses under another id and name of its company than it paid under (an administrator
                     # reversing under its former name: Wausau for UMR) never joins by id or name: the payer's own claim
                     # number and the amount pair them, within one payer company
-                    cands = [p for p in pos.get(svc(r), []) if left[p["line_key"]] > 0 and when(p) < when(r)
+                    cands = [p for p in pos.get(svc(r), []) if left[p["line_key"]] > 0 and (when(p) < when(r) or (same_day and when(p) == when(r)))
                              and (p["paid_cents"] == amount or left[p["line_key"]] == amount)
                              and pccn.get(p["claim_key"]) == pccn.get(r["claim_key"]) and company(p) and company(p) == company(r)]
                 if not cands:
