@@ -1340,7 +1340,8 @@ PERSON_KINDS = ("manual", "hidden", "unhidden")
 ROW_COLS = ("finding_id", "signal", "category", "status", "work_state", "follow_up_on", "line_key", "claim_key",
             "patient_control_number", "service_date", "procedure_code", "shortfall_cents", "payer_group", "auto_note",
             "transaction_key", "payment_date", "stale", "evidence", "hint", "appeal_deadline", "recovered_cents", "ema_link",
-            "first_seen")
+            "first_seen", "original_procedure_code", "paid_cents")     # the last two: the code billed and what was paid, as
+                                                                        # detect.fold_payer_policy read them (_owner_accepted)
 
 
 def begin_detection(conn: sqlite3.Connection, *, run_id: str | None = None, today: Any = None) -> dict:
@@ -1498,6 +1499,7 @@ def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, fact
     answered = _answered_since(conn, claim_items)
     sent_again = _sent_again(conn, claim_items)
     accepted = _policy_accepts(conn)
+    policy = meta_get(conn, "ema:writeoff_policy", {}) or {}
     left: list[dict] = []
     for r in cands:
         if r.get("transaction_key") and r["transaction_key"] in superseded:
@@ -1506,7 +1508,7 @@ def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, fact
             routes["claim_answered"] += 1
         elif r["finding_id"] in sent_again:
             routes["sent_again"] += 1           # its bill went out again: the earlier chase waits for the new one (detect.save)
-        elif accepted and _owner_accepted(r, accepted):
+        elif (accepted or policy) and _owner_accepted(r, accepted, policy):
             routes["owner_policy"] += 1         # the owner accepted its pattern (a person's decision): it left the work
         else:
             left.append(r)
@@ -1555,11 +1557,34 @@ def _sent_again(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
     return out
 
 
-def _owner_accepted(r: dict, accepted: set[str]) -> bool:
-    """Whether the owner accepted the item's pattern (ema_checks.set_policy): its payer's policy for the code
-    ('group|code||payer_policy', detect.fold_payer_policy) or its write-off pattern ('group|code|modifier|reason')."""
-    keys = {f"{r.get('payer_group') or ''}|{r.get('procedure_code') or ''}||payer_policy", *_pattern_key(r)}
-    return bool(keys & accepted)
+def _owner_accepted(r: dict, accepted: set[str], policy: dict | None = None) -> bool:
+    """Whether the owner accepted the item's pattern (ema_checks.set_policy) in a way that took it off the run: its
+    write-off pattern ('group|code|modifier|reason'), or its payer's policy for a code it almost never pays, read exactly
+    as the two steps that leave such items out read it: detect.fold_payer_policy folds a remittance line by the first
+    service rarely_paid.item_codes names (the billed code of a changed one included), and ema_checks C5 drops each line of
+    an EMA-only denial, so that item goes only when every one of its lines is accepted. A decision is read per period of
+    the payer's rule (rarely_paid.pattern_key, the owner's decision 4) with the one made for the pair at every date, the
+    newer winning (rarely_paid.decision_for). A whole-claim denial is never left out by a payer-policy decision."""
+    if set(_pattern_key(r)) & accepted:
+        return True
+    if not policy:
+        return False
+    from . import rarely_paid as rp
+
+    def accepted_at(code: str, svc: str | None) -> bool:
+        d = rp.decision_for(policy, rp.pattern_key(r.get("payer_group"), code, svc))
+        return bool(d) and d.get("decision") == "accept"
+    try:
+        codes = rp.item_codes(r)
+        if not codes:
+            return False
+        if r.get("line_key"):
+            return accepted_at(*codes[0])
+        if r.get("signal") == "EMA_DENIED":
+            return all(accepted_at(c, s) for c, s in codes)
+    except Exception as exc:        # noqa: BLE001  (an item it cannot read keeps no route: it stays listed, never dropped)
+        _caught(exc, "vanished.owner_policy")
+    return False
 
 
 def _answered_since(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
