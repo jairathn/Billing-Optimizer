@@ -283,20 +283,19 @@ def test_an_auto_write_off_the_era_export_records_is_proven(store, ledger, tmp_p
 
 
 def test_a_deadline_that_passed_inside_a_later_window_names_that_window(store, ledger, tmp_path):
-    """M1 (money review): the item's own deadline passed, but Anthem's window for the denial is open: never expired, and the
-    step says which window is open and until when; never 'file today only if ... otherwise mark it Lost' (H5). The denial is
-    clinical (CO-50, not medically necessary): Anthem's clinical appeal, 180 days from the notice, received 5 days after the
-    March 28 remittance, runs to September 29 (fx-windows; the two-year Claim Payment Dispute 'does not apply to appeals
-    regarding a clinical decision denial')."""
+    """M1 (money review): the item's own deadline passed, but Anthem's two-year dispute window is open: never expired, and the
+    step says which window is open and until when; never 'file today only if ... otherwise mark it Lost' (H5). The denial
+    is clinical (CO-50) and the remittance names no plan: it may be a BlueCard member's, whose claim denial goes to the
+    local plan as a Claim Payment Dispute, so the dispute's two years stay its last day (fx-windows)."""
     auto_writeoff_world(store, ledger, tmp_path, reason=("CO", "50"), signal="DENIED_MEDICAL_NECESSITY", carc="50", appeal_deadline="2026-04-20")
     out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
     v, n = out["verdict"], out["next_step"]
     assert v["state"] == "work_now" and out["state"]["rule"] == "open_late"
-    assert v["sentence"].startswith("Its own deadline passed on Apr 20, 2026; the payer's dispute window is open until Sep 29, 2026")
-    assert n["action"].startswith("Its own deadline passed on Apr 20, 2026; the payer's dispute window is open until Sep 29, 2026")
+    assert v["sentence"].startswith("Its own deadline passed on Apr 20, 2026; the payer's dispute window is open until Mar 28, 2028")
+    assert n["action"].startswith("Its own deadline passed on Apr 20, 2026; the payer's dispute window is open until Mar 28, 2028")
     assert "File today only if" not in n["action"] and "mark it Lost" not in n["action"]
-    assert (n["deadline"], n["route"]) == ("2026-09-29", "appeal")
-    assert any(c["what"] == "appeal" and c["date"] == "2026-09-29" for c in n["clocks"])
+    assert (n["deadline"], n["route"]) == ("2028-03-28", "appeal")
+    assert any(c["what"] == "appeal" and c["date"] == "2028-03-28" for c in n["clocks"])
 
 
 def test_a_window_that_closed_with_every_other_one_is_expired_and_asks_for_nothing(store):
