@@ -38,7 +38,7 @@ from tests.test_payer_windows import _book, _run, dates  # noqa: E402
 
 KINDS = [False, True]
 KIND_IDS = ["store_file", "compact_image"]
-CLINICAL = ("50", "55", "56", "150", "151", "152")
+CLINICAL = ("50", "55", "56")
 NECESSITY = svc("11102", "150.00", "0.00", None, "CAS*CO*50*150.00~", dos="20260520")
 MODIFIER = svc("99213", "150.00", "0.00", None, "CAS*CO*16*150.00~", dos="20260520") + "LQ*HE*N822~"
 
@@ -88,8 +88,10 @@ def test_an_anthem_commercial_clinical_denial_is_appealed_within_180_days_of_the
             assert dates("2026-03-01", r) == ("2026-08-28", "2026-09-02"), (kind, carc, r["label"])
             assert r["verified"] and "one hundred eighty (180) calendar days" in r["label"], r["label"]
             assert "Clinical Appeals" in r["source"], r["source"]
-    # a payment dispute keeps the two years; a reason that is not known keeps them too (an underpayment has none)
-    for carc in ("45", "97", "29", "16", None):
+    # a payment dispute keeps the two years; a reason that is not known keeps them too (an underpayment has none); so do the
+    # level-of-service, frequency and length denials (150, 151, 152): Anthem reviews an E&M level 'in accordance with correct
+    # coding requirements and/or reimbursement policy', a 'Claim code editing' matter for the Claim Payment Dispute
+    for carc in ("45", "97", "29", "16", "150", "151", "152", None):
         assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", carc=carc)) == ("2028-03-01", "2028-03-01"), carc
     # the Federal Employee Program keeps its own clinical row: the member's 6 months
     assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM", carc="50")) == \

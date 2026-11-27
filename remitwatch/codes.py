@@ -500,6 +500,11 @@ WELLCARE_KY_CLINICAL_CARCS = frozenset({"15", "39", "62", "197", "198", "243", "
 # a clinical decision: not medically necessary, experimental or investigational. Anthem's Claim Payment Dispute 'does not
 # apply to appeals regarding a clinical decision denial' (its Kentucky provider manual, Claim Payment Disputes)
 MEDICAL_NECESSITY_CARCS = frozenset({"50", "55", "56", "150", "151", "152"})
+# Anthem's commercial clinical appeal: a claim 'denied as not medically necessary or experimental/investigational' (its 2026
+# manuals, Clinical Appeals): CARC 50, 55 and 56. The level-of-service, frequency and length denials (150, 151, 152, 'the
+# information submitted does not support') stay with the Claim Payment Dispute: Anthem reviews an E&M level 'in accordance
+# with correct coding requirements and/or reimbursement policy', and the dispute covers 'Claim code editing issues' (fx-windows)
+ANTHEM_CLINICAL_CARCS = frozenset({"50", "55", "56"})
 GEHA_MATCH = r"(?i)^(geha\b|government employees (health|hospital) association)"
 FEP_PLAN = r"FEDERAL EMPLOYEE"
 # the Federal Employee Program reaches the practice through Anthem (the 835's contract class names it); Anthem's provider
@@ -543,7 +548,7 @@ APPEAL_RULES: list[dict] = [
     # the Claim Payment Dispute below, which 'does not apply to appeals regarding a clinical decision denial'. The manuals
     # count the 180 days from receipt of the notice: the remittance's date is the safe date, and receipt presumed 5 days
     # after it (as for KRS 205.534 above) the last day (fx-windows)
-    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": MEDICAL_NECESSITY_CARCS, "days": 180,
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": ANTHEM_CLINICAL_CARCS, "days": 180,
      "verified": True, "legal": {"days": 185},
      "label": "Anthem commercial, a clinical appeal (a claim 'denied as not medically necessary or experimental/investigational'): "
               "'Providers and Facilities have one hundred eighty (180) calendar days to file a clinical appeal from the date they receive "
@@ -723,9 +728,9 @@ CORRECTED_RULES: list[dict] = [
     # finding 19, and this unit: Humana's how-to page no longer carries it): the manual's claim limit dates the corrected
     # claim, not confirmed for one (fx-windows)
     {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "months": 12, "clock": "dos", "verified": False,
-     "label": "Humana Medicare Advantage: a corrected claim within the manual's limit for a claim, 'Medicare lines of business: 1 year from "
-              "date of service' (unless the agreement says otherwise). The manual sets no corrected-claim window of its own, and the "
-              "tip sheet earlier cited for one was not found",
+     "label": "Humana Medicare Advantage: a corrected claim within 1 year of the date of service, the manual's limit for a claim ('Medicare "
+              "lines of business: 1 year from date of service', unless the agreement says otherwise). The manual sets no corrected-claim "
+              "window of its own, and the tip sheet earlier cited for one was not found",
      "source": "Humana 2026 Provider Manual for physicians, hospitals and healthcare providers (773902ALL0725-A), claims submission"},
     {"match": r"^Humana", "kinds": {"medicaid"}, "days": 365, "clock": "dos", "verified": False,
      "label": "Humana Medicaid: corrected claim within 365 days of the date of service, the Kentucky plan's rule; the remittance does not say "

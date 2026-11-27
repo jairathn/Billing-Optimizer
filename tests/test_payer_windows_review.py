@@ -140,7 +140,9 @@ def test_wellcare_kentucky_medicaid_named_without_the_word_medicaid_is_medicaid_
     r = filing_rule(grp, kind, payer_name=WK_NAME, payer_id="99141")
     assert window_end("2025-12-10", r) == "2026-12-10", (grp, kind, r["label"])
     assert codes.normalize_payer("WELLCARE SAMPLE MEDICAID OF KENTUCKY") == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
-    assert codes.normalize_payer("SAMPLE KY MEDCAID") == ("Medicaid KY", "medicaid")
+    # the program's own name misspelled is the program; a plan's name that names the state is not (fx-windows,
+    # tests/test_fx_windows.py: the state program is named by the state or by 'Medicaid' and the state)
+    assert codes.normalize_payer("KY MEDCAID") == ("Medicaid KY", "medicaid")
     assert codes.normalize_payer("Wellcare Sample Medicare") == ("WellCare / Ambetter (Centene)", "medicare_advantage")
     assert codes.normalize_payer("Ambetter Sample Wellcare of Kentucky") == ("Ambetter (Centene)", "commercial")
     assert codes.payer_group_kind("WELLCARE SAMPLE OF KENTUCKY", "MC") == ("WellCare / Ambetter (Centene) Medicaid", "medicaid")
