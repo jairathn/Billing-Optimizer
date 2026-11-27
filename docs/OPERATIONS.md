@@ -478,6 +478,14 @@ How a date is counted. A window the payer states in months or years is counted i
 
 The AWS server updates itself: a merge to main is deployed within about 5 minutes (`docs/SERVER_RUNBOOK.md`, "Automatic deploys"). On another host: `git pull`, then `REMITWATCH_COMMIT=$(git rev-parse HEAD) docker compose build` (with the commit, `/api/health` says what runs; a plain `docker compose build` shows `"commit": null`), then `docker compose up -d`, each with `sudo` where Docker is root's. The store is migrated on start. Detection keeps every status, note and appeal date across runs, including when a new rule changes how a line is classified.
 
+A release that reads more of each 837 claim file (the patient, the payer's place on the claim, the other payer and what it
+answered) reads the 837 files read before it again, once, on each host: the server from the copy it read, or from a file of
+the same name and the same bytes under its Dropbox mirror (`REMITWATCH_DATA_DIR`); Vercel from the Dropbox folder, by the
+name each file was read under, over as many runs of the chain as it takes. Only bytes that are the file's own are read.
+The cycle's summary says what it did (`reread_837`: files read, claims updated, files left for the next run, files not
+found). A file that cannot be found keeps its claims as they were read: the rules that need the patient or the payer's
+place work for those claims as they did before, and the summary counts the file on every cycle.
+
 ## 10. Troubleshooting
 
 - `Dropbox files/list_folder failed 409 ... not_found`: `DROPBOX_ROOT_PATH` is wrong for this account, or the folder is in a team space (set `DROPBOX_PATH_ROOT_NS`).

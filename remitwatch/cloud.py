@@ -55,11 +55,11 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "11"                # bump when SERVING_TABLES changes: a copy made by another build is made again (7: the
+SERVING_BUILD = "12"                # bump when SERVING_TABLES changes: a copy made by another build is made again (7: the
                                     # release's heirs, or push 2's EMA reports; 8: what the A/R's billing notes say, and the
                                     # 835 claims of whole bills; 9: both together; 10: the runs' logs, the decision log, the
                                     # self-check's lists and the archive's index; 11: what the payers' recoupments took from
-                                    # each payment, ledger_taken)
+                                    # each payment, ledger_taken; 12: the 837 sends of the items' bills)
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 PRESS = "press.json"                # the owner's decision 1: when someone last pressed "Run the analysis now" (and who, as a
                                     # fingerprint), so a second press before the run has taken its lock starts nothing
@@ -1116,6 +1116,91 @@ def apply_production_items(store, slot: ProductionSlot, items: list[tuple[dict, 
     return out
 
 
+REREAD_837_BATCH = 200          # 837 files fetched at once to be read again (about 7 MB on the real archive)
+
+
+def reread_837(store, client, *, deadline: float, log=print) -> dict:
+    """(F3a's need) This host's once-only read again of the 837 files whose claims were read before x12_837.READ_VERSION
+    (pipeline.reread_837 is the server's): each is fetched from Dropbox by the name it was read under (the folder's files
+    this store has seen, dropbox_seen; never the first load's archive), and its bytes are read only when their SHA-256 is
+    the file's. Stops at the deadline ('remaining': the next run of the chain goes on). A file Dropbox no longer has, or
+    holds under that name with other bytes, is counted ('missing') and kept as it was read; a download that may work next
+    time ('download_errors') is tried again by a later run. Returns {} when there is nothing to read again."""
+    from . import x12_837
+    from .dropbox_sync import permanent_download_error
+    from .pipeline import REREAD_837_META, remember_reread, reread_memory, reread_stuck
+    conn = store.conn
+    todo = x12_837.files_to_reread(conn)
+    if not todo:
+        if conn.execute("SELECT 1 FROM meta WHERE key=?", (REREAD_837_META,)).fetchone():
+            remember_reread(conn, "serverless", set())
+        return {}
+    known = reread_memory(conn, "serverless")
+    listed = set(todo)
+    missing = {s for s in known if s in listed}
+    todo = [s for s in todo if s not in missing]
+    out = {"listed": len(listed), "read": 0, "claims": 0, "missing": len(missing), "remaining": 0, "download_errors": 0}
+    if not todo:
+        return out
+    names: dict[str, str] = {}
+    for i in range(0, len(todo), 500):
+        part = todo[i:i + 500]
+        for sha, name, path in conn.execute(f"SELECT sha256, source_name, source_path FROM files WHERE sha256 IN "
+                                            f"({','.join('?' * len(part))})", part):
+            names[sha] = (name or os.path.basename(path or "")).lower()
+    where: dict[str, list[str]] = {}
+    for fid, path in conn.execute("SELECT id, path FROM dropbox_seen WHERE id NOT LIKE 'zip:%' ORDER BY at DESC"):
+        if fid:
+            where.setdefault(os.path.basename(str(path or "")).lower(), []).append(fid)
+    left = {sha: list(where.get(names.get(sha) or "", [])) for sha in todo}
+
+    def fetch(job: tuple):
+        sha, fid = job
+        try:
+            return sha, fid, client.download_bytes(fid)[0]
+        except Exception as exc:       # noqa: BLE001  (sorted below: gone for good, or worth another run)
+            return sha, fid, exc
+    pending = [s for s in todo if left[s]]
+    missing |= {s for s in todo if not left[s]}
+    read: set[str] = set()
+    while pending:
+        if time.time() > deadline:
+            out["remaining"] = len(pending)
+            break
+        batch, pending = pending[:REREAD_837_BATCH], pending[REREAD_837_BATCH:]
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            got = list(ex.map(fetch, [(sha, left[sha].pop(0)) for sha in batch]))
+        again = []
+        for sha, _fid, data in got:
+            if isinstance(data, Exception):
+                if not permanent_download_error(data):
+                    out["download_errors"] += 1         # a timeout or a busy server: a later run asks again
+                    continue
+            elif hashlib.sha256(data).hexdigest() == sha:
+                r = x12_837.reread_837_bytes(conn, data)
+                read.add(sha)
+                out["read"] += 1
+                out["claims"] += int(r.get("updated") or 0)
+                continue
+            # gone from Dropbox, or that name holds other bytes now: the next file of the same name, if there is one
+            if left[sha]:
+                again.append(sha)
+            else:
+                missing.add(sha)
+        got = None
+        pending = again + pending
+    missing |= reread_stuck(conn, read)     # read, and its claims are not the ones the file makes now: nothing to change
+    out["missing"] = len(missing)
+    out["noted"] = missing != known
+    if out["noted"]:
+        remember_reread(conn, "serverless", missing)
+    if out["read"] or out["noted"]:
+        log(f"  837 files read again with the current reader: {out['read']} ({out['claims']} claims updated)"
+            + (f"; {len(missing)} not found in Dropbox, kept as they were read" if missing else "")
+            + (f"; {out['remaining']} left for the next run" if out["remaining"] else ""))
+    return out
+
+
 def reread_waiting(store, client, state, slot: ProductionSlot | None, *, deadline: float, log=print) -> dict:
     """The reports the catalog keeps waiting (and held files a person chose to apply), fetched again where they are kept:
     by Dropbox id, or from the state folder for an upload. A Production report goes through the slot; one larger than
@@ -1476,6 +1561,25 @@ def _whole_bills() -> str:
 
 
 BILLS = _whole_bills()
+
+
+def _bills_837() -> str:
+    """The 837 claims and lines of every bill that has an item (every send, every payer), so the dashboard's copy tells an
+    item's story and works out its state with the sends the server sees (F3a: without them the copy showed only the send
+    the item's evidence names). Plain SQL only (ema_reports.bill_sql)."""
+    from .ema_reports import bill_sql
+    pcn = "patient_control_number"
+    return f"{bill_sql(pcn)} IN (SELECT {bill_sql('f.' + pcn)} FROM main.findings f WHERE f.{pcn} IS NOT NULL)"
+
+
+BILLS_837 = _bills_837()
+# what the pages read of a send (story's 837 rows, states' resends): no keyed hash of a patient (patient_key, person_key,
+# first_key), no file it came from, no member id or claim reference the pages do not show
+CLAIMS_837_COLUMNS = ("claim_837_key,bht_created,patient_control_number,total_charge_cents,frequency_code,place_of_service,"
+                      "payer_name,payer_id,service_date,line_count,payer_resp,filing_indicator,other_payer_name,other_payer_id,"
+                      "other_payer_resp,other_paid_cents,other_left_cents,other_pr_cents,read_version")
+LINES_837_COLUMNS = ("line_837_key,claim_837_key,patient_control_number,line_seq,procedure_code,modifiers,charge_cents,units,"
+                     "service_date")
 SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     # table, column whitelist (None = every shared column), filter
     ("findings", None, None), ("payer_rates", None, None), ("fee_table", None, None), ("provider_tiers", None, None),
@@ -1493,6 +1597,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     # server's does (fx-ledger-r2-4). s is the copy build_serving attaches; lines is copied before this table.
     ("ledger_taken", None, "line_key IN (SELECT line_key FROM s.lines)"),
     ("ema_rows", None, "claim_id IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
+    # the 837 sends of the items' bills (F3a): the story's sends and the resends that make an item's state
+    ("claims_837", CLAIMS_837_COLUMNS, BILLS_837), ("lines_837", LINES_837_COLUMNS, BILLS_837),
     ("line_links", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
     ("line_handling", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
     # what each clinician did (remitwatch.activity): counts and sums per clinician, no patient rows
@@ -1527,6 +1633,8 @@ def empty_serving(path: str) -> None:
     ensure_schema(c)
     c.executescript(ALERTS_DDL + LINK_DDL)
     c.execute(HEIRS_DDL)                # an item's new number, for a page drawn before the run that gave it
+    from . import x12_837
+    x12_837.ensure_schema(c)            # the 837 sends of the items' bills (SERVING_TABLES, F3a)
     activity.ensure_schema(c)
     actions_mod.ensure_fax_tables(c)
     actions_mod.ensure_hide_rules(c)
@@ -2341,12 +2449,24 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             rr = {"error": type(exc).__name__}
         if rr.get("read") or rr.get("gone") or rr.get("error"):
             out["ema_waiting"] = rr
+        # (F3a's need) the 837 files read before the reader's current version, read again once from Dropbox, after what is
+        # new in the folder: a claim that changed is analysed as after new files, and what is left goes to the next run
+        r837: dict = {}
+        if client is not None and not (ingest.get("remaining") or 0):
+            try:
+                with rl.step("reread_837"):
+                    r837 = reread_837(store, client, deadline=t0 + budget * 0.5, log=log)
+            except Exception as exc:       # noqa: BLE001  (what it read is committed; a later run goes on)
+                runlog.caught(exc, "reread_837")
+                r837 = {"error": type(exc).__name__}
+            if r837:
+                out["reread_837"] = {k: v for k, v in r837.items() if k != "noted"}
         applied = slot.finish(out)          # the Production file read this run: summaries, then the ledger saved
         n_ingested = sum((src.get(k) or 0) for src in (ingest, tz) for k in ("remits", "ema", "claims_837"))
         n_ingested += int(up_in.get("read") or 0) + int(rr.get("ema") or 0)
-        ingested = n_ingested > 0
+        ingested = n_ingested > 0 or bool(r837.get("claims"))
         remaining = ((ingest.get("remaining") or 0) > 0 or (tz.get("remaining") or 0) > 0 or (up_in.get("remaining") or 0) > 0
-                     or (rr.get("later") or 0) > 0)
+                     or (rr.get("later") or 0) > 0 or (r837.get("remaining") or 0) > 0)
         ema_dirty = bool(ema_dirty or getattr(store, "ema_changed", False) or up_in.get("changed") or rr.get("changed")
                          or applied or "ema_apply" in out)
         mem["ingest"] = peak_mb()
@@ -2557,7 +2677,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             reg.save()                  # meta repair:state (saved with the store) and logs/repair_state.json
         rl.save_to_store(conn)
         if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed") or ema_dirty \
-                or howto_changed or repairs_dirty:
+                or howto_changed or repairs_dirty or r837.get("noted"):
             t2 = time.time()
             with rl.step("save_store"):
                 meta = save_raw(state, store, log, status=out)      # a lost answer leaves its pending record in this run's status

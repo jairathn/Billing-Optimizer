@@ -918,3 +918,309 @@ def test_the_dashboards_copy_carries_the_takebacks_of_its_own_lines_only_and_as_
     finally:
         s.close()
         w.store.close()
+
+
+# ===================================================================================== F3a's needs (fx-837's routed needs)
+# The 837 reader takes in more since x12_837.READ_VERSION 2 and 3 (the claim's patient and its keyed first name, the
+# payer's place on the claim, the other payer and its answer): each host reads once more the 837 files an older reader
+# read (pipeline.reread_837 on a server, cloud.reread_837 on Vercel), and the dashboard's copy carries the 837 sends of
+# the items' bills.
+
+def _file_837(claims: list[str], n: int = 1, bht: str = "20260915") -> bytes:
+    """An invented 837P file holding these claims (tests/test_fx_837.clm837), made and sent on `bht`."""
+    st = (f"ST*837*{n:04d}*005010X222A1~BHT*0019*00*{n}*{bht}*1200*CH~HL*1**20*1~NM1*85*2*TEST DERMATOLOGY*****XX*1777777772~"
+          + "".join(claims) + f"SE*99*{n:04d}~")
+    return (f"ISA*00*          *00*          *ZZ*999999999      *ZZ*TRIZETTO       *{bht[2:]}*1200*^*00501*{n:09d}*0*P*:~"
+            f"GS*HC*999999999*TRIZETTO*{bht}*1200*{n}*X*005010X222A1~" + st + f"GE*1*{n}~IEA*1*{n:09d}~").encode()
+
+
+def _as_read_before(conn) -> None:
+    """The claims as the reader before READ_VERSION 2 left them: no patient, no place on the claim, no other payer."""
+    conn.execute("""UPDATE claims_837 SET patient_key=NULL, person_key=NULL, first_key=NULL, payer_resp=NULL, filing_indicator=NULL,
+                    other_payer_name=NULL, other_paid_cents=NULL, read_version=0""")
+    conn.commit()
+
+
+def _claim_837(conn) -> tuple:
+    return tuple(conn.execute("SELECT patient_key IS NOT NULL, payer_resp, read_version FROM claims_837").fetchone())
+
+
+def _server_837(tmp_path, monkeypatch, name: str = "c0001.837"):
+    """A server whose cycle read one invented 837 (bill CB0000T06) from the folder it was given, then its claim set back to
+    how the reader before READ_VERSION 2 stored it. (db, the file's path, the data folder)."""
+    from tests.test_837_sends import V
+    from tests.test_fx_837 import clm837
+    for k in [k for k in os.environ if k.startswith(("DROPBOX_", "TRIZETTO_", "SMTP_", "SRFAX_", "MODMED_"))]:
+        monkeypatch.delenv(k, raising=False)
+    data_dir = tmp_path / "mirror"
+    drop = data_dir / "Trizetto" / "837s"
+    drop.mkdir(parents=True)
+    monkeypatch.setenv("REMITWATCH_DATA_DIR", str(data_dir))
+    (drop / name).write_bytes(_file_837([clm837("CB0000T06C017", V)]))
+    db = str(tmp_path / "s.sqlite")
+    from remitwatch import pipeline
+    pipeline.run_cycle(db, sync=False, local=str(drop), email=False, report=False, log=lambda *a: None)
+    s = Store(db)
+    assert s.conn.execute("SELECT COUNT(*) FROM claims_837").fetchone()[0] == 1
+    _as_read_before(s.conn)
+    s.close()
+    return db, drop / name, data_dir
+
+
+def test_the_server_reads_again_an_837_read_before_the_patient_loop_was_read(tmp_path, monkeypatch):
+    """fx-837's need (plans/progress/fx-837_needs_tests.py): the server's cycle read bill CB0000T06's 837 before
+    x12_837.READ_VERSION 2 (no patient, SBR01 or other payer on file). The file is still where the cycle read it. The next
+    cycle reads it again: the claim gets its keyed patient and its place, the file is no longer listed to read again, and
+    the cycle analyses what changed."""
+    from remitwatch import pipeline, x12_837
+    db, path, _ = _server_837(tmp_path, monkeypatch)
+    s = Store(db)
+    assert x12_837.files_to_reread(s.conn)
+    s.close()
+    out = pipeline.run_cycle(db, sync=False, local=None, email=False, report=False, log=lambda *a: None)
+    assert out.get("reread_837", {}).get("read") == 1 and out["reread_837"]["claims"] == 1, out.get("reread_837")
+    assert "detect" in out, "a claim the reread changed is analysed in the same cycle"
+    s = Store(db)
+    assert _claim_837(s.conn) == (1, "P", x12_837.READ_VERSION)
+    assert not x12_837.files_to_reread(s.conn)
+    s.close()
+    quiet = pipeline.run_cycle(db, sync=False, local=None, email=False, report=False, log=lambda *a: None)
+    assert "reread_837" not in quiet and "detect" not in quiet, "read again once: a quiet cycle after it reads nothing"
+
+
+def test_the_server_finds_an_837_that_moved_inside_the_data_folder_by_its_name_and_bytes(tmp_path, monkeypatch):
+    """The file the cycle read moved to another folder of the mirror (a person tidied the Dropbox folder). The server finds
+    it by its name and reads it only because its bytes are the file's; a file of the same name with other bytes is not
+    read."""
+    from remitwatch import pipeline, x12_837
+    from tests.test_837_sends import V
+    from tests.test_fx_837 import clm837
+    db, path, data_dir = _server_837(tmp_path, monkeypatch)
+    other = data_dir / "Old" / path.name
+    other.parent.mkdir()
+    other.write_bytes(_file_837([clm837("CB0000T07C017", V)], n=2))      # the same name, another file
+    moved = data_dir / "Archive" / "2026" / path.name
+    moved.parent.mkdir(parents=True)
+    os.replace(path, moved)
+    out = pipeline.run_cycle(db, sync=False, local=None, email=False, report=False, log=lambda *a: None)
+    assert out["reread_837"]["read"] == 1 and out["reread_837"]["missing"] == 0, out["reread_837"]
+    s = Store(db)
+    assert _claim_837(s.conn) == (1, "P", x12_837.READ_VERSION)
+    assert s.conn.execute("SELECT COUNT(*) FROM claims_837").fetchone()[0] == 1, "the other file is not read as new"
+    s.close()
+
+
+def test_the_server_finds_an_837_kept_among_its_uploads(tmp_path, monkeypatch):
+    """The file was read from a folder that is gone, and its only copy left on the server is the one the Upload page kept
+    (uploads.upload_dir, remittances/): it is read again from there."""
+    from remitwatch import pipeline, x12_837
+    db, path, _ = _server_837(tmp_path, monkeypatch)
+    kept = tmp_path / "kept-uploads"
+    monkeypatch.setenv("REMITWATCH_UPLOAD_DIR", str(kept))
+    (kept / "remittances").mkdir(parents=True)
+    os.replace(path, kept / "remittances" / path.name)
+    out = pipeline.run_cycle(db, sync=False, local=None, email=False, report=False, log=lambda *a: None)
+    assert out["reread_837"]["read"] == 1 and out["reread_837"]["missing"] == 0, out["reread_837"]
+    s = Store(db)
+    assert _claim_837(s.conn) == (1, "P", x12_837.READ_VERSION)
+    s.close()
+
+
+def test_the_server_counts_an_837_it_cannot_find_and_does_not_look_for_it_every_cycle(tmp_path, monkeypatch):
+    """The file is gone from the server (and no file of its name and bytes is in the data folder): the claim keeps how it
+    was read, the cycle says how many files it could not find, and the next cycles do not look again until a release
+    changes the reader."""
+    from remitwatch import pipeline, x12_837
+    db, path, _ = _server_837(tmp_path, monkeypatch)
+    os.remove(path)
+    out = pipeline.run_cycle(db, sync=False, local=None, email=False, report=False, log=lambda *a: None)
+    assert out["reread_837"] == {"listed": 1, "read": 0, "claims": 0, "missing": 1, "remaining": 0}, out["reread_837"]
+    s = Store(db)
+    assert _claim_837(s.conn) == (0, None, 0)
+    s.close()
+    looked = []
+    real = pipeline._same_bytes
+    monkeypatch.setattr(pipeline, "_same_bytes", lambda p, sha: looked.append(p) or real(p, sha))
+    again = pipeline.run_cycle(db, sync=False, local=None, email=False, report=False, log=lambda *a: None)
+    assert again["reread_837"]["missing"] == 1 and again["reread_837"]["read"] == 0 and not looked
+    # a release that changes the reader looks again
+    monkeypatch.setattr(x12_837, "READ_VERSION", x12_837.READ_VERSION + 1)
+    pipeline.run_cycle(db, sync=False, local=None, email=False, report=False, log=lambda *a: None)
+    assert looked, "the memory holds for one version of the reader only"
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_reading_an_837_again_stops_at_its_deadline_and_goes_on_later(tmp_path, monkeypatch, kind):
+    """Two files to read again and no time left: nothing is read and both are left for later ('remaining'), none counted
+    missing; with time, both are read. Both store kinds (the server's reader is the same code on Vercel's image)."""
+    import time as _time
+    from remitwatch import pipeline, x12_837
+    from tests.test_837_sends import V, _store
+    from tests.test_fx_837 import clm837
+    data_dir = tmp_path / "mirror"
+    data_dir.mkdir()
+    s = _store(tmp_path, kind)
+    for n, cid in ((1, "CB0000T08C017"), (2, "CB0000T09C017")):
+        p = data_dir / f"c{n:04d}.837"
+        p.write_bytes(_file_837([clm837(cid, V)], n=n))
+        s.ingest_835_paths([str(p)])
+    _as_read_before(s.conn)
+    late = pipeline.reread_837(s, data_dir=str(data_dir), deadline=_time.time() - 1, log=lambda *a: None)
+    assert late == {"listed": 2, "read": 0, "claims": 0, "missing": 0, "remaining": 2}, late
+    done = pipeline.reread_837(s, data_dir=str(data_dir), deadline=_time.time() + 60, log=lambda *a: None)
+    assert done["read"] == 2 and done["claims"] == 2 and not x12_837.files_to_reread(s.conn), done
+    s.close()
+
+
+def _vercel_837(box, name: str = "c0001.txt"):
+    """Vercel: one invented 837 (bill CB0000T06) in the Dropbox data folder read by a run, then the store image set back to
+    how the reader before READ_VERSION 2 stored its claim. (root, client, state, the file's path in the fake Dropbox)."""
+    from tests.test_837_sends import V
+    from tests.test_cloud import DATA, cycle
+    from tests.test_fx_837 import clm837
+    from tests.test_837_sends import answer
+    root, client, state = box
+    folder = root / DATA / "837"
+    folder.mkdir(parents=True)
+    (folder / name).write_bytes(_file_837([clm837("CB0000T06C017", V)]))
+    # Anthem's answer to it, so the store has remittance lines to analyse
+    (root / DATA / "r0001.RMT").write_bytes(remit(answer("CB0000T06C017", paid="0.00"), "0.00", payer="ANTHEM", payer_id="ANTHM",
+                                                  seg_count=99, isa_ctrl="000000001", pay_date="20261001"))
+    cycle(state, client)
+    store, existed = cloud.load_raw(state)
+    assert existed and store.conn.execute("SELECT COUNT(*) FROM claims_837").fetchone()[0] == 1
+    _as_read_before(store.conn)
+    cloud.save_raw(state, store, lambda *a: None)
+    store.close()
+    return root, client, state, folder / name
+
+
+def _watch_downloads(client) -> list[str]:
+    """The data folder's files the fake Dropbox hands out from now on (the state folder's are left out)."""
+    seen: list[str] = []
+    real = client.download_bytes
+
+    def download_bytes(path_or_id: str):
+        if "RemitWatch-state" not in path_or_id:
+            seen.append(path_or_id)
+        return real(path_or_id)
+    client.download_bytes = download_bytes
+    return seen
+
+
+def test_vercel_reads_again_an_837_read_before_the_patient_loop_was_read_from_dropbox(box):
+    """fx-837's need on Vercel: the same once-only read again, the file fetched from Dropbox by the name it was read
+    under. The claim gets its patient and its place; the run saves the store; the next run reads nothing again."""
+    from remitwatch import x12_837
+    from tests.test_cloud import cycle
+    root, client, state, _p = _vercel_837(box)
+    out = cycle(state, client)
+    assert out.get("reread_837", {}).get("read") == 1 and out["reread_837"]["claims"] == 1, out.get("reread_837")
+    store, _ = cloud.load_raw(state)
+    assert _claim_837(store.conn) == (1, "P", x12_837.READ_VERSION)
+    assert not x12_837.files_to_reread(store.conn)
+    store.close()
+    fetched = _watch_downloads(client)
+    again = cycle(state, client)
+    assert "reread_837" not in again and not fetched, (again.get("reread_837"), fetched)
+
+
+def test_vercel_counts_an_837_gone_from_dropbox_once_and_reads_one_of_its_name_only_by_its_bytes(box):
+    """The 837 under its name now holds other bytes (a file saved over it): it is not read; the file is counted missing,
+    the store keeps the claim as it was read, and the next runs do not fetch it again. A transient download error is
+    neither: a later run asks again."""
+    from remitwatch import x12_837
+    from remitwatch.dropbox_sync import DropboxNotFound  # noqa: F401  (the fake's permanent error)
+    from tests.test_837_sends import V
+    from tests.test_cloud import cycle
+    from tests.test_fx_837 import clm837
+    root, client, state, p = _vercel_837(box)
+    client.broken["c0001.txt"] = RuntimeError("Dropbox files/download failed: timed out")
+    out = cycle(state, client)
+    assert out["reread_837"]["download_errors"] == 1 and out["reread_837"]["missing"] == 0, out["reread_837"]
+    client.broken.clear()
+    p.write_bytes(_file_837([clm837("CB0000T07C017", V)], n=2))
+    out = cycle(state, client)
+    assert out["reread_837"]["missing"] == 1 and out["reread_837"]["read"] == 0, out["reread_837"]
+    store, _ = cloud.load_raw(state)
+    kept = store.conn.execute("""SELECT patient_key, payer_resp, read_version FROM claims_837
+                                 WHERE patient_control_number='CB0000T06C017'""").fetchone()
+    assert tuple(kept) == (None, None, 0), "the claim keeps how it was read"
+    new = store.conn.execute("SELECT read_version FROM claims_837 WHERE patient_control_number='CB0000T07C017'").fetchone()
+    assert new and new[0] == x12_837.READ_VERSION, "the file saved over it is a new file, read as such"
+    store.close()
+    fetched = _watch_downloads(client)
+    again = cycle(state, client)
+    assert again.get("reread_837", {}).get("missing") == 1 and not fetched, (again.get("reread_837"), fetched)
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_the_dashboards_copy_shows_every_send_in_an_items_story(tmp_path, kind):
+    """fx-837's need (cloud.SERVING_TABLES carries the findings' bills' 837 sends): bill CB0000T05's C017 went to Anthem
+    September 1 and its replacement C024 September 15; no payer answered. The story on the dashboard's copy shows both
+    sends, as the store's does, with no note that the 837 files are kept on the server."""
+    from remitwatch import story
+    from tests.test_837_sends import V, _remits, _store, _visits, send
+    from tests.test_fx_837 import clm837
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000T05C017", V)], "20260901")
+    send(s, tmp_path, [clm837("CB0000T05C024", V, freq="7")], "20260915")
+    _remits(s, tmp_path, _visits(), "20261110")
+    detect.Detector(s, run_id="t1").run()
+    fid = s.query("SELECT finding_id FROM findings WHERE patient_control_number='CB0000T05C024'")[0]["finding_id"]
+    copy = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(s.conn, copy)
+    served = Store(copy)
+    st = story.item_story(served.conn, fid)
+    sends = [(r["date"], r["claim_id"]) for r in st["rows"] if r["source"] == "837"]
+    assert sends == [("2026-09-01", "CB0000T05C017"), ("2026-09-15", "CB0000T05C024")], sends
+    assert story.COPY_837_NOTE not in st["notes"]
+    assert story.item_story(s.conn, fid)["rows"] == st["rows"], "the copy tells the story the store tells"
+    served.close()
+    s.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_the_dashboards_copy_carries_no_keyed_patient_or_file_of_an_837_and_only_the_items_bills(tmp_path, kind):
+    """The copy's 837 rows hold what the pages read: no keyed hash of the patient (patient_key, person_key, first_key),
+    no file they came from, no member id; and only the sends of bills that have an item (bill CB0000T05 has one; bill
+    CB0000T10, sent and paid, has none)."""
+    from tests.test_837_sends import V, _remits, _store, _visits, answer, send
+    from tests.test_fx_837 import clm837
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000T05C017", V, patient=("SAMPLE", "KID", "20150101"))], "20260901")
+    send(s, tmp_path, [clm837("CB0000T10C017", V)], "20260902")
+    _remits(s, tmp_path, _visits() + [answer("CB0000T10C017")], "20261110")
+    detect.Detector(s, run_id="t1").run()
+    assert s.conn.execute("SELECT COUNT(*) FROM claims_837 WHERE patient_key IS NOT NULL").fetchone()[0] == 2
+    copy = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(s.conn, copy)
+    c = sqlite3.connect(copy)
+    for table, banned in (("claims_837", {"patient_key", "person_key", "first_key", "file_sha256", "source_name", "subscriber_id",
+                                          "original_reference_number", "prior_auth", "relationship", "st_control"}),
+                          ("lines_837", {"diagnosis_pointers", "line_control_number"})):
+        filled = {col for col in [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+                  if c.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} IS NOT NULL").fetchone()[0]}
+        assert not filled & banned, (table, filled & banned)
+    assert [r[0] for r in c.execute("SELECT patient_control_number FROM claims_837")] == ["CB0000T05C017"]
+    assert [r[0] for r in c.execute("SELECT DISTINCT patient_control_number FROM lines_837")] == ["CB0000T05C017"]
+    c.close()
+    s.close()
+
+
+def test_vercel_a_run_whose_time_ran_out_reading_837s_again_hands_the_rest_to_the_next_run(box, monkeypatch):
+    """The read again stops at the run's half budget like any reading: the run says there is more (the chain goes on to
+    the next run) and holds the analysis until the reading is done, so the analysis sees every claim read the same way."""
+    from tests.test_cloud import cycle
+    root, client, state, _p = _vercel_837(box)
+    real = cloud.reread_837
+
+    def out_of_time(store, client, *, deadline, log=print):
+        return real(store, client, deadline=0.0, log=log)       # the deadline has passed before the first file
+    monkeypatch.setattr(cloud, "reread_837", out_of_time)
+    out = cycle(state, client)
+    assert out["reread_837"]["remaining"] == 1 and out["more"] and "detect" not in out, out.get("reread_837")
+    assert cloud.next_run(out, 1) in ({"trigger": "continue", "delay": 0}, {"end": True})
+    monkeypatch.setattr(cloud, "reread_837", real)
+    done = cycle(state, client)
+    assert done["reread_837"]["read"] == 1 and not done["more"] and "detect" in done, (done.get("reread_837"), done.get("deferred"))
