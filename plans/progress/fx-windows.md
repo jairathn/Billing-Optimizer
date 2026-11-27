@@ -26,8 +26,72 @@ tests and restored byte for byte (`$S/tk/units/fx-windows/scripts2/mutate2.py`, 
 | r2-4 (medium) CARC 150, 151, 152 | fixed | codes: `MAYBE_CLINICAL_CARCS` (150, 151, 152 and the product's medical-necessity class 167, B22, 272, B5, B12, 58, 216, A1): 180 days shown, the dispute's two years last, for any Anthem commercial member and for the FEP (its 6 months only for 50, 55, 56; tests/test_payer_windows_review.py's FEP expectation changed on purpose). 150 on an E&M code (99202 to 99499) stays the dispute's two years: the manuals' 'Evaluation and Management (E&M) Services' review is 'in accordance with correct coding requirements and/or reimbursement policy' (new plan fact `code`, the item's procedure code, read by rule_facts; `ANTHEM_EM_LEVEL`). On the copy: no Anthem commercial 150, 151 or 152 since 2025; 167 four adjustments, 58 one |
 | r2-5 (low) second claim with no date of service | fixed | codes.second_claim_window: 6 months from the payment shown, 12 months from it the last day, the words say the date of service is not known |
 | r2-7 (low) real payer names in tests and comments | fixed | the six strings replaced by invented ones in tests/test_fx_windows.py, a codes.py comment and this file; `$S/tk/units/fx-windows/private_words_plus.txt` is the shared private list plus the six strings: test_docs passes with it (see Needs from others 4) |
-| r2-8 (low) the VA's last day | fixed | codes: a VA Community Care appeal row, 90 days shown (not confirmed, as before) and 12 months the last day (the UnitedHealthcare-administered plans' window the claims had while their name decided their group) |
+| r2-8 (low) the VA's last day | fixed; the never-answered half routed (F3c) | codes: a VA Community Care appeal row, 90 days shown (not confirmed, as before) and 12 months the last day (the UnitedHealthcare-administered plans' window the claims had while their name decided their group). The 837 pass dates a never-answered claim by window_end alone and never reads that last day: Needs from others 5 |
 | r1-2 (low) the A/R rows keep the old group | routed, done by F4 | F4's d78502f (wip/fx-ema: ema_ledger `_name_rules_hash`, `_regroup_ar`) re-groups ema_ar's rows; the reviewer's test is in the needs file and passes on a scratch merge of this branch with origin/wip/fx-ema (F4's own tests green on that merge too: test_fx_ema, test_selfcheck, test_ema_checks, 336 passed) |
+
+### Fix round: measurement (private world copy, day 2026-11-24, one server cycle each)
+The integration tip fe9ad71 (batch 1 merged; no F8 code) against the branch at 975ef19, which holds both of this round's
+merges (47b1ba0 and fe9ad71): the moves are both rounds' F8 changes. The tip ran twice on fresh copies: the same 18,710
+items, none moved (no noise). Detection: the branch 474.5 s at a 1,118 MB peak; the tip 479.0 s and 552.2 s (a busier
+machine) at 1,119 and 1,116 MB; no step error.
+- Open items 12,829 ($3,764,927.52) -> 12,830 (the same dollars); Work now 6,743 ($2,044,712.60) -> 6,741 ($2,044,532.75).
+  456 items moved, none vanished.
+- Anthem / BCBS clinical denials (CARC 50, 55, 56): the date shown earlier on 38 ($9,155.50), the same items as the build
+  round. What the round changed is their last day:
+  - Anthem's own member (the plan names Kentucky or Indiana): 3 DENIED_NONCOVERED ($179.85), newly expired (180 days from
+    the remittance shown, 185 the last day, both past). The build round expired 13 ($752.38): the other 10 ($572.53) have
+    a plan that names no state and keep the dispute's two years now (r1-1, r2-6).
+  - A plan that names no state, or no plan (r1-1, r2-6): 21 ($7,107.75): CLAIM_DENIED_UNPAID 8 ($5,981.63),
+    DENIED_NONCOVERED 9 ($521.57), DENIED_MEDICAL_NECESSITY 2 ($484.65), EMA_DENIED 2 ($119.90): 180 days shown, the
+    dispute's two years the last day (the tip's date).
+  - A BlueCard member or another state's plan: 11 ($679.18): DENIED_NONCOVERED 8 ($479.60), CLAIM_DENIED_UNPAID 3 ($199.58).
+  - A whole claim with more than one denial reason (r2-2): 3 CLAIM_DENIED_UNPAID ($1,188.72), a clinical reason beside
+    CO-97 or CO-197: the clinical appeal's date shown, the dispute's two years the last day.
+- VA Community Care (r2-8): 76 EMA_DENIED ($26,756.98), the last day later: 90 days stays the date shown (not
+  confirmed), 12 months is the last day; all 76 had both dates past (expired before and after). 35 NO_ANSWER: the basis
+  quotes the VA's appeal row, the dates are unchanged (Needs from others 5).
+- As in the build round: basis words only on 291 Humana Medicare Advantage items ($43,496.66) and 9 of the VA's sends
+  ($2,687.00); 'Medicaid of Indiana' 1 EMA_DENIED ($63.89); the Kentucky plan named '<plan> Medicaid of Ky' 5 NO_ANSWER
+  ($56.47); 1 NO_ANSWER appears ($0).
+- No item on the copy for r2-4 (no Anthem item carries 150, 151, 152 or the medical-necessity class), r2-5 (the second
+  claim's window is dormant in detection) or r2-1 beyond the build round's one item.
+- A17 (W view), tip -> branch: CORRECT|open 2,254 -> 2,251 and CORRECT|closed 10,316 -> 10,319 (the 3 newly expired,
+  which A17 also calls lost to the deadline: lot DENIED in scope 339 -> 340, out of scope 102 -> 104, off_list:expired
+  9 -> 10); ALREADY_DONE|open 1,265 -> 1,266 (the appearing $0 item). No other A17 verdict changed. The build round had
+  moved 13 to CORRECT|closed; the 10 that stay open are CORRECT|open on both sides.
+
+### Fix round: hand-trace (33 moved items, from the raw rows: the 835 claim, line and CAS rows, EMA's rows, the 837 sends)
+Each item's dates worked out again by hand from the raw dates and the rule's words, then compared with what the branch
+wrote. Verdicts: 32 right, 1 unclear, 0 wrong.
+- Anthem's own member, newly expired (the plan names Indiana by its code; CO-55 on the 835; 180 days from the remittance
+  shown, 185 the last day, both past): 217a402b517b0c46b4bc51e5, a39bb2ad095631d4fe132f39, c430baade7361c99e15ec456
+  DENIED_NONCOVERED $59.95 each: right.
+- The six items the reviewers cited (a plan that names no state; CO-55 or CO-50 on the 835; 180 days shown, past; the
+  dispute's two years the last day, ahead; listed, as at the tip; the build round had expired four of them at 185 days):
+  aadabc6530a4f49c2ae32f29, 130279059fa13777125f3006, 86ca7816d5076f64febe0189, 0c0e3bba7d4a7a3e1394b468,
+  20a09dbf841aaceeea04bf7d DENIED_NONCOVERED $59.95 each, 48d261c0190012a39cf9ff64 DENIED_MEDICAL_NECESSITY $50.96: right.
+- A plan that names no state, whole claims denied CO-50 two years ago (expired before and after: the two years past):
+  1c4108bfde6a8e8e210e7e28, 7ef0618254f18f78bc447c53, 7f7adde4f07fa568e22a2131, acc3c7798b0c6062ab70c6be,
+  c8767c66ad6c8320199840c1 CLAIM_DENIED_UNPAID $741.85 each, af97a80255178c6ce2ec04c8 DENIED_MEDICAL_NECESSITY $433.69: right.
+- EMA's own clinical denials (no plan named): 8535d8d1be007ae9bd40e194 (CO-55), 9166d036e64794a06e8c2f36 (CO-50)
+  EMA_DENIED $59.95 each: 180 days from EMA's posting less the payer's 5-day delay shown, two years the last day: right.
+- More than one denial reason (r2-2): 78d7a49277e46d242adfe260 and 7950abbdced9e69a7300d2c9 CLAIM_DENIED_UNPAID $200.02
+  each (BlueCard; CO-97 beside two PR-55), f798c4dea952ac28fa768da7 CLAIM_DENIED_UNPAID $788.68 (a plan naming no state;
+  CO-197 beside three CO-50; both dates past): 180 days shown, the dispute's two years the last day: right.
+- BlueCard or another state's plan: 181bc05f050d37215eda4234 CLAIM_DENIED_UNPAID $50.96 (BlueCard's host words),
+  076f9da1a6a69d976377b893 DENIED_NONCOVERED $59.95 (another state's code; already done): 180 days shown, two years
+  last: right.
+- VA Community Care EMA denials (r2-8): 0187c8f5fbdbc88682d6b442 (OA-B15), 07b06a33e00dce3ee68814f8 (OA-96),
+  07c8b223cdddf7c6b95800bb (OA-96), 0bcba7ca5e24c1ab642deafb (OA-B15, posted under another administrator's name)
+  EMA_DENIED $357.48 each: 90 days from EMA's posting less 9 days shown, 12 months the last day, both past: right.
+- VA never answered, basis words only (the first-filing limit plus 90 days, unchanged): 0d1830f6882079e75a5e574d
+  NO_ANSWER $37.21 (expired), 917bff5041201c0e73055374 NO_ANSWER $65.08: right as the 837 pass dates them; their last
+  day is Needs from others 5.
+- Carried from the build round, the dates traced then: f08d747771bd5fd7fc44b73d EMA_DENIED $63.89 (Indiana's program, 60
+  days), 58bb593548102cfc5b031450 NO_ANSWER $56.47 (Kentucky managed care, 365 + 120 days): right;
+  84c6128e241cf91fed4ca54f NO_ANSWER $0 (appears): unclear, as in the build round (Observations).
+- Humana Medicare Advantage, words only: 04c1932468d4d25c9650eaeb DENIED_CODING $49.06, 07b64d0a966a48bc1401c1da
+  DENIED_MISSING_INFO $80.88: a year from the service shown, 18 months from the remittance the last day, unchanged: right.
 
 ## Inputs (read only, never in git)
 - S=/tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad
@@ -187,6 +251,19 @@ branch wrote. Verdicts: 29 right, 1 unclear, 0 wrong (30 items).
    this branch's first round copied from the practice's files (they are the last six lines of
    `$S/tk/units/fx-windows/private_words_plus.txt`), so test_docs catches them if they come back. This branch and the
    integration tip fe9ad71 pass test_docs with that list.
+5. F3c (detect's 837 pass: `_open_claim_dates` and the never-answered emit after it, F3a's functions), the other half of
+   review r2-8, found by this round's measurement: a never-answered claim sent on time is dated by the first-filing limit
+   plus the payer's appeal window (window_end only), and its last day is set only for a claim sent late, so the VA
+   network's 12-month last day (r2-8) never reaches it. EMA's never-answered path (ema_checks.unanswered_claims) already
+   reads it. On the real copy: 14 NO_ANSWER items of the VA network ($4,157.11) are expired on the unconfirmed 90 days
+   past the filing limit and would stay listed with 12 months (dates unchanged by this branch: the tip dates them the
+   same). The change, checked on a scratch tree (the test passes on both store kinds; test_837_sends, test_fx_837,
+   test_fx_windows, test_payer_windows, test_story and test_states: 425 passed):
+       _open_claim_dates, on-time branch, after `deadline = window_end(max(file_by, due or file_by), ap)`:
+           `file_legal = legal_deadline(max(file_by, due or file_by), ap)` (returned as 'legal')
+       the emit: `f["legal_deadline"] = file_legal if file_legal and deadline and file_legal > deadline else None` for an
+           on-time claim too (today only under `if not timely:`)
+   Test: test_a_never_answered_send_to_the_va_network_keeps_twelve_months_past_the_filing_limit_as_its_last_day.
 
 ## Observations for the final trace (no test: no date moves on the real copy)
 - The 837 pass groups a never-answered claim by the payer id's answered claims (detect's group_of votes). Plans that share
@@ -237,7 +314,11 @@ branch wrote. Verdicts: 29 right, 1 unclear, 0 wrong (30 items).
   clinical appeal's 180 days as its date and the dispute's two years as its last day.
 
 ## Next command
-- Merge the integration tip again when batch 1 lands, then `python3 -m pytest -q tests/test_fx_windows.py` and the files
-  the rules touch (tests/test_payer_windows*.py, test_story, test_archive, test_features, test_workable, test_ema_checks,
-  test_837_sends, test_states, test_ema_wiring, test_remitwatch). A new measurement: `$S/tk/units/fx-windows/scripts/
-  measure.sh <tag> <tree>` (one world copy at a time; the scripts stay in the private folder).
+- Merge the integration tip again when batch 2 lands, then `python3 -m pytest -q tests/test_fx_windows.py
+  tests/test_payer_windows_review.py` and the files the rules touch (tests/test_payer_windows.py, test_story,
+  test_archive, test_features, test_workable, test_ema_checks, test_837_sends, test_states, test_ema_wiring,
+  test_remitwatch, test_docs with REMITWATCH_PRIVATE_WORDS). The needs: `python3 -m pytest -q
+  plans/progress/fx-windows_needs_tests.py` (each fails here until its fixer's change lands). A new measurement:
+  `$S/tk/units/fx-windows/scripts2/measure3.sh <tag> <tree> [keep]` (one world copy at a time; `keep` leaves the copy
+  for the hand-trace, delete it after; the scripts stay in the private folder), then `scripts/compare.py`,
+  `scripts2/classify.py` and `scripts/trace.py`.

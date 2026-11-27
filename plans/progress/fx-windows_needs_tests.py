@@ -177,3 +177,30 @@ def test_an_anthem_clinical_denials_next_step_and_letter_name_the_clinical_appea
         assert "clinical appeal" in packet["process"], packet["process"]
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_a_never_answered_send_to_the_va_network_keeps_twelve_months_past_the_filing_limit_as_its_last_day(tmp_path, kind):
+    """F3c need (detect: the 837 pass's _open_claim_dates and the never-answered emit after it; F3a's functions), the other
+    half of fx-windows review r2-8. A claim sent August 12, 2026 to the VA's network (payer id VACCN) for an August 10
+    visit, never answered, remittances reaching November 10: it had to reach the payer by February 6, 2027 (38 U.S.C.
+    1703D(b): 180 days from the service), and its date runs the network's reconsideration window past that limit: 90 days
+    (May 7, 2027), not confirmed (no source for the region). Since r2-8 the VA's appeal rule keeps 12 months, the window
+    the claims had under the administrator's name, as its last day, so that no item closes early on a window nobody has
+    confirmed; EMA's never-answered path (ema_checks.unanswered_claims) already reads it (legal_deadline), the 837 pass
+    reads window_end only and sets legal_deadline only for a claim sent late. On June 1, 2027 the item is expired (its
+    last day May 7, 2027); it should be listed, its last day February 6, 2028. On the real copy: 14 never-answered VA
+    items ($4,157.11) are expired on the 90 days and would be listed. The change, in _open_claim_dates' on-time branch:
+    `legal = legal_deadline(max(file_by, due or file_by), ap)` returned as the item's last day (where later than the date),
+    and the emit sets legal_deadline from it for an on-time claim too."""
+    from tests.test_837_sends import VA, _chased, _remits, _store, _visits, clm837, send
+    s = _store(tmp_path, kind)
+    try:
+        send(s, tmp_path, [clm837("CB0000V01C017", [("99214", "100.00", "20260810")], payer=VA, member="V00000001")], "20260812")
+        _remits(s, tmp_path, _visits(), "20261110")
+        a = _chased(s, "t1", today="2027-06-01")["CB0000V01C017"]
+        assert a["payer_group"] == "VA Community Care" and a["appeal_deadline"] == "2027-05-07", (a["payer_group"], a["appeal_deadline"])
+        assert a["legal_deadline"] == "2028-02-06", (a["legal_deadline"], a["deadline_basis"][-160:])
+        assert a["work_state"] != "expired", (a["work_state"], a["legal_deadline"])
+    finally:
+        s.close()
