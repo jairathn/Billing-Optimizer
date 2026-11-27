@@ -936,14 +936,16 @@ def test_f1need_a_second_payers_share_taken_back_tells_the_biller_to_bill_the_pa
     """(r1-2) The item's state and the drawer's next step say to bill the patient the $16.00, or dispute the takeback, with
     the bill-the-patient action, never only "match the overpayment letter and post it"."""
     from remitwatch import story
+    from remitwatch import states as S
     w, r = _taken_back_item(tmp_path, tbkind)
+    assert S.second_share_back(r)
     out = story.explain(w.store.conn, r["finding_id"], today="2026-09-20")
     nxt, st = out["next_step"] or {}, out["state"] or {}
     assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient"), st["state_basis"]
     assert nxt["route"] == "bill_patient" and nxt["action"].startswith("Bill the patient $16.00, or dispute the takeback:"), nxt["action"]
-    assert "mark_billed" in nxt["buttons"] and "mark_sent" in nxt["buttons"], nxt["buttons"]
+    assert "billed_patient" in nxt["buttons"] and "mark_sent" in nxt["buttons"] and "mark_billed" not in nxt["buttons"], nxt["buttons"]
     assert nxt["expected_cents"] == 1600, nxt["expected_cents"]
-    assert any("put $16.00 on the patient's next statement" in x for x in nxt["steps"]), nxt["steps"]
+    assert any("put $16.00 on the patient's next statement and press Billed the patient" in x for x in nxt["steps"]), nxt["steps"]
     assert any(x.startswith("If it was not owed, dispute it") for x in nxt["steps"]), nxt["steps"]
     w.store.close()
 
@@ -982,8 +984,10 @@ def test_f1need_a_medicaid_plans_share_taken_back_is_never_billed_to_its_member(
     share is not the member's. Inside the plan's window the item stays the takeback's own work (find out why, dispute it,
     or find the plan that covered the day); past it, nothing can be recovered (expired). Neither says bill the patient."""
     from remitwatch import story
+    from remitwatch import states as S
     w, r = _taken_back_item(tmp_path, tbkind, gap={"payer": "KENTUCKY MEDICAID", "payer_id": "TMCD1"}, today="2026-08-10")
     assert r["payer_kind"] == "medicaid", r["payer_kind"]
+    assert not S.second_share_back(r), "a Medicaid plan's share is never billed to its member (Billed the patient does not apply)"
     assert (r["work_state"], r["state_rule"]) == ("work_now", "fees"), r["state_basis"]
     assert "a Medicaid member is not billed for it" in r["state_basis"] and "bill the patient" not in r["state_basis"], r["state_basis"]
     nxt = story.explain(w.store.conn, r["finding_id"], today="2026-08-10")["next_step"]
@@ -1004,8 +1008,45 @@ def test_f1need_past_the_dispute_window_the_share_is_still_billed_to_the_patient
     assert "bill the patient (the window to dispute the takeback closed on" in r["state_basis"], r["state_basis"]
     nxt = story.explain(w.store.conn, r["finding_id"], today="2028-06-01")["next_step"]
     assert nxt["action"].startswith("Bill the patient $16.00: ") and "dispute" not in nxt["action"], nxt["action"]
-    assert "mark_billed" in nxt["buttons"] and "mark_sent" not in nxt["buttons"], nxt["buttons"]
+    assert "billed_patient" in nxt["buttons"] and "mark_sent" not in nxt["buttons"], nxt["buttons"]
     w.store.close()
+
+
+def test_f1need_billed_the_patient_waits_for_the_patients_payment_not_a_payers_answer(tmp_path, tbkind):
+    """A person bills the patient the $16.00 (Billed the patient, the step's button): the item waits for the patient's
+    payment in EMA, as a patient-group denial does (states._billed_patient), at once in the drawer and after the next run;
+    two monthly statements later with nothing seen it is "send another statement, or mark it Done", never a follow-up with
+    the supplement about "the appeal or claim marked Sent". The expected amount is the share taken back. Control: Mark
+    sent (the dispute) waits on the supplement's answer. The person acts after the run (a status of the page's day)."""
+    import datetime as dt
+    from remitwatch import actions, story
+    from remitwatch import states as S
+    w, r = _taken_back_item(tmp_path, tbkind)
+    fid = r["finding_id"]
+    assert actions.apply_status(w.store.conn, fid, "appealed", notes="Billed the patient: statement 1", actor="Biller")
+    w.store.conn.commit()
+    today = S._today(None)
+    for when in ("at once", "after the next run"):
+        if when == "after the next run":
+            w.run("r2", today=today)
+        out = story.explain(w.store.conn, fid, today=today)
+        st, nxt = out["state"], out["next_step"]
+        assert (st["work_state"], st["rule"]) == ("waiting", "billed_patient"), (when, st["state_basis"])
+        assert st["state_basis"].startswith("Patient billed by Biller on ") and ": statement 1; it waits for the patient's payment in EMA" in st["state_basis"], st["state_basis"]
+        assert nxt["action"].startswith("Wait for the patient's payment") and "marked Sent" not in nxt["action"], nxt["action"]
+        assert nxt["expected_cents"] == 1600 and "share the second payer took back" in nxt["expected_basis"], (nxt["expected_cents"], nxt["expected_basis"])
+    later = (dt.date.fromisoformat(today) + dt.timedelta(days=S.PATIENT_WAIT_DAYS + 10)).isoformat()
+    out = story.explain(w.store.conn, fid, today=later)
+    assert out["state"]["rule"] == "patient_unpaid" and "Follow up with" not in out["next_step"]["action"], (out["state"], out["next_step"]["action"])
+    w.store.close()
+    (tmp_path / "dispute").mkdir()
+    w2, r2 = _taken_back_item(tmp_path / "dispute", tbkind)
+    assert actions.apply_status(w2.store.conn, r2["finding_id"], "appealed", notes="Dispute faxed to the supplement", actor="Biller")
+    w2.store.conn.commit()
+    w2.run("r2", today=today)
+    st2 = story.explain(w2.store.conn, r2["finding_id"], today=today)["state"]
+    assert st2["rule"] != "billed_patient" and "Marked Sent by Biller" in st2["state_basis"], st2
+    w2.store.close()
 
 
 # =========================================================================================== routed from F3a (837 pass)

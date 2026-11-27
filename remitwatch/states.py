@@ -2439,6 +2439,13 @@ def patient_denial(f: dict) -> bool:
     return str(f.get("carc_group") or _ev(f).get("carc_group") or "").upper() == "PR"
 
 
+def second_share_back(f: dict) -> bool:
+    """A second payer's share taken back in full (F1's money-2, routed to F5): a TAKEBACK item of a second payer's line
+    (evidence second_payer), never a Medicaid plan's (its payment is payment in full: the share is not its member's). The
+    patient is billed for it as for a patient-group denial: Billed the patient, then the patient's payment in EMA."""
+    return (f.get("signal") or "") == "TAKEBACK" and bool(_ev(f).get("second_payer")) and f.get("payer_kind") != "medicaid"
+
+
 def patient_share(fx: dict) -> dict:
     """What a patient-group denial asks of the patient: every PR amount the payer set on the item's own line, never more
     than the charge less what any payer paid for the service (the standing payments of its other answers). {'cents', 'pr':
@@ -2451,6 +2458,12 @@ def patient_share(fx: dict) -> dict:
                and (x["paid"] or 0) > 0)
     tot = _ema_line_totals(fx) if fx.get("ema") else None
     by_patient = max(tot["pat_paid"], 0) if tot and tot["n"] and not tot["several"] else 0
+    if second_share_back(f):
+        # the share the second payer paid and took back (its recoupment's cents): no PR adjustment of its own line says it
+        tb = _ev(f).get("taken_back")
+        cents = max(int((tb.get("cents") if isinstance(tb, dict) else None) or f.get("shortfall_cents") or 0), 0)
+        return {"cents": cents, "pr": [], "charge": int(f.get("charge_cents") or 0), "paid": paid, "patient_paid": by_patient,
+                "left": max(cents - by_patient, 0)}
     if not own:
         cents = max(int((_ev(f).get("patient_share") or {}).get("cents") or f.get("shortfall_cents") or 0), 0)
         return {"cents": cents, "pr": [], "charge": int(f.get("charge_cents") or 0), "paid": paid, "patient_paid": by_patient,
@@ -2959,7 +2972,7 @@ def _decide(fx: dict, today: str) -> dict:
         if sig == "SECONDARY_NOT_BILLED":
             return _billed_second(res, fx, ev, anchor, who, today, put)
         newest = _newest_work(sent)
-        if newest is not None and newest.get("patient") and patient_denial(f):
+        if newest is not None and newest.get("patient") and (patient_denial(f) or second_share_back(f)):
             return _billed_patient(res, fx, newest, who, today, put)
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
         return _follow(res, fx, ev, anchor, work, f"Marked Sent by {who} on {day(anchor)}", today, deadline, confirmed=True,

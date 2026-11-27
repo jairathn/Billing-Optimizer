@@ -2091,7 +2091,9 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             buttons.append("mark_done")
             basis = "two monthly statements after the patient was billed"
             sh = st.get("patient_share") or {}
-            expected, expected_basis = int(sh.get("left", sh.get("cents")) or 0), "what the payer put on the patient on its 835, less what the patient paid"
+            expected, expected_basis = int(sh.get("left", sh.get("cents")) or 0), (
+                "the patient's share the second payer took back, less what the patient paid" if S.second_share_back(f) else
+                "what the payer put on the patient on its 835, less what the patient paid")
         expected, expected_basis = (expected, expected_basis)
     elif route == "refund":
         action, steps, who, deadline, basis = _refund_step(f, fx, st, bal, deadline, basis)
@@ -2530,11 +2532,15 @@ def _second_share_taken_back_step(f: dict, st: dict, tb: dict):
            "that pays first, puts the share back on the patient.")
     lead = f"Bill the patient {usd(owed)}, or dispute the takeback" if open_ else f"Bill the patient {usd(owed)}"
     action = f"{lead}: {grp} paid the patient's share as second payer, then took it back on {when}."
-    steps = [why, f"If the takeback was owed, put {usd(owed)} on the patient's next statement and press Mark billed."]
+    # Billed the patient (not Mark billed): the item then waits on the patient's payment in EMA (states._billed_patient),
+    # never on a payer's answer to a claim marked sent
+    steps = [why, f"If the takeback was owed, put {usd(owed)} on the patient's next statement and press Billed the patient: the item "
+                  "then waits for the patient's payment in EMA."]
     if open_:
         steps.append(f"If it was not owed, dispute it with {grp} (send the remittance that paid it) and press Mark sent.")
     steps.append(post)
-    return action, steps, "Patient accounts", owed, ["mark_billed", "mark_sent", "copy_instructions"] if open_ else ["mark_billed", "copy_instructions"]
+    return (action, steps, "Patient accounts", owed,
+            ["billed_patient", "mark_sent", "copy_instructions"] if open_ else ["billed_patient", "copy_instructions"])
 
 
 PATIENT_DENIAL_WORDS = {"288": "no referral on file", "27": "the coverage had ended", "26": "the coverage had not started",
