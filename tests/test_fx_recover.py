@@ -972,3 +972,70 @@ def test_trace_a_payment_that_replaces_one_held_at_the_answer_is_no_units_recove
     got = sorted(r["recovered_cents"] or 0 for r in rows if r["status"] == "resolved")
     assert got == [4373, 4373], [(r["signal"], r["status"], r["recovered_cents"]) for r in rows]
     w.store.close()
+
+
+def test_trace_a_second_payers_payment_after_a_denial_that_held_nothing_is_what_came_back(tmp_path, kind):
+    """Maple pays a 99213 first ($20.00, the patient's $60.00 copay left). Medicare, billed too, denies it (CO-50). The
+    second payer behind Maple then pays the $60.00. Medicare's denial held no money for anyone to share: the $60.00 came
+    after it and is what came back (the hand trace: the money held at the answer was Maple's, another payer's, and the
+    second payer's payment was taken as a share of Medicare's answer: recovery $0)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99213", "100.00", "80.00"), "20260301", **KY)
+    first = sv("99213", "100.00", "20.00", 1, "CAS*CO*45*20.00~CAS*PR*3*60.00~", allowed="80.00")
+    w.remit([clm("CB0000720C017", "1", "100.00", "20.00", first, payer_ctl="M1")], "20260410", **MAPLE)
+    w.remit([clm("CB0000720C017", "1", "100.00", "0.00", sv("99213", "100.00", "0.00", 1, "CAS*CO*50*100.00~"), payer_ctl="K1")],
+            "20260415", **KY)
+    w.remit([clm("CB0000720C017", "2", "100.00", "60.00", sv("99213", "100.00", "60.00", 1, "CAS*OA*23*40.00~", allowed="80.00"),
+                 payer_ctl="G1")], "20260515", **GAP)
+    w.run("t1", today="2026-05-25")
+    rows = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000720C017" and r["payer_name"] == KY["payer"]]
+    print(brief(rows))
+    assert [(r["status"], r["recovered_cents"]) for r in rows] == [("resolved", 6000)], brief(rows)
+    w.store.close()
+
+
+@pytest.mark.parametrize("offset", ["line", "claim"])
+def test_trace_the_items_own_payer_paying_as_second_payer_after_its_denial_is_what_came_back(tmp_path, kind, offset):
+    """Maple pays a 99213 first ($70.00). Pine, billed first by mistake, denies it (CO-50), then processes it as second
+    payer and pays $10.00: on the line (its OA-23 naming Maple's payment), or with the line at $80.00 and Maple's $70.00
+    taken back at the claim level (PI-22: the claim pays $10.00). Pine's item recovered the $10.00 that arrived (the hand
+    trace: the second payer was the item's own payer, its payment was taken as a share of the answer and the recovery was
+    $0; a line that pays more than its claim was counted whole)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99213", "100.00", "80.00"), "20260301", **PINE)
+    first = sv("99213", "100.00", "70.00", 1, "CAS*CO*45*20.00~CAS*PR*2*10.00~", allowed="80.00")
+    w.remit([clm("CB0000730C017", "1", "100.00", "70.00", first, payer_ctl="M1")], "20260410", **MAPLE)
+    w.remit([clm("CB0000730C017", "1", "100.00", "0.00", sv("99213", "100.00", "0.00", 1, "CAS*CO*50*100.00~"), payer_ctl="P1")],
+            "20260501", **PINE)
+    if offset == "line":
+        second = clm("CB0000730C017", "2", "100.00", "10.00", sv("99213", "100.00", "10.00", 1, "CAS*CO*45*20.00~CAS*OA*23*70.00~",
+                                                               allowed="80.00"), payer_ctl="P2")
+    else:
+        second = clm("CB0000730C017", "2", "100.00", "10.00", sv("99213", "100.00", "80.00", 1, "CAS*CO*45*20.00~", allowed="80.00"),
+                     payer_ctl="P2", claim_cas="CAS*PI*22*70.00~")
+    w.remit([second], "20260601", **PINE)
+    w.run("t1", today="2026-06-20")
+    rows = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000730C017"
+            and r["payer_name"] == PINE["payer"]]
+    print(brief(rows))
+    assert [(r["status"], r["recovered_cents"]) for r in rows] == [("resolved", 1000)], brief(rows)
+    w.store.close()
+
+
+def test_trace_the_items_own_payer_paying_more_as_second_payer_after_its_short_answer_is_what_came_back(tmp_path, kind):
+    """Pine pays a 99213 $50.00, $30.00 short of its own rate. It then reverses that and processes the claim as second
+    payer, paying $80.00. The item recovered $30.00: a payer's own payment as second payer is no share of its own answer
+    (taken as one, the $80.00 was held at the answer and the recovery was $0)."""
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99213", "100.00", "80.00"), "20260301", **PINE)
+    short = sv("99213", "100.00", "50.00", 1, "CAS*CO*45*50.00~", allowed="50.00")
+    w.remit([clm("CB0000740C017", "1", "100.00", "50.00", short, payer_ctl="P1")], "20260410", **PINE)
+    back = sv("99213", "-100.00", "-50.00", -1, "CAS*CO*45*-50.00~", allowed="-50.00")
+    again = sv("99213", "100.00", "80.00", 1, "CAS*CO*45*20.00~", allowed="80.00")
+    w.remit([clm("CB0000740C017", "22", "-100.00", "-50.00", back, payer_ctl="P1"),
+             clm("CB0000740C017", "2", "100.00", "80.00", again, payer_ctl="P2")], "20260601", **PINE)
+    w.run("t1", today="2026-06-20")
+    rows = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000740C017"]
+    print(brief(rows))
+    assert [(r["status"], r["recovered_cents"]) for r in rows] == [("resolved", 3000)], brief(rows)
+    w.store.close()

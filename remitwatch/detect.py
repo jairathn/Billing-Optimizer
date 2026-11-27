@@ -2810,50 +2810,94 @@ class Detector:
             return self.paid_events.get(key, [])
         return [e for e in self.paid_by_code.get((key[0], key[1]), []) if e[7] is None]
 
-    def _gained(self, keys: list, part: str | None, mine: str, own_pcn: str | None, evs: list) -> tuple[float, set, Counter]:
+    def _claim_share(self, lk: str) -> float:
+        """The part of a paying line's money its claim paid: 1, or less where the claim's lines pay more than the claim does
+        (CLP04, less its prompt-pay interest and what the payer added at the claim level) and the claim's own adjustments
+        take the difference back, as a second payer's PI-22 or OA-23 naming the first payer's payment does (the line pays
+        as if first, the claim pays the difference). The claim's paying lines share the take-back in proportion to what
+        each pays (the fx-recover hand trace: such a line's whole payment was counted as recovered). A claim total that
+        differs from its lines with no adjustment of its own to say why changes nothing here."""
+        shares = self.__dict__.setdefault("_claim_shares", {})
+        of = self.__dict__.get("_claim_of_line")
+        if of is None:
+            of = self.__dict__["_claim_of_line"] = {x["line_key"]: x["claim_key"] for x in self.lines}
+        ck = of.get(lk)
+        if ck is None:
+            return 1.0
+        if ck not in shares:
+            share = 1.0
+            lines_paid = sum(max(x.get("paid_cents") or 0, 0) for x in self.lines_by_claim.get(ck, []))
+            row = self.conn.execute("SELECT paid_cents, other_amounts, claim_status_code FROM claims WHERE claim_key=?", (ck,)).fetchone() \
+                if lines_paid > 0 else None
+            if row is not None and row[2] != "22":
+                try:
+                    amts = json.loads(row[1]) if row[1] else {}
+                except (TypeError, ValueError) as exc:
+                    from .runlog import caught
+                    caught(exc, "detect.claim_share_amounts")
+                    amts = {}
+                interest = amts.get("I") if isinstance(amts, dict) else None
+                added = sum(-a for _g, _rc, a in self.claim_adj.get(ck, []) if a < 0)
+                paid = (row[0] or 0) - max(interest if isinstance(interest, int) else 0, 0) - added
+                taken = sum(a for _g, _rc, a in self.claim_adj.get(ck, []) if a > 0)
+                if paid < lines_paid and taken > 0:
+                    share = (lines_paid - min(lines_paid - max(paid, 0), taken)) / lines_paid
+            shares[ck] = share
+        return shares[ck]
+
+    def _gained(self, keys: list, part: str | None, mine: str, own_pcn: str | None, evs: list, own_line: str | None = None,
+                me: str | None = None) -> tuple[float, set, Counter]:
         """What a service gained since an item's answer (review money-4): the money every payer's payments of it hold now,
         less what they held at the answer (`mine`, on the item's claim id `own_pcn`: a payment taken back by then held
-        nothing). A second payer's share of that answer (paid after it, before the first later payment that pays the item:
-        the supplement's coinsurance of a downcoded answer) counts as held then, at what it paid: a supplement that takes its
-        share back and pays the new one has added only the difference. `keys`: the service's (bill, code, date), with the
-        item's own line's when that is another code (a downcode paid again under the code billed); `part`: the item's part
-        (pays_part). Returns (that gain, the paying lines made since the answer, which hold it, and the amounts of the
-        payments held at the answer that were taken back since: a payment of one of those amounts since only replaces it)."""
+        nothing), each at what its claim paid of it (_claim_share). A second payer's share of that answer (paid after it,
+        before the first later payment that pays the item: the supplement's coinsurance of a downcoded answer) counts as
+        held then, at what it paid: a supplement that takes its share back and pays the new one has added only the
+        difference. `keys`: the service's (bill, code, date), with the item's own line's when that is another code (a
+        downcode paid again under the code billed); `part`: the item's part (pays_part); `own_line` and `me`: the item's
+        own line and payer. Returns (that gain, the paying lines made since the answer, which hold it, and the amounts of
+        the payments held at the answer that were taken back since: a payment of one of those amounts since only replaces
+        it)."""
         when = lambda p: p.get("payment_date") or p.get("txn_payment_date") or ""      # noqa: E731
-        rows: dict[str, list] = {}          # line key -> [date, claim status, claim id, cents standing now]
+        rows: dict[str, list] = {}          # line key -> [date, claim status, claim id, cents standing now, payer]
         taken: dict[str, list] = defaultdict(list)          # line key -> [(day, cents)] taken back
         for key in keys:
             for e in self._events_of(key):
                 if pays_part(event_part(e), part):
-                    rows.setdefault(e[8], [e[0], e[3], e[4], e[2]])
+                    rows.setdefault(e[8], [e[0], e[3], e[4], e[2], e[6]])
             for p, day, c in self.took.get(key, ()):
                 if pays_part(component_of(p.get("modifiers_list")), part):
                     taken[p["line_key"]].append((day, c))
-                    rows.setdefault(p["line_key"], [when(p), p.get("claim_status_code"), p["patient_control_number"], 0])
-        now = held = 0.0
+                    rows.setdefault(p["line_key"], [when(p), p.get("claim_status_code"), p["patient_control_number"], 0,
+                                                    p.get("payer_id") or p.get("payer_name")])
+        now = held = answered = 0.0
         since: set[str] = set()
         seconds: list = []
         replaced: Counter = Counter()
-        for lk, (d, st, pcn, stands) in rows.items():
+        for lk, (d, st, pcn, stands, who) in rows.items():
             gone = taken.get(lk, ())
             paid = stands + sum(c for _d, c in gone)            # what it paid: what stands plus what was taken back
-            now += stands
+            share = self._claim_share(lk)
+            now += stands * share
             if d < mine or (d == mine and pcn == own_pcn):
-                held += paid - sum(c for day, c in gone if day <= mine)
+                was = (paid - sum(c for day, c in gone if day <= mine)) * share
+                held += was
+                if lk == own_line or (own_line is None and d == mine and pcn == own_pcn):
+                    answered += was             # what the item's own answer held
                 if any(day > mine for day, _c in gone):
                     replaced[int(paid)] += 1
-            elif st in ("2", "3"):
-                seconds.append((lk, d, paid))
+            elif st in ("2", "3") and (me is None or who != me):
+                seconds.append((lk, d, paid * share))
             else:
                 since.add(lk)
         # a second payer's payment before the first later payment as primary (reversed since or not) is its share of the
-        # item's answer only where that answer held money for it to share (a short payment): after a denial, or a payment
-        # the payer took back by its answer, nothing stood, and what a second payer paid since is part of what came back
-        # (the fx-recover hand trace: a supplement's share paid between a denial and the payer's new payment was taken as held)
-        first_paid = min((d for d, st, pcn, _s in rows.values() if st in ("1", "19") and (d > mine or (d == mine and pcn != own_pcn))),
+        # item's answer only where that answer held money for it to share (a short payment of the item's own line): after a
+        # denial, or a payment the payer took back by its answer, nothing stood, and what a second payer paid since is part
+        # of what came back; so is the item's own payer's payment as second payer, and a second payer's payment where the
+        # money held at the answer was another unit's or another payer's (the fx-recover hand trace)
+        first_paid = min((d for d, st, pcn, _s, _w in rows.values() if st in ("1", "19") and (d > mine or (d == mine and pcn != own_pcn))),
                          default=None)
         for lk, d, paid in seconds:
-            if held > 0 and (first_paid is None or d < first_paid):
+            if answered > 0 and (first_paid is None or d < first_paid):
                 held += paid
             else:
                 since.add(lk)
@@ -2885,11 +2929,12 @@ class Detector:
             replaced: Counter = Counter()
             if key[0] is None:
                 # payments on other bills (resolve_elsewhere): all of them came after the item's answer
-                gain, since = float(sum(e[2] for e in evs)), {e[8] for e in evs}
+                gain, since = float(sum(e[2] * self._claim_share(e[8]) for e in evs)), {e[8] for e in evs}
                 if own is not None and own_key != key:
                     gain -= sum(c for p, day, c in self.took.get(own_key, ()) if p["line_key"] == own["line_key"] and day > mine)
             else:
-                gain, since, replaced = self._gained([key] + ([own_key] if own is not None and own_key != key else []), part, mine, own_pcn, evs)
+                gain, since, replaced = self._gained([key] + ([own_key] if own is not None and own_key != key else []), part, mine, own_pcn, evs,
+                                                     own_line=own.get("line_key") if own else None, me=me)
             budget = gain - sum(self.used_units.get(lk, (0, 0))[1] for lk in since)
             mods = own.get("modifiers") if own else None
             charge = own.get("charge_cents") if own else None
@@ -2915,7 +2960,7 @@ class Detector:
                         taken_elsewhere = True
                         continue
                     units = min(free, need)
-                    picks.append([e, units, e[2] * units / e[5]])
+                    picks.append([e, units, e[2] * units / e[5] * self._claim_share(e[8])])
                     value += picks[-1][2]
                     need -= units
             rec = max(0.0, min(value, budget))
