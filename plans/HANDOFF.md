@@ -96,11 +96,14 @@ the release gates (section 0 below, "Then, in order").
   (A17 review a17-r1-3, 23:05 UTC): the VA Community Care claims go out under 837 payer id VACCN and every send is named
   as Optum/UnitedHealthcare, so the name rules may give them UHC's windows; check the product's group and windows for
   that payer id against the va_ccn rows of plans/tools/a17/payer_windows.json and fix by the payer id if they differ.
-- **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
-  world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
-  SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
-  them by rule (A17 and hand-traces per group) and writes the explanation the owner reads before pressing Accept; none
-  is accepted unexplained.
+- **The release's re-analysis leaves open items the new rules no longer produce.** On the merged code at 947203b (hook,
+  decisions, the merge fixes; one server cycle on a private world copy, 2026-11-27 02:00 UTC, no error, safe mode off,
+  detection 245 s at a 1.1 GB peak): 2,255 items, $219,047 (UNDERPAID_VS_OWN_RATE 1,586 / $80,702, NO_ANSWER 364 /
+  $93,022, MPPR_EXCESS 108, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72, SECOND_RATE 30, others 22), plus 9 items
+  ($5,387) the left-record check warns about. On wip/hook alone it was 1,892 ($203,702); the rise is fix7c's
+  plan-level rates. The vanished self-check keeps them listed until a person accepts. The final stage explains them by
+  rule (A17 and hand-traces per group) and writes the explanation the owner reads before pressing Accept; none is
+  accepted unexplained. The fix wave will move these numbers again: measure on the final merge.
 - **Batch 1's builders (2026-11-27 00:50 UTC): what they routed.** F1's three needs and two of its open questions are in
   the brief's F2 section (a part paid as the whole service on another bill; the Medicaid share's size; denials of voided
   claims; one service on a rejected and a denial item; 129 second payers' shares taken back in full, $6,424.85, on no
