@@ -4779,6 +4779,12 @@ class Detector:
         who = lambda x: (x.get("payer_group"), x.get("payer_name") if x.get("payer_group") in MANY_PAYER_GROUPS else None)    # noqa: E731
         # a payer may write the modifiers into the code ('17263 76'): the code is its first word (verifier of privacy-4)
         base = lambda code: (code or "").split(" ")[0]          # noqa: E731
+        # an unlisted code is any service or drug (J3490: an unclassified drug), priced claim by claim: the payer has paid
+        # "it" only where it allowed or paid the code with the units this line billed, the units standing for the drug and
+        # its dose where the code does not name them (fix wave F2: one J3490 an Anthem plan once allowed made every J3490 a
+        # code it pays)
+        rated = lambda x: (who(x), base(x.get("procedure_code"))) + ((self.billed_units_of(x),)     # noqa: E731
+                                                                     if is_unlisted(base(x.get("procedure_code"))) else ())
         codes = {base(l.get("procedure_code")) for l, _r in cands}
         bills = {bill_of(l["patient_control_number"]) for l, _r in cands}
         priced: set[tuple] = set()          # (payer, code) the payer allowed or paid at least once: it has a rate for the code
@@ -4787,7 +4793,7 @@ class Detector:
             if x.get("claim_status_code") == "22":
                 continue
             if base(x.get("procedure_code")) in codes and ((x.get("allowed_cents") or 0) > 0 or (x.get("paid_cents") or 0) > 0):
-                priced.add((who(x), base(x["procedure_code"])))
+                priced.add(rated(x))
             if self.standing.get(x["line_key"], 0) > 0 and x.get("claim_status_code") in ("1", "19") and bill_of(x["patient_control_number"]) in bills:
                 later[(bill_of(x["patient_control_number"]), x.get("service_date"))].append(x)
         keys = sorted({l["claim_key"] for l, _r in cands})
@@ -4825,7 +4831,7 @@ class Detector:
             if again:
                 self.ema_counts["co45_rebilled_paid"] += 1          # billed again under another code, and that code paid
                 continue
-            if (who(l), base(code)) not in priced:
+            if rated(l) not in priced:
                 # the payer never allowed or paid the code: its write-off of the whole charge is listed all the same, for a
                 # person or the owner's policy to decide (owner's rule 2, decision 4: codes a payer rarely pays are pursued;
                 # explain_rarely_paid says why the payer does not pay it). Review privacy-4: it was dropped with no item
@@ -5538,6 +5544,7 @@ class Detector:
                         else:
                             continue
                 need: dict[tuple, list] = {}            # (code, date) -> [units billed, expected]
+                own_rate: set[tuple] = set()            # the services priced by the payer's own rate (not an estimate)
                 for ln in lines:
                     if not (ln.get("charge_cents") or 0) and not self.adj.get(ln["line_key"]):
                         continue                        # a $0.00 line with no adjustments bills nothing (T-N7)
@@ -5547,6 +5554,8 @@ class Detector:
                     k = need.setdefault((ln["procedure_code"], ln.get("service_date")), [0, 0])
                     k[0] += self.billed_units_of(ln)
                     k[1] += e or 0
+                    if e and self._expected_allowed(ln2, ln["procedure_code"])[2] is not None:
+                        own_rate.add((ln["procedure_code"], ln.get("service_date")))
                 unpaid: dict[tuple, list] = {}          # (code, date) -> [units unpaid, expected for them]
                 pays: list[tuple] = []
                 wants: list[tuple] = []                 # every code and date the claim lists, with its later payments (_recover)
@@ -5674,6 +5683,11 @@ class Detector:
                 part = {code: v[0] for (code, _d), v in novel.items() if code != "*" and v[0] < need.get((code, _d), [0])[0]}
                 if part:
                     ev["units_unpaid"] = part
+                # what each service the claim lists is worth by this payer's own rate ('code date'; a service with none is
+                # left out): a second payer owes the share the first payer left only up to it (archive rule 2's Medicaid
+                # cap, fix wave F2)
+                ev["rate_expected"] = {f"{code} {d or ''}".strip(): v[1] for (code, d), v in need.items()
+                                       if code != "*" and isinstance(v[1], int) and (code, d) in own_rate}
                 self._emit("CLAIM_DENIED_UNPAID", "denial", sev, act, f"Claim denied ({top or 'no CARC'}) and never paid: {', '.join(codes[:6]) or 'no service lines'}",
                            None, exp or None, exp or None, top, rarc, ev, key_parts=(cl["claim_key"],), claim=cl)
                 f = self.findings.get(_fid("CLAIM_DENIED_UNPAID", cl["claim_key"]))

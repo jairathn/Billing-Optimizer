@@ -853,3 +853,71 @@ def test_pattern_a_repricing_request_leaves_out_the_claims_the_payer_paid_more_s
     assert sorted((c[0], c[4]) for c in item["ev"].get("repriced") or []) == [(pcn(i), 8236) for i in range(900, 904)], \
         item["ev"].get("repriced")
     w.store.close()
+
+
+# =========================================================================== residual: J3490, an unlisted drug the payer paid once
+def _j3490_history(w: World, units: int) -> None:
+    """Anthem allowed J3490 once, for a drug billed with `units` units ($35.00)."""
+    w.remit([clm("CB0000800C001", "1", "50.00", "35.00", sv("J3490", "50.00", "35.00", units, "CAS*CO*45*15.00~", dos="20260210",
+                                                             allowed="35.00"), payer_ctl="AJ0", dos="20260210")], "20260301")
+
+
+@pytest.mark.parametrize("units_before,flag", [(1, True), (4, False)])
+def test_j3490_an_unlisted_drug_is_priced_by_the_payers_history_with_its_units(tmp_path, kind, units_before, flag):
+    """J3490 is any drug. Anthem writes off the whole $400.00 of a 4-unit J3490 as CO-45. It allowed J3490 once before: for
+    a 1-unit drug that says nothing of this drug, so the line is listed as a code the payer has no rate for (decision 4's
+    research of why it does not pay); for the same 4 units it is a denial of a drug the payer pays. Listed either way."""
+    w = World(tmp_path, kind)
+    _j3490_history(w, units_before)
+    w.remit([clm("CB0000810C017", "1", "400.00", "0.00", sv("J3490", "400.00", "0.00", 4, "CAS*CO*45*400.00~", dos="20260407"),
+                 payer_ctl="AJ1", dos="20260407")], "20260428")
+    w.run("j1", today="2026-05-01")
+    items = [r for r in w.rows("COALESCE(stale,0)=0") if r["patient_control_number"] == "CB0000810C017"]
+    print([(r["signal"], r["status"], r["shortfall_cents"], json.loads(r["evidence"]).get("payer_has_no_rate")) for r in items])
+    assert items, "the payer wrote off the whole $400.00 of J3490: listed"
+    assert bool(json.loads(items[0]["evidence"]).get("payer_has_no_rate")) is flag, items[0]["evidence"]
+    w.store.close()
+
+
+# =========================================================================== residual: Medicaid owes a share up to its own rate
+def _claim_denied_after_primary(tmp_path, kind, mcd_rates: dict):
+    """Medicaid's own rates (25 visits of each code it paid: `mcd_rates`); Humana pays the destruction ($23.00, coinsurance
+    $6.00 left) and puts the visit on the deductible ($105.00); Medicaid denies the whole claim ten days later (CO-B7)."""
+    from tests.test_claim_after_primary import BILL, HUMANA, MEDICAID, World, primary_answer, run
+    w = World(tmp_path, kind)
+    start = 1
+    for code, (charge, rate) in mcd_rates.items():
+        w.remit(clean_visits(start, 25, code, charge, rate), "20260301", **MEDICAID)
+        start += 100
+    w.remit([primary_answer()], "20260501", **HUMANA)
+    w.remit([clm(f"{BILL}C018", "4", "172.00", "0.00", sv("99203", "110.00", "0.00", 0, "CAS*CO*B7*110.00~", mods="25")
+                 + sv("17000", "62.00", "0.00", 0, "CAS*CO*B7*62.00~", mods="59"), payer_ctl="MD1")], "20260511", **MEDICAID)
+    run(w, "r1")
+    return w, w.items()[f"{BILL}C018::CLAIM_DENIED_UNPAID"]
+
+
+def test_medicaid_a_claim_denied_after_the_primary_is_sized_at_what_medicaid_owes_by_its_own_rates(tmp_path, kind):
+    """Medicaid's own rates: 99203 $105.00, 17000 $20.00. The primary left $111.00 to the patient ($105.00 of the visit,
+    $6.00 of the destruction), but Medicaid pays a service it answers second only up to its rate less the primary's
+    payment: the visit $105.00, the destruction nothing ($20.00 less $23.00 paid). The item is the $105.00 Medicaid owes."""
+    w, r = _claim_denied_after_primary(tmp_path, kind, {"99203": ("110.00", "105.00"), "17000": ("62.00", "20.00")})
+    print(r["shortfall_cents"], r["work_state"], r["hint"])
+    assert (r["shortfall_cents"], r["work_state"]) == (10500, "work_now"), (r["shortfall_cents"], r["work_state"], r["hint"])
+    assert "owes $105.00 of the $111.00 share" in (r["hint"] or ""), r["hint"]
+    assert json.loads(r["evidence"])["archive_rule"]["patient_share_left_cents"] == 11100
+    w.store.close()
+
+
+def test_medicaid_owes_nothing_of_a_share_when_its_rate_is_below_what_the_primary_paid(tmp_path, kind):
+    """Medicaid's own rates: 99203 $20.00, 17000 $20.00. Of the $111.00 share it owes $20.00 for the visit (the primary paid
+    nothing on it) and nothing for the destruction (its $20.00 less the primary's $23.00)."""
+    w, r = _claim_denied_after_primary(tmp_path, kind, {"99203": ("110.00", "20.00"), "17000": ("62.00", "20.00")})
+    assert (r["shortfall_cents"], r["work_state"]) == (2000, "work_now"), (r["shortfall_cents"], r["work_state"], r["hint"])
+    w.store.close()
+
+
+def test_medicaid_control_a_service_medicaid_never_priced_caps_nothing(tmp_path, kind):
+    """Medicaid never paid 17000: what it owes for the destruction is not known, so nothing caps the $111.00 share."""
+    w, r = _claim_denied_after_primary(tmp_path, kind, {"99203": ("110.00", "105.00")})
+    assert (r["shortfall_cents"], r["work_state"]) == (11100, "work_now"), (r["shortfall_cents"], r["work_state"], r["hint"])
+    w.store.close()

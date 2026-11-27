@@ -71,11 +71,23 @@ ownership table, what every fixer delivers). Rules: `plans/briefs/2026-11-26_com
 - Related suites (fx_recover, plan_rates, results, review_rates, sizes_and_rates, review3 patterns and views, review6
   pattern windows and holds, resolution, features, insights, desk, selfcheck, archive, claims): 805 passed, 1 xfailed.
 
+## Done (residuals), commit "fx-recover: J3490 by its units; Medicaid owes a claim's share up to its own rate"
+- J3490 (detect.py `_co45_not_denials`): an unlisted code (codes.is_unlisted: J3490 and the like) has a rate only where the
+  payer allowed or paid it with the units the line billed (the units stand for the drug and dose). A 4-unit J3490 written
+  off whole by a payer that once allowed a 1-unit J3490 is listed as a code it has no rate for (decision 4's research);
+  with the same units before, as a denial of a drug it pays. Test: 1 (two cases, both store kinds).
+- The second payer's share above Medicaid's rate (archive_rules.py `_claim_after_primary`, new `_medicaid_owes` and
+  `_owes_words`; detect.py run_claim_rules writes the claim item's `rate_expected`: each service the claim lists at the
+  payer's own rate): a Medicaid plan that denied a whole claim after another payer paid it owes the share the first payer
+  left only up to its own rate less what the first payer paid, service by service; nothing owed is done (written off,
+  never billed to a Medicaid member). A service Medicaid has no rate of its own for caps nothing. Small edits in
+  functions no fixer owns (archive rule 2's claim branch, one evidence key in run_claim_rules). Tests: 3.
+
 ## In progress
-- The other residuals.
+- $0 items on Work now: measuring what they are on the tip's snapshot first.
 
 ## Left, in order
-1. The residuals: J3490, $0 lines on Work now, the status-1 supplement, the second payer's share above Medicaid's rate.
+1. The residuals: $0 lines on Work now; the status-1 supplement (waits for F1's `_after_other_payer`, merged with F1).
 2. F1's routed needs, after `git log origin/claude/ecstatic-fermi-orfcgo --grep 'Merge wip/fx-ledger'` shows the merge.
 3. Measure on a private world copy (tip against branch), A17 classes, hand-trace 20+ moved items. Also measure the
    claim-level-paid and rebilled-paid CO-45 drops (privacy-4's "money counted nowhere" check) and how many settling

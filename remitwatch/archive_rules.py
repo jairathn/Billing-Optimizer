@@ -1160,6 +1160,35 @@ def _denied_units(a: Ans, prim: Sequence[Ans]) -> float:
     return m.billed_units if m is not None else a.billed_units
 
 
+def _medicaid_owes(f: Mapping, kind: Any, paid_first: Mapping[tuple, int]) -> int | None:
+    """What a Medicaid plan that denied a whole claim after another payer paid it owes by its own rate: for each service,
+    its expected amount by Medicaid's own rate less what the first payer paid for it, never below $0 (Medicaid pays the
+    lesser of the share the first payer left and that), added over the claim's services. `paid_first`: (code, date) ->
+    the first payer's standing payment. None where the payer is not Medicaid, or a service of the claim has no amount by
+    the payer's own rate (an estimate caps nothing: run_claim_rules' rate_expected). Fix wave F2: the share named by a
+    second payer's claim-level denial was more than Medicaid's own rate."""
+    per = _ev(f).get("rate_expected")
+    if kind != "medicaid" or not isinstance(per, dict) or not per:
+        return None
+    out, priced = 0, set()
+    for key, exp in per.items():
+        code, _sp, dos = str(key).partition(" ")
+        if not isinstance(exp, int):
+            return None
+        priced.add((code, dos or None))
+        out += max(0, exp - int(paid_first.get((code, dos or None), 0)))
+    return out if set(paid_first) <= priced else None
+
+
+def _owes_words(who: str, owes: int, share: int) -> str:
+    """Why a Medicaid plan answering second owes less than the share the first payer left (_medicaid_owes)."""
+    if not owes:
+        return (f" {who} pays a service it answers second only up to its own rate less what the first payer paid, and that leaves "
+                f"nothing of the {_usd(share)} share: it is written off (a Medicaid member is never billed)")
+    return (f" {who} pays a service it answers second only up to its own rate less what the first payer paid: it owes {_usd(owes)} "
+            f"of the {_usd(share)} share, and the rest is written off (a Medicaid member is never billed)")
+
+
 def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
                            standing: Mapping[str, int] | None = None) -> list[dict]:
     """A payer's denial of a service another payer had already paid as primary (a payment that still stands, before the
@@ -1316,6 +1345,12 @@ def _claim_after_primary(items: list, arch: Archive) -> list[dict]:
         settled = sum(x.standing for x in later) + sum(x.pr_cents(COST_SHARE_CARCS) for x in later if x.status in SECONDARY_STATUSES) + claim_paid
         denier_paid = claim_paid + sum(x.standing for x in later if _same_payer(x, cl))
         left = max(0, share - settled)
+        # a Medicaid plan owes the share only up to its own rate less the first payer's payment (fix wave F2)
+        first_paid: dict[tuple, int] = defaultdict(int)
+        for x in mine:
+            first_paid[(x.billed_code, x.dos)] += max(x.standing, 0)
+        owes = _medicaid_owes(f, cl.kind, first_paid)
+        owed_by_it = False              # the share is the denying payer's to pay (sent to it again as secondary)
         who = cl.payer_name or "the payer"
         rs = _claim_reasons(cl)
         reasons = {r for _g, r, _c in rs}
@@ -1345,12 +1380,17 @@ def _claim_after_primary(items: list, arch: Archive) -> list[dict]:
             hint += (f": {who} says another payer covers this claim first ({said}): it is not its to pay as primary. Send it as a "
                      f"secondary claim with {p.payer_name}'s payment: the patient's share the primary left, {_usd(left)}, is what is left "
                      "(never billed to a Medicaid member).")
+            owed_by_it = True
         elif left:
             hint += (f": this claim denial by {who} ({said}) is about the patient's share the primary left, {_usd(left)}, not the whole "
                      "claim. Fix what it asks and send it as a secondary claim, or bill the patient where the plan allows it (never a "
                      "Medicaid member).")
+            owed_by_it = True
         else:
             hint += f": this claim denial by {who} is another payer's answer, not a denial to appeal. Nothing is left to collect from a payer."
+        if owed_by_it and owes is not None and owes < left:
+            size, state = owes, ("work_now" if owes else "done")
+            hint = hint.rstrip(". ") + "." + _owes_words(who, owes, left) + "."
         proof = [_proof(x, "payment", True) for x in paid] + [_proof(x, _kind(x), False) for x in later]
         proof += [_proof(cl.lines[0], _kind(cl.lines[0]), False)] if cl.lines else []
         out.append(_reclass(R_OTHER_PAYER, f, "other_payer_paid", "Paid by another payer first", hint, size, state, proof, "proven",
