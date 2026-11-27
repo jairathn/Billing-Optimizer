@@ -712,18 +712,19 @@ def test_a_recoupment_listed_on_its_own_carries_what_it_took_from_a_claim_in_par
 
 
 def test_a_takeback_no_item_carries_leaves_the_payment_unmarked(tmp_path, kind):
-    """The control of the test above: the payer answers the service again after its payment (a duplicate denial), so no
-    TAKEBACK item carries the takeback (that answer is the work): the ledger leaves it unmarked and the payment proves
-    nothing paid (test_a_payment_a_recoupment_took_back_proves_nothing_paid)."""
+    """The control of the test above: the payer answers the service again after its payment (a medical-necessity denial on
+    another claim), so no TAKEBACK item carries the takeback (that answer is the work): the ledger leaves it unmarked and the
+    payment proves nothing paid (test_a_payment_a_recoupment_took_back_proves_nothing_paid). (A duplicate denial restating
+    the payment is no such answer since fx-ledger-r1-1: test_a_takeback_after_the_services_later_answer_is_not_lost_to_that_answers_window.)"""
     w = World(tmp_path, kind)
     w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
     w.remit([visit_paid(f"{BILL}C024", payer_ctl="PC300B")], "20260520")
-    w.remit([visit_denied_line(f"{BILL}C031", carc="18", payer_ctl="PC300C")], "20260615")
+    w.remit([visit_denied_line(f"{BILL}C031", carc="50", payer_ctl="PC300C")], "20260615")
     w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
             plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C024*117.60~")
     w.run("r1", today="2026-09-20")
     rows = w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0")
-    assert not [r for r in rows if r["signal"] == "TAKEBACK"], "the duplicate denial is the work, not a TAKEBACK item"
+    assert not [r for r in rows if r["signal"] == "TAKEBACK"], "the payer's later denial is the work, not a TAKEBACK item"
     taken = w.store.conn.execute("SELECT taken_cents, listed FROM ledger_taken").fetchall()
     assert [tuple(t) for t in taken] == [(11760, 0)], taken
     w.store.close()
@@ -905,6 +906,29 @@ def test_the_denial_that_carries_a_takeback_keeps_the_takebacks_window(tmp_path,
     else:
         assert den[0]["work_state"] == "expired", (den[0]["work_state"], den[0]["state_basis"])
     w.store.close()
+
+
+@pytest.mark.parametrize("listed,words", [(1, "worked on its own takeback item"), (2, "worked on the payer's own denial of the service")])
+def test_a_proof_names_where_the_takeback_of_its_payment_is_worked(tmp_path, kind, listed, words):
+    """(r1-1) A later payment ($110.00) of a 99213 denial, which a recoupment took back in full since: worked on an item of
+    its own (ledger_taken.listed 1) or on the payer's own denial of the service, which the payment had answered (listed 2:
+    _taken_back_items' 'mine'). The denial rests on the payment, its proof naming the takeback and where it is worked."""
+    from tests import test_states as TS
+    s = _states_store(tmp_path, kind)
+    try:
+        tk0 = TS.denied(s)
+        TS.item(s, line_key=TS.line_key(s, tk0), claim_key=f"{tk0}-0", transaction_key=tk0)
+        tk1 = TS.remit(s, trace="T1", paid_on="2026-04-10", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+                                                                    "lines": [TS.ln("99213", 150, 110, [("CO", "45", 40)], lcn="1")]}])
+        s.conn.execute("CREATE TABLE IF NOT EXISTS ledger_taken (line_key TEXT PRIMARY KEY, taken_cents INTEGER, taken_on TEXT, "
+                       "standing_cents INTEGER, listed INTEGER NOT NULL DEFAULT 0)")
+        s.conn.execute("INSERT INTO ledger_taken VALUES (?,?,?,?,?)", (TS.line_key(s, tk1), 11000, "2026-04-20", 0, listed))
+        s.conn.commit()
+        st = TS.state(s)
+        print(listed, st["work_state"], st.get("state_basis"))
+        assert st["work_state"] == "done" and words in (st.get("state_basis") or ""), (st["work_state"], st.get("state_basis"))
+    finally:
+        s.close()
 
 
 # ------------------------------------------------------------------------------------------------ fx-ledger-r1-3
@@ -1094,6 +1118,41 @@ def test_a_recoupment_its_own_adjustment_cancels_in_the_same_remittance_is_not_l
     w.store.close()
 
 
+def test_a_recoupment_its_adjustment_cancels_in_part_is_listed_at_what_it_withheld(tmp_path, kind):
+    """(r2-1, the edge) A WO of $600.00 and a CS of -$100.00 naming C024, whose only answer on file is a denial: the payer
+    withheld $500.00 net, and no payment on file shows what it took. The listing carries the $500.00, not the $600.00."""
+    pcn = f"{BILL}C024"
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "17311", "1400.00", "600.00"), "20260301")
+    w.remit([visit_denied_line(pcn, carc="16", code="17311", charge="1400.00", payer_ctl="PC300B")], "20260520")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {pcn}*600.00~PLB*1777777772*20261231*CS:87654321 {pcn}*-100.00~")
+    w.run("r1", today="2026-09-20")
+    own = [r for r in w.rows("COALESCE(stale, 0) = 0") if r["signal"] == "TAKEBACK"]
+    print(brief(own))
+    assert [r["shortfall_cents"] for r in own] == [50000], brief(own)
+    assert "$500.00 of it takes back no payment on file" in own[0]["title"], own[0]["title"]
+    w.store.close()
+
+
+def test_a_recoupment_the_same_remittances_reversal_reports_is_not_listed_again(tmp_path, kind):
+    """(r2-1, the edge) Anthem pays C024's 17311 $600.00 on May 20; on August 3 one remittance reverses that payment and
+    lists a WO of $600.00 naming C024: the same money twice (the ledger takes it once, by the reversal). No 'Overpayment
+    recovery of $600.00 withheld' listing beside it."""
+    pcn = f"{BILL}C024"
+    w = World(tmp_path, kind)
+    _paid_600(w, pcn)
+    w.remit([visit_reversed(pcn, paid="600.00", code="17311", charge="1400.00", payer_ctl="PC300B"),
+             visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900", paid="1200.00")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {pcn}*600.00~")
+    det = w.run("r1", today="2026-09-20")
+    own = [r for r in w.rows("COALESCE(stale, 0) = 0") if r["signal"] == "TAKEBACK" and not r["line_key"]]
+    print(left_on(det, pcn), brief(own))
+    assert left_on(det, pcn) == 0, "the reversal took the payment"
+    assert own == [], brief(own)
+    w.store.close()
+
+
 # ------------------------------------------------------------------------------------------------ fx-ledger-r2-2 (voids)
 @pytest.mark.parametrize("voided", ["second_payers_claim", "the_paid_claim"])
 def test_a_void_of_another_payers_claim_of_the_bill_does_not_drop_the_primarys_takeback(tmp_path, kind, voided):
@@ -1124,6 +1183,28 @@ def test_a_void_of_another_payers_claim_of_the_bill_does_not_drop_the_primarys_t
             f"Anthem took back its $117.60 and only the supplement's claim was voided; no item lists the takeback: {brief(tb)}")
     else:
         assert tb == [], brief(tb)
+    w.store.close()
+
+
+def test_a_send_to_another_payer_after_the_void_does_not_undo_the_void(tmp_path, kind):
+    """(r2-2, the mirror) Anthem pays C017's 99214 $117.60 on May 20; the practice voids C017 (June 15), then bills the
+    supplement on C024 (July 1). In August Anthem withholds the $117.60 naming C017: Anthem's claim stays voided (the send
+    to the supplement replaces nothing of Anthem's), so the takeback answers the void and is no work."""
+    from tests.test_837_sends import clm837, send
+    gap837 = ("TESTGAP SUPPLEMENT", "TGAP1")
+    v = [("99214", "223.65", "20260401")]
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
+    send(w.store, tmp_path, [clm837(f"{BILL}C017", v)], "20260402")
+    w.remit([visit_paid(f"{BILL}C017", payer_ctl="PC300B")], "20260520")
+    send(w.store, tmp_path, [clm837(f"{BILL}C017", v, freq="8")], "20260615")
+    send(w.store, tmp_path, [clm837(f"{BILL}C024", v, payer=gap837)], "20260701")
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {BILL}C017*117.60~")
+    det = w.run("r1", today="2026-09-20")
+    assert left_on(det, f"{BILL}C017") == 0
+    tb = w.rows("signal='TAKEBACK'")
+    assert tb == [], brief(tb)
     w.store.close()
 
 

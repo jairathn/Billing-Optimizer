@@ -672,7 +672,7 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     if lkeys and _table(conn, "ledger_taken"):
         listed = "listed" if "listed" in _cols(conn, "ledger_taken") else "0"
         for part in _chunks(lkeys):
-            taken_l.update((r[0], (r[1] or 0, bool(r[2]))) for r in conn.execute(
+            taken_l.update((r[0], (r[1] or 0, int(r[2] or 0))) for r in conn.execute(
                 f"SELECT line_key, taken_cents, {listed} FROM ledger_taken WHERE line_key IN ({','.join('?' * len(part))})", part))
     if has_adj and (lkeys or ckeys):
         _temp(conn, "st_lk", ["k TEXT PRIMARY KEY"], [(k,) for k in lkeys])
@@ -714,7 +714,7 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
                          "modifiers": r[19], "charge": r[20], "paid": r[21], "allowed": r[22], "units": r[23], "ounits": r[24],
                          "lcn": r[25], "tk": r[26], "cfi": r[27], "read": r[28],
                          "taken": (taken_l.get(r[15]) or (0, False))[0] if r[15] else 0,
-                         "taken_listed": (taken_l.get(r[15]) or (0, False))[1] if r[15] else False,
+                         "taken_listed": (taken_l.get(r[15]) or (0, 0))[1] if r[15] else 0,
                          "adj": adj_l.get(r[15], []) if r[15] else [], "rmk": rmk_l.get(r[15], []) if r[15] else [],
                          "cadj": adj_c.get(r[1], []), "crmk": rmk_c.get(r[1], [])})
         _pair_reversals(recs)
@@ -1759,12 +1759,14 @@ def _ema_pay_taken(fx: dict, p: dict) -> dict:
 
 
 def _taken_note(rows: list[dict]) -> str:
-    """The words a proof adds when a payment it counts was taken back since and that takeback is an item of its own (a
-    TAKEBACK item, or the recoupment's own listing): the person checking the proof sees the takeback and where it is worked."""
+    """The words a proof adds when a payment it counts was taken back since and that takeback is worked on an item: its own
+    (a TAKEBACK item, or the recoupment's own listing: ledger_taken.listed 1), or the payer's own denial of the service,
+    which the payment had answered (listed 2). The person checking the proof sees the takeback and where it is worked."""
     x = next((y for y in rows if y.get("taken") and y.get("taken_listed")), None)
     if not x:
         return ""
-    return f"; {x['payer'] or 'the payer'} took {usd(min(x['taken'], abs(x['paid'] or 0)))} of it back later, worked on its own takeback item"
+    where = "on the payer's own denial of the service" if x["taken_listed"] == 2 else "on its own takeback item"
+    return f"; {x['payer'] or 'the payer'} took {usd(min(x['taken'], abs(x['paid'] or 0)))} of it back later, worked {where}"
 
 
 def paid_proof(fx: dict) -> dict | None:
@@ -2207,6 +2209,9 @@ def paid_first_elsewhere(fx: dict) -> dict | None:
     if need <= 1:
         # nothing says what the item should bring: half of what its own EMA lines charge
         need = max(1, sum(ln.get("charges") or 0 for ln in lines) // 2)
+    # half of what the item should bring: a first payment under it never settles the denial. With nothing to say what the
+    # item should bring, that is the floor of half its own EMA charges above (fx-ledger-r2-3: never _threshold's one cent)
+    half = _threshold(f) if worth > 1 else need
     if total <= 0:
         return None
     pos = sorted((p for p in counted if p["cents"] > 0), key=lambda p: (p["posted"] or "", p["check"]))
@@ -2214,7 +2219,7 @@ def paid_first_elsewhere(fx: dict) -> dict | None:
     if taken_back_since(fx, first["posted"]):
         return None                 # a takeback named for the claim since: the payment may not stand (money-8)
     if total < need:
-        if dup or total < _threshold(f):
+        if dup or total < half:
             return None
         # the first payer paid part of what Medicaid allows: the rest of it is still Medicaid's to pay, up to what EMA shows
         # open on the line. Nothing of it open in EMA leaves nothing to recover, as when the first payment reached the rate
