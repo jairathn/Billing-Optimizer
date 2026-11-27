@@ -23,7 +23,7 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-27 00:52 UTC, session on `claude/ecstatic-fermi-orfcgo`)
+### Running now (updated 2026-11-27 04:50 UTC, session on `claude/ecstatic-fermi-orfcgo`)
 
 Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
 branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
@@ -38,17 +38,19 @@ a unit from its branch and progress file (the brief says what done means), or st
 | review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | **done**: 37 findings, every verdict in; they feed the fix wave |
 | a17, the independent every-claim auditor | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | **merged** at 2874e3d (plans only: the auditor, its sourced window table, the report). After its fix round, Work now (services since 2026-01-01): correct 1,357 ($219,685), already done 165, already worked 27, duplicate 5, wrong amount 190 ($16,814), undecided 37; money left on the table 762 services ($88,179), plus 139 ($27,678) past windows the table could not verify. Score again with the fix wave merged before the final trace |
 | deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | **merged** at 63fc3df (23:40 UTC): build, two reviews (15 findings, all fixed), fix round; merged cleanly on top of fix7c, the shared modules' tests pass on the merge (469); full python3 suite on 63fc3df: 3,068 passed, 0 failed (29 skipped, 1 xfailed). Its leftovers are fix-wave F8 (codes.py) and parts of F4 and F6 |
-| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | run wf_ea1ab0ef-037: built (316b9d8; three needs routed to F2), reviewed (14 findings), fix round running |
-| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | run wf_91b074e9-48a: built (3a7f95b; needs routed to F3c, F5, F6), reviewed (14 findings), fix round running |
-| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | run wf_fc5edc8c-c0f: built (a2120cd; needs on F3a's functions go to F3c), reviewed (12 findings), fix round running |
-| fix wave F2 recoveries and closures | `wip/fx-recover` | the same brief, section F2 (with F1's routed needs, after F1 merges) | run wf_fa21bf23-007, started 01:54 UTC: build, two reviews, one fix round |
-| fix wave F4 the EMA side and the bare $0 rule | `wip/fx-ema` | the same brief, section F4 | run wf_ebdf14ed-6fe, started 01:54 UTC |
-| fix wave F5 people and decision 2's follow-ups | `wip/fx-people` | the same brief, section F5 (F3a's page needs after F3a merges) | run wf_ab3cfbba-d2b, started 01:54 UTC |
-| fix wave F6 hosts | `wip/fx-hosts` | the same brief, section F6 (F3a's host needs after F3a merges) | run wf_53e32423-10f, started 01:54 UTC |
-| fix wave F8 the deadlines follow-ups | `wip/fx-windows` | the same brief, section F8 | run wf_3690391d-bc8, started 01:54 UTC |
+| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | **merged** at 47b1ba0 (code equal to its tip 5515357): 14 review findings, 11 fixed, 3 routed (F2, F5, F6); its full suite: python3 one load-sensitive hook test (F6's), 3.11.1 only the serialize class. Real copy: 124 claim-level recoupment listings ($440,716) left the list because their netted entries withheld nothing (traced by the fixer; checked again in the batch-1 merge review) |
+| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | **merged** at 09def4e (fix round tip 8aa94df, code 2b66abf): all 14 findings fixed; full python3 suite on 2b66abf 3,475 passed, 0 failed. Its patient-keyed rules stay dormant until the 837 files are read again (F6); the integrator is fetching the 837 files to test them on real data |
+| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | **merged** at 8cb51f6 (fix round tip 39fbd06, code c41f286): all 12 findings fixed; 61 moved items traced (4 wasted checks, $311, left for F3c). Its needs: F3c (the yield condition at the merge, the waiting view, `_who`), F4 (content bridge), F6 (two vanished-check routes) |
+| fix wave F2 recoveries and closures | `wip/fx-recover` | the same brief, section F2 (with F1's routed needs) | run wf_fa21bf23-007, started 01:54 UTC: building (F1 merged at 47b1ba0, its routed needs can start) |
+| fix wave F4 the EMA side and the bare $0 rule | `wip/fx-ema` | the same brief, section F4 (with F8's and F3b's routed needs) | run wf_ebdf14ed-6fe: built (68713a8), reviewed (13 findings: rule 4.2's first call reads another code's share; copay closures sized at half; second payer already answered), fix round running |
+| fix wave F5 people and decision 2's follow-ups | `wip/fx-people` | the same brief, section F5 (F3a's and F1's routed needs) | run wf_ab3cfbba-d2b, started 01:54 UTC: building |
+| fix wave F6 hosts | `wip/fx-hosts` | the same brief, section F6 (F3a's, F1's and F3b's routed needs) | run wf_53e32423-10f, started 01:54 UTC: building; F3a's host needs prepared on the local branch `stage/fx-hosts-f3a` (adc1428, not on origin), to land once the tip carries the fx-837 merge |
+| fix wave F8 the deadlines follow-ups | `wip/fx-windows` | the same brief, section F8 | run wf_3690391d-bc8: built (152b191; two needs routed to F4), reviews running |
 
-Merged: fix7d, fix7c, deadlines, hook, decisions, a17's tool. Next, as each fix round ends: F1, F3a, F3b (F3a before
-F3b), then F3c (the two passes' needs on each other), then batch 2 (F2, F4, F5, F6, F8) as each ends, then F7. Each merge:
+Merged: fix7d, fix7c, deadlines, hook, decisions, a17's tool, then batch 1 (F1 at 47b1ba0, F3a and F3b at 8cb51f6).
+Next: F3c (the two passes' needs on each other, launched on the batch-1 merge), a review of what batch 1's fix rounds
+changed after their reviews (with a real-data run of the merge), the 837 files fetched into the private folder so F3a's
+patient rules can be measured on real data, then batch 2 (F2, F4, F5, F6, F8) as each ends, then F7. Each merge:
 into the integration commit, the full suite from a frozen worktree of the merge commit (`$S/tk/tools/integ_suite.sh`),
 push to both branch names.
 
