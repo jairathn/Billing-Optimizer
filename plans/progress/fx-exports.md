@@ -11,7 +11,7 @@ Functions this fixer owns (detect.py): `run_ema_open_claims`, `_ema_check_open_c
 `_claim_content`, `_unanswered_before_send`, `_bills_with_lines`, `_g8_one_service`, `_exports_yield_to_newer_bills`.
 Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date as the unseen meta's newest_835.
 
-## State (updated 2026-11-26 23:45 UTC)
+## State (updated 2026-11-27 00:45 UTC)
 
 - Every finding and residual in scope is fixed but one residual (export claims dated only by the visit day get no
   send-day twins: left, see below). `tests/test_fx_exports.py`: 18 tests, 42 cases (both store kinds), green; every fix
@@ -20,7 +20,9 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
   line ($0.01 J3590) left the claim's content, so the content bridge found no EMA claim and 2 export claims EMA shows
   paid were listed. The same gap was already in the 837 pass (15 open items A17 calls already done); `_ema_claims_found`
   now matches every claim's whole content, so both passes are fixed.
-- Merges: the integration tip 5eb528e is merged (4ba364b); the tip has not moved since (checked 23:00 UTC).
+- Merges: the integration tip 5eb528e was merged at 4ba364b (before the measurement) and 9f58506 (fix7c and the deadlines
+  unit merged) at 97ea88e (after it), with no conflict. The measurement's branch code is 39c5121: this branch plus the
+  integration tip as of 5eb528e; it does not include fix7c's or the deadlines unit's merges.
 
 ## Findings and residuals: status
 
@@ -91,6 +93,12 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
   test_archive 4 (compact kind), test_runlog 4, test_parity 4, test_repair 4, test_ema_ledger 3, 2 each in test_swing,
   test_cycle_converges and test_notes_bodies_cli, 1 each in test_fax, test_aws, test_api_review, review6/test_r6_cov_holds,
   test_efficiency, test_ema_reports, test_diagnose and test_hotfix2_pages.
+
+- On the merge with 9f58506 (97ea88e): tests/test_fx_exports.py and tests/test_837_sends.py 74 passed; full suite in
+  python3 3,110 passed, 29 skipped, 1 xfailed, none failed; full suite in 3.11.1 with SQLite 3.40.0: 2,992 passed, 13
+  skipped, 1 xfailed, 110 failed and 24 errors: the same serialize class as above (every one names `serialize` when run
+  again with one line each), plus the brief's known flaky banner test
+  (tests/test_feed_and_day.py::test_the_pages_say_how_far_the_remittances_reach[server]), which passed when run again.
 
 ## Next command
 
