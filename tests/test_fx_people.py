@@ -1006,3 +1006,130 @@ def test_f1need_past_the_dispute_window_the_share_is_still_billed_to_the_patient
     assert nxt["action"].startswith("Bill the patient $16.00: ") and "dispute" not in nxt["action"], nxt["action"]
     assert "mark_billed" in nxt["buttons"] and "mark_sent" not in nxt["buttons"], nxt["buttons"]
     w.store.close()
+
+
+# =========================================================================================== routed from F3a (837 pass)
+# After "Merge wip/fx-837" (09def4e): the story names an 837 send in plain words, and the never-answered page lists the
+# claims sent and not due yet with their due days, and the never-answered claims by the week they were sent, so a lost
+# batch stands out. Invented claims, payers and dollars; both hosts.
+def test_the_story_names_an_837_send_in_plain_words():
+    """F3a's need (plans/progress/fx-837_needs_tests.py): the story's rows from an 837 claim file carry source '837'; the
+    drawer labels each source in words and had none for '837', so it showed the bare code."""
+    import re
+    with open(os.path.join(os.path.dirname(HERE), "remitwatch", "static", "features.js"), encoding="utf-8") as fh:
+        js = fh.read()
+    m = re.search(r"const XP_SOURCE = \{([^}]*)\}", js)
+    assert m and re.search(r"'837'\s*:\s*'837 claim file'", m.group(1)), m.group(1) if m else "no XP_SOURCE"
+
+
+WAITING = {"n": 3, "billed_cents": 45000, "first_due": "2026-12-01", "last_due": "2026-12-20", "at": "2026-11-24T10:00:00+00:00",
+           "claims": [["CB0000W03C017", "Plan B", "2026-11-02", "2026-12-20", 15000],
+                      ["CB0000W01C017", "Plan A", "2026-11-01", "2026-12-01", 20000],
+                      {"claim": "CB0000W02C017", "payer_group": "Plan A", "sent": "2026-11-01", "due": "2026-12-05", "billed_cents": 10000}],
+           "sent_by_week": {"2026-10-05": 6, "2026-10-12": 20, "2026-10-19": 10}}
+
+
+def _never_answered_store(db: str):
+    """Five claims sent the week of October 5 never answered (of six sent), one of twenty the next week and one of ten the
+    week after; three claims sent in November are not due yet (one row stored as a dict, as a later build may store it)."""
+    from remitwatch.detect import WAITING_837_META
+    from tests.test_states import item, new_store
+    s = new_store(db)
+    sends = [("2026-10-06", "Plan A")] * 5 + [("2026-10-13", "Plan B"), ("2026-10-20", "Plan A")]
+    for i, (day_, grp) in enumerate(sends):
+        item(s, finding_id=f"NA{i}", signal="NO_ANSWER", category="denial", carc=None, payer_group=grp, shortfall_cents=10000 + i,
+             evidence={"sent_837": {"day": day_}})
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (WAITING_837_META, json.dumps(WAITING)))
+    s.conn.commit()
+    return s
+
+
+def _check_never_answered(d: dict) -> None:
+    w = d["waiting"]
+    assert (w["n"], w["billed_cents"], w["first_due"], w["last_due"], w["listed"]) == (3, 45000, "2026-12-01", "2026-12-20", 3), w
+    assert [(r["claim"], r["payer_group"], r["sent"], r["due"], r["billed_cents"]) for r in w["claims"]] == [
+        ("CB0000W01C017", "Plan A", "2026-11-01", "2026-12-01", 20000), ("CB0000W02C017", "Plan A", "2026-11-01", "2026-12-05", 10000),
+        ("CB0000W03C017", "Plan B", "2026-11-02", "2026-12-20", 15000)], w["claims"]
+    assert [(x["week"], x["unanswered"], x["sent"]) for x in d["weeks"]] == [("2026-10-05", 5, 6), ("2026-10-12", 1, 20), ("2026-10-19", 1, 10)]
+    assert d["stand_out"] == ["2026-10-05"] and d["usual_share"] == 0.1, d
+
+
+def test_the_never_answered_page_reads_the_waiting_claims_and_the_send_weeks_on_the_server(tmp_path, monkeypatch):
+    from tests.test_hotfix2d import _site
+    db = str(tmp_path / "store.sqlite")
+    _never_answered_store(db).close()
+    client, _line, _api = _site(tmp_path, monkeypatch, db)
+    r = client.get("/api/never-answered", headers=XHR)
+    assert r.status_code == 200, r.text
+    _check_never_answered(r.json())
+
+
+def test_the_never_answered_page_reads_the_dashboards_copy_on_the_serverless_site(tmp_path, monkeypatch):
+    from remitwatch.state import LocalState
+    root = tmp_path / "dbx"
+    (root / "RemitWatch-state").mkdir(parents=True)
+    s = _never_answered_store(str(tmp_path / "store.sqlite"))
+    cloud.save_serving(LocalState(str(root / "RemitWatch-state")), s.conn)
+    s.close()
+    c, hdr, _api = _serve(root, monkeypatch)
+    assert c.get("/api/never-answered", headers=XHR).status_code == 401          # behind the login, as every page
+    r = c.get("/api/never-answered", headers=hdr)
+    assert r.status_code == 200, r.text
+    _check_never_answered(r.json())
+
+
+def test_the_never_answered_page_with_nothing_waiting_says_nothing(tmp_path, monkeypatch):
+    from tests.test_hotfix2d import _site
+    from tests.test_states import new_store
+    db = str(tmp_path / "store.sqlite")
+    new_store(db).close()
+    client, _line, _api = _site(tmp_path, monkeypatch, db)
+    d = client.get("/api/never-answered", headers=XHR).json()
+    assert d["waiting"]["n"] == 0 and d["waiting"]["claims"] == [] and d["weeks"] == [] and d["stand_out"] == [], d
+
+
+NA_PAGE_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/].map(re => grab(html, re)).join('\n');
+const ctx = { console, state: { summary: null, filt: {}, lim: {} } };
+vm.createContext(ctx);
+for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js')]) vm.runInContext(src, ctx);
+const d = JSON.parse(process.argv[3]);
+const out = { full: ctx.naPanelHtml(d), none: ctx.naPanelHtml({ waiting: { n: 0 }, weeks: [], stand_out: [] }), empty: ctx.naPanelHtml(null) };
+d.waiting.n = 5; d.stand_out = [];
+out.more = ctx.naPanelHtml(d);
+console.log(JSON.stringify(out));
+"""
+
+
+def test_the_never_answered_page_lists_the_waiting_claims_and_marks_the_week_that_stands_out(tmp_path, monkeypatch):
+    """The page's own code (desk.js naPanelHtml) on what the route answers: the waiting claims soonest due first with their
+    due days, the send weeks with the one that stands out marked and what to do about it; nothing at all when nothing
+    waits and no week has a never-answered claim. desk.js asks for it on the never-answered claims' page only."""
+    if not _node_ok():
+        pytest.skip("needs node")
+    from tests.test_hotfix2d import _site
+    db = str(tmp_path / "store.sqlite")
+    _never_answered_store(db).close()
+    client, _line, _api = _site(tmp_path, monkeypatch, db)
+    d = client.get("/api/never-answered", headers=XHR).json()
+    static = os.path.join(os.path.dirname(HERE), "remitwatch", "static")
+    js = tmp_path / "na_page.js"
+    js.write_text(NA_PAGE_JS, encoding="utf-8")
+    r = subprocess.run(["node", str(js), static, json.dumps(d)], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-3000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    full = out["full"]
+    assert "Sent, waiting for the payer's answer" in full and "3 claims sent ($450.00 billed) are not due yet, due from Dec 1, 2026 to Dec 20, 2026" in full, full
+    assert full.index("CB0000W01C017") < full.index("CB0000W02C017") < full.index("CB0000W03C017"), "soonest due first"
+    assert "<td>Dec 5, 2026</td>" in full and "$100.00" in full
+    assert "Never answered, by the week they were sent" in full and full.count("stands out</span>") == 1, full
+    assert "In a usual week 10% of the claims sent get no answer. 1 week stands out" in full
+    assert "Oct 5, 2026 <span class=\"chip sev-high\">stands out</span>" in full and "83%" in full, full
+    assert out["none"] == "" and out["empty"] == "", out
+    assert "No week stands out." in out["more"] and "The first 3 by due day; 2 more come due later." in out["more"], out["more"]
+    desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()
+    assert "const naShown = f.kind === 'chase' || f.signal === 'NO_ANSWER';" in desk and "api('/api/never-answered')" in desk

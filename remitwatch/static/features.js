@@ -515,7 +515,7 @@ async function setFindingStatus(id, status, shortfall, signal, seen, charge){
 const XP_STATE = {work_now:['Work now','xs-now'], waiting:['Waiting','xs-wait'], done:['Done','xs-done'], accepted:['Accepted','xs-quiet'],
   expired:['Expired','xs-quiet'], cant_check:["Can't be checked",'xs-warn']};
 const XP_STRENGTH = {proven:'Proven: two sources agree', one_source:'From one source', inferred:'Inferred'};
-const XP_SOURCE = {'835':'835', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
+const XP_SOURCE = {'835':'835', '837':'837 claim file', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
 const XP_BUTTON = {build_packet:'Build the appeal packet', attach_note:'Attach the visit note', find_note:'Find the note in EMA', upload_note:'Upload the note',
   fax_payer:'Fax it to the payer', copy_instructions:'Copy the steps', mark_sent:'Mark sent', log_outcome:'Log what happened', mark_posted:'Mark posted in EMA',
   mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA',

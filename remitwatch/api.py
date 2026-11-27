@@ -2783,6 +2783,57 @@ def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, p
     return {"n": sum(k["n"] for k in out), "cents": sum(k["cents"] for k in out), "kinds": out}
 
 
+NEVER_ANSWERED_ROWS = 200          # the waiting claims the never-answered page lists, soonest due first (the meta keeps more)
+
+
+def _waiting_row(r: Any) -> dict | None:
+    """One claim of the waiting view (detect.WAITING_837_META 'claims'): stored as [claim, group, sent, due, billed cents];
+    a row stored as a dict with those names is read the same."""
+    if isinstance(r, dict):
+        claim, grp, sent, due, billed = (r.get("claim") or r.get("pcn"), r.get("payer_group") or r.get("group"), r.get("sent"),
+                                         r.get("due"), r.get("billed_cents", r.get("billed")))
+    elif isinstance(r, (list, tuple)) and len(r) >= 5:
+        claim, grp, sent, due, billed = r[:5]
+    else:
+        return None
+    try:
+        cents = int(billed or 0)
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "never_answered:row", level="warning")          # a damaged row: shown with no amount
+        cents = 0
+    return {"claim": str(claim or ""), "payer_group": str(grp or "Unknown"), "sent": str(sent or "")[:10] or None,
+            "due": str(due or "")[:10] or None, "billed_cents": cents}
+
+
+@app.get("/api/never-answered")
+def never_answered(_: str = Depends(require_auth)):
+    """The never-answered page's two views from the last analysis (F3a's 837 pass, routed to F5): the claims sent that no
+    payer has answered yet and that are not due yet, soonest due first, with their due days (detect.WAITING_837_META: on no
+    list until their due day, so blindness is loud), and the claims listed as never answered by the week they were sent,
+    against what the 837s show sent that week (insights.unanswered_weeks), so a batch that never reached the payers stands
+    out. Read from the store or the dashboard's copy (it carries the meta and the findings)."""
+    from .detect import WAITING_837_META
+    from .insights import _meta, unanswered_weeks
+    conn = db()
+    try:
+        w = _meta(conn, WAITING_837_META)
+        weeks = unanswered_weeks(conn)
+    finally:
+        conn.close()
+    w = w if isinstance(w, dict) else {}
+    rows = [x for x in (_waiting_row(r) for r in (w.get("claims") or [])) if x]
+    rows.sort(key=lambda x: (x["due"] or "9999", x["claim"]))
+    try:
+        n, billed = int(w.get("n") or len(rows)), int(w.get("billed_cents") or 0)
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "never_answered:waiting", level="warning")      # a damaged view: what the rows show
+        n, billed = len(rows), sum(x["billed_cents"] for x in rows)
+    waiting = {"n": n, "billed_cents": billed, "first_due": w.get("first_due"), "last_due": w.get("last_due"), "at": w.get("at"),
+               "claims": rows[:NEVER_ANSWERED_ROWS], "listed": min(len(rows), NEVER_ANSWERED_ROWS)}
+    return {"waiting": waiting, "weeks": weeks.get("weeks") or [], "usual_share": weeks.get("usual_share"),
+            "stand_out": [x.get("week") for x in weeks.get("stand_out") or []]}
+
+
 @app.get("/api/desk")
 def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query(None, max_length=200), min: int = Query(0, ge=0, le=10**6),
          status: str = Query(TODO_STATUSES, max_length=80), deadline: Optional[str] = Query(None, max_length=20),

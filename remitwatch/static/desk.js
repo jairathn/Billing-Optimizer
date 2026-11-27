@@ -211,6 +211,9 @@ async function deskTab(v, key){
   // the service year (the owner's decision 2, its follow-up: how old a bill to a patient would be shows on its step, and
   // the lists filter by it; what to do with the older ones is the owner's call, never the page's)
   const years = serviceYears(b, f.year);
+  // the never-answered claims' page (the chase kind of work, or the reason): what is sent and not due yet, and the send
+  // weeks whose claims went mostly unanswered (F3a's 837 pass, routed to F5)
+  const naShown = f.kind === 'chase' || f.signal === 'NO_ANSWER';
   const orders = [['value','Worth most first'],['deadline','Soonest first'],['shortfall','Largest first'],['payer','By payer']].concat(waiting?[['sent','Oldest sent first']]:[]);
   const startLbl = closed || !res.items.length ? '' : f.sort === 'sent' ? 'Start with the oldest sent' : f.sort === 'shortfall' ? 'Start with the largest' : f.sort === 'deadline' ? 'Start with what closes first' : f.sort === 'value' ? 'Start with what is worth most' : 'Start with the first item';
   const moreOpen = !!(state.moreF && state.moreF[key]);
@@ -243,6 +246,7 @@ async function deskTab(v, key){
     ${res.items.length ? '' : `<div class="empty">Nothing here. ${chips.length ? 'Remove a filter above, or pick' : 'Pick'} another box at the top.</div>`}
     ${res.total > res.items.length ? `<button class="ghost" id="moreRows">Show ${Math.min(ROWS, res.total-res.items.length)} more</button>` : ''}
     <div class="fix-after">${fix.line||''}</div>
+    ${naShown ? '<div id="naPanel" aria-live="polite"></div>' : ''}
     ${key==='worklist' ? '' : `<details class="fold" id="fold" ${foldIsOpen(key)?'open':''}><summary>${esc(DETAILS_SUMMARY[key]||'Details')}</summary><div id="foldBody" class="muted small">Loading…</div></details>`}`;
   // a change redraws the page; the control that made it gets the focus back (or the list head, for a click that opens a list)
   const set = (patch, focus) => { state.filt[key] = Object.assign({}, f, patch); state.lim[key] = ROWS; state.refocus = focus || null; render(); };
@@ -303,6 +307,34 @@ async function deskTab(v, key){
   if(state.refocus){ const el = [...v.querySelectorAll(state.refocus)].find(e => e.offsetParent !== null); state.refocus = null;
     if(el){ el.focus({preventScroll: el.id !== 'listHead'}); if(el.id === 'listHead') el.scrollIntoView({block:'start'}); } }
   if(f.first === '1' && res.items.length){ state.filt[key] = Object.assign({}, f, {first:''}); openDetail(res.items[0].finding_id); }
+  const na = v.querySelector('#naPanel');
+  if(na) api('/api/never-answered').then(d => { if(run === state.run) na.innerHTML = naPanelHtml(d); })
+    .catch(e => { if(run === state.run) na.innerHTML = `<div class="note">The claims waiting for an answer could not be loaded: ${esc(e.message || String(e))}</div>`; });
+}
+// The never-answered page's two views (/api/never-answered): the claims sent that are not due yet, soonest due first, with
+// their due days (on no list until then: blindness is loud), and the claims never answered by the week they were sent,
+// against what the 837s show sent that week, so a batch that never reached the payers stands out
+function naPanelHtml(d){
+  if(!d) return '';
+  const w = d.waiting || {}, weeks = d.weeks || [], stand = new Set(d.stand_out || []), out = [];
+  if(w.n){
+    const listed = Number(w.listed || 0), later = Number(w.n) - listed;
+    out.push(`<div class="panel" id="naWaiting"><h2>Sent, waiting for the payer's answer</h2>
+      <div class="note">${pl(w.n, 'claim')} sent (${money2(w.billed_cents)} billed) ${w.n == 1 ? 'is' : 'are'} not due yet${w.first_due ? `, due from ${longDate(w.first_due)}` : ''}${w.last_due && w.last_due !== w.first_due ? ` to ${longDate(w.last_due)}` : ''}: on no list until the due day, when a claim still unanswered is listed here to chase.</div>
+      <div class="scroll"><table class="wl"><thead><tr><th>Claim</th><th>Payer</th><th>Sent</th><th>Due</th><th class="num">Billed</th></tr></thead>
+      <tbody>${(w.claims || []).map(r => `<tr><td>${esc(r.claim)}</td><td>${esc(r.payer_group)}</td><td>${r.sent ? longDate(r.sent) : ''}</td><td>${r.due ? longDate(r.due) : ''}</td><td class="num">${money2(r.billed_cents)}</td></tr>`).join('')}</tbody></table></div>
+      ${later > 0 ? `<div class="small muted">The first ${num(listed)} by due day; ${num(later)} more come due later.</div>` : ''}</div>`);
+  }
+  if(weeks.length){
+    const usual = d.usual_share != null ? `In a usual week ${Math.round(d.usual_share * 100)}% of the claims sent get no answer. ` : '';
+    const lead = stand.size ? `${pl(stand.size, 'week')} ${stand.size === 1 ? 'stands' : 'stand'} out: a batch that never reached the payers looks like this. Open the clearinghouse's acceptance report for ${stand.size === 1 ? 'that week' : 'those weeks'} and send again the claims the payers never received.`
+      : 'No week stands out.';
+    out.push(`<div class="panel" id="naWeeks"><h2>Never answered, by the week they were sent</h2>
+      <div class="note">${usual}${lead}</div>
+      <div class="scroll"><table class="wl"><thead><tr><th>Week of</th><th class="num">Sent</th><th class="num">Never answered</th><th class="num">Share</th><th>Payers</th></tr></thead>
+      <tbody>${weeks.map(x => `<tr${stand.has(x.week) ? ' class="na-stand"' : ''}><td>${longDate(x.week)}${stand.has(x.week) ? ' <span class="chip sev-high">stands out</span>' : ''}</td><td class="num">${x.sent == null ? '' : num(x.sent)}</td><td class="num">${num(x.unanswered)} · ${money2(x.cents)}</td><td class="num">${x.share == null ? '' : Math.round(x.share * 100) + '%'}</td><td>${(x.payers || []).map(p => `${esc(p[0])} ${num(p[1])}`).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>`);
+  }
+  return out.join('');
 }
 const DETAILS_SUMMARY = {denials:'Details: by reason, by month, what each label means', bundling:'Details: by reason, by month, the 2027 changes, label meanings',
   downcoding:'Details: by reason, plans, what gets cut, by clinician', contracts:'Details: rates against Medicare by code and payer, by reason'};
