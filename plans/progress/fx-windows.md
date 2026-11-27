@@ -30,7 +30,8 @@ and detect._emit_proto now pass the denial's reason, `carc`).
       CO-50 denial), fixed at 0892a41 and 346b3aa; then the files the rules touch, on the final code: 615 passed. Python
       3.11.1 with SQLite 3.40.0, the whole suite on 38bedf8: 3,193 passed, 13 skipped, 1 xfailed, 153 failed and 47
       errors, every one but the story test above stopping at `Connection.serialize`, which that build lacks (CLAUDE.md:
-      only tests that serialize a store image may fail there); on the final code, the changed and window files
+      only tests that serialize a store image may fail there; the 104 whose tracebacks the shard logs did not print were
+      run again on the final code: 103 stop there, 1 passed); on the final code, the changed and window files
       (test_story, test_archive, test_fx_windows, test_payer_windows*, test_workable): 309 passed, 4 failed, the 4 the
       store image's serialize.
 
