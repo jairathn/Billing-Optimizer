@@ -1,8 +1,8 @@
 # Progress: unit hook (E, G and H wired into both cycles, then the owner's decision 1)
 
 Brief: plans/briefs/2026-11-26_hook.md (with plans/brief_HOOK_2026-11-24.md and plans/briefs/2026-11-26_common.md).
-Branch: wip/hook. Last updated: 2026-11-26 23:10 UTC (fix round: fixes, tests, break and restore and the real-data
-check done; the suites are running).
+Branch: wip/hook. Last updated: 2026-11-27 00:20 UTC (fix round done: 19 findings fixed, break and restore, real-data
+check, suites in four environments; ready for the integrator).
 
 ## Done
 - 2026-11-26 18:35 UTC: merged the integration tip (fc73dec) into wip/hook, no conflicts. After the merge, in python3:
@@ -84,7 +84,8 @@ check done; the suites are running).
   - r2-5: selfcheck.accept_findings text (accepted per check, or nothing accepted); ops.js offers Accept only for failing
     critical checks not yet accepted for the run shown, and says what was accepted.
   - r2-6, r1-7: cloud.trigger_cycle returns Asked (why, status); cloud.press says it; api_ops.press_run answers 502/503.
-  - r2-7: api_ops.ops_audit_now under the pipeline lock (409/503 with a sentence; busy_timeout 2 s).
+  - r2-7: api_ops.ops_audit_now under the pipeline lock: 409 with a sentence when a cycle holds the lock or is writing
+    the store (busy_timeout 2 s; any other SQLite error is raised and logged), never a server error.
   - r2-8: api_ops.ops_accept refuses a stale run at once on Vercel (copy's run newer); selfcheck.apply_request keeps a
     refusal at the fold in the acceptances (stale), cloud.apply_actions(results=) puts it in status.json
     (selfcheck_requests); ops.js says "Not accepted". Also: the dashboard's copy no longer works out a journaled
@@ -159,6 +160,29 @@ check done; the suites are running).
   test_a_closure_settled_by_the_payers_own_zero_answer_carries_its_proof_and_holds_no_run runs the S01 and P01
   scenarios on both store kinds (closure_proof passes, no hold); removing the clause holds the run (checked, restored).
 
+## Suites (fix round, 2026-11-26 and 27, tip after the fix round)
+- python3 (3.13, SQLite 3.5x), whole suite in 3 shards: 2,875 passed, 55 failed, 29 skipped, 1 xfailed. The 55 are the
+  same 55 tests as before the fix round (compared name by name): 34 test_fax.py, 9 test_hotfix2.py, 5
+  test_no_fax_route.py, 4 test_notes_bodies_cli.py, 2 test_hotfix2c.py, 1 test_bulk_pause.py; they fail on the
+  integration tip itself or are review hosts-5's dated fixtures (see below).
+- Python 3.11.1 / SQLite 3.40.0, whole suite in 3 shards: 250 failing tests: 196 fail only for want of
+  Connection.serialize in that build (allowed by CLAUDE.md; 33 of them are test_hook_review.py's Vercel tests), 54 are
+  python3's (the 55th fails there for serialize). No OperationalError in any log.
+- Python 3.12 / SQLite 3.45 and the newest libraries (FastAPI 0.165.0, Starlette 1.10.0), the touched files
+  (test_hook_review, hooks, docs, cloud, selfcheck, diagnose, runlog, archive, repair, ema_pages2): 630 passed, 1
+  skipped in each.
+- node tests/calc_model_check.js (79 checks) and tests/lab_review_check.js (143 checks): none failing.
+- After the last change (the self-audit route's 409): test_hooks and test_hook_review 106 passed (python3); its tests
+  pass in 3.12, the newest libraries and 3.11.1.
+- The reviewers' own tests, run unchanged against this branch: r1 12 of 16 pass; the 4 left
+  (test_r1_press_chain_idle_work.py) follow a press's chain only while a run has more to do, so they never start the
+  tidy run that api.cron_cycle starts (cloud.next_run); the ported tests follow cloud.next_run and pass, and the real
+  data shows the tidy run doing the work. r2 24 of 29 pass; the 5 left test what the fixes changed on purpose: Accept
+  is no longer offered for a warning alone (r2-5), the safe-mode line is above the page (#scBar) not inside it, the
+  status's analysed.findings still counts every item found (the panel shows the open items: lists, analysed.open),
+  an acceptance the checks overtook is refused at once on Vercel rather than journaled (r2-8), and the runbook no
+  longer names presses the Vercel site lacks (r2-10).
+
 ## Suites (2026-11-26, this branch)
 - python3 (3.13, SQLite 3.5x), whole suite in 3 shards: 2,823 passed, 55 failed, 29 skipped, 1 xfailed. The 55: 34 in
   test_fax.py, 9 test_hotfix2.py, 5 test_no_fax_route.py, 4 test_notes_bodies_cli.py, 2 test_hotfix2c.py, 1
@@ -184,7 +208,7 @@ check done; the suites are running).
 - Dated tests (hosts-5 and the fax files above) fail against the real clock on the tip too.
 
 ## Next
-1. The integrator merges wip/hook (privacy-3 now has its test on this branch).
+1. The integrator merges wip/hook (privacy-3 has its test on this branch; the fix round's 19 findings are fixed).
 
 ## Numbers measured so far
 - (from the earlier runs, see plans/HANDOFF.md section 0 item 2): three server cycles converge; five faults detected,
