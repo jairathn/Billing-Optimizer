@@ -1600,7 +1600,7 @@ def answers_through(conn: sqlite3.Connection, payer_group: str | None, newest_83
 _REASON_SQL = "(zr.grp <> '' OR zr.code GLOB 'N[0-9]*' OR zr.code GLOB 'M[0-9]*' OR zr.code GLOB 'MA[0-9]*')"
 
 
-def zero_answer_sql(y: str = "y") -> str:
+def zero_answer_sql(y: str = "y", same_check: bool = True) -> str:
     """SQL that is true for a $0 row EMA posted under a check (ema_line_payments, alias `y`: a check number and no insurance
     money) that is a payer's $0 answer: one that carries its proof, an allowed amount on the row, or the payer's reason
     (a CARC of any group: a denial, the contractual write-down, the patient's share; or a remark code) posted on the same
@@ -1612,18 +1612,19 @@ def zero_answer_sql(y: str = "y") -> str:
     too: the payer adjudicated the claim on that check and paid nothing on this line (a second payer that pays the
     procedures' coinsurance and not the visit's copay; review fx-ema-r1-4). A store whose summary keeps the routine
     reasons (CO-45, the patient's share) of only some lines reads a $0 answer whose only proof is one of those as bare
-    until it holds it: the claim stays listed, never dropped."""
+    until it holds it: the claim stays listed, never dropped. same_check=False leaves the same-check reading out (a caller
+    that must tell a $0 row's own proof from its check's: detect.run_secondary_not_billed)."""
+    check = (f" OR EXISTS (SELECT 1 FROM ema_line_payments zck WHERE zck.link = {y}.link AND zck.check_no = {y}.check_no "
+             f"AND zck.payer = {y}.payer AND COALESCE(zck.ins_paid, 0) > 0)") if same_check else ""
     return (f"(COALESCE({y}.check_no, '') <> '' AND COALESCE({y}.ins_paid, 0) = 0 AND (COALESCE({y}.allowed, 0) <> 0 "
             f"OR EXISTS (SELECT 1 FROM ema_line_reasons zr WHERE zr.link = {y}.link AND zr.svc = {y}.svc AND zr.cpt = {y}.cpt "
-            f"AND {_REASON_SQL} AND (zr.first_posted = {y}.posted OR zr.last_posted = {y}.posted)) "
-            f"OR EXISTS (SELECT 1 FROM ema_line_payments zck WHERE zck.link = {y}.link AND zck.check_no = {y}.check_no "
-            f"AND zck.payer = {y}.payer AND COALESCE(zck.ins_paid, 0) > 0)))")
+            f"AND {_REASON_SQL} AND (zr.first_posted = {y}.posted OR zr.last_posted = {y}.posted)){check}))")
 
 
-def answer_row_sql(y: str = "y") -> str:
+def answer_row_sql(y: str = "y", same_check: bool = True) -> str:
     """SQL that is true for an EMA payment row (ema_line_payments, alias `y`) that is a payer's answer: insurance money on
     it (a payment, or one taken back), or a $0 answer that carries its proof (zero_answer_sql)."""
-    return f"(COALESCE({y}.ins_paid, 0) <> 0 OR {zero_answer_sql(y)})"
+    return f"(COALESCE({y}.ins_paid, 0) <> 0 OR {zero_answer_sql(y, same_check)})"
 
 
 def line_answered_sql(l: str = "l") -> str:

@@ -317,11 +317,16 @@ def test_one_rule_for_several_codes_of_a_claim_is_told_once():
     tell that rule once, naming the three codes; a code under another rule keeps its own line."""
     from remitwatch import story
     f = _whole_claim("Medicaid (other)", ["99213", "11102", "88305"])
-    blocks = rp.researched_blocks(f)
+    # the catch-all's research speaks for a pair the run found rarely paid (review fx-ema-r1-5: it holds many payers): the
+    # run's evidence says so for the three codes, as the drawer, the packet and the note review are given it (rarely_paid.why)
+    assert rp.researched_blocks(f) == []
+    pairs = {rp.pattern_key("Medicaid (other)", c, "2026-03-02"): {"code": c, "answered": 25, "paid": 0, "unpaid": 25,
+                                                                   "from": "2025-01-01"} for c in ("99213", "11102", "88305")}
+    blocks = rp.researched_blocks(f, blocks=[rp.block_for(f, c, "2026-03-02", pairs=pairs) for c in ("99213", "11102", "88305")])
     assert [b["code"] for b in blocks] == ["99213", "11102", "88305"] and len({b["what_to_show"] for b in blocks}) == 1
-    got = rp.checklist(f)
+    got = rp.checklist(f, blocks=blocks)
     assert len(got) == 1 and got[0].startswith("What the note or claim must show for Medicaid (other) to pay 99213, 11102 and 88305")
-    inp = rp.review_input(f)
+    inp = rp.review_input(f, blocks=blocks)
     assert [(r["code"], r["codes"]) for r in inp] == [("99213, 11102 and 88305", ["99213", "11102", "88305"])]
     nxt = {"action": "Send a corrected claim.", "steps": ["Fix the claim."], "buttons": [], "route": "corrected"}
     out = story._with_payer_rule(nxt, blocks, f, {"work_state": "work_now"})

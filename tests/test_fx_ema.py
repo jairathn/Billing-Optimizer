@@ -762,6 +762,42 @@ def test_a_second_payers_zero_on_the_check_that_paid_the_claims_other_line_is_it
     assert det.ema_counts["snb_second_answered_ema"] >= 1
 
 
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_supplements_zero_on_the_crossover_that_denied_the_line_never_answers_the_share_a_reprocess_made(tmp_path, kind):
+    """fx-ema-r1-4's other side (its 1a15880b, 'right' to list): Medicare crossed claim 9 over to the supplement when it had
+    denied 99213 (CO-97, no share) and paid 11102; ten days later it reprocessed 99213 and paid it, leaving $17.90 of
+    coinsurance, on an answer that was not crossed over. The supplement's own check then paid 11102's share and listed
+    99213 at $0: that answered the crossover, where 99213 had no share, never the $17.90 the reprocess made. The share is
+    listed as never billed to the supplement (the same check's $0 counts as an answer only where the share reached it)."""
+    s, lg = _world(tmp_path, kind)
+    med, sup = "MEDICARE TEST REGION", "TESTLIFE MEDIGAP"
+    remit(s, trace="555000901", paid_on="2026-03-20", payer=med,
+          claims=[{"pcn": F.claim_id(9), "last": "SAMPLE", "first": "DELTA", "status": "19", "crossover": sup,
+                   "lines": [(S, "99213", 150, 0, [("CO", "97", 150)]),
+                             (S, "11102", 120, 60, [("CO", "45", 40), ("PR", "2", 20)], {"allowed_cents": 8000})]}])
+    remit(s, trace="555000902", paid_on="2026-03-30", payer=med,
+          claims=[{"pcn": F.claim_id(9), "last": "SAMPLE", "first": "DELTA", "status": "1",
+                   "lines": [(S, "99213", 150, 70, [("CO", "45", 62.10), ("PR", "2", 17.90)], {"allowed_cents": 8790})]}])
+    rows = [charge(F.link_no(9), patient=2, primary=P["medicare"], secondary=sup),
+            charge(F.link_no(9), cpt="11102", amount=120, patient=2, primary=P["medicare"], secondary=sup),
+            pay(F.link_no(9), "555000901", 0, patient=2, posted=D(2026, 3, 22), payer=P["medicare"], primary=P["medicare"], secondary=sup),
+            pay(F.link_no(9), "555000901", 60, cpt="11102", patient=2, posted=D(2026, 3, 22), payer=P["medicare"],
+                primary=P["medicare"], secondary=sup),
+            pay(F.link_no(9), "555000902", 70, patient=2, posted=D(2026, 4, 1), payer=P["medicare"], primary=P["medicare"],
+                secondary=sup),
+            # the supplement's own check, after the reprocess: 11102's share paid, 99213 at $0 (its crossover had no share)
+            pay(F.link_no(9), "SUPCHK9", 20, cpt="11102", patient=2, posted=D(2026, 4, 5), payer=sup, primary=P["medicare"],
+                secondary=sup),
+            pay(F.link_no(9), "SUPCHK9", 0, patient=2, posted=D(2026, 4, 5), payer=sup, primary=P["medicare"], secondary=sup)]
+    ar = [F.ar_row(claim=F.claim_id(9), link=F.link_no(9), status="Payment Pending", current=17.90, aging=D(2026, 4, 1), svc=SVC,
+                   patient=2, primary=P["medicare"], secondary=sup)]
+    denial_world(s, lg, tmp_path, rows, ar_rows=ar)
+    lg.close()
+    _run(s)
+    got = _items(s, "signal='SECONDARY_NOT_BILLED'")
+    assert [(g["patient_control_number"], g["shortfall_cents"]) for g in got] == [(F.claim_id(9), 1790)], got
+
 def _second_payer_world(s, lg, tmp_path, *, bare: bool):
     """Blue Cross paid claim 71's 99213 ($90) and left $30; Aetna is the second payer on file in EMA and was never billed.
     With bare=True a batch check of Aetna's lists the line at $0 on April 20 with nothing else: a bare $0 row."""

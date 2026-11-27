@@ -8110,11 +8110,13 @@ class Detector:
                 self.conn.execute("CREATE TEMP TABLE dt_links (link INTEGER, svc TEXT, cpt TEXT)")
                 self.conn.executemany("INSERT INTO temp.dt_links VALUES (?,?,?)", {(r[3], r[1], r[2]) for r in rows})
                 # each payment row and whether it answers (ema_checks.answer_row_sql: a bare $0 row under a check, with no
-                # reason, allowed amount or adjustment, is no second payer's answer)
-                for lk, svc, cpt, grp, cents, posted, answer in self.conn.execute(
-                        f"""SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0), y.posted, {ec.answer_row_sql('y')}
+                # reason, allowed amount or adjustment, is no second payer's answer), and whether only its check makes it
+                # one (a $0 row on the check that paid another line of the claim: run_secondary_not_billed reads it so)
+                for lk, svc, cpt, grp, cents, posted, answer, own in self.conn.execute(
+                        f"""SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0), y.posted, {ec.answer_row_sql('y')},
+                                   {ec.answer_row_sql('y', same_check=False)}
                             FROM temp.dt_links d JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
-                    pays[(lk, svc, cpt)].append((grp, cents, posted, bool(answer)))
+                    pays[(lk, svc, cpt)].append((grp, cents, posted, bool(answer), bool(own)))
                 for lk, svc, cpt, zg, code, payer, first, cents in self.conn.execute(
                         """SELECT z.link, z.svc, z.cpt, z.grp, z.code, z.payer, z.first_posted,
                                   COALESCE(z.contractual,0) + COALESCE(z.noncontractual,0) FROM temp.dt_links d
@@ -8135,12 +8137,12 @@ class Detector:
                         elsewhere[(nk, svc, cpt)].append((lk, grp, cents))
                     self.conn.execute("DROP TABLE IF EXISTS temp.dt_nk")
             for b, svc, cpt, lk, sec, prim, grp, bal, pat, chg, nk in rows:
-                other = sum(c for g, c, _p, _a in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
+                other = sum(c for g, c, _p, _a, _o in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
                 other += sum(c for olk, g, c in elsewhere.get((nk, svc, cpt), []) if olk != lk and c > 0 and g and grp
                              and not ec._same_payer(g, grp))
                 # every answer on the line from a payer other than the primary: a payment row ($0 included, with its proof) or
                 # its own reason
-                answers = [(p or "", g, c, "payment") for g, c, p, a in pays.get((lk, svc, cpt), [])
+                answers = [(p or "", g, c, "payment" if o else "same_check") for g, c, p, a, o in pays.get((lk, svc, cpt), [])
                            if a and g and grp and not ec._same_payer(g, grp)]
                 for zg, code, payer, first, cents in reasons.get((lk, svc, cpt), []):
                     if payer not in groups_of:
@@ -8170,6 +8172,7 @@ class Detector:
         cands: dict[tuple, Line] = {}
         other_paid: set[tuple] = set()
         second_835: dict[tuple, list] = defaultdict(list)       # (bill, date, code) -> second payers' remittances: (date, payer)
+        crossed_nil: dict[tuple, str] = {}                      # (bill, date, code) -> first crossover that carried no share of it
         for l in self.lines:
             code, dos = l.get("procedure_code"), l.get("service_date")
             if not code or not dos or code in ("99024", "G2211"):
@@ -8180,6 +8183,12 @@ class Detector:
                 # processed as a second (or third) payer, or reversed: an answer from a second payer, whatever it paid
                 second_835[key].append((l.get("payment_date") or l.get("txn_payment_date") or "", l.get("payer_id") or l.get("payer_name")))
                 continue
+            if st == "19" and not (self.standing.get(l["line_key"]) or 0) and l.get("payer_kind") != "supplement" \
+                    and sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3")) <= 100:
+                # the first payer crossed the claim over when it paid nothing of this line and left no share of it
+                day = (l.get("payment_date") or l.get("txn_payment_date") or "")[:10]
+                if day and day < crossed_nil.get(key, "9999"):
+                    crossed_nil[key] = day
             if st not in ("1", "19") or not (self.standing.get(l["line_key"]) or 0) or l.get("payer_kind") == "supplement":
                 continue
             pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
@@ -8237,6 +8246,12 @@ class Detector:
                     continue
                 # the second payer answered in EMA after the first payer's payment: a $0 payment row or a reason of its own
                 ans = [a for a in e.get("answers") or [] if (a[0] or "") >= paid_on[:10]]
+                if ans and l.get("claim_status_code") != "19" and crossed_nil.get(key, "9999") < paid_on[:10]:
+                    # the line reached the second payer on a crossover that carried no share of it (the first payer had
+                    # denied it), and the share came on a later answer that was not crossed over: a $0 the second payer
+                    # listed for it beside its payment of that crossover's other lines answered the crossover, never this
+                    # share (review fx-ema-r1-4, its line the review called right to list)
+                    ans = [a for a in ans if a[3] != "same_check"]
                 if ans:
                     self.ema_counts["snb_second_answered_ema"] += 1
                     continue
