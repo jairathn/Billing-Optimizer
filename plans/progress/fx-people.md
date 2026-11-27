@@ -52,10 +52,8 @@ Runner: `$S/tk/units/fx-people/bin/t.sh [python] -- <pytest args>` (clean enviro
   failing its test.
 
 ## Half done
-- Measurement of the branch on a private world copy (running: `bash $U/measure.sh br <worktree> keep`); the tip's run
-  is in `$U/snap_tip.sqlite` and `$U/a17_tip/`.
 - F3a-routed needs (the 837 label in the story, the never-answered page by send week): waiting for "Merge wip/fx-837" on
-  the integration tip.
+  the integration tip (not there at 03:40 UTC).
 
 ## Next command
 - `git fetch origin && git log origin/claude/ecstatic-fermi-orfcgo --oneline --grep 'Merge wip/fx-'`: when batch 1 is
@@ -64,7 +62,29 @@ Runner: `$S/tk/units/fx-people/bin/t.sh [python] -- <pytest args>` (clean enviro
   then build the F3a-routed needs (tests in `plans/progress/fx-837_needs_tests.py`).
 
 ## Numbers measured
-(after the branch run)
+Private world copy (store of 11-24, as of 2026-11-24), integration tip 59f6822 against this branch (6673b6f + the net
+amount fix), `$U/compare.py` on the two snapshots; aggregates only.
+- 18,810 live items on both. 9 change state, all DENIED_PLAN_EXCLUSION of Medicare KY (CGS J15), $581.32: 8 work now
+  (bill the patient, $568.06) and 1 can't check ($13.26) -> done, rule next_payer_contractual (the owner's count was 9).
+  Their later payers: KY Medicaid 3 ($134.86), Medicare supplement carriers 4 ($349.90), Anthem / BCBS 1 ($83.30), an
+  indemnity carrier 1 ($13.26). Work now 6,714 -> 6,706 ($2,037,736.83 -> $2,037,168.77); can't check 43 -> 42; done
+  6,941 -> 6,950. Nothing appears or vanishes.
+- 5 keep their state with a new basis and step: PR-288 for Medicaid members (Humana's Medicaid plan, CLP06 MC), $1,187.76:
+  "bill the patient" -> "never a bill to the patient; get a retroactive referral and send a corrected claim" (deadlines
+  from Jun to Nov 2027). Of the 24 open PR-288 items, 22 are Medicaid members and none is told to bill the patient; 0
+  remittances are "unclear" on the bill path.
+- Bill-the-patient items by service year (the steps now name it; the batch decision is the owner's): work now 2025: 25
+  ($2,112.35), 2026: 46 ($4,915.74); can't check 2023: 7 ($244.31), 2024: 35 ($2,868.63).
+- A17 classes before and after: identical (0 of 234 summary keys and 0 finding verdicts differ; the 14 items are
+  ALREADY_DONE / MOVED_TO_PATIENT in A17 on both). Work now open: CORRECT 4,969 ($778,108.31), ALREADY_DONE 2,821
+  ($775,581.27), ALREADY_WORKED 91 ($27,749.75), DUPLICATE 213 ($199,494.70), WRONG_AMOUNT 2,063 ($129,738.01),
+  UNDECIDED 1,283; closed wrongly 5 ($147.79); left on the table (in scope): DENIED 401 ($28,939.69), NEVER_ANSWERED 114
+  ($17,568.16), SHORT 270 ($8,829.69), WORKED_WAITING 7 ($253.90).
+- Hand trace: all 14 moved items from the raw rows (`$U/hand_trace.md`): right 9, unclear 5 (the Medigap and indemnity
+  carriers' CO answers: see open question 3), wrong 0 after one fix (a later answer with CO-45 -$127.81 and CO-B7
+  $142.11 on a $14.30 line showed $142.11; the reason now shows the net and every CO code, and only a contractual
+  adjustment with no other group settles it: re-decided on the world, 9 of 9 show the item's own amount).
+- The people fixes move no item in detection (pages and api only).
 
 ## Needs from others
 
@@ -75,3 +95,9 @@ Runner: `$S/tk/units/fx-people/bin/t.sh [python] -- <pytest args>` (clean enviro
 2. A later payer that paid part, took the rest off as contractual and put nothing on the patient: still billed with the
    caution "if its answer settled the service, do not bill: press Done". Should it go to Done like the
    contractual-only answer?
+3. Five of the nine "contractual adjustment only" answers ($363.16) come from Medicare supplement or indemnity carriers
+   (CO-96 non-covered, CO-45), which usually have no contract with the practice. The decision ("the contract puts that
+   amount on the practice") sends them to Done as built; if the practice has no contract with those carriers, Medicare's
+   PR-49 may still let the practice bill the patient. Keep them Done, or only for Medicaid and contracted plans?
+4. One of the nine (Anthem, $83.30) answered CO-97 (bundled into another service). Done is right for the patient's
+   side; a corrected claim with a modifier may still recover it from Anthem, and that later line has no item of its own.

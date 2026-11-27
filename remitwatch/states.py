@@ -2363,11 +2363,17 @@ def next_payer_settled(fx: dict) -> dict | None:
     if not nxt or nxt["co"] <= 0 or nxt["pr"] > 0 or nxt["paid"] > 0:
         return None
     x = nxt["row"]
+    # a contractual adjustment only (the owner's words): no other group beside it, and the amount shown is the net the
+    # practice carries (a negative adjustment beside a positive one nets out), so the reason reconciles to the cent
+    co = [(c, a) for g, c, a in x["adj"] if a and g == "CO"]
+    net = sum(a for _c, a in co)
+    if net <= 0 or any(a and g != "CO" for g, _c, a in x["adj"]):
+        return None
     name, kind = row_group(x)
     name = name if name and name != "Unknown" else str(x.get("payer") or "the next payer")
     medicaid = " (a Medicaid plan: what it pays is payment in full)" if kind == "medicaid" else ""
     text = (f"{name} answered after it on {day(x.get('date'))} and put the service on the practice under its contract "
-            f"({', '.join(nxt['co_codes'])}, {usd(nxt['co'])}), paying nothing and leaving nothing to the member{medicaid}: "
+            f"({', '.join(sorted({f'CO-{c}' for c, _a in co}))}, {usd(net)}), paying nothing and leaving nothing to the member{medicaid}: "
             "settled by another payer, so the member is not billed")
     return {"rule": "next_payer_contractual", "cents": 0, "date": x.get("date"), "payer": x.get("payer"),
             "check_tail": x.get("check_tail"), "source": "835", "text": text}

@@ -789,13 +789,15 @@ def test_d2f_a_supplement_that_answered_with_a_contractual_adjustment_only_settl
     assert "Bill the patient" not in story.next_step(sstore.conn, "F1", today=TODAY2)["action"]
 
 
-def test_d2f_a_later_payer_that_paid_or_put_some_on_the_patient_does_not_settle_it(sstore):
-    """Only a contractual adjustment with nothing paid and nothing on the member settles it: a later payer that paid part or
-    put part on the patient leaves the bill (capped, with its caution: review r1-5)."""
-    _supplement_answer(sstore, co=30, pr=120, allowed=120)
-    assert (_state(sstore)["work_state"], _state(sstore)["rule"]) == ("work_now", "bill_patient_denial")
-    _supplement_answer(sstore, co=50, pr=0, allowed=100, paid=100)
-    assert _state(sstore)["rule"] != "next_payer_contractual"
+@pytest.mark.parametrize("answer", [dict(co=30, pr=120, allowed=120), dict(co=50, pr=0, allowed=100, paid=100)],
+                         ids=["part_on_the_patient", "part_paid"])
+def test_d2f_a_later_payer_that_paid_or_put_some_on_the_patient_does_not_settle_it(sstore, answer):
+    """Only a contractual adjustment with nothing paid and nothing on the member settles it: a later payer that put part on
+    the patient, or paid part and took the rest off as contractual, leaves the bill (capped, with its caution: review
+    r1-5)."""
+    _supplement_answer(sstore, **answer)
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
 
 
 def test_d2f_a_persons_billed_the_patient_stands_over_a_later_contractual_answer(sstore):
@@ -861,3 +863,34 @@ def test_d2f_the_lists_filter_by_service_year(tmp_path):
     desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()
     assert "sel('year','Service year',[['','Any service year'],...years.map(y=>[y,'Services of '+y])],f.year||'')" in desk
     assert "chip('year', `Services of ${esc(f.year)}`)" in desk and "year:f.year" in desk
+
+
+def _later_answer(s, rows):
+    """Medicare's PR-49 $150.00 on a routine visit, sent on; the member's Medicaid plan answered after it with `rows`
+    ((group, reason, dollars), nothing paid) in place of the builder's CO-45."""
+    _crossed_over(s, "4", "KENTUCKY MEDICAID", "MC", ("CO", "45"))
+    lk = s.conn.execute("SELECT line_key, claim_key, transaction_key FROM lines WHERE payer_name='KENTUCKY MEDICAID'").fetchone()
+    s.conn.execute("DELETE FROM adjustments WHERE line_key=?", (lk[0],))
+    s.conn.executemany("INSERT INTO adjustments (transaction_key, claim_key, line_key, level, group_code, reason_code, amount_cents) "
+                       "VALUES (?,?,?,?,?,?,?)", [(lk[2], lk[1], lk[0], "line", g, r, round(a * 100)) for g, r, a in rows])
+    s.conn.commit()
+
+
+def test_d2f_the_reason_shown_is_the_later_payers_net_contractual_amount(sstore):
+    """A later answer can carry a negative adjustment beside a positive one (CO-45 -$127.81 and CO-B7 $277.81 on a $150.00
+    line): the reason shown names every contractual code and the net amount the practice carries ($150.00, the line's
+    charge), never the larger of the two (a hand-checker reconciles it to the cent)."""
+    _later_answer(sstore, [("CO", "45", -127.81), ("CO", "B7", 277.81)])
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("done", "next_payer_contractual"), st["state_basis"]
+    assert "under its contract (CO-45, CO-B7, $150.00), paying nothing" in st["state_basis"], st["state_basis"]
+
+
+def test_d2f_a_later_answer_with_other_adjustments_beside_the_contractual_one_does_not_settle_it(sstore):
+    """Only a contractual adjustment settles it (the owner's words: "a contractual adjustment only"): a later answer that
+    took $30.00 off as contractual and the rest as another payer's adjudication (OA-23) keeps the bill, with its caution."""
+    from remitwatch import story
+    _later_answer(sstore, [("CO", "45", 30), ("OA", "23", 120)])
+    st = _state(sstore)
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
+    assert story.next_step(sstore.conn, "F1", today=TODAY2)["steps"][0].startswith("Before billing: Medicaid KY answered after it")
