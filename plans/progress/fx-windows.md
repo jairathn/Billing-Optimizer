@@ -7,6 +7,28 @@ had not reached the integration tip when this unit measured: the measurement hol
 F8 owns remitwatch/codes.py and docs/RESEARCH_SUMMARY.md, and call sites only to pass a keyword fact (ema_checks.ema_denials
 and detect._emit_proto now pass the denial's reason, `carc`).
 
+## Fix round (2026-11-27, the reviewers' r1 and r2 findings)
+Merges in this round: the integration tip 47b1ba0 (F1 fx-ledger merged) at a063a77, then fe9ad71 (batch 1: F1, F3a
+fx-837, F3b fx-exports merged) at 02d909d. The reviewers' tests (`$S/tk/review/fx-windows-r1-tests/`,
+`$S/tk/review/fx-windows-r2-tests/`) were run against the branch after the first merge: all 24 failed for the reasons
+they name; after the fixes 20 pass, the 4 left are routed (r1-2, r2-3). Ported into tests/test_fx_windows.py section 6
+(invented data, both store kinds where detection or EMA's checks date the item): 22 new cases, each failing on a063a77
+(the code before the round); all pass now. Break and restore: 23 mutations of the round's fixes, each caught by its
+tests and restored byte for byte (`$S/tk/units/fx-windows/scripts2/mutate2.py`, log `logs2/mutate2.log`).
+
+| finding | outcome | what changed |
+|---|---|---|
+| r1-1 (high) home plan by the plan name alone | fixed | codes: only a plan that names Kentucky or Indiana shows Anthem's own member (`_fits` condition 'plan_state', `ANTHEM_OWN_STATES`); a plan naming no state is dated as a plan not known: 180 days shown, the dispute's two years the last day. The payer's name is not read for it (the local plan sends the 835 for its own and BlueCard members alike; on the copy no Anthem commercial payer name names a state). The member-id prefix the reviewer suggests is not used: see Open questions |
+| r2-6 (medium) a plan naming no state taken as Anthem's own | fixed | the same change; tests' 'SAMPLE PPO' and 'PPO' expectations moved to the plan-not-known dates |
+| r2-1 (medium) EMA's checks pass no payer name | fixed | call sites only: ema_checks.ema_denials (appeal_rule and corrected_rule get `payer_name`), ema_checks.unanswered_claims (`payer_name=c["payer"]`), detect._emit_proto (`**rule_facts(claim, carc=...)`) |
+| r2-2 (medium) a clinical reason beside other reasons | fixed | codes: a new plan fact `carcs` (every denial reason of the item); appeal_rule puts the reasons' windows together (`_together`: window_end the earliest, legal_deadline the latest, rule_at per member; one window for all reasons is that window, unchanged). Call sites: detect.run_claim_rules' CLAIM_DENIED_UNPAID emit (`claim=dict(cl, carcs=...)`), ema_checks.ema_denials (`carcs=` and the proto's claim dict), detect._emit_proto (rule_facts reads them). Line items (one top reason per line) are unchanged |
+| r2-3 (medium) the next step and letter name the dispute | routed (integrator; no fixer owns story._appeal_channel or appeals._process) | codes: Anthem's clinical rows carry 'process' (the letter's sentence) and 'channel' (the next step's words); the change that reads them and its test are in Needs from others 3 (checked on a scratch copy: the test passes, test_story green) |
+| r2-4 (medium) CARC 150, 151, 152 | fixed | codes: `MAYBE_CLINICAL_CARCS` (150, 151, 152 and the product's medical-necessity class 167, B22, 272, B5, B12, 58, 216, A1): 180 days shown, the dispute's two years last, for any Anthem commercial member and for the FEP (its 6 months only for 50, 55, 56; tests/test_payer_windows_review.py's FEP expectation changed on purpose). 150 on an E&M code (99202 to 99499) stays the dispute's two years: the manuals' 'Evaluation and Management (E&M) Services' review is 'in accordance with correct coding requirements and/or reimbursement policy' (new plan fact `code`, the item's procedure code, read by rule_facts; `ANTHEM_EM_LEVEL`). On the copy: no Anthem commercial 150, 151 or 152 since 2025; 167 four adjustments, 58 one |
+| r2-5 (low) second claim with no date of service | fixed | codes.second_claim_window: 6 months from the payment shown, 12 months from it the last day, the words say the date of service is not known |
+| r2-7 (low) real payer names in tests and comments | fixed | the six strings replaced by invented ones in tests/test_fx_windows.py, a codes.py comment and this file; `$S/tk/units/fx-windows/private_words_plus.txt` is the shared private list plus the six strings: test_docs passes with it (see Needs from others 4) |
+| r2-8 (low) the VA's last day | fixed | codes: a VA Community Care appeal row, 90 days shown (not confirmed, as before) and 12 months the last day (the UnitedHealthcare-administered plans' window the claims had while their name decided their group) |
+| r1-2 (low) the A/R rows keep the old group | routed, done by F4 | F4's d78502f (wip/fx-ema: ema_ledger `_name_rules_hash`, `_regroup_ar`) re-groups ema_ar's rows; the reviewer's test is in the needs file and passes on a scratch merge of this branch with origin/wip/fx-ema (F4's own tests green on that merge too: test_fx_ema, test_selfcheck, test_ema_checks, 336 passed) |
+
 ## Inputs (read only, never in git)
 - S=/tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad
 - Sources (downloaded by the A17 research): `$S/tk/units/a17/windows/dl/` (anthem/PM_KY_00011, PM_KY_00012, PM_IN_00012,
@@ -50,7 +72,7 @@ and detect._emit_proto now pass the denial's reason, `carc`).
    detect._emit_proto pass the reason (the same rule dates an EMA denial and works out its last day).
 2. EMA's 'Medicaid of Kentucky' / 'Medicaid of Indiana': the name rules read the state program by a name that starts with
    the state or with the word Medicaid followed by the state. Found on the way: the old unanchored rules read managed care
-   plans' names ('Anthem Indiana Medicaid Hoosier Healthwise', 'MHS ... Indiana Medicaid', '<plan> Pathways Indiana
+   plans' names ('Anthem <state> Medicaid <program>', '<plan> ... Indiana Medicaid', '<plan> <program> Indiana
    Medicaid') as Indiana's fee-for-service program. Fixed: Anthem's Medicaid names are Anthem's Medicaid group; other plans
    are 'Medicaid (other)' with the state from the name, now also from the state's code after "of" ('<plan> Medicaid of
    Ky', plan_state), so a Kentucky plan's denial gets Kentucky's managed care windows (120 days, last day 125) instead of
@@ -136,30 +158,44 @@ branch wrote. Verdicts: 29 right, 1 unclear, 0 wrong (30 items).
   58bb593548102cfc5b031450 NO_ANSWER $56.47 and d4dd79dd2ccb0737bcf378d6 NO_ANSWER $0: right.
 
 ## Needs from others (failing tests in plans/progress/fx-windows_needs_tests.py, not collected by the suite)
-1. F4 (ema_checks / ema_ledger) or F6 (the two cycles): call ema_reports.learn_payer_aliases(conn) once the weekly
-   exports are read and before the EMA checks and the ledger's refresh use the payer groups. Today nothing calls it, so
-   EMA's name-only paths group the VA network's claims (named after its administrator, payer id VACCN on the weekly
-   exports' rows) as 'Optum (UHC)', commercial, dated by the UnitedHealthcare-administered plans' 12 months instead of
-   the statute's 180 days. On the real copy: 151 EMA_DENIED items ($71,386) and 32 NOT_SENT items ($1,950) of the VA's
-   network carry Optum's group and windows. Test: test_an_ema_denial_from_the_va_network_named_after_its_administrator_is_the_vas
-   (both store kinds); it passes once learn_payer_aliases runs first (checked privately).
-2. F4 (ema_ledger.refresh): the EMA summaries keep the payer group the name rules gave when Part A last ran, and refresh
-   runs Part A only when the posting ledger changed. A release that changes the name rules re-runs detection
-   (detect.RULE_FILES holds codes.py) but leaves the stored groups until the next Production report, so not_sent and
-   unanswered_claims date a claim by the old group's windows. On the real copy one NOT_SENT item named 'Medicaid of
-   Kentucky' kept 'Medicaid (other)'. The change: a hash of the name rules in meta; when it differs, Part A (or a
-   re-group of the stored rows with rw_payer_group) at the next refresh. Test:
-   test_the_ema_summaries_take_a_changed_name_rule_without_a_new_report (both store kinds); it passes when Part A runs
-   again (checked privately with parts="AB").
+1. F4, done on wip/fx-ema at d78502f (`ema_ledger.refresh` calls `ema_reports.learn_payer_aliases` first): EMA's
+   name-only paths grouped the VA network's claims (named after its administrator, payer id VACCN on the weekly exports'
+   rows) as 'Optum (UHC)', commercial, dated by the UnitedHealthcare-administered plans' 12 months instead of the
+   statute's 180 days. On the real copy: 151 EMA_DENIED items ($71,386) and 32 NOT_SENT items ($1,950). Test:
+   test_an_ema_denial_from_the_va_network_named_after_its_administrator_is_the_vas (passes on a scratch merge with
+   origin/wip/fx-ema). With it, those items take the VA's windows: 90 days shown and (this round, r2-8) 12 months the
+   last day, so none closes before the 12 months it had.
+2. F4, done on wip/fx-ema at d78502f (`_name_rules_hash`, `_regroup_ar`): a release that changes the name rules re-groups
+   the stored EMA summaries, the A/R's rows included. Review r1-2 showed re-running Part A alone left ema_ar on the old
+   group (ema_checks._status_claims reads the A/R rows first; on the real copy the 53 ema_lines rows of EMA's Kentucky
+   program name read 'Medicaid KY' after Part A, its 81 ema_ar rows still 'Medicaid (other)'), so the earlier note here
+   ('Part A again makes it pass') was wrong for the NOT_SENT item. Tests:
+   test_the_ema_summaries_take_a_changed_name_rule_without_a_new_report and
+   test_a_not_sent_claim_takes_the_changed_name_rule_once_the_summaries_are_refreshed (asserts the A/R rows and the
+   NOT_SENT item's group); both pass on a scratch merge of this branch with origin/wip/fx-ema.
+3. Integrator (story._appeal_channel and appeals._process; no fixer owns them), review r2-3: an Anthem own-plan CO-50
+   denial is dated by the clinical appeal, but its next step says 'File it on Availity as a Claim Payment Dispute' and its
+   letter 'This is a Claim Payment Reconsideration ... within the two years the manual allows'. The rule now carries its
+   route's words (`codes.appeal_rule(...)['process']`, `['channel']`, set only on Anthem's clinical and may-be-clinical
+   rows). The change, checked on a scratch copy (the test passes on both store kinds, tests/test_story.py green):
+       appeals._process(f), first lines: `r = appeal_rule(grp, kind, **rule_facts(f))`; `if r.get("process"): return r["process"]`
+       story._appeal_channel(f), before the APPEAL_CHANNELS loop: the same with `r.get("channel")`
+   Test: test_an_anthem_clinical_denials_next_step_and_letter_name_the_clinical_appeal_not_the_payment_dispute.
+   Before the merge also run tests/test_decisions*.py, test_ema_pages.py, test_ema_wiring.py, test_fax.py and
+   test_features.py, which read the letter's words.
+4. Integrator (the shared private word list, `$S/docs_private/all_words.txt`), review r2-7: add the six payer names
+   this branch's first round copied from the practice's files (they are the last six lines of
+   `$S/tk/units/fx-windows/private_words_plus.txt`), so test_docs catches them if they come back. This branch and the
+   integration tip fe9ad71 pass test_docs with that list.
 
 ## Observations for the final trace (no test: no date moves on the real copy)
 - The 837 pass groups a never-answered claim by the payer id's answered claims (detect's group_of votes). Plans that share
   an id take the id's majority: 'MHS ... Indiana Medicaid' sends under Centene's id are 'Ambetter (Centene)', commercial
-  (4 NO_ANSWER items, $377); 'Humana Healthy Horizons Medicaid of Kentucky' sends are 'Humana Medicare Advantage
+  (4 NO_ANSWER items, $377); the sends of Humana's Kentucky Medicaid plan ('<Humana plan> Medicaid of Kentucky') are 'Humana Medicare Advantage
   Medicaid' (payer_group_kind appends Medicaid to the MA group). The first-filing windows are the same either way
   (Ambetter's 90/180 days equal Indiana's managed care 90/180; Humana's Medicaid rows match either group), so no date
   moves; the group label is wrong. F3a's (detect's 837 pass) to judge.
-- EMA names 'Humana Healthy Horizons Medicaid of Kentucky' 'Medicaid (other)' (the generic Medicaid rule comes before the
+- EMA names Humana's Kentucky Medicaid plan ('<Humana plan> Medicaid of Kentucky') 'Medicaid (other)' (the generic Medicaid rule comes before the
   Humana rules); its windows are Kentucky's managed care ones either way (120 days, last day 125; filing 365 days).
 
 - The appearing NO_ANSWER item (84c6128e241cf91fed4ca54f, $0): a claim whose one code (G2211) A17 calls not payable by
@@ -167,20 +203,34 @@ branch wrote. Verdicts: 29 right, 1 unclear, 0 wrong (30 items).
   never pays belongs on the never-answered list is the 837 pass's rule (F3a's).
 
 ## For the merge
-- codes.py is this unit's only rule file; the call sites (ema_checks.ema_denials, detect._emit_proto) only pass `carc`.
+- codes.py is this unit's only rule file. The call sites pass facts only: ema_checks.ema_denials (`carc`, `payer_name`,
+  `carcs`, and `carcs` in the item's claim dict), ema_checks.unanswered_claims (`payer_name`), detect._emit_proto
+  (`rule_facts(claim, carc=...)`) and detect.run_claim_rules' CLAIM_DENIED_UNPAID emit (`claim=dict(cl, carcs=...)`).
   detect.RULE_FILES holds codes.py, so the release re-analyses the archive once.
+- Two new plan facts: `carcs` (every denial reason of an item, given by a call site) and `code` (the item's procedure
+  code, read by rule_facts from `procedure_code`). rule_facts adds each only where the item has it, so an item's dict of
+  facts is as before otherwise. A rule for several reasons together carries 'members'; window_end, legal_deadline and
+  rule_at read them.
 - F4's wip/fx-ema adds ema_checks._catch_all_company, whose docstring says the state's own program 'Medicaid of <state>'
   lands in 'Medicaid (other)'. After this branch, Kentucky's and Indiana's land in 'Medicaid KY' and 'Medicaid IN' (a
   program of another state still lands in the catch-all); the logic still holds (a name in the catch-all is told by its
   company, a group outside it by the group), only the docstring's example is out of date.
 - tests/test_payer_windows_review.py and tests/test_workable.py hold expectations this branch changed on purpose:
-  'KY MEDCAID' (with the state first) is Kentucky's program, and the VA filing label quotes 38 U.S.C. 1703D(b).
+  'KY MEDCAID' (with the state first) is Kentucky's program, the VA filing label quotes 38 U.S.C. 1703D(b), and (fix
+  round) the FEP's 150, 151 and 152 keep the dispute's two years as their last day.
   tests/test_story.py keeps its expectation (an Anthem CO-50 denial whose remittance names no plan stays open to the
   dispute's two years); only its docstring says why.
 
 ## Open questions
+- Anthem's own member by the member id's prefix (review r1-1's suggestion, not built): a Blue plan gives its members a
+  three-letter prefix, and on the copy the prefix separates the two populations well (state-free plans: 4,164 claims of
+  prefixes seen only beside Kentucky or Indiana plans, 10,315 only beside BlueCard or other states' plans, 2,410 beside
+  both, 9,195 with no alpha prefix). Learning a home state per prefix would let a state-free plan's clinical denial of a
+  Kentucky or Indiana member expire at 185 days instead of the dispute's two years. It needs the fact on every finding
+  (states, story and appeals read the windows from the stored item, which carries no member id), so it is a schema
+  change for the integrator to weigh; today such an item stays listed up to the two years, never closed early.
 - The VA network's reconsideration window (Region 2: Kentucky, Indiana) has no source read: 90 days is used, not
-  confirmed.
+  confirmed, with 12 months as the last day.
 - Indiana managed care plans' dispute windows (60 days used, not confirmed) and whether the practice is in each plan's
   network (90 or 180 days to file).
 - Whether a BlueCard member's Home Plan gave its own appeal directions on a given claim is not on file: the item keeps the
