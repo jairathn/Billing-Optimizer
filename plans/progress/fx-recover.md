@@ -83,84 +83,135 @@ ownership table, what every fixer delivers). Rules: `plans/briefs/2026-11-26_com
   never billed to a Medicaid member). A service Medicaid has no rate of its own for caps nothing. Small edits in
   functions no fixer owns (archive rule 2's claim branch, one evidence key in run_claim_rules). Tests: 3.
 
-## Done (hand trace), commits d54fb7c, 5a6aa7f, 2a93acd
+## Done (hand trace), commits d54fb7c, 5a6aa7f, 2a93acd, 4bea68e
 - d54fb7c: a second payer's share paid between a denial and the payer's new payment is part of what came back (the
   denial held nothing for it to share); a payment that only replaces one the payer held at the answer and took back is
   picked last. Tests: 2.
-- 5a6aa7f and 2a93acd (detect.py `_gained`, `_recover`, new `_claim_share`): the hand trace of branch 2's moves found the
+- 5a6aa7f, 2a93acd (detect.py `_gained`, `_recover`, new `_claim_share`): the hand trace of branch 2's moves found the
   held-share rule too wide. A second payer's payment after an item's answer was held as its share of that answer whenever
   the service held any money then (another unit's payment on the same claim, or another payer's), so a first payer's
   denied unit later paid by the second payer, a denial after another payer had paid, and a payer that denied as primary
-  and paid as second payer all recorded $0. Now only the money the item's own line held at its answer is shared. And a
-  line's money is what its claim paid of it: where a claim's own adjustments take back what its lines pay (a second
-  payer's claim-level PI-22 or OA-23 naming the first payer's payment: the line pays as if first, the claim pays the
+  and paid as second payer all recorded $0. Now only the money the item's own line held at its answer is shared. A line's
+  money is what its claim paid of it: where a claim's own adjustments take back what its lines pay (a second payer's
+  claim-level PI-22 or OA-23 naming the first payer's payment: the line pays as if first, the claim pays the
   difference), the paying lines share the take-back in proportion; a claim total that differs from its lines with no
-  claim-level adjustment changes nothing (the test builders write a fixed CLP04). Tests: 3 functions (6 ids with the
-  two offsets and both store kinds) plus a control.
-- Every fix broken on purpose and restored ($U/scripts/breaks.py: 32 breaks, each fails its tests; git diff unchanged).
-- Recovery suites (every test file that checks a recovery, 43 files): 1,497 passed.
+  claim-level adjustment changes nothing (the test builders write a fixed CLP04). 2a93acd dropped an own-payer exclusion
+  that no case reached (its break failed no test). Tests: 3 functions (both store kinds) plus a control.
+- 4bea68e: what a payer adds at the claim level (a negative adjustment: the patient's share paid after all) is money the
+  claim paid toward its lines; only interest is left out (an Aetna second payer's claim in the trace). Test: the
+  claim-level case with an added PR-2.
+
+## Done (F1's routed needs), commits 4bea68e, 6665b49, dda9345
+- need_status_1_supplement_not_primary (archive_rules.other_payer_paid_first, new `_after_other_payer`): a payment
+  processed after another payer's (CARC 22 or 23 on its line or claim, by the payer) is no primary payment, whatever
+  claim status it reports (F1's reading in states.paid_proof and detect._taken_back_items).
+- need_part_paid_as_global_elsewhere (detect.resolve_elsewhere): a 26 or TC part billed apart after the same payer paid
+  the whole service on another bill of the patient is a duplicate, closed as paid before, whatever its CARC.
+- need_medicaid_share_size (detect._set_states; states.states_of passes the state's paid_first_partial on, a small edit
+  in a function no fixer owns): a Medicaid denial kept as work because the first payer paid part of Medicaid's rate is
+  sized at what Medicaid still owes.
+- need_denial_on_a_voided_claim (new detect._voided_denials, run right after resolve_elsewhere): a denial of a claim the
+  practice voided afterwards (the newest 837 send since the denial a void with nothing after it, or EMA's charge voided:
+  detect._voided_services) is reclassified as archive rule h's 'voided', so states._decide's archive branch puts it done
+  with the void as proof. The rule that lists the denial and states._decide are unchanged. 6665b49 moved it after
+  resolve_elsewhere: run before it, 16 Medicare denials voided and billed again under a new bill that paid were sized at
+  $0 first and closed at what the payer paid. Test added.
+- 6665b49 also: money-11's same-day fold (archive_rules.fold_repeat_denials) folded a second delivery of the same claim
+  id under another plan (REF*CE) into the first, and its item took the first plan's deadline
+  (test_payer_windows::test_detection_dates_each_plan_by_its_own_window[store_file] failed since 422b99e). The answer's
+  signature carries the claim's plan; load_archive reads claims.contract_class into Claim.plan (no fixer owns it).
+- dda9345: detect's same-day copies (`_answer_copies`) keep the plan too: in Python 3.11.1 the second plan's delivery was
+  still passed by as a copy of the first, which the store already listed (the same test failed there only).
+- The four need tests copied into tests/test_fx_recover.py (`test_f1_*`, both store kinds).
+- Every fix broken on purpose and restored ($U/scripts/breaks.py: 39 breaks, each fails its tests; git diff unchanged).
 
 ## Measured (private world copy, cycle_run 2026-11-24, A17 W view)
-Tip: 56b538e's code (the tip is now bf1f17b, plans only since). Branch 2: d54fb7c. Branch 3: 2a93acd. No merge of
-another fixer's branch is in either measurement (F1's merge has not reached the tip).
-- Branch 2 against the tip: 494 items moved. Recovered: 486 items, -$10,742.85 (454 capped at the shortfall, -$9,346.32;
-  21 lower, -$2,058.10; 11 higher, +$661.57). Appeared: 5 DENIED_OTHER (+$1,813.23: 4 Medicare Supplement carriers, 3
-  of them 99999 and one '17263 76 5', all expired, payer_has_no_rate; 1 Self-funded plan TPAs 11401, Work now, $116.60,
-  payer_has_no_rate). Vanished: 2 DENIED_FREQUENCY UnitedHealthcare Medicare Advantage 77401 ($25.55, already done).
-  Size: 1 SECOND_RATE Humana Medicare Advantage 11102 (-$17.28: one claim taken back left the review). On real data
-  the pattern rules moved one review (a claim taken back); no claim was paid more since or repriced.
-- A17 W, tip -> branch 2: CORRECT|closed 10,445 -> 9,996 (in scope 2,579 -> 2,511); WRONG_AMOUNT|closed 485 -> 936
-  (in scope 126 -> 194); ALREADY_DONE|open 1,278 -> 1,279 (+1: the 11401 item, $116.60); NOT_A_UNIT -$17.28; every
-  other class the same (ALREADY_WORKED 37, DUPLICATE 66, CORRECT|open 2,215, WRONG_AMOUNT|open 1,636, UNDECIDED 984,
-  CLOSED_WRONGLY 5); money left on the table unchanged. Of the verdict changes, 441 CORRECT -> WRONG_AMOUNT are the
-  brief's cap at the shortfall (A17 counts every payment after the answer, uncapped) and 10 are lower recoveries, all
-  hand traced below (the reason for 5a6aa7f).
-- Branch 3: BRANCH3_RESULTS
+Final: the integration tip fe9ad71 (F1, F3a and F3b merged) against this branch at 6665b49 (that tip merged in at
+ca811ed). Earlier rounds: tip 56b538e against branch 2 (d54fb7c) and branch 3 (2a93acd), before F1's merge.
+- 574 items moved. Recovered: 546 items, -$15,710.47 (440 capped at the shortfall, -$8,116.94; 95 lower, -$8,255.10;
+  11 higher, +$661.57). The lower ones are mostly lines that pay more than their claim (a second payer's claim-level
+  PI-22 or OA-23 taking back the first payer's payment, or CO-B13 'paid before'): the recovery is now what the claim paid.
+- Appeared: 5 DENIED_OTHER (+$1,813.23): 4 Medicare Supplement carriers (99999 three times and '17263 76 5', expired,
+  payer_has_no_rate) and 1 Self-funded plan TPAs 11401 on Work now ($116.60, payer_has_no_rate).
+- Closed as paid before, a part billed apart after the same payer paid the whole service (F1's need): 10 items from Work
+  now ($741.92): 88305 parts at Anthem Medicare Advantage (4), UMWA (2), Anthem claim denials (2), UnitedHealthcare
+  Medicare Advantage (2, CO-151 on 9 units of the 26, against the same payer's 9 units of the whole service paid 17 days
+  before).
+- Done, the claim voided by the practice (F1's need): 10 items, 2 bundling denials from Work now (UnitedHealthcare and its
+  Medicare Advantage plan) and 8 expired denials (UMWA 4, Medicare KY 3, UHC Integrated Services 1), the void in EMA's
+  lines or in an 837 frequency 8 sent after the denial.
+- Vanished: 2 DENIED_FREQUENCY UnitedHealthcare Medicare Advantage 77401 ($25.55, already done on the tip). Size: 1
+  SECOND_RATE Humana Medicare Advantage 11102 (-$17.28: a claim taken back left the review).
+- A17 W, tip -> branch: ALREADY_DONE|open 1,265 -> 1,256 (in scope 998 -> 989); CLOSED_WRONGLY|closed 5 -> 7 (the two
+  CO-151 items above, $0 each; A17 reads them as real denials); CORRECT|closed 10,316 -> 9,838; CORRECT|open 2,254 ->
+  2,252; WRONG_AMOUNT|closed 485 -> 975 (in scope 126 -> 205); NOT_A_UNIT -$17.28; money left on the table unchanged.
+  Of the WRONG_AMOUNT moves, about 440 are the brief's cap at the shortfall (A17 counts every payment after the answer,
+  uncapped), most of the rest the claim-level take-back (A17 counts a line's paid as listed).
+- privacy-3 on real data: 222 closures by the payer's own settling answer, every one with proof rows that reconcile; no
+  answer failed to reconcile. privacy-4: 106 whole-charge CO-45 lines counted out as paid at the claim level and 2 as
+  rebilled and paid, unchanged by money-10 (no prompt-pay interest among them).
+- Lines that pay more than their claim, the rest taken back at the claim level: 472 second-payer claims ($119,332.25)
+  and 58 first-payer claims ($17,654.33) on the real copy.
 
-## Hand trace (de-identified views only; verdicts on the branch's value)
-Branch 1 and 2 picks (26): the three 99999 and the '17263 76 5' supplement items listed as codes the payer has no
-rate for: right (privacy-4, decision 4), the '17263 76 5' one unsized (residual). The 11401 TPA item on Work now:
-right by decision 4 (A17 calls it already done). Four second-payer-share cases wrong on branch 1, fixed in d54fb7c; one
-replacement-payment case wrong on both, fixed in d54fb7c. Two vanished 77401 frequency denials: wrong (a same-day
-delivery reversed later was folded as a copy; residual, already-done items, no Work-now effect). One multi-unit service
-whose other unit's second-payer takeback lowers this unit's recovery: wrong (residual). Six capped at the shortfall:
-right by the brief (A17 disagrees: the cap question below). One Cigna claim-level second-payer settlement: unclear.
-Others right (a review losing a claim taken back; recoveries picked by charge and modifiers).
-Branch 2's ten lower recoveries A17 calls wrong (L0 to L9), each against raw rows:
-- L0, Medicare KY OA-109 99213: another payer paid first, its second payer paid $45.00 after Medicare's denial. Branch
-  2 $0: wrong (Medicare's denial held nothing). Branch 3: L0_RESULT.
-- L1, Medicare KY 11305 CO-50 (one unit paid, this one denied); Medicare reopened and paid it $33.25; the supplement's
-  $8.29 share of the other unit came between. Branch 2 $24.96: wrong. Branch 3: L1_RESULT.
-- L2 and L6, UMWA 99213 denied as primary after another payer paid; UMWA then paid as second payer: its line says
-  $42.88 (and $75.58) but its claim took $37.88 (and $72.50) back at the claim level (PI-22), so $5.00 (and $3.08)
-  arrived. Tip $42.88 and $75.58: wrong (too high); branch 2 $0: wrong. Branch 3: L2_RESULT.
-- L3, L4, L5, UMWA 17003, 17110, 99213 on one claim: UMWA's lines repeat the first payer's payments ($169.15 in all) and
-  its claim takes $124.15 back (PI-22): $45.00 arrived. Tip credited $169.15 (wrong); branch 2 $0 on these three (17000's
-  $23.12 kept). Branch 3 shares the $124.15 by what each line pays: L3_RESULT. The claim's total is right; each line's
-  share is an estimate (by the first payer's own line payments it would be $0, $0, $21.88 and $23.12): unclear per line.
-- L7, L8, L9, Anthem CODE_CHANGED 77436 (CO-97); Medicare as second payer paid the line (as 77600) $388.33. Branch 2
-  $0: wrong. Branch 3: L7_RESULT (capped at the $357.48 shortfall by the brief).
+## Hand trace (de-identified views only: days from the bill's first row, claims lettered, payers by group)
+42 items traced against their raw 835 rows.
+- Branch 1 and 2 picks (26): the three 99999 and the '17263 76 5' supplement items listed as codes the payer has no
+  rate for: right (privacy-4, decision 4); the '17263 76 5' one unsized (residual). The 11401 TPA item on Work now: right
+  by decision 4 (A17 calls it already done). Four second-payer-share cases wrong on branch 1 and one replacement-payment
+  case wrong on both: fixed in d54fb7c. Two vanished 77401 frequency denials: wrong (a same-day delivery reversed later
+  folded as a copy; residual, already-done items). One multi-unit service whose other unit's second-payer takeback
+  lowers this unit's recovery: wrong (residual). Six capped at the shortfall: right by the brief (A17 disagrees). One
+  Cigna claim-level second-payer settlement: unclear. The rest right.
+- Branch 2's ten lower recoveries A17 called wrong (L0 to L9), each against raw rows, all fixed on branch 3:
+  L0 Medicare KY OA-109, another payer's second payer paid $45.00 after the denial: $0 -> $45.00, right. L1 Medicare KY
+  11305 CO-50, reopened and paid $33.25 (the supplement's share of the other unit between): $24.96 -> $33.25, right. L2
+  and L6 UMWA, denied as primary then paid as second payer, its line $42.88 / $75.58 with $37.88 / $72.50 taken back at
+  the claim level: tip $42.88 / $75.58 (too high), branch 2 $0, branch 3 $5.00 / $3.08, right. L3 to L5 UMWA, three lines
+  of one claim repeating the first payer's payments, $124.15 taken back at the claim level, $45.00 arrived: tip $169.15,
+  branch 3 shares the claim's $45.00 by what each line pays ($1.21, $20.59, $17.06 with 17000's $6.15): the claim's total
+  right, each line's share an estimate (by the first payer's own line payments it would be $0, $0, $21.88, $23.12):
+  unclear per line. L7 to L9 Anthem CODE_CHANGED 77436, Medicare as second payer paid the line (as 77600) $388.33: $0 ->
+  $357.48 (capped at the shortfall by the brief), right by the brief.
+- Branch 3's new lower recoveries (6 sampled): two CO-B13 'paid before' claims with no earlier payment on the bill:
+  unclear ($0 now; the payment they name is not on file). One B13 claim repeating a payment made before the denial:
+  right ($0, tip $33.37). Medicare paid after the denial, the supplement's line repeating it with its claim paying $0:
+  right ($42.33, tip $95.25). An Aetna second payer whose claim paid the coinsurance back at the claim level: wrong on
+  branch 3 ($70.75), fixed in 4bea68e (the added money counts). L5 above.
+- Final branch's state moves: the two CO-151 88305-26 items closed as paid before (9 units of the whole service paid by
+  the same payer 17 days earlier on another bill): right by F1's rule, A17 calls them closed wrongly. The voided items:
+  2 checked against their sends (one an 837 void after the denial, one EMA's void): right.
+
+## Suites
+- python3 (3.13), the full suite at ca811ed: 3,891 passed, 29 skipped, 1 xfailed, 1 failed
+  (test_payer_windows::test_detection_dates_each_plan_by_its_own_window[store_file], mine since 422b99e, fixed in
+  6665b49 and dda9345).
+- Python 3.11.1 (SQLite 3.40.0), the full suite at 6665b49: 152 failed and 47 errors, all from the missing
+  Connection.serialize but two: the same payer-windows test (fixed in dda9345: 39 passed in that file) and
+  test_cloud::test_self_test_passes_when_many_requests_ask_at_once, which fails on the tip fe9ad71 in 3.11.1 too (not
+  mine).
+- At dda9345, the 53 test files that touch recoveries, folds and copies: 2,465 passed (four shards).
 
 ## Not done, and why
-- Items worth $0 on Work now: measured on the branch's real-copy run, no Work-now item has a $0 charge; the 154 with no
-  amount have a charge (133) or an unknown one (21): unpriced, not $0 lines, so they stay. The $0 and token lines of
-  never-answered export claims are the exports pass's (review answers item, run_ema_open_claims).
-- The status-1 supplement: waits for F1's `_after_other_payer` (F1's merge has not reached the tip).
-- F1's routed needs (part paid as global elsewhere, Medicaid share size, denial on a voided claim, one service on two
-  items, the 129 taken-back second shares): wait for `Merge wip/fx-ledger` on the tip.
+- Items worth $0 on Work now: on the real copy no Work-now item has a $0 charge; the 154 with no amount have a charge
+  (133) or an unknown one (21): unpriced, not $0 lines, so they stay. The $0 and token lines of never-answered export
+  claims are the exports pass's (review answers item, run_ema_open_claims).
+- A second payer the 837 names (F2's residual's second half): the CARC 22 and 23 reading is in (F1's routed need); the
+  837's own naming of the second payer is not.
+- F1's routed items with no need file: one service on two items (a REJECTED_PRE_PAYER claim item beside a waiting
+  line denial of the same drug line) and the 129 second payers' shares taken back in full ($6,424.85) on no item. Not
+  started (time); the second is the owner's call for the small partial recoupments, per the brief.
 
 ## Residuals for the integrator
-- The cap at the shortfall (brief, money-4) against A17 and decision 3 ("the recovery is what actually arrived"): A17
-  counts every payment after the answer, uncapped; 441 closed items move to WRONG_AMOUNT on the cap alone. One line
-  decides it (`cap=` in `_emit`); the owner's call.
-- Lines that pay more than their claim, the rest taken back at the claim level: 472 second-payer claims ($119,332.25)
-  and 58 first-payer claims ($17,654.33) on the real copy. Recoveries now count what the claim paid; every other use of a
-  line's payment (whether a service is paid, sizes, the ledger) still reads the line. No fixer owns line money as a
-  whole: the integrator's to route (F1's ledger is the nearest).
+- The cap at the shortfall (brief, money-4) against A17 and decision 3 ("the recovery is what actually arrived"): 440
+  closed items move to WRONG_AMOUNT on the cap alone. One line decides it (`cap=` in `_emit`); the owner's call.
+- Lines that pay more than their claim: recoveries now count what the claim paid (shared by what each line pays); every
+  other use of a line's payment (whether a service is paid, sizes, the ledger) still reads the line. No fixer owns line
+  money as a whole; F1's ledger is the nearest. A17 reads the line too.
+- CO-B13 'paid before' at the claim level with no earlier payment on file: the recovery is $0 now; where that payment
+  was made is not known from the 835s.
 - A multi-unit service where another unit's second-payer takeback lowers this unit's recovery (one item seen).
 - A same-day delivery reversed later is folded as a copy (two 77401 items, $25.55, already done).
 - The '17263 76 5' no-rate item is unsized (size by the base code's rate).
-- A Cigna claim-level second-payer settlement (one item): unclear.
 
 ## Needs from others
 (none: the items above have no owner among the fixers' functions; the integrator routes them)
