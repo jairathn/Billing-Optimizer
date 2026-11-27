@@ -58,3 +58,41 @@ def test_an_ema_denial_from_the_va_network_named_after_its_administrator_is_the_
     finally:
         lg.close()
         st.close()
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=["store_file", "compact_image"])
+def test_the_ema_summaries_take_a_changed_name_rule_without_a_new_report(tmp_path, ema_env, monkeypatch, compact):
+    """F4 need (ema_ledger.refresh): the EMA summaries (ema_lines, and the A/R's stored rows) keep the payer group the name
+    rules gave when Part A last ran, and refresh runs Part A only when the posting ledger changed. A release that changes
+    the name rules (codes.PAYER_RULES; here fx-windows' reading of EMA's 'Medicaid of Kentucky' as Kentucky's own
+    program) re-runs detection (detect.RULE_FILES holds codes.py) but leaves the stored groups as they were until the next
+    Production report arrives, so the checks that read them (not_sent, unanswered_claims) date such a claim by the old
+    group's windows ('Medicaid (other)': the 90-day default instead of Kentucky's 12 months). On the real copy one
+    NOT_SENT item of that name kept 'Medicaid (other)' after the change.
+    The change: keep a hash of the name rules in meta (codes.PAYER_RULES, ema_reports' VA rule and alias maps) and, when
+    it differs, run Part A (or re-group the stored rows with rw_payer_group) at the next refresh."""
+    from remitwatch import codes, ema_ledger as el, ema_reports as er
+    from remitwatch.store import Store
+    from tests import test_ema_checks as TC
+    name = "Medicaid of Kentucky"
+    new_rules = list(codes.PAYER_RULES)
+    old_rules = [r for r in new_rules if r[1] != "Medicaid KY"]          # the release before: the name reads as 'Medicaid (other)'
+    st = Store(":memory:", compact=True) if compact else Store(str(tmp_path / "store.sqlite"))
+    er.ensure_schema(st.conn)
+    st.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (TC.SALT_HEX,))
+    st.conn.commit()
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        monkeypatch.setattr(codes, "PAYER_RULES", old_rules)
+        er._GROUPERS.clear()
+        TC.load(st, lg, tmp_path, TC.c5_rows(link=2, reason="CO-16", payer=name))
+        groups = {g for (g,) in st.conn.execute("SELECT DISTINCT payer_group FROM ema_lines WHERE primary_payer = ?", (name,))}
+        assert groups == {"Medicaid (other)"}, groups                    # what the earlier release stored
+        monkeypatch.setattr(codes, "PAYER_RULES", new_rules)             # the release with the new rule starts
+        er._GROUPERS.clear()
+        el.refresh(st, lg, parts="auto", log=TC.Log())
+        groups = {g for (g,) in st.conn.execute("SELECT DISTINCT payer_group FROM ema_lines WHERE primary_payer = ?", (name,))}
+        assert groups == {"Medicaid KY"}, groups
+    finally:
+        lg.close()
+        st.close()

@@ -262,6 +262,23 @@ def test_the_state_program_named_with_the_state_after_the_word_medicaid_is_the_s
     assert filing_rule(grp, kind)["days"] == 180 and appeal_rule(grp, kind)["days"] == 60
 
 
+def test_a_plan_that_names_its_state_by_the_code_after_of_is_read_as_that_states():
+    """EMA names a Kentucky managed care plan '<plan> Medicaid of Ky': the state is the code after 'of', so the plan gets
+    Kentucky's managed care windows (an appeal in 120 days, the last day 125: KRS 205.534's receipt) instead of the 90-day
+    default with no last day of its own, which would close the item 35 days early. A word that starts with the letters
+    (OF INSURANCE) names no state."""
+    assert codes.plan_state(None, "Sample Health Plan Medicaid of Ky") == "KY"
+    assert codes.plan_state(None, "Sample Health Plan Medicaid of In") == "IN"
+    assert codes.plan_state(None, "Sample Plan of Insurance") is None
+    assert codes.plan_state("SAMPLE PPO", "Sample Health Plan") is None
+    name = "Sample Health Plan Medicaid of Ky"
+    g, k = codes.normalize_payer(name)
+    assert (g, k) == ("Medicaid (other)", "medicaid")
+    r = appeal_rule(g, k, payer_name=name)
+    assert (r["days"], r["legal"]) == (120, {"days": 125}), r["label"]
+    assert "Kentucky Medicaid managed care" in r["label"], r["label"]
+
+
 def test_a_managed_care_plans_name_that_names_the_state_is_not_the_state_program():
     """A Medicaid managed care plan's name starts with the plan's own ('Anthem Indiana Medicaid Hoosier Healthwise', '<plan>
     Pathways Indiana Medicaid', '<plan> Medicaid of Kentucky'): it is never the state's fee-for-service program, whose rules

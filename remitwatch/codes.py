@@ -379,9 +379,10 @@ def plan_state(plan: str | None = None, payer_name: str | None = None) -> str | 
         u = " ".join(str(text or "").upper().split())
         if not u:
             continue
-        if re.search(r"\bKENTUCKY\b", u) or u.startswith("KY "):
+        # the state's code after 'of' ('<plan> Medicaid of Ky', as EMA names a plan) names it too (fx-windows)
+        if re.search(r"\bKENTUCKY\b|\bOF KY\b", u) or u.startswith("KY "):
             return "KY"
-        if re.search(r"\bINDIANA\b", u) or u.startswith("IN "):
+        if re.search(r"\bINDIANA\b|\bOF IN\b", u) or u.startswith("IN "):
             return "IN"
         m = _STATE_RE.search(u)
         if m:
