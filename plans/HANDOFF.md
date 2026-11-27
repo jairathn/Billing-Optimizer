@@ -6,7 +6,7 @@ push-2 branch (`git show origin/claude/ecstatic-fermi-orfcgo:CLAUDE.md`; it is n
 push 2's modules, but its rules apply to every change). This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-26, 19:05 UTC.
+Last updated: 2026-11-27, 00:52 UTC.
 
 ## 00. Two sessions take turns (read this first, every time you resume)
 
@@ -23,7 +23,7 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-26 22:20 UTC, session on `claude/ecstatic-fermi-orfcgo`; the units started 18:24 to 18:27 UTC)
+### Running now (updated 2026-11-27 00:52 UTC, session on `claude/ecstatic-fermi-orfcgo`)
 
 Each unit is a workflow on that session's machine: builder, then two independent reviewers, then one fix round. Its
 branch and `plans/progress/<unit>.md` on it hold its state; its brief is in `plans/briefs/`. If that session stops, resume
@@ -33,17 +33,19 @@ a unit from its branch and progress file (the brief says what done means), or st
 |---|---|---|---|
 | fix7d, one practice day | `wip/fix7d` | `plans/briefs/2026-11-26_fix7d.md` | **merged** at 993f440 (22:15 UTC): build, two reviews (10 findings), fix round all done; its code equals the merge's; python3 green, under GMT-14 and GMT+12 too, 3.11.1 only the serialize class |
 | fix7c, underpayment rates by plan | `wip/fix7c` | `plans/briefs/2026-11-26_fix7c.md` | **merged** at ecaef14 (23:55 UTC): build, two reviews (18 findings, all fixed), fix round; its code equals the merge's; full suite on its code merged with fix7d: python3 2,993 passed 0 failed, 3.11.1 only the serialize class. Left: UHC Kentucky PA/NP since late October (owner), a UMR NP review sized at the plan's full rate (about $217 if NPs are paid like PAs), the dependent's own patient loop (F3a), pattern items' reversed lines and Results credit (F2) |
-| hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | running (run wf_de305d40-7eb); at 18:40: tip merged (d3a7700), decision 1 not started yet |
-| the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | running (run wf_3bb6d5ec-97b); at 18:40: reading code paths, baseline measured; research on decision 4 running beside it |
-| review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | running (run wf_184ad9ab-91b): areas answers and money first, then hosts, people, privacy. The orchestrator's own read of the whole diff is in `plans/review_notes_orchestrator_2026-11-26.md` (merge it into the review file) |
-| a17, the independent every-claim auditor (started early: it touches no product code) | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | running (run wf_8fc9da8c-468, started 18:55 UTC): payer-window research beside the build, then integration, two reviews, one fix round. Score again with the merged code before the final trace |
+| hook-in unit and the owner's decision 1 (Vercel analyses only on a press) | `wip/hook` | `plans/briefs/2026-11-26_hook.md` | **merged** at 98c03ca, then dd04209 (CLAUDE.md: Vercel analyses only on a press, reads the A/R only, tidies after a chain). Full python3 suite on dd04209: one failure, ops.js cutting a run's time to UTC's day, fixed at 99529ab |
+| the owner's decisions 2, 3 and 4 | `wip/decisions` | `plans/briefs/2026-11-26_decisions.md` | **merged** at d5e445b (three textual conflicts with the hook, resolved as unions). The merge broke 4 decision-4 tests: the hook's vanished self-check kept items the owner had taken off by accepting a period pattern. Fixed at 38ba02f (the check reads the owner's per-period accepts as fold_payer_policy and C5 do, with the billed code and paid amount in its snapshot; tests/test_merge_vanished_policy.py) |
+| review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | **done**: 37 findings, every verdict in; they feed the fix wave |
+| a17, the independent every-claim auditor | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | **merged** at 2874e3d (plans only: the auditor, its sourced window table, the report). After its fix round, Work now (services since 2026-01-01): correct 1,357 ($219,685), already done 165, already worked 27, duplicate 5, wrong amount 190 ($16,814), undecided 37; money left on the table 762 services ($88,179), plus 139 ($27,678) past windows the table could not verify. Score again with the fix wave merged before the final trace |
 | deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | **merged** at 63fc3df (23:40 UTC): build, two reviews (15 findings, all fixed), fix round; merged cleanly on top of fix7c, the shared modules' tests pass on the merge (469); full python3 suite on 63fc3df: 3,068 passed, 0 failed (29 skipped, 1 xfailed). Its leftovers are fix-wave F8 (codes.py) and parts of F4 and F6 |
-| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | running (run wf_ea1ab0ef-037, started 22:18 UTC): build, two reviews, one fix round |
-| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | running (run wf_91b074e9-48a, started 22:18 UTC) |
-| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | running (run wf_fc5edc8c-c0f, started 22:18 UTC) |
+| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | run wf_ea1ab0ef-037: built (316b9d8; three needs routed to F2), two reviews running, then one fix round |
+| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | run wf_91b074e9-48a: built (3a7f95b; needs routed to F3c, F5, F6), two reviews running, then one fix round |
+| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | run wf_fc5edc8c-c0f: built (a2120cd; needs on F3a's functions go to F3c), two reviews running, then one fix round |
 
-Merge order when they finish: fix7d, fix7c, decisions, hook, deadlines, then a17's tool (each: merge into the integration
-commit, the full suite in the four environments from a frozen worktree of the merge commit, push to both branch names).
+Merged: fix7d, fix7c, deadlines, hook, decisions, a17's tool. Next, as each fix round ends: F1, F3a, F3b (F3a before
+F3b), then F3c (the two passes' needs on each other), then batch 2 (F2, F4, F5, F6, F8) as each ends, then F7. Each merge:
+into the integration commit, the full suite from a frozen worktree of the merge commit (`$S/tk/tools/integ_suite.sh`),
+push to both branch names.
 
 The review (`plans/review_2026-11-26.md`, 37 findings in five areas, every verdict in) feeds the fix wave after the
 merges. Its brief is `plans/briefs/2026-11-26_fixwave.md` (written 21:20 UTC): seven fixers with a table of the functions
@@ -94,6 +96,21 @@ the release gates (section 0 below, "Then, in order").
   SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
   them by rule (A17 and hand-traces per group) and writes the explanation the owner reads before pressing Accept; none
   is accepted unexplained.
+- **Batch 1's builders (2026-11-27 00:50 UTC): what they routed.** F1's three needs and two of its open questions are in
+  the brief's F2 section (a part paid as the whole service on another bill; the Medicaid share's size; denials of voided
+  claims; one service on a rejected and a denial item; 129 second payers' shares taken back in full, $6,424.85, on no
+  item). F3a and F3b need each other's functions: a new section F3c runs after both merge. F3a's page and host needs are
+  in F5's and F6's sections (the 837 files read again once on each host: until then F3a's patient, sibling and
+  secondary-send rules stay dormant on real data, since every 837 row was read before READ_VERSION 2).
+- **For the final stage's auditor (A17) and hand traces.** F3b: a payer's CO-45 posted after the send with the patient
+  paying the rest is an answer (a Cigna claim A17 calls never answered). F1: EMA often shows a line settled while the
+  835's WO took its payment back (the recoupment was not posted against the line); the new TAKEBACK items surface these
+  and A17's unit model calls them paid, so trace them by hand. A17's per-year tiers made 23 Cigna and 3 UMR units newly
+  short: hand-check them. 320 of 364 send-day twin bills cannot be proven to be the same patient or another (A17's new
+  TWIN_UNPROVEN state).
+- **A stray file outside the repository.** F3a left a copy of detect.py (code only, no patient data) at `/detect_keep.py`
+  in this container's root; a safety check blocks Claude from deleting a file at the root. Harmless; it goes with the
+  container, or a person can delete it.
 
 ## 0. Taking over (written 2026-11-25 13:50 UTC; read this first)
 
