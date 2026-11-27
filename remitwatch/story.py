@@ -5,7 +5,9 @@ postings, never from EMA's claim status alone.
   item_story(conn, finding_id=None, *, claim_key=None, ledger=None, today=None)
       {'rows': [...], 'balance': {...}, 'reconciles': bool, 'gap_cents': int, 'twin': {...} or None, 'notes': [...]}
       One chronological list of every event on the item's line (its claim's, where the line has none), each row tagged
-      with its source: '835' (each adjudication: payer, paid, allowed, every reason with group, amount and meaning, every
+      with its source: '837' (each send of the item's bill in the 837 claim files: the day, the payer and its place on
+      the claim, an original, a replacement or a void, the item's services billed), '835' (each adjudication: payer, paid,
+      allowed, every reason with group, amount and meaning, every
       remark, the claim status, reversal pairs, the code paid against the code billed, units; the takebacks naming the
       claim), 'production' (EMA's postings: the charge, each payment and whether its check has an 835 on file, each
       adjustment with its reason, kind and whether it was posted on a remittance's posting day, patient money), 'ar'
@@ -44,7 +46,7 @@ from typing import Any, Sequence
 from . import states as S
 from .states import day, tail, usd
 
-SOURCES = ("835", "production", "ar", "weekly", "claim_status", "remitwatch")
+SOURCES = ("837", "835", "production", "ar", "weekly", "claim_status", "remitwatch")
 BUTTONS = ("build_packet", "attach_note", "find_note", "upload_note", "fax_payer", "copy_instructions", "mark_sent", "log_outcome",
            "mark_posted", "mark_billed", "accept_pattern", "let_go", "reopen", "request_era", "open_in_ema", "billed_patient", "mark_done")
 STATUS_WORDS = {"1": "processed as primary", "2": "processed as secondary", "3": "processed as tertiary", "4": "denied",
@@ -57,7 +59,11 @@ SERVER_ONLY = "Each of EMA's postings is kept on the server; this site shows EMA
 # the dashboard's copy keeps every 835 claim of an item's bill (cloud.SERVING_BUILD 8) but not EMA's single postings
 COPY_NOTE = ("This site keeps every remittance of the bill. Each analysis works out each item's state from the full store, which also "
              "keeps each of EMA's postings.")
-_SRC_ORDER = {"835": 0, "production": 1, "weekly": 2, "claim_status": 3, "ar": 4, "remitwatch": 5}
+_SRC_ORDER = {"837": -1, "835": 0, "production": 1, "weekly": 2, "claim_status": 3, "ar": 4, "remitwatch": 5}
+# on the dashboard's copy, which keeps no 837 claim file: the send the item's own evidence names
+COPY_837_NOTE = "The 837 claim files are kept on the server; this site shows the send the analysis dated this item by."
+_FREQ_WORDS = {"1": "an original claim", "7": "a replacement (corrected) claim", "8": "a void of the claim", "6": "a corrected claim"}
+_PLACE_WORDS = {"P": "primary", "S": "secondary", "T": "tertiary"}
 
 
 # ------------------------------------------------------------------------------------------------------------ helpers
@@ -199,6 +205,71 @@ def _rows_835(fx: dict) -> list[dict]:
                         f"reference names claim {p['claim_id']}; check ending {p['check_tail']}).", payer=S._grp_kind(p["payer"])[0],
                         amount=-abs(p["cents"]) if p["reason"] in ("WO", "72", "FB") else p["cents"], tags=["plb"]))
     return out
+
+
+def _rows_837(conn: sqlite3.Connection, fx: dict) -> tuple[list[dict], list[str]]:
+    """Each send of the item's bill in the 837 claim files (every submission, every payer: what the practice sent, and
+    when): the day it went out, the claim id, the payer and its place on the claim (SBR01; the payer before it and what it
+    left the patient, where the 837 says), an original, a replacement or a void, and the item's own services billed on it
+    with their charges. On the dashboard's copy, which keeps no 837 file, the send the item's evidence names (sent_837),
+    with a note. ([rows], [notes])."""
+    f = fx["item"]
+    b = S.bill_of(f.get("patient_control_number"))
+    keys = {(str(d or "")[:10], c) for d, c in S._service_keys(f)}
+    out: list[dict] = []
+    if b and S._table(conn, "claims_837"):
+        cols = S._cols(conn, "claims_837")
+        more = ("payer_resp, other_payer_name, other_paid_cents, other_left_cents, other_pr_cents, read_version" if "payer_resp" in cols
+                else "NULL, NULL, NULL, NULL, NULL, NULL")
+        sends = conn.execute(f"""SELECT claim_837_key, patient_control_number, bht_created, TRIM(COALESCE(frequency_code, '')), payer_name,
+                                        total_charge_cents, {more}
+                                 FROM claims_837 WHERE patient_control_number >= ? AND patient_control_number < ?
+                                 ORDER BY bht_created, patient_control_number, claim_837_key""", (b, b + "~")).fetchall()
+        lines: dict[str, list] = {}
+        if S._table(conn, "lines_837"):
+            for key, code, dos, mods, chg, units in conn.execute(
+                    """SELECT claim_837_key, procedure_code, service_date, modifiers, charge_cents, units FROM lines_837
+                       WHERE patient_control_number >= ? AND patient_control_number < ? ORDER BY claim_837_key, line_seq""", (b, b + "~")):
+                lines.setdefault(key, []).append((code, str(dos or "")[:10], mods, chg, units))
+        from .x12_837 import later_payers_send
+        for key, cid, bht, freq, payer, total, resp, other, other_paid, left, pr, version in sends:
+            if S.bill_of(cid) != b:
+                continue
+            own = [x for x in lines.get(key, []) if (x[1], x[0]) in keys] if keys else lines.get(key, [])
+            rest = len(lines.get(key, [])) - len(own)
+            billed = "; ".join(f"{_line_label(c, d, m)} billed {usd(chg)}" + (f" ({u:g} units)" if u and u != 1 else "")
+                               for c, d, m, chg, u in own)
+            what = _FREQ_WORDS.get(freq, "a claim")
+            place = _PLACE_WORDS.get(str(resp or "").upper())
+            bits = [f"Sent electronically to {payer or 'the payer'} as claim {cid}, {what}" + (f", as its {place} payer" if place and place != "primary" else "")]
+            later = later_payers_send(resp, {"other_payer_name": other, "other_paid_cents": other_paid, "other_left_cents": left,
+                                             "other_pr_cents": pr, "read_version": version})
+            if later and (other or other_paid is not None):
+                # sent after the payer before it answered (a claim to the primary lists the secondary in its other-payer
+                # loop without any answer: that is no 'after X answered', fx-837-r1-4, r2-1)
+                lft = left if left is not None else pr
+                bits.append(f"after {other or 'another payer'} answered it" + (f" (paid {usd(other_paid)}" if other_paid is not None else "")
+                            + (f", left the patient {usd(lft)})" if lft is not None else (")" if other_paid is not None else "")))
+            if billed:
+                bits.append(billed)
+            if rest > 0:
+                bits.append(f"and {rest} other {'line' if rest == 1 else 'lines'}")
+            bits.append(f"claim total {usd(total)}")
+            tags = ["837"] + (["own_send"] if cid == f.get("patient_control_number") else [])
+            out.append(_row(bht, "837", "void" if freq == "8" else "send", "; ".join(bits) + ".", payer=payer, amount=total,
+                            tags=tags, claim_id=cid, line=_line_label(own[0][0], own[0][1], own[0][2]) if own else None))
+        return out, []
+    sent = (S._ev(f).get("sent_837") or {}) if f.get("evidence") else {}
+    if sent.get("day"):
+        what = _FREQ_WORDS.get(str(sent.get("frequency") or ""), "a claim")
+        place = _PLACE_WORDS.get(str(sent.get("payer_resp") or "").upper())
+        n = int(sent.get("sends") or 1)
+        out.append(_row(sent["day"], "837", "send", f"Sent electronically to {sent.get('payer') or 'the payer'} as claim "
+                        f"{f.get('patient_control_number')}, {what}" + (f", as its {place} payer" if place and place != "primary" else "")
+                        + (f" (sent {n} times, first on {day(sent.get('first'))})" if n > 1 else "") + ".",
+                        payer=sent.get("payer"), tags=["837", "own_send"], claim_id=f.get("patient_control_number")))
+        return out, [COPY_837_NOTE]
+    return out, []
 
 
 def _remit_days(fx: dict) -> dict[str, str]:
@@ -820,8 +891,11 @@ def _gather(conn: sqlite3.Connection, f: dict, today: str | None) -> dict:
 
 def _story(conn: sqlite3.Connection, fx: dict, ledger: Any) -> dict:
     rows: list[dict] = []
+    sends, notes837 = _rows_837(conn, fx)
+    rows += sends
     rows += _rows_835(fx)
     prod, itemized, notes = _rows_production(conn, fx, ledger)
+    notes += notes837
     rows += prod
     rows += _rows_ar(fx)
     rows += _rows_weekly(conn, fx)
