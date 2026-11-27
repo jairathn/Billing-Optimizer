@@ -101,7 +101,13 @@ in), `$U/compare.py` and `$U/basis.py` on the two snapshots; aggregates only. (T
   denials on work now 2025: 25 ($2,112.35), 2026: 46 ($4,915.74); can't check 2023: 7 ($244.31), 2024: 35
   ($2,868.63); second payers' shares on work now 2024: 7 ($220.92), 2025: 3 ($85.07), 2026: 1 ($156.64, an earlier
   rule's). Of the 24 open PR-288 items, 22 are Medicaid members and none is told to bill the patient.
-- A17 classes before and after: A17_CLASSES
+- A17 classes before and after: identical (0 of 311 summary keys and 0 of 18,710 finding verdicts differ). Open:
+  CORRECT 5,008 ($783,101.06), ALREADY_DONE 2,736 ($536,093.79), ALREADY_WORKED 91 ($27,749.75), DUPLICATE 175
+  ($14,835.88), WRONG_AMOUNT 2,050 ($129,275.83), UNDECIDED 1,280 ($246,728.64), NOT_A_UNIT 1,489; closed wrongly 5
+  ($147.79); left on the table in scope: DENIED 401 ($28,939.69), NEVER_ANSWERED 114 ($17,568.16), SHORT 270
+  ($8,829.69), WORKED_WAITING 7 ($253.90). The moved items in A17: the 14 of decision 2 ALREADY_DONE /
+  MOVED_TO_PATIENT; the 11 second-payer takebacks ALREADY_DONE (PAID, or PAID with MOVED_TO_PATIENT or NOT_PAYABLE)
+  10 and DUPLICATE 1: A17 does not see a second payer's takeback as open money, on the tip and the branch alike.
 - Hand trace: all 25 moved items from the raw rows (`$U/hand_trace2.md`; `$U/hand_trace.md` for the 14 of decision
   2, same ids, raw rows and states, 13 of 14 bases identical and the 14th the net-amount fix): right 19, unclear 6 (the
   5 of open question 3 and 4, and the Anthem item's FB question for F1, open question 5), wrong 0. Before ad889b0 the
