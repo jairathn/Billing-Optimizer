@@ -7791,14 +7791,24 @@ class Detector:
                 self.ema_counts["c6_" + str(act)] += 1
 
     def _close_from_ema(self, f: dict, r: dict, o: dict, how: str, note: str) -> None:
-        """Close an item by a payment EMA posted on a check no 835 carries, with that payment as the proof row."""
+        """Close an item by a payment EMA posted on a check no 835 carries, with that payment as the proof row, and the
+        patient's money on the line as a row of its own where it decided the verdict (C6's copay rule: the payer's payment
+        judged against the share it owes), so the rows add up to what the item calls paid (review fx-ema-r1-3)."""
         payer, cents, when = r.get("payer") or "insurance", r.get("paid_cents") or 0, r.get("date")
+        proof = [{"date": when, "source": "production", "kind": "payment", "payer": payer, "amount_cents": cents,
+                  "codes": [], "text": f"EMA posted {_usd(cents)} from {payer} on a check ending {r.get('check_tail') or ''} "
+                                       "that no 835 carries", "decisive": True}]
+        pat, pat_on = int(r.get("patient_cents") or 0), r.get("patient_date")
+        if pat > 0:
+            proof.append({"date": pat_on, "source": "production", "kind": "patient_payment", "payer": "the patient",
+                          "amount_cents": pat, "codes": [], "decisive": True,
+                          "text": f"EMA shows {_usd(pat)} paid by the patient on the line (copay, coinsurance or deductible), "
+                                  + (f"the newest posting on {pat_on}" if pat_on else "its posting date not kept by the store")})
         detail = {"payment_date": when, "claim": f.get("patient_control_number"), "paid_cents": cents, "how": how,
                   "trace": f"EMA check ending {r.get('check_tail') or ''}", "source": "EMA Production", "payer": payer,
-                  "ema_link": o.get("link"), "postings_through": o.get("as_of"),
-                  "proof": [{"date": when, "source": "production", "kind": "payment", "payer": payer, "amount_cents": cents,
-                             "codes": [], "text": f"EMA posted {_usd(cents)} from {payer} on a check ending {r.get('check_tail') or ''} "
-                                                  "that no 835 carries", "decisive": True}]}
+                  "ema_link": o.get("link"), "postings_through": o.get("as_of"), "proof": proof}
+        if pat > 0:
+            detail["patient_paid_cents"] = pat
         used = ("ema",) + tuple(r.get("used") or (when, r.get("check_tail"), o.get("link")))
         self._mark_paid(f, when, cents if r.get("recover_cents") is None else max(0, min(cents, r["recover_cents"])), note, detail,
                         used=used)

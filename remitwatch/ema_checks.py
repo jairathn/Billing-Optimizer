@@ -2233,6 +2233,25 @@ def _threshold(f: dict) -> int:
     return int(math.ceil(CLOSE_SHARE * e)) if e > 0 else 1
 
 
+def _paid_with_patient(same: int, cover: int, f: dict) -> bool:
+    """Whether the item's own payer's later payment pays the item (C6), the patient's money on the line counted: with
+    nothing from the patient, the payment reaches _threshold (half of what the item is expected to bring); with the
+    patient's money beside it (`cover`: the copay, coinsurance or deductible the patient paid on the line), the payer's
+    payment is judged against the share it owes, what the item is expected to bring less what the patient paid, and must
+    reach half of that (CLOSE_SHARE), as a payment with no copay is judged against half of the whole. A token payment
+    beside a large copay is a partial payment, never 'paid' (review fx-ema-r1-2, r2-6: $1 beside a $60 copay on a $100
+    service, $12 beside $40). A short payment never counts the patient's money (the caller gives no cover)."""
+    if same <= 0:
+        return False
+    if same >= _threshold(f):
+        return True
+    if cover <= 0 or f.get("category") in SHORT_CATEGORIES:
+        return False
+    e = f.get("expected_cents") or f.get("shortfall_cents") or 0
+    owed = max(0, int(e) - int(cover))
+    return same >= int(math.ceil(CLOSE_SHARE * owed))
+
+
 def _pattern(f: dict, carc: str | None) -> str:
     mods = (f.get("modifiers") or "").split(",")[0].strip()
     return f"{f.get('payer_group') or ''}|{f.get('procedure_code') or ''}|{mods}|{carc or ''}"
@@ -2620,7 +2639,7 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     nothing_after = not any_after and res["patient_after"] == 0 and not others_later
     pay_after = res["paid_after_same"] + res["paid_after_other"]
     on = None
-    if res["paid_after_same"] > 0 and res["paid_after_same"] + cover >= thr:
+    if _paid_with_patient(res["paid_after_same"], cover, f):
         out, on = "paid_after", (res["first_paid_after"] or {}).get("date")
     elif res["paid_after_other"] > 0 and res["paid_after_other"] >= thr:
         out, on = "paid_after_other", (res["first_paid_after"] or {}).get("date")
@@ -2762,7 +2781,10 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
     Same payer group and at least half of what the item is expected to bring (95% of the shortfall for downcoding and
     underpayment) closes it; another payer's payment gives a hint about a second payer; less gives a "partly paid per
     EMA" hint; a payment before the item's remittance gives the paid-before hint (G4), never a closure. Later payments
-    an 835 carries are the archive rules' (the 835 decides). Patient payments never count.
+    an 835 carries are the archive rules' (the 835 decides). The patient's money counts only beside the payer's own
+    payment on a check (o['patient_cover']): the payer's payment is then judged against the share it owes, half of what
+    the item is expected to bring less what the patient paid (_paid_with_patient), and the patient's part is returned
+    ('patient_cents', 'patient_date') for a proof row of its own.
     Returns {finding id: {'action': 'close'|'hint_other_payer'|'hint_partial'|'hint_paid_before', 'paid_cents', 'date',
     'check_tail', 'payer', 'note', 'hint', 'used': (check, posted, link, date of service, code)}}. The wiring calls _mark_paid for 'close' when
     REMITWATCH_EMA_CLOSES is on, else sets the hint; with closes=False the note is worded as a hint."""
@@ -2785,9 +2807,9 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
         rows = [p for p in o.get("payments") or [] if p["kind"] == "ema"]
         as_of = o.get("as_of")
         # the patient's share beside the payer's payment (o['patient_cover']: what the patient paid on the line; none for a
-        # short payment)
+        # short payment): the payer's payment is then judged against the share it owes (_paid_with_patient)
         cover = o.get("patient_cover") or 0
-        if same > 0 and same + cover >= thr:
+        if _paid_with_patient(same, cover, f):
             first = min((p for p in rows if p["same"]), key=lambda p: (p["posted"] or "", p["check"] or ""))
             payer = first["payer"] or first["group"]
             note = (f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} (check ending {_tail(first['check'])}, "
@@ -2796,7 +2818,11 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
             out[fid] = {"action": "close", "paid_cents": same, "date": first["posted"], "check_tail": _tail(first["check"]),
                         "payer": payer, "note": note,
                         "hint": f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} (no 835): check before marking it paid",
-                        "used": _used(first)}
+                        "used": _used(first),
+                        # the patient's money that, beside the payer's payment, made the item paid: a proof row of its own
+                        # (detect._close_from_ema), dated by its newest posting where the store keeps it
+                        "patient_cents": cover if same < thr and cover else 0,
+                        "patient_date": o.get("patient_paid_on") if same < thr and cover else None}
             b = o.get("paid_before_first") or {}
             if (f.get("category") in ("denial", "bundling") and not (f.get("paid_cents") or 0) and b
                     and (o.get("paid_before") or 0) >= thr and (o.get("balance") or 0) < -CREDIT_MIN):
