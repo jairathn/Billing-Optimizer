@@ -1178,14 +1178,38 @@ def test_today_says_the_blind_spot_in_dollars_and_says_no_all_clear(page_run):
 
 def test_today_gives_no_all_clear_while_the_self_check_holds(page_run):
     """Nothing closes this week and the feeds are current: step 1 is done. While the self-check's line is up (safe mode
-    while it checks its last run, given in /api/meta as selfcheck_banner), Today does not say all clear."""
+    while it checks its last run, given in /api/meta as banner: the key the route publishes, review hook-r2-2), Today does
+    not say all clear."""
     out, ans = page_run()
     brief = json.loads(json.dumps(ans["/api/brief"]))
     brief["work"]["total"]["due7_n"] = 0
     out, _ = page_run({"/api/brief": brief})
     assert "step is-done" in out["today_html"] and "Nothing closes this week<" in out["today_html"]
-    meta = dict(ans["/api/meta"], selfcheck_banner={"level": "safe_mode", "text": "Safe mode: the worklist is the one from before the last run."})
+    meta = dict(ans["/api/meta"], banner={"level": "safe_mode", "text": "Safe mode: the worklist is the one from before the last run.",
+                                         "safe_mode": "Safe mode: the worklist is the one from before the last run."})
     out, _ = page_run({"/api/brief": brief, "/api/meta": meta})
+    assert "is-done" not in out["today_html"] and "Nothing closes this week<" in out["today_html"]
+
+
+def test_today_gives_no_all_clear_while_the_real_meta_says_safe_mode(page_run):
+    """The same, on the real /api/meta answer (review hook-r2-2): safe mode in the store, nothing closing this week. The
+    route publishes the banner under the key Today reads, so step 1 is not ticked."""
+    import remitwatch.api as api
+    got = {}
+
+    def answers(c):
+        conn = sqlite3.connect(api.DB_PATH)
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('selfcheck:safe_mode', ?)",
+                     (json.dumps({"on": True, "text": "Safe mode: the run of today is held."}),))
+        conn.commit()
+        conn.close()
+        meta = c.get("/api/meta").json()
+        brief = c.get("/api/brief").json()
+        brief["work"]["total"]["due7_n"] = 0           # nothing closes this week: step 1 would be ticked done
+        got["banner"] = meta.get("banner")
+        return {"/api/brief": brief, "/api/meta": meta}
+    out, _ = page_run(answers)
+    assert got["banner"] and got["banner"]["level"] == "safe_mode", got
     assert "is-done" not in out["today_html"] and "Nothing closes this week<" in out["today_html"]
 
 

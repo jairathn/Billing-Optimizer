@@ -557,23 +557,21 @@ def _note_internal(what: str, exc: BaseException) -> None:
 
 # ------------------------------------------------------------------------------------------------------------- memory
 def memory() -> dict:
-    """{rss_mb, peak_mb}: now and the most this process has held (Linux /proc, else getrusage)."""
+    """{rss_mb, peak_mb}: now, and the most this run has held (remitwatch.runtime.peak_mb: since the run's start set the
+    high-water mark back; Linux /proc, else getrusage)."""
     out: dict = {"rss_mb": None, "peak_mb": None}
     try:
         with open("/proc/self/status") as fh:
             for ln in fh:
                 if ln.startswith("VmRSS:"):
                     out["rss_mb"] = int(ln.split()[1]) >> 10
-                elif ln.startswith("VmHWM:"):
-                    out["peak_mb"] = int(ln.split()[1]) >> 10
     except (OSError, ValueError, IndexError):
         pass
-    if out["peak_mb"] is None:
-        try:
-            import resource
-            out["peak_mb"] = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
-        except (ImportError, OSError, ValueError):
-            pass
+    try:
+        from .runtime import peak_mb
+        out["peak_mb"] = peak_mb()
+    except (ImportError, OSError, ValueError):
+        pass
     return out
 
 
@@ -1498,15 +1496,57 @@ def find_killed_runs(sink, *, now: datetime | None = None, exclude: str | None =
             gone = age > SERVER_STALE_SECONDS or (same_host and not _pid_alive(body.get("pid")))
         if not gone:
             continue
-        entry = {"run_id": body.get("run_id"), "kind": body.get("kind"), "host_mode": body.get("host_mode"),
-                 "trigger": body.get("trigger"), "started_at": body.get("started_at"), "finished_at": None,
-                 "outcome": "killed", "last_step": body.get("last_step"), "last_at": body.get("last_at"),
-                 "peak_mb": body.get("peak_mb"), "errors": 0, "repairs": 0}
-        update_index(sink, entry)
-        _write_killed_record(sink, body)
-        sink.delete(name)
-        out.append(entry)
+        out.append(_record_killed(sink, name, body))
     return out
+
+
+def _record_killed(sink, name: str, body: dict) -> dict:
+    """A run that is gone, from its open marker: in the index as killed, with a record of its own; its marker removed."""
+    entry = {"run_id": body.get("run_id"), "kind": body.get("kind"), "host_mode": body.get("host_mode"),
+             "trigger": body.get("trigger"), "started_at": body.get("started_at"), "finished_at": None,
+             "outcome": "killed", "last_step": body.get("last_step"), "last_at": body.get("last_at"),
+             "peak_mb": body.get("peak_mb"), "errors": 0, "repairs": 0}
+    update_index(sink, entry)
+    _write_killed_record(sink, body)
+    sink.delete(name)
+    return entry
+
+
+TAKEOVER_MATCH_SECONDS = 120        # a run's marker starts this soon after it took its lock (the lock names no run id)
+
+
+def started_near(started_at: Any, took: datetime) -> bool:
+    """Whether a run that started at `started_at` is the one that took a lock at `took` (an older build's lock names no run)."""
+    try:
+        t = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    return -5 <= (t - took).total_seconds() <= TAKEOVER_MATCH_SECONDS
+
+
+def claim_killed(sink, *, run_id: str | None = None, started: str | None = None, exclude: str | None = None) -> dict | None:
+    """The open marker of the run whose lock a later run took over (the platform stopped it), recorded as killed now, as
+    find_killed_runs does (the index, its record, the marker removed), so no later run counts the same run again. Found by
+    its run id, or, for a lock that names none, as the marker of a run that started as the lock was taken (`started`).
+    None when no such marker is open."""
+    took = None
+    if not run_id:
+        try:
+            took = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            took = took if took.tzinfo else took.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+    for meta in sink.list("open"):
+        name = meta.get("name") or ""
+        if not name.endswith(".json"):
+            continue
+        body = sink.read_json(name)
+        if not isinstance(body, dict) or not body.get("run_id") or body.get("run_id") == exclude:
+            continue
+        if (body.get("run_id") == run_id) if run_id else started_near(body.get("started_at"), took):
+            return _record_killed(sink, name, body)
+    return None
 
 
 def _write_killed_record(sink, body: dict) -> None:
@@ -2219,10 +2259,16 @@ def panel(conn: sqlite3.Connection | None, logs_dir: Any = None, *, now: datetim
                  "running": "is still running"}
         sentence = f"The last run started {when} and {words.get(last.get('outcome'), last.get('outcome'))}."
         gap = _usual_gap(listed)
-        if gap and ago_h is not None and ago_h * 3600 > max(2 * gap, 3600):
+        if (last.get("host_mode") or host_mode()) == "serverless":
+            # the owner's decision 1: this host runs only when a person presses, so days with no run are normal there and
+            # there is no schedule to check
+            if ago_h is not None and ago_h >= 24:
+                sentence += (f" This site runs only when someone presses Run the analysis now (the Data tab): nobody has for "
+                             f"{_span(ago_h * 3600)}.")
+        elif gap and ago_h is not None and ago_h * 3600 > max(2 * gap, 3600):
             stale = True
             sentence += (f" No run has started for {_span(ago_h * 3600)}, though runs usually start {_every(gap)}. Check that the "
-                         "scheduled runs are still on (the server's container, or Vercel's daily cron).")
+                         "server's container is running: its scheduler starts the runs.")
     if problems:
         sentence += f" {len(problems)} problem(s) could not be repaired automatically: see below."
     return {"title": "Logs and diagnostics", "sentence": sentence, "last_run": last, "runs": listed, "repairs": repairs,

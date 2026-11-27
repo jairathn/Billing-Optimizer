@@ -51,6 +51,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from . import ema_ledger as el
 from . import ema_reports as er
+from . import rarely_paid
 from .codes import EM_CODES, UNKNOWN_PART, appeal_rule, component_of, corrected_rule, filing_rule, part_fits, rule_at, window_end
 from .codes import legal_deadline as _legal_deadline
 from .ema_reports import status_class  # noqa: F401  (re-exported: the spec's ema_checks.status_class)
@@ -3211,14 +3212,21 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             if got >= PAID_SINCE_SHARE * expected:
                 continue
         pol = never_paid(dgrp, ln["cpt"])
-        if pol:
+        # a payer and code the research covers for this payer group counts too (remitwatch.rarely_paid, the owner's
+        # decision 4), on the dates its rule covers: a pattern per period where the rule changed on a date
+        res = rarely_paid.entry_for(dgrp, ln["cpt"], ln["svc"])
+        if pol or rarely_paid.applies(res, False):
             # the owner's table shows the pattern whatever the decision (so it can be changed back); its lines are left out
             # unless the owner chose to pursue them
-            key_p = f"{dgrp}|{ln['cpt']}||payer_policy"
-            decision = (decisions.get(key_p) or {}).get("decision") or "pursue"     # the owner's decision 16: pursued until accepted
+            key_p = rarely_paid.pattern_key(dgrp, ln["cpt"], ln["svc"])
+            # the owner's decision 16: pursued until accepted; a decision made for the pair at every date covers each period
+            dec_p = rarely_paid.decision_for(decisions, key_p)
+            decision = (dec_p or {}).get("decision") or "pursue"
             lo = left_out.setdefault("payer_policy", {"n": 0, "cents": 0, "patterns": {}})
-            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": pol[0], "answered": pol[1], "n": 0,
-                                                   "cents": 0, "decision": decision, "default": key_p not in decisions})
+            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": pol[0] if pol else None,
+                                                   "answered": pol[1] if pol else None, "n": 0, "cents": 0, "decision": decision,
+                                                   "default": dec_p is None,
+                                                   "researched": res["verdict"] if rarely_paid.applies(res, bool(pol)) else None})
             pt["n"] += 1
             pt["cents"] += expected or 0
             if decision != "pursue":

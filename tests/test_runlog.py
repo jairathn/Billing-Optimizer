@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from remitwatch import cloud, diagnose, pipeline, runlog  # noqa: E402
 from remitwatch.alerts import ALERTS_DDL  # noqa: E402
-from remitwatch.detect import Detector, ensure_schema  # noqa: E402
+from remitwatch.detect import DETECT_VERSION, Detector, ensure_schema  # noqa: E402
 from remitwatch.state import DropboxState, LocalState  # noqa: E402
 from remitwatch.store import Store  # noqa: E402
 from tests import ema_fixtures as F  # noqa: E402
@@ -805,18 +805,19 @@ def test_a_closure_by_a_later_payment_is_recorded_with_its_rule_and_evidence(tmp
     feed = tmp_path / "feed"
     p1, p2 = denial_files(feed, paid_later=True)
     _ingest(store, [p1])
-    Detector(store, "run-20261101T000000Z-aaaa").run()
-    before = runlog.snapshot_items(store.conn)
-    assert len(before) == 1
+    Detector(store, "run-20261101T000000Z-aaaa").run()          # the run writes its own decision log (needs_H, W3)
+    fids = [r[0] for r in store.conn.execute("SELECT finding_id FROM findings")]
+    assert len(fids) == 1
     _ingest(store, [p2])
-    Detector(store, "run-20261102T000000Z-bbbb").run()
-    res = runlog.record_decisions(store.conn, "run-20261102T000000Z-bbbb", before, rule_version="2.11-test")
+    det = Detector(store, "run-20261102T000000Z-bbbb")
+    det.run()
+    res = det.decisions
     assert res["by_kind"] == {"closed": 1} and list(res["closed_by_rule"]) == ["paid_later:later_payment"]
-    fid = next(iter(before.rows))
+    fid = fids[0]
     got = runlog.decisions_for(store.conn, fid)["items"]
-    assert len(got) == 1
+    assert [x["kind"] for x in got] == ["closed", "raised"]           # the newest first: closed by run b, raised by run a
     d = got[0]
-    assert d["rule"] == "paid_later:later_payment" and d["rule_version"] == "2.11-test" and d["kind"] == "closed"
+    assert d["rule"] == "paid_later:later_payment" and d["rule_version"] == DETECT_VERSION and d["kind"] == "closed"
     assert d["change"]["status"] == ["open", "resolved"] and d["change"]["closed_automatically"] == [False, True]
     assert d["change"]["work_state"][1] == "done"
     src = {e["source"]: e for e in d["evidence"]}
@@ -969,17 +970,6 @@ def _report_files(folder) -> list[str]:
     return [p_ar, p_prod]
 
 
-def _wired_ema_step(out, key, fn, *a, **kw):
-    """pipeline._ema_step as needs_H.md asks for it: the exception is logged (with its stack, scrubbed) before it is
-    contained."""
-    try:
-        return fn(*a, **kw)
-    except Exception as exc:        # noqa: BLE001
-        runlog.caught(exc, key)
-        out[key] = {"error": type(exc).__name__}
-        return None
-
-
 def _poisoned(*_a, log=print, **_kw):
     """A step that fails with the planted values in its log line and in its error message."""
     log(f"  EMA ERROR /uploads/{UNI}/{EMA_NAME}.xlsx: could not read '{MEMBER}' born {DOB.isoformat()}")
@@ -1001,19 +991,22 @@ def test_no_planted_identifier_reaches_any_log_byte_on_a_server(tmp_path, monkey
     with open(os.path.join(ready, pair + ".json"), "w") as fh:
         json.dump({"name": f"{UNI} {EMA_NAME} AR.xlsx", "origin": "upload", "user": "staff", "sha256": hashlib.sha256(up).hexdigest(),
                    "size": len(up), "gz": False, "received_at": "2026-11-20T10:00:00+00:00", "report_hint": None}, fh)
-    monkeypatch.setattr(pipeline, "_ema_step", _wired_ema_step)
     monkeypatch.setattr(pipeline, "reread_waiting", _poisoned)
-    rl = runlog.start_run("cycle", trigger="test", db_path=db, host="server")
-    with rl.step("cycle"):
-        out = pipeline.run_cycle(db, sync=False, local=str(feed), email=False, report=False, log=rl.log)
-    with rl.step("broken", contain=True):
-        raise RuntimeError(f"{EMA_NAME} {UNI} {MEMBER} {MRN} 1960-02-29")
+    printed: list = []
+    pipeline.run_cycle(db, sync=False, local=str(feed), email=False, report=False, log=printed.append)   # its own run log
+    sink = runlog.DirSink(runlog.logs_dir_for(db))
+    m, _events = runlog.read_run(sink, runlog.read_index(sink)[-1]["run_id"])
+    assert any(e["type"] == "ValueError" and e["step"] == "ema_waiting" for e in m["errors"])   # the hook logged the contained error
+    assert any("EMA ERROR" in str(x) for x in printed)                                       # the console sees the lines,
+    assert not any(LAST in str(x) or MEMBER in str(x) or UNI in str(x) for x in printed)      # scrubbed
     store = Store(db)
     try:
         assert store.conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] >= 1
         assert store.conn.execute("SELECT COUNT(*) FROM ema_report_files").fetchone()[0] >= 2     # the reports were read
-        rl.finish(conn=store.conn, out=out)
-        assert any(e["type"] == "ValueError" for e in rl.manifest["errors"])                  # the hook logged the contained error
+        rl = runlog.start_run("cycle", trigger="test", db_path=db, host="server")
+        with rl.step("broken", contain=True):
+            raise RuntimeError(f"{EMA_NAME} {UNI} {MEMBER} {MRN} 1960-02-29")
+        rl.finish(conn=store.conn)
         files = all_log_bytes(runlog.logs_dir_for(db))
         assert any(n.endswith(".jsonl") for n in files)
         files.update(log_tables(store.conn))
@@ -1047,11 +1040,8 @@ def test_no_planted_identifier_reaches_any_log_byte_on_a_serverless_host(tmp_pat
     monkeypatch.setattr(cloud, "repair_ledger", poisoned_repair)
     outs = []
     for _ in range(6):
-        rl = runlog.start_run("cycle", trigger="test", state=state, host="serverless")
-        with rl.step("cycle"):
-            out = cloud.run_cloud_cycle(state, client, budget_s=600, email=False, log=rl.log)
+        out = cloud.run_cloud_cycle(state, client, budget_s=600, email=False)       # its own run log (needs_H C2, W4)
         outs.append(out)
-        rl.finish(out=out)
         if not out.get("more"):
             break
     assert not outs[-1].get("more") and any("detect" in o for o in outs)
@@ -1073,7 +1063,7 @@ H_MODULES = ["runlog.py", "repair.py", "diagnose.py"]
 PKG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "remitwatch")
 # the cycle files' silent except blocks, counted when runlog was built: the hook-in adds a runlog.caught to each step
 # boundary's block, so these numbers may only go down (lower them when a block starts logging)
-SILENT_CEILING = {"pipeline.py": 9, "cloud.py": 11}
+SILENT_CEILING = {"pipeline.py": 0, "cloud.py": 0}       # the hook-in made every broad except in both cycles log (W9)
 
 
 def test_runlogs_own_modules_swallow_nothing():

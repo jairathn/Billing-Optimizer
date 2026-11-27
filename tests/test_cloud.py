@@ -56,6 +56,10 @@ def box(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
     monkeypatch.setenv("DROPBOX_ROOT_PATH", f"/{DATA}")
+    # the weekly self-audit takes the first run that does not analyse and saves the store for it: these tests are about
+    # what idle runs leave alone, so it is not due here (tests/test_hooks.py tests it on this host)
+    from remitwatch import selfcheck
+    monkeypatch.setattr(selfcheck, "audit_due", lambda *a, **k: False)
     root = tmp_path / "dbx"
     client = FakeDropbox(str(root))
     state = DropboxState(client, "/RemitWatch-state")
@@ -95,13 +99,16 @@ def test_first_load_then_nothing_new_then_one_new_file(box):
 
     # nothing new: no download of data, no detection, and neither the store nor the dashboard's copy is uploaded again
     revs = (state.meta(cloud.RAW)["rev"], state.meta(cloud.SERVING)["rev"], state.get(cloud.CURSOR))
-    uploads = client.calls.get("upload", 0)
+    paths: list = []
+    real_upload = client.upload
+    client.upload = lambda path, data, **kw: (paths.append(path), real_upload(path, data, **kw))[1]
     time.sleep(0.01)
     again = cycle(state, client)
+    del client.upload
     assert again["ingest"]["mode"] == "delta" and again["ingest"]["downloaded"] == 0 and "detect" not in again
     assert again["more"] is False and again["changed"] is False and "store" not in again and "serving" not in again
     assert (state.meta(cloud.RAW)["rev"], state.meta(cloud.SERVING)["rev"], state.get(cloud.CURSOR)) == revs
-    assert client.calls.get("upload", 0) - uploads == 2            # the lock and the status
+    assert len([p for p in paths if "/logs/" not in p]) == 2 and paths     # the lock and the status (and the run's own logs)
     status = json.loads(state.get(cloud.STATUS))
     assert status["started"] == again["started"] and status["last_change"] == out["finished"]
     assert status["totals"] == {"remit_files": 6, "findings": out["detect"]["findings"], "newest_payment": "2026-04-15"}
@@ -418,37 +425,41 @@ def test_scheduler_address_runs_one_cycle_and_needs_the_secret(site, monkeypatch
     out = tc.get("/api/cron/cycle", headers={"Authorization": "Bearer s3cret-value-for-the-scheduler"}).json()
     assert out["trigger"] == "cron" and out["actions_folded"] == 1 and out["more"] is False and calls == []
     assert out["ingest"] == {"skipped": "Dropbox credentials are not configured"}
-    # the button starts a run through the same address, on the site's own public name
+    # the button starts a run through the same address, on the site's own public name (a press: the owner's decision 1;
+    # each press below stands for another day, so the hold a press keeps until its run starts is left out)
+    monkeypatch.setattr(cloud, "PRESS_HOLD_SECONDS", 0)
     xhr = dict(auth, **{"X-Requested-With": "remitwatch"})
-    assert tc.post("/api/sync/run", headers=xhr).json() == {"started": True}
+    assert tc.post("/api/sync/run", headers=xhr).json()["started"] is True
     assert calls == [("http://testserver", "button", 0)]
     monkeypatch.setenv("VERCEL_ENV", "production")
     monkeypatch.setenv("VERCEL_PROJECT_PRODUCTION_URL", "remitwatch.example.com")
     tc.post("/api/sync/run", headers=xhr)
     assert calls[-1][0] == "https://remitwatch.example.com"
     monkeypatch.setattr(cloud, "trigger_cycle", lambda *a, **k: False)
-    assert tc.post("/api/sync/run", headers=xhr).status_code == 400
+    # the run could not be asked for although the secret is set: a 502 that does not blame the secret (review hook-r2-6)
+    refused = tc.post("/api/sync/run", headers=xhr)
+    assert refused.status_code == 502 and "CRON_SECRET is not set" not in refused.json()["detail"], refused.text
     # the site's own pages may also call it with the login, but only with the header a cross-site page cannot send:
     # a browser attaches a saved login to requests another site's page causes, a GET for an image included
     assert tc.post("/api/cron/cycle", headers=auth).status_code == 400 and tc.get("/api/cron/cycle", headers=auth).status_code == 400
     assert tc.post("/api/cron/cycle", headers=xhr).status_code == 200
 
 
-def test_webhook_is_verified_and_only_starts_a_run_for_new_files(site, monkeypatch):
+def test_webhook_is_verified_and_starts_no_run_on_vercel(site, monkeypatch):
+    """The notification is still verified (a bad signature is a 403), but on Vercel it starts nothing: the site analyses
+    only when someone presses Run the analysis now (the owner's decision 1, 2026-11-26; until then a notification with
+    new files started a run)."""
     tc, _auth, api, _state = site
     monkeypatch.setenv("DROPBOX_APP_SECRET", "appsecret")
     assert tc.get("/api/dropbox/webhook?challenge=abc123").text == "abc123"
     body = b'{"list_folder": {"accounts": ["dbid:x"]}}'
     seen = []
-    monkeypatch.setattr(api, "_webhook_work", lambda origin: seen.append(origin))
+    monkeypatch.setattr(cloud, "trigger_cycle", lambda *a, **k: seen.append(a) or True)
     assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": "bad"}).status_code == 403
     assert seen == []
     sig = hmac.new(b"appsecret", body, hashlib.sha256).hexdigest()
     assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": sig}).text == "ok"
-    assert seen == ["http://testserver"]
-    # a check that hangs must not hold the reply back past Dropbox's limit, and an error in it is not Dropbox's problem
-    monkeypatch.setattr(api, "_webhook_work", lambda origin: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert tc.post("/api/dropbox/webhook", content=body, headers={"X-Dropbox-Signature": sig}).status_code == 200
+    assert seen == []
 
 
 def test_setup_checklist_reports_what_is_missing(site, monkeypatch):
@@ -529,12 +540,16 @@ def test_an_unreadable_file_is_remembered_and_starts_nothing_again(box, monkeypa
     # the position moved past it and the store remembers it, so neither the next run nor a notification asks for it again
     assert state.get(cloud.CURSOR) != position and state.meta(cloud.RAW)["rev"] != store_rev
     assert cloud.has_new_files(state, client) is False
-    downloads = client.calls["download"]
+    read: list = []
+    real_get = client.download_bytes
+    client.download_bytes = lambda path, *a, **kw: (read.append(path), real_get(path, *a, **kw))[1]
     again = cycle(state, client)
+    del client.download_bytes
     assert again["ingest"]["downloaded"] == 0 and again["ingest"]["errors"] == 0
     # the store and a few small state files (status.json, which the release reads for the image it saved, the how-to
-    # boxes, the serving mark, the position, the mail marks, the lock), never the bad file
-    assert client.calls["download"] - downloads <= 9
+    # boxes, the serving mark, the position (once more for the run's log of the feed positions), the mail marks, the
+    # lock), and the run's own logs, never the bad file
+    assert len([p for p in read if "/logs/" not in p]) <= 10 and not any("Claim Status" in p for p in read), read
     # a file far larger than any remittance is not read at all
     monkeypatch.setattr(cloud, "MAX_FILE_BYTES", 200)
     time.sleep(0.01)

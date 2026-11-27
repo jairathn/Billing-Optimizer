@@ -827,6 +827,12 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
                           "title": f"EMA's side is known for {share:.0%} of the open work",
                           "detail": "For the rest the site cannot tell whether a biller already wrote it off, moved it to the patient or resent it.",
                           "who": "Practice administrator: export ERA & Payment Line Adjustments every week (and once from November 2024)."})
+    try:        # the self-check first (what the app cannot see, safe mode, red checks), then the store's size and memory
+        from . import archive, selfcheck
+        items = selfcheck.data_health(conn, today) + items + archive.data_health(conn)
+    except (sqlite3.Error, ImportError, KeyError, TypeError, ValueError) as exc:
+        from . import runlog
+        runlog.caught(exc, "data_health:selfcheck", level="warning")
     items += ema_health(conn, today)
     return items
 

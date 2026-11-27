@@ -328,11 +328,13 @@ def _pct(values: list, p: int) -> Any:
 
 
 def peak_mb() -> int | None:
-    """The most memory this process has held so far, in MB."""
+    """The most memory this run has held so far, in MB (remitwatch.runtime.peak_mb: a run sets the high-water mark back
+    when it starts, so on a warm serverless instance an earlier invocation's peak is not taken as this run's)."""
     try:
-        import resource
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
-    except Exception:          # noqa: BLE001  (no resource module on this platform)
+        from .runtime import peak_mb as run_peak
+        return run_peak()
+    except Exception as exc:          # noqa: BLE001  (no measure on this platform: the run records none)
+        _caught(exc, "peak_mb")
         return None
 
 
@@ -434,6 +436,11 @@ K_BLIND = "selfcheck:blind"
 K_RATES = "selfcheck:rates"
 K_HOUSE = "selfcheck:housekeeping"
 K_ANSWER = "selfcheck:answer_days"
+K_FACTS_VERSION = "selfcheck:facts_version"
+K_FACTS_INPUT = "selfcheck:facts_input"
+# the fingerprint's own version (_facts_of): a build that reads another part of an item's claim changes every fingerprint,
+# so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else)
+FACTS_VERSION = "3"
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
@@ -470,11 +477,15 @@ def budgets(mode: str, *, budget_s: Any = None) -> dict:
     except ValueError:
         mem_mb = SERVERLESS_MEMORY_BUDGET_MB if serverless else None
     try:
-        secs = float(budget_s) if budget_s else float(setting("REMITWATCH_MAX_SECONDS" if serverless else
-                                                            "REMITWATCH_CYCLE_BUDGET_SECONDS", 240 if serverless else 3600))
+        secs = float(budget_s) if budget_s else float(setting("REMITWATCH_MAX_SECONDS", 240) if serverless
+                                                      else setting("REMITWATCH_CYCLE_BUDGET_SECONDS", 3600))
     except (TypeError, ValueError):
         secs = 240.0 if serverless else 3600.0
-    return {"memory_mb": mem_mb, "seconds": secs, "tmp_mb": TMP_BUDGET_MB if serverless else None, "share": PRESSURE_SHARE}
+    # serverless: the store image's save goes through one block SQLite caps at 1,024 MB (store.MEMDB_CEILING_MB); a bigger
+    # image is saved with a third copy of the store, past what the function's memory holds
+    from .store import MEMDB_CEILING_MB
+    return {"memory_mb": mem_mb, "seconds": secs, "tmp_mb": TMP_BUDGET_MB if serverless else None, "share": PRESSURE_SHARE,
+            "ceiling_mb": MEMDB_CEILING_MB if serverless else None}
 
 
 def mark(out: dict, step: str, started: float | None = None, *, tmp: bool | None = None) -> dict:
@@ -484,7 +495,8 @@ def mark(out: dict, step: str, started: float | None = None, *, tmp: bool | None
     fig = {"mem": peak_mb()}
     out.setdefault("memory_mb", {})[step] = fig["mem"]
     if tmp if tmp is not None else (out.get("mode") == "serverless"):
-        fig["tmp"] = tmp_used_mb()
+        # RemitWatch's temporary folder (REMITWATCH_TMP, as runlog.tmp_usage reads it; on Vercel /tmp is the function's own)
+        fig["tmp"] = tmp_used_mb(setting("REMITWATCH_TMP") or None)
         out.setdefault("tmp_mb", {})[step] = fig["tmp"]
     if started is not None:
         fig["seconds"] = round(time.time() - started, 1)
@@ -509,9 +521,12 @@ def pressure_of(status: dict | None, b: dict) -> dict:
         except (TypeError, ValueError):
             secs = None
     budget_s = st.get("budget_seconds") or b.get("seconds")
+    image = (st.get("store") or {}).get("image_mb") if isinstance(st.get("store"), dict) else None
+    image = image if isinstance(image, (int, float)) and image > 0 else None
     share = {"memory": (peak / b["memory_mb"]) if peak and b.get("memory_mb") else None,
              "time": (float(secs) / float(budget_s)) if isinstance(secs, (int, float)) and budget_s else None,
-             "tmp": (tmp / b["tmp_mb"]) if tmp is not None and b.get("tmp_mb") else None}
+             "tmp": (tmp / b["tmp_mb"]) if tmp is not None and b.get("tmp_mb") else None,
+             "image": (image / b["ceiling_mb"]) if image and b.get("ceiling_mb") else None}
     err = str(st.get("error") or "")
     killed = bool(re.search(r"MemoryError|OutOfTime|out of time|Killed|Timeout|timed out", err, re.I)) or \
         (bool(st.get("started")) and not st.get("finished") and not st.get("skipped"))
@@ -524,11 +539,13 @@ def pressure_of(status: dict | None, b: dict) -> dict:
         parts.append(f"{secs:,.0f} s of a {float(budget_s):,.0f} s budget ({share['time']:.0%})")
     if tmp is not None and b.get("tmp_mb"):
         parts.append(f"/tmp {tmp:,} MB of {b['tmp_mb']:,} MB ({share['tmp']:.0%})")
+    if image and b.get("ceiling_mb"):
+        parts.append(f"the store {image:,.0f} MB in memory, of the {b['ceiling_mb']:,} MB a run saves in one piece ({share['image']:.0%})")
     if killed:
         parts.append(err[:160] if err else "the run stopped before it finished")
     return {**{k: (round(v, 3) if v is not None else None) for k, v in share.items()}, "peak_mb": peak, "seconds": secs,
-            "tmp_mb": tmp, "pressured": bool(over) or killed, "killed": killed, "worst": worst or ("killed" if killed else None),
-            "text": "; ".join(parts)}
+            "tmp_mb": tmp, "image_mb": image, "ceiling_mb": b.get("ceiling_mb"), "pressured": bool(over) or killed,
+            "killed": killed, "worst": worst or ("killed" if killed else None), "text": "; ".join(parts)}
 
 
 def plan_for(level: int, pressure: dict | None = None) -> dict:
@@ -584,7 +601,15 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
 
     def step(st: dict, b: dict) -> None:
         nonlocal level, calm, pressure
+        was = pressure
         pressure = pressure_of(st, b)
+        if pressure.get("image_mb") is None and isinstance(was, dict) and was.get("image_mb"):
+            # a run that saved no store (one that stopped, an idle one) measured no image, but the image is as large as
+            # the last save left it: its size is kept, so the ceiling's warning stays up until a save measures it smaller.
+            # It does not step the level: only a run that measured it does that
+            ceiling = pressure.get("ceiling_mb") or was.get("ceiling_mb")
+            pressure = dict(pressure, image_mb=was["image_mb"], ceiling_mb=ceiling, image_carried=True,
+                            image=round(float(was["image_mb"]) / float(ceiling), 3) if ceiling else was.get("image"))
         before = level
         if pressure["pressured"]:
             level, calm = min(level + 1, len(LEVELS) - 1), 0
@@ -621,9 +646,34 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
     _defer(conn, reg, plan, t)
     reg["plan"] = {k: plan[k] for k in ("level", "name", "spread", "archive_tight", "skip", "overdue", "alert", "actions")}
     reg["mode"] = mode
+    reg["seq"] = int(reg.get("seq") or 0) + 1         # which state is newer: the store's or a status's (adopt_regulation)
     meta_set(conn, K_REGULATE, reg)
     conn.commit()
     return plan
+
+
+def regulation_state(conn: sqlite3.Connection) -> dict:
+    """The self-regulation state the run leaves (meta selfcheck:regulate). A serverless run writes it in its status.json:
+    an idle run saves no store, and without it the next run would start from the level the last saving run left."""
+    return meta_get(conn, K_REGULATE, {}) or {}
+
+
+def adopt_regulation(conn: sqlite3.Connection, status: dict | None) -> bool:
+    """Before plan_next on a serverless host: the state the last run left in its status (status['regulate']) when it is
+    newer than the store's (a higher 'seq': that run saved no store). Calm runs then count toward a step down and runs
+    past a budget toward the alert, saved store or not. Returns True when adopted."""
+    got = (status or {}).get("regulate")
+    if not isinstance(got, dict):
+        return False
+    have = meta_get(conn, K_REGULATE, {}) or {}
+    try:
+        newer = int(got.get("seq") or 0) > int(have.get("seq") or 0)
+    except (TypeError, ValueError):
+        return False
+    if newer:
+        meta_set(conn, K_REGULATE, got)
+        conn.commit()
+    return newer
 
 
 STEP_WORDS = {"activity": "the provider tables", "report": "the weekly report email", "backfill": "the export-time backfill",
@@ -699,11 +749,36 @@ def archive_budget_state(plan: dict) -> dict:
     months more, never below its floor or the windows open items need), and the measured share otherwise (so a calm run
     lets the horizon relax)."""
     p = (plan or {}).get("pressure") or {}
-    share = p.get("memory")
+    shares = [s for s in (p.get("memory"), p.get("image")) if isinstance(s, (int, float))]
+    share = max(shares) if shares else None          # memory against its budget, or the image against its one-block ceiling
     if (plan or {}).get("archive_tight"):
         share = max(float(share or 0), PRESSURE_SHARE)
     return {"peak_mb": p.get("peak_mb"), "budget_mb": SERVERLESS_MEMORY_BUDGET_MB if p.get("peak_mb") else None, "share": share,
             "level": (plan or {}).get("level", 0), "why": p.get("text")}
+
+
+CEILING_WARN_SHARE = 0.75           # the store image at this share of its one-block ceiling: said loudly, well before it
+
+
+def ceiling_warning(conn: sqlite3.Connection) -> dict | None:
+    """The serverless store image near the one block its save goes through (store.MEMDB_CEILING_MB), from the last run's
+    figures (meta selfcheck:regulate): what would stop being checked if it went on, in dollars and items (the open items
+    on the lists, and every new remittance). None below CEILING_WARN_SHARE or on a server."""
+    p = (meta_get(conn, K_REGULATE, {}) or {}).get("last_pressure") or {}
+    share, image, ceiling = p.get("image"), p.get("image_mb"), p.get("ceiling_mb")
+    if not (isinstance(share, (int, float)) and share >= CEILING_WARN_SHARE and image and ceiling):
+        return None
+    n = cents = 0
+    if _has_table(conn, "findings") and "work_state" in _cols(conn, "findings"):
+        n, cents = conn.execute("""SELECT COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE COALESCE(stale, 0) = 0
+                                   AND work_state IN ('work_now', 'waiting')""").fetchone()
+    title = (f"The store is {image:,.0f} MB in memory, {share:.0%} of the {ceiling:,} MB a run can save in one piece. Past it, "
+             f"each save needs a third copy of the store, more than this host's memory: the runs would stop, and "
+             f"{_n(int(n), 'open item')} ({usd0(cents)}) and every new remittance would no longer be checked. RemitWatch moves "
+             "older settled claims to the archive sooner to keep it down; if this stays, tell whoever looks after the hosting "
+             "(a shorter horizon, REMITWATCH_RETENTION_MONTHS, or the server as the host that analyses).")
+    return {"image_mb": image, "ceiling_mb": ceiling, "share": share, "n": int(n), "cents": int(cents),
+            "severity": "high" if share >= PRESSURE_SHARE else "medium", "title": title}
 
 
 def regulation(conn: sqlite3.Connection) -> dict:
@@ -782,6 +857,11 @@ CHECKS: dict[str, tuple] = {
     "feed_ema": ("warning", None, 0, "EMA's reports are current",
                  "The Production report is at most 14 days old and the A/R at most 8.",
                  "Pull the weekly EMA reports (Upload page lists them)."),
+    "left_record": ("warning", None, 0, "No item left the record without a reason",
+                    "An item no list shows (expired past its windows, done, closed with its proof) is the scoreboard's record: "
+                    "one the run no longer produced, with no reason found, is counted here (it is not put back).",
+                    "The run no longer produced these items: find the rule that stopped (the signal of the examples, 'gone' "
+                    "in the run's decision log). A rule changed on purpose explains them; a whole signal gone is a bug."),
     "line_balance": ("warning", None, 0, "EMA's A/R agrees with its postings",
                      "Each line carries on EMA's newest A/R the balance its postings leave, to the dollar, both ways (a denied "
                      "line by its Denial Amount); a line the A/R no longer lists (settled in EMA) leaves nothing open in its "
@@ -887,8 +967,17 @@ def has_proof(ev: dict) -> bool:
     rows = list(pl.get("proof") or []) + (list(ar.get("proof") or []) if ar.get("action") == "close_with_proof" else [])
     if proof_money(rows) > 0:
         return True
+    sb = ev.get("settled_by") if isinstance(ev.get("settled_by"), dict) else {}
+    if sb.get("date") and sb.get("claim") and sb.get("how"):
+        return True             # the payer's own later answer settled it (detect._close_by_answer): dated, on its claim, nothing owed
     paid = pl.get("paid_cents")
-    return bool(pl.get("payment_date")) and isinstance(paid, (int, float)) and paid > 0 and bool(pl.get("trace") or pl.get("claim"))
+    if not (isinstance(paid, (int, float)) and paid > 0):
+        return False
+    if pl.get("payment_date") and (pl.get("trace") or pl.get("claim")):
+        return True
+    # what EMA's report shows paid by insurance on the claim (the weekly charge lines carry no payment date): the amount,
+    # the claim and the report that shows it let a person find it in EMA
+    return bool(pl.get("claim")) and bool(pl.get("source"))
 
 
 def check_closure_proof(conn: sqlite3.Connection, today: str) -> dict:
@@ -1251,7 +1340,8 @@ PERSON_KINDS = ("manual", "hidden", "unhidden")
 ROW_COLS = ("finding_id", "signal", "category", "status", "work_state", "follow_up_on", "line_key", "claim_key",
             "patient_control_number", "service_date", "procedure_code", "shortfall_cents", "payer_group", "auto_note",
             "transaction_key", "payment_date", "stale", "evidence", "hint", "appeal_deadline", "recovered_cents", "ema_link",
-            "first_seen")
+            "first_seen", "original_procedure_code", "paid_cents")     # the last two: the code billed and what was paid, as
+                                                                        # detect.fold_payer_policy read them (_owner_accepted)
 
 
 def begin_detection(conn: sqlite3.Connection, *, run_id: str | None = None, today: Any = None) -> dict:
@@ -1303,7 +1393,7 @@ def _is_listed(r: dict, states_kept: bool) -> bool:
 
 
 def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dict[str, dict], *,
-                   facts: dict[str, str] | None = None) -> dict:
+                   facts: dict[str, str] | None = None, delivered_again: Any = None) -> dict:
     """Open items people were shown as work (Work now or Waiting) before the run that the run no longer has, or keeps only
     as a stale row (an item a person worked that no rule produces any more: it is on no list), with no route out: a
     person's own decision on it while the run ran; an item THIS run made for the same line, claim and code, or service (an
@@ -1311,12 +1401,27 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
     (no answer, rejected, never sent), an item this run made for its bill and day or an 835 answer on its bill since it
     was raised; a fold into another item; its remittance superseded; or new facts on its own claim since the run before
     (`facts`: the fingerprints that run stored, selfcheck_facts: the 835 answers on its bill, EMA's lines and newest A/R
-    rows for its EMA claim number), as the rules' answer may then rightly change."""
+    rows for its EMA claim number), as the rules' answer may then rightly change; or its line is a copy of an answer the
+    payer delivered again the same day (`delivered_again`: the lines the detector passed by, detect._answer_copies), whose
+    one item the other delivery keeps."""
     if not before:
         return _skip("vanished", "no items before this run")
+    again = {str(x) for x in (delivered_again or ()) if x}
     states_kept = any(r.get("work_state") for r in before.values())
     new_rows = [r for f, r in after.items() if f not in before and not r.get("stale")]
     lines = {r["line_key"] for r in new_rows if r.get("line_key")}
+    own_lines = set(lines)
+    for r in new_rows:                  # a routine-rate pattern this run made lists the lines it groups (evidence line_keys)
+        if not r.get("line_key") and r.get("evidence") and "line_keys" in str(r["evidence"]):
+            lines.update(str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x)
+    for f, r in after.items():          # ... and an older pattern this run gave more lines (a reopened continuation takes back
+        b = before.get(f)               # the lines a later one held): its lines grew this run
+        if b is None or r.get("stale") or r.get("line_key") or not r.get("evidence") or "line_keys" not in str(r["evidence"]):
+            continue
+        grown = {str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x} - \
+            {str(x) for x in (_ev(b.get("evidence")).get("line_keys") or []) if x}
+        lines.update(grown)
+        own_lines.update(grown)
     claim_codes = {(r.get("claim_key"), r.get("procedure_code")) for r in new_rows if r.get("claim_key")}
     service = {(bill_of(r.get("patient_control_number")), str(r.get("service_date") or "")[:10], r.get("procedure_code"))
                for r in new_rows if r.get("patient_control_number")}
@@ -1333,31 +1438,55 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             elif isinstance(x, str):
                 folded.add(x)
     routes: Counter = Counter()
+    uroutes: Counter = Counter()        # the same routes for the items no list shows (the left_record check)
     cands: list[dict] = []
+    ucands: list[dict] = []
     for fid, r in before.items():
-        if not _is_listed(r, states_kept):
-            continue
+        listed = _is_listed(r, states_kept)
         a = after.get(fid)
         if a is not None and not a.get("stale"):
             continue                            # still on record: where it went is the other checks' business
+        if not listed and (a is not None or r.get("stale")):
+            continue                            # not on a list, and still on record (a stale row): nothing left it
+        rt = routes if listed else uroutes
         if a is not None and a.get("status") not in OPEN_STATUSES:
-            routes["decided"] += 1              # a person let it go, lost it or marked it paid while the run ran
+            rt["decided"] += 1                  # a person let it go, lost it or marked it paid while the run ran
             continue
         lk = r.get("line_key")
         b = bill_of(r.get("patient_control_number"))
         svc = str(r.get("service_date") or "")[:10]
         if lk and lk in lines:
-            routes["same_line"] += 1
+            rt["same_line"] += 1
         elif r.get("claim_key") and (r["claim_key"], r.get("procedure_code")) in claim_codes:
-            routes["same_claim_code"] += 1
+            rt["same_claim_code"] += 1
         elif not lk and b and (b, svc, r.get("procedure_code")) in service:
-            routes["same_service"] += 1         # a claim-level item carried on by an item for its service
+            rt["same_service"] += 1             # a claim-level item carried on by an item for its service
         elif not lk and b and r.get("signal") in CLAIM_SIGNALS and (b, svc) in bill_days:
-            routes["claim_answered"] += 1       # the claim's answer brought items of its own
+            rt["claim_answered"] += 1           # the claim's answer brought items of its own
         elif fid in folded:
-            routes["folded"] += 1
+            rt["folded"] += 1
+        elif not lk and r.get("evidence") and own_lines & {str(x) for x in (_ev(r["evidence"]).get("line_keys") or []) if x}:
+            rt["regrouped"] += 1                # a pattern whose lines this run lists one by one again
+        elif lk and lk in again:
+            rt["delivered_again"] += 1          # one answer delivered twice is one item: the other delivery keeps it (T-I3)
         else:
-            cands.append(r)
+            (cands if listed else ucands).append(r)
+    left = _no_route(conn, cands, routes, facts)
+    uleft = _no_route(conn, ucands, uroutes, facts)
+    offs = [(r["finding_id"], int(r.get("shortfall_cents") or 0), r["finding_id"]) for r in left]
+    by_signal = Counter(r.get("signal") for r in left)
+    out = _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10)),
+                                          "stale": sum(1 for r in left if r["finding_id"] in after)})
+    uoffs = [(r["finding_id"], int(r.get("shortfall_cents") or 0), r["finding_id"]) for r in uleft]
+    out["left_record"] = _result("left_record", uoffs, info={
+        "routes": dict(uroutes), "by_signal": dict(Counter(r.get("signal") for r in uleft).most_common(10)),
+        "by_state": dict(Counter(str(r.get("work_state") or r.get("status")) for r in uleft).most_common(10))})
+    return out
+
+
+def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, facts: dict[str, str] | None) -> list[dict]:
+    """The candidates the store's own records give no route out: not their remittance superseded, not a claim answered or
+    sent again since, not the owner's accepted pattern, not new facts on their own claim (`facts`). Counts the routes."""
     superseded: set[str] = set()
     tks = sorted({r.get("transaction_key") for r in cands if r.get("transaction_key")})
     if tks and _has_table(conn, "transactions"):
@@ -1366,13 +1495,21 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             have = {tk: sup for tk, sup in conn.execute(f"SELECT transaction_key, COALESCE(superseded, 0) FROM transactions "
                                                         f"WHERE transaction_key IN ({','.join('?' * len(part))})", part)}
             superseded.update(tk for tk in part if have.get(tk, 1))     # gone from the store, or superseded
-    answered = _answered_since(conn, [r for r in cands if not r.get("line_key") and r.get("signal") in CLAIM_SIGNALS])
+    claim_items = [r for r in cands if not r.get("line_key") and r.get("signal") in CLAIM_SIGNALS]
+    answered = _answered_since(conn, claim_items)
+    sent_again = _sent_again(conn, claim_items)
+    accepted = _policy_accepts(conn)
+    policy = meta_get(conn, "ema:writeoff_policy", {}) or {}
     left: list[dict] = []
     for r in cands:
         if r.get("transaction_key") and r["transaction_key"] in superseded:
             routes["superseded"] += 1
         elif r["finding_id"] in answered:
             routes["claim_answered"] += 1
+        elif r["finding_id"] in sent_again:
+            routes["sent_again"] += 1           # its bill went out again: the earlier chase waits for the new one (detect.save)
+        elif (accepted or policy) and _owner_accepted(r, accepted, policy):
+            routes["owner_policy"] += 1         # the owner accepted its pattern (a person's decision): it left the work
         else:
             left.append(r)
     if facts and left:
@@ -1385,10 +1522,69 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             else:
                 kept_left.append(r)
         left = kept_left
-    offs = [(r["finding_id"], int(r.get("shortfall_cents") or 0), r["finding_id"]) for r in left]
-    by_signal = Counter(r.get("signal") for r in left)
-    return _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10)),
-                                           "stale": sum(1 for r in left if r["finding_id"] in after)})
+    return left
+
+
+_SUB_NO = re.compile(r"C(\d{1,3})$")
+
+
+def _sent_again(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
+    """Items about a whole claim whose bill went out again under a later submission number (EMA's rows with a submission
+    date, an 837 or an 835 claim of the same bill): detection chases only a bill's newest submission, and the earlier
+    one's item waits, stale, until the new one comes due (detect.save hands its notes on)."""
+    out: set[str] = set()
+    sources = [(t, col, extra) for t, col, extra in (("ema_rows", "claim_id", " AND COALESCE(claim_submission_date,'') != ''"),
+                                                     ("claims_837", "patient_control_number", ""),
+                                                     ("claims", "patient_control_number", ""))
+               if _has_table(conn, t) and col in _cols(conn, t)
+               and (not extra or "claim_submission_date" in _cols(conn, t))]
+    for r in items:
+        pcn = str(r.get("patient_control_number") or "")
+        b, m = bill_of(pcn), _SUB_NO.search(pcn)
+        if not b or not m:
+            continue
+        mine = int(m.group(1))
+        for t, col, extra in sources:
+            found = False
+            for (other,) in conn.execute(f"SELECT DISTINCT {col} FROM {t} WHERE {col} >= ? AND {col} < ?{extra}", (b + "C", b + "D")):
+                mo = _SUB_NO.search(str(other or ""))
+                if mo and bill_of(other) == b and int(mo.group(1)) > mine:
+                    found = True
+                    break
+            if found:
+                out.add(r["finding_id"])
+                break
+    return out
+
+
+def _owner_accepted(r: dict, accepted: set[str], policy: dict | None = None) -> bool:
+    """Whether the owner accepted the item's pattern (ema_checks.set_policy) in a way that took it off the run: its
+    write-off pattern ('group|code|modifier|reason'), or its payer's policy for a code it almost never pays, read exactly
+    as the two steps that leave such items out read it: detect.fold_payer_policy folds a remittance line by the first
+    service rarely_paid.item_codes names (the billed code of a changed one included), and ema_checks C5 drops each line of
+    an EMA-only denial, so that item goes only when every one of its lines is accepted. A decision is read per period of
+    the payer's rule (rarely_paid.pattern_key, the owner's decision 4) with the one made for the pair at every date, the
+    newer winning (rarely_paid.decision_for). A whole-claim denial is never left out by a payer-policy decision."""
+    if set(_pattern_key(r)) & accepted:
+        return True
+    if not policy:
+        return False
+    from . import rarely_paid as rp
+
+    def accepted_at(code: str, svc: str | None) -> bool:
+        d = rp.decision_for(policy, rp.pattern_key(r.get("payer_group"), code, svc))
+        return bool(d) and d.get("decision") == "accept"
+    try:
+        codes = rp.item_codes(r)
+        if not codes:
+            return False
+        if r.get("line_key"):
+            return accepted_at(*codes[0])
+        if r.get("signal") == "EMA_DENIED":
+            return all(accepted_at(c, s) for c, s in codes)
+    except Exception as exc:        # noqa: BLE001  (an item it cannot read keeps no route: it stays listed, never dropped)
+        _caught(exc, "vanished.owner_policy")
+    return False
 
 
 def _answered_since(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
@@ -1414,7 +1610,8 @@ def _answered_since(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
 def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
     """A fingerprint of what each item's own claim shows in the data now: the 835 answers on its bill (how many, the
     newest date, the money), and for its EMA claim number EMA's lines (count, insurer paid, balance, newest posting, status
-    classes) and the newest A/R rows (claim status, balance); for an item with no bill, the remittance feed as a whole.
+    classes) and the newest A/R rows (claim status, balance), or with no EMA claim number EMA's lines on file for its bill,
+    date and code; for an item with no bill, the remittance feed as a whole.
     Two runs that see the same fingerprint saw the same facts, so an item that left between them left because a rule
     changed, not because its claim did."""
     out: dict[str, str] = {}
@@ -1427,6 +1624,7 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
                 .fetchone()) if has_835 else None
     by_bill: dict[str, list] = {}
     by_link: dict[int, list] = {}
+    by_service: dict[tuple, list | None] = {}
     for it in items:
         b = bill_of(it.get("patient_control_number"))
         if b and has_835 and b not in by_bill:
@@ -1452,26 +1650,62 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
                                                        WHERE link = ? AND as_of = (SELECT MAX(as_of) FROM ema_ar WHERE link = ?)
                                                        GROUP BY 1 ORDER BY 1""", (link, link))]
             by_link[link] = [ema, ar]
-        raw = json.dumps([by_bill.get(b) if b else feed, by_link.get(link) if link is not None else None], default=str)
+        parts = [by_bill.get(b) if b else feed, by_link.get(link) if link is not None else None]
+        svc, code = str(it.get("service_date") or "")[:10], it.get("procedure_code")
+        if link is None and b and has_lines and svc and code:
+            # an item raised before EMA's line was on file (the item makes the next summary keep the line): the line's
+            # coming is new facts on its own claim. Only a line on file is added, so an item with none keeps its fingerprint
+            k = (b, svc, str(code))
+            if k not in by_service:
+                n, paid, bal, posted = conn.execute("""SELECT COUNT(*), SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(balance, 0)),
+                                                              MAX(last_posted) FROM ema_lines WHERE bill = ? AND svc = ? AND cpt = ?""",
+                                                    k).fetchone()
+                by_service[k] = [n, paid, bal, posted] if n else None
+            if by_service[k] is not None:
+                parts.append(by_service[k])
+        raw = json.dumps(parts, default=str)
         out[it["finding_id"]] = hashlib.sha1(raw.encode()).hexdigest()[:16]
     return out
 
 
+def _input_position(conn: sqlite3.Connection) -> list:
+    """How much source data the store has read: the 835 transactions (count, newest row), the 835 files and EMA's report
+    files applied (count, newest). New facts on a claim can only come with a file read: when this has not moved, a
+    fingerprint that changed is RemitWatch's own summaries changing (a refresh, a rebuild, a release), not new input."""
+    pos: list = []
+    for sql in ("SELECT COUNT(*), MAX(rowid) FROM transactions", "SELECT COUNT(*), MAX(ingested_at) FROM files",
+                "SELECT COUNT(*), MAX(applied_at) FROM ema_report_files WHERE applied_at IS NOT NULL"):
+        try:
+            pos.append(list(conn.execute(sql).fetchone()))
+        except sqlite3.Error as exc:    # a store without that table (an old copy, a test's): nothing read of that kind
+            _caught(exc, "input_position")
+            pos.append(None)
+    return pos
+
+
 def _stored_facts(conn: sqlite3.Connection) -> dict[str, str]:
+    """The fingerprints the run before stored, when this build makes them the same way and a source file was read since
+    (else none: never compared, so no departure is excused as new facts)."""
+    if meta_get(conn, K_FACTS_VERSION) != FACTS_VERSION:
+        return {}
+    if meta_get(conn, K_FACTS_INPUT) == _input_position(conn):
+        return {}                       # nothing read since the run before: no claim has new facts
     try:
         return {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        _caught(exc, "facts")
         return {}
 
 
 def _save_facts(conn: sqlite3.Connection) -> int:
-    """The fingerprints of the items people see now (the next run's vanished check compares against them)."""
+    """The fingerprints of the items on record now, listed or not (the next run's vanished and left_record checks compare
+    against them), and the source data read so far."""
     rows = _after_rows(conn)
-    states_kept = any(r.get("work_state") for r in rows.values())
-    listed = [r for r in rows.values() if _is_listed(r, states_kept)]
-    fps = _facts_of(conn, listed)
+    fps = _facts_of(conn, [r for r in rows.values() if not r.get("stale")])
     conn.execute("DELETE FROM selfcheck_facts")
     conn.executemany("INSERT OR REPLACE INTO selfcheck_facts (finding_id, fp) VALUES (?, ?)", list(fps.items()))
+    meta_set(conn, K_FACTS_VERSION, FACTS_VERSION)
+    meta_set(conn, K_FACTS_INPUT, _input_position(conn))
     return len(fps)
 
 
@@ -1749,7 +1983,11 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
     try:
-        results.append(check_vanished(conn, before, after, facts=_stored_facts(conn)))
+        van = check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again"))
+        left_record = van.pop("left_record", None)
+        results.append(van)
+        if left_record:
+            results.append(left_record)     # the items no list shows that left the record: counted, never put back
     except Exception as exc:       # noqa: BLE001
         _caught(exc, "vanished")
         results.append(_check_error("vanished", exc))
@@ -1864,6 +2102,35 @@ def _store_results(conn, results, rid, today, mode, held, first, kept, at) -> li
     return summary
 
 
+CRASHED_TITLE = "The checks after the analysis"
+
+
+def crashed(conn: sqlite3.Connection, exc: BaseException, *, run_id: str | None = None, today: Any = None) -> dict:
+    """after_detection itself failed (a code bug in the checks). The items detection saved stand and the next run tries
+    again; what after_detection left half done is rolled back. It is said as a critical check that could not run (the
+    CHECK_FAILED alert, every run until the checks run again), never silent. Only the exception's type is kept."""
+    try:
+        conn.rollback()
+        conn.execute(f"DROP TABLE IF EXISTS temp.{SNAPSHOT}")
+    except sqlite3.Error as e2:
+        _caught(e2, "crashed")
+    rid, at, t = run_id or ("run-" + now_of()[:19]), now_of(), today_of(today)
+    what = ("Download the diagnostic bundle from the Data tab and give it to the maintainer: until the checks run again, a run "
+            "that drops or closes items wrongly is not held.")
+    check = {"id": "selfcheck", "severity": "critical", "status": "error", "n": None, "cents": None, "new": None,
+             "title": CRASHED_TITLE, "sentence": "The checks themselves could not run after this analysis.",
+             "text": f"{CRASHED_TITLE}: they could not run ({type(exc).__name__})", "what_to_check": what, "examples": [],
+             "info": {"error": type(exc).__name__}}
+    meta_set(conn, K_LAST, {"run_id": rid, "at": at, "today": t, "mode": None, "held": False, "first": False, "kept": 0,
+                            "version": VERSION, "checks": [check], "crashed": True})
+    hist = list(meta_get(conn, K_HISTORY, []) or [])
+    hist.append({"run_id": rid, "at": at, "held": False, "checks": {"selfcheck": "error"}})
+    meta_set(conn, K_HISTORY, hist[-HISTORY_RUNS:])
+    conn.commit()
+    return {"run_id": rid, "held": False, "first": False, "crashed": True, "kept": 0, "failing": [], "errors": ["selfcheck"],
+            "checks": [check], "safe_mode": meta_get(conn, K_SAFE, {}) or {}}
+
+
 def accept_findings(conn: sqlite3.Connection, user: str, check_ids: Iterable[str] | None = None, *,
                     run_id: str | None = None) -> dict:
     """A person accepts what the latest checks found (a business decision on the Data tab: "this change is intended", or
@@ -1897,7 +2164,14 @@ def accept_findings(conn: sqlite3.Connection, user: str, check_ids: Iterable[str
         hist.append({"at": at, "by": who, "run_id": latest, "checks": accepted})
         meta_set(conn, K_ACCEPTED, hist)
     conn.commit()
-    return {"accepted": accepted, "by": who, "at": at, "run_id": latest}
+    if accepted:
+        text = ("Accepted: " + "; ".join(f"{_n(n, 'item')} of '{CHECKS[c][3] if c in CHECKS else c}'" for c, n in sorted(accepted.items()))
+                + f", what run {latest} found. They no longer hold a run or stay on the worklist because of these checks.")
+    else:
+        # a warning check keeps no list to accept (it holds no run and keeps no item), and a check that passed has none
+        text = ("Nothing was accepted: the checks named have no items to accept (a warning keeps no list: it holds no run "
+                "and keeps no item on the worklist).")
+    return {"accepted": accepted, "by": who, "at": at, "run_id": latest, "text": text}
 
 
 def held_copy(conn: sqlite3.Connection) -> dict:
@@ -4071,6 +4345,11 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
                                  f"({usd0(c.get('cents'))}). "
                                  f"{c.get('what_to_check') or ''}",
                         "detail": {"check": c["id"], "examples": c.get("examples"), "info": c.get("info")}})
+    ceil = ceiling_warning(conn)
+    if ceil:
+        out.append({"kind": "NEAR_CEILING", "severity": ceil["severity"], "payer_group": None, "key": ("NEAR_CEILING",),
+                    "n": ceil["n"], "cents": ceil["cents"], "title": ceil["title"],
+                    "detail": {k: ceil[k] for k in ("image_mb", "ceiling_mb", "share")}})
     reg = regulation(conn)
     if reg["level"] >= len(LEVELS) - 1:
         p = reg.get("pressure") or {}
@@ -4119,23 +4398,27 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
 # 6. Housekeeping
 # =====================================================================================================================
 def housekeeping(*, mode: str, db_path: str | None = None, state: Any = None, conn: sqlite3.Connection | None = None,
-                 now: float | None = None, keep_days: int = 30, archive_result: dict | None = None) -> dict:
+                 now: float | None = None, keep_days: int = 30, archive_result: dict | None = None, uploads: bool = True) -> dict:
     """The clean-ups of units A1, A2 and E, called from the cycle with what each did: upload pieces left unfinished for a
     day (uploads.sweep), the ledger's and refreshes' work files (ema_ledger.clean_work_files), kept upload copies the
     reports' catalog no longer needs after `keep_days` (only a file whose report was applied and later replaced or
     superseded, or read as 'already'; the sidecar, the record of what happened, stays; never a held or waiting file's, and
     never the newest of a report). It does not compact the archive (VACUUM needs the store's size again; unit E runs
     archive.compact before detection): the cycle passes that result as `archive_result` to record it with the rest. Each
-    step reports or records its error; nothing waits for a person."""
+    step reports or records its error; nothing waits for a person. `uploads=False`: the cycle swept the uploads at its
+    start already (a cut-off report can hold patient data: it goes first), so they are not swept twice."""
     now = now or time.time()
     out: dict = {"at": now_of(), "mode": mode}
     try:
-        from . import uploads
-        if mode == "serverless" and state is not None:
-            out["uploads"] = uploads.state_uploads(state).sweep(now)
+        from . import uploads as up
+        if not uploads:
+            out["uploads"] = {"swept_at_start": True}
+        elif mode == "serverless" and state is not None:
+            out["uploads"] = up.state_uploads(state).sweep(now)
         elif db_path:
-            out["uploads"] = uploads.ServerUploads(db_path).sweep(now)
+            out["uploads"] = up.ServerUploads(db_path).sweep(now)
     except Exception as exc:       # noqa: BLE001  (recorded: the next cycle tries again)
+        _caught(exc, "housekeeping:uploads")
         out["uploads"] = {"error": type(exc).__name__}
     try:
         from . import ema_ledger, runtime
@@ -4304,14 +4587,16 @@ def banner(conn: sqlite3.Connection) -> dict | None:
     it too): {'level': 'blind' | 'safe_mode', 'text'}, or None when there is nothing to say. Never 'all clear' while blind."""
     safe = meta_get(conn, K_SAFE, {}) or {}
     blind = meta_get(conn, K_BLIND, {}) or {}
-    parts, level = [], None
+    parts, level, safe_text = [], None, None
     if safe.get("on"):
-        parts.append("Safe mode: the worklist is the one from before RemitWatch's last run, which it is checking. Nothing was lost.")
+        safe_text = "Safe mode: the worklist is the one from before RemitWatch's last run, which it is checking. Nothing was lost."
+        parts.append(safe_text)
         level = "safe_mode"
     if blind.get("blind") and blind.get("banner"):
         parts.append(blind["banner"])
         level = level or "blind"
-    return {"level": level, "text": " ".join(parts)} if parts else None
+    # 'safe_mode' on its own: the pages draw it above everything, and the blind-spot bar already says the rest in dollars
+    return {"level": level, "text": " ".join(parts), "safe_mode": safe_text} if parts else None
 
 
 REQUESTS = ("audit", "accept")
@@ -4326,7 +4611,21 @@ def apply_request(conn: sqlite3.Connection, action: dict, *, today: Any = None) 
     if what == "audit":
         return {"audit": self_audit(conn, today=today, force=True, why="on demand")}
     if what == "accept":
-        return accept_findings(conn, str(action.get("user") or "a person"), action.get("checks"), run_id=action.get("run_id"))
+        rid = action.get("run_id")
+        if not (isinstance(rid, str) and re.fullmatch(r"run-\d{8}T\d{6}Z(-[0-9a-f]{4,8})?", rid)):
+            # an acceptance names the run the page showed: without one it could only take whatever the latest run found
+            return {"accepted": {}, "refused": True,
+                    "text": "Not accepted: the request did not say which run's findings to accept. Press Accept again on the Data tab."}
+        got = accept_findings(conn, str(action.get("user") or "a person"), action.get("checks"), run_id=rid)
+        if got.get("stale"):
+            # the checks ran again between the page and this run (Vercel's journal): kept where the panel reads it, so
+            # the owner who was told "Accepted" learns it was not, and why
+            hist = list(meta_get(conn, K_ACCEPTED, []) or [])[-49:]
+            hist.append({"at": got.get("at"), "by": got.get("by"), "run_id": rid, "latest": got.get("run_id"), "stale": True,
+                         "checks": {c: 0 for c in (action.get("checks") or []) if isinstance(c, str)}})
+            meta_set(conn, K_ACCEPTED, hist)
+            conn.commit()
+        return got
     return {"skipped": f"unknown request {what!r}"}
 
 
@@ -4342,6 +4641,11 @@ def data_health(conn: sqlite3.Connection, today: Any = None) -> list[dict]:
     if safe.get("on"):
         out.append({"key": "selfcheck_safe_mode", "ok": False, "title": "Safe mode: the worklist is from before the last run",
                     "detail": safe.get("text") or "", "who": "Owner: download the diagnostic bundle from the Data tab for the maintainer."})
+    ceil = ceiling_warning(conn)
+    if ceil:
+        out.append({"key": "selfcheck_ceiling", "ok": False, "severity": ceil["severity"],
+                    "title": f"The store is near what a run can save in one piece ({ceil['share']:.0%})",
+                    "detail": ceil["title"], "who": "Whoever looks after the hosting, if this stays for a week."})
     last = meta_get(conn, K_LAST, {}) or {}
     for c in last.get("checks") or []:
         if c.get("status") not in ("fail", "error") or c.get("id") in ("feed_835", "feed_ema"):

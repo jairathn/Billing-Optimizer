@@ -237,7 +237,9 @@ def test_the_lists_carry_the_new_columns_and_a_copy_without_them_still_answers(s
     by = {i["signal"]: i for i in got["items"]}
     assert {"DENIED_AUTH", "EMA_DENIED", "NOT_SENT", "REMIT_NOT_POSTED", "FORWARDED_TO_CARRIER"} <= set(by)
     assert by["EMA_DENIED"]["source"] == "ema" and by["DENIED_AUTH"]["work_state"] in ("work_now", "done", "waiting")
-    assert all(i["expected_value_cents"] is None for i in got["items"])        # the run writes it later (unit G): NULL until then
+    # the run writes what working an open item is worth, with its basis (remitwatch.selfcheck, wired into detection)
+    live = [i for i in got["items"] if i["work_state"] in ("work_now", "waiting")]
+    assert live and all(i["expected_value_cents"] is not None and i["recovery_basis"] for i in live)
 
 
 def test_each_state_counts_what_its_list_holds_and_the_states_add_up(site):
@@ -400,10 +402,8 @@ def test_the_list_sorts_by_what_working_an_item_is_worth_then_by_its_date(server
     plain = [i["finding_id"] for i in _items(server, sort="value")["items"]]
     by_dollars = [i["finding_id"] for i in sorted(_items(server)["items"], key=lambda i: -(i["shortfall_cents"] or -1))]
     assert [x for x in plain if x] and set(plain) == set(by_dollars)
-    # the run's expected value (unit G's column) when it writes one: dollars x the pattern's recovery rate
+    # the run's expected value (unit G's column, written by every run now): dollars x the pattern's recovery rate
     conn = _store(server)
-    conn.execute("ALTER TABLE findings ADD COLUMN expected_value_cents INTEGER")
-    conn.execute("ALTER TABLE findings ADD COLUMN recovery_basis TEXT")
     for n, fid in enumerate(ids):
         conn.execute("UPDATE findings SET expected_value_cents=?, recovery_basis=? WHERE finding_id=?", (n * 100, f"basis {n}", fid))
     conn.commit()
@@ -659,7 +659,9 @@ def test_on_vercel_a_decision_goes_through_the_journal_and_clears_the_ledgers_tr
         monkeypatch.setattr(el.LedgerHandle, "clear_attempt", lambda self, f: cleared.append(f))
         monkeypatch.setattr(cloud, "trigger_cycle", lambda base, trigger="x", **k: runs.append(trigger) or True)
         r = site.c.post(f"/api/ema/reports/{fid}/decision", json={"decision": "apply"}, headers=XHR)
-        assert r.status_code == 200 and cleared == [fid] and runs == ["decision"]
+        # the next press reads it: Vercel starts no run by itself (the owner's decision 1)
+        assert r.status_code == 200 and cleared == [fid] and runs == [] and r.json()["run_started"] is False
+        assert "Run the analysis now" in r.json()["text"]
         entries = cloud.read_actions(cloud.SERVING_COPY.state())
         assert [a for _n, a in entries if a["kind"] == "ema_report_decision"][0]["file_id"] == fid
         # the journal entry replayed on the store makes the same decision

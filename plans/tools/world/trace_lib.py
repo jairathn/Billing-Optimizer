@@ -10,20 +10,43 @@ transaction_key), finding ids, codes, dollars, payer names and statuses appear.
 """
 import datetime as dt
 import json
+import os
 import re
 import sqlite3
 from collections import defaultdict
 
-BASE = "/tmp/claude-0/-home-user-Billing-Optimizer/5f451de0-d1a3-5988-9a9a-08fbd67159f6/scratchpad/audit"
+# Paths come from the environment (a private folder of your own, never a path in the repository):
+#   TRACE_DIR     the private folder holding the world copy (TRACE_DB, default world.sqlite) and its posting ledger
+#                 (TRACE_LEDGER, default ema_ledger.sqlite, else world_ema_ledger.sqlite, in TRACE_DIR)
+#   TRACE_AUDIT   optional: an auditor output (audit_result.sqlite), attached as A for finding() and auditor_units()
+BASE = os.environ.get("TRACE_DIR") or ""
 BILL_RE = re.compile(r"^([A-Z]{2}\d{2}[A-Z0-9]{5,6})C\d{0,3}$")
 AUD_RE = re.compile(r"^([A-Z]{2}\d{2}[A-Z0-9]{5})(C\d{0,3})?$")
 
 
+def _ledger_path():
+    p = os.environ.get("TRACE_LEDGER")
+    if p:
+        return p
+    for nm in ("ema_ledger.sqlite", "world_ema_ledger.sqlite"):
+        if os.path.exists(os.path.join(BASE, nm)):
+            return os.path.join(BASE, nm)
+    return os.path.join(BASE, "ema_ledger.sqlite")
+
+
 def connect():
-    w = sqlite3.connect(f"file:{BASE}/world.sqlite?mode=ro", uri=True)
-    w.execute(f"attach 'file:{BASE}/world_ema_ledger.sqlite?mode=ro' as L")
-    w.execute(f"attach 'file:{BASE}/audit_result.sqlite?mode=ro' as A")
+    if not BASE:
+        raise SystemExit("set TRACE_DIR to the private folder holding the world copy")
+    w = sqlite3.connect(f"file:{os.path.join(BASE, os.environ.get('TRACE_DB') or 'world.sqlite')}?mode=ro", uri=True)
+    w.execute(f"attach 'file:{_ledger_path()}?mode=ro' as L")
+    aud = os.environ.get("TRACE_AUDIT")
+    if aud and os.path.exists(aud):
+        w.execute(f"attach 'file:{aud}?mode=ro' as A")
     return w
+
+
+def has_table(w, name, schema="main"):
+    return w.execute(f"select 1 from {schema}.sqlite_master where type='table' and name=?", (name,)).fetchone() is not None
 
 
 def iso(s):
@@ -146,6 +169,15 @@ class Tracer:
             " carc, claim_action, coverage_type, denial_date, bill_created from ema_rows where claim_id >= ? and claim_id < ?",
             (bill, bill + "~")).fetchall()
         ema = [e for e in ema if bill_of(e[19]) == bill]
+        # the day each weekly export was made (its rows tell the claim's state as of that day)
+        made = {}
+        if has_table(self.w, "ema_sources"):
+            made = {r[0]: iso(r[1]) for r in self.w.execute("select source_name, created_at from ema_sources")}
+        srcs = {r[0]: r[1] for r in self.w.execute("select rowid, source_name from ema_rows where claim_id >= ? and "
+                                                     "claim_id < ?", (bill, bill + "~"))} if made else {}
+        exp_days = sorted({made.get(v) for v in srcs.values() if made.get(v)})
+        if exp_days:
+            self.p(f" EMA weekly exports holding this bill, made: {', '.join(rel(d, anchor) for d in exp_days)}")
         allp = sorted({c[3] for c in claims} | {c[2] for c in c837} | {e[19] for e in ema})
         idx = {p: i + 1 for i, p in enumerate(allp)}
         self.p(f"== service {code}/{comp} units: claim ids of bill={len(allp)}; 835 processings={len(claims)}; "
@@ -262,7 +294,95 @@ class Tracer:
                f"paid={money(paid)} alw={money(allowed)} CAS[{self.fmt_cas(cas)}] RARC[{','.join(rarc)}]")
 
     # ---------------------------------------------------------------------------------------------- EMA books
+    def ema_links_of_bill(self, bill):
+        """EMA claims (links) tied to a bill by the link map or the A/R's claim links (keys only)."""
+        out = set()
+        if has_table(self.w, "ema_link_map"):
+            out |= {r[0] for r in self.w.execute("select link from ema_link_map where bill=?", (bill,)) if r[0] is not None}
+        if has_table(self.w, "ema_claim_links"):
+            out |= {r[0] for r in self.w.execute("select link from ema_claim_links where bill=? or (claim_id >= ? and "
+                                                 "claim_id < ?)", (bill, bill, bill + "~")) if r[0] is not None}
+        return sorted(out)
+
+    def postings(self, link, dos, code, anchor):
+        ps = self.w.execute(
+            "select p.posted, p.grp, p.code, ks.name, ss.name, acs.name, pys.name, p.ins_paid, p.pat_paid, p.contractual,"
+            " p.noncontractual, p.pat_adj, p.allowed, p.charges, p.flags, p.check_no, p.units"
+            " from L.postings p left join L.names ks on ks.id=p.kind left join L.names ss on ss.id=p.status"
+            " left join L.names acs on acs.id=p.action left join L.names pys on pys.id=p.payer"
+            " where p.link=? and p.svc=? and p.cpt=? order by p.posted", (link, dos, code)).fetchall()
+        for (posted, grp, rc, kind, st2, act, payer, ip, pp, co, nc, pa, al, ch, fl, chk, un) in ps:
+            bits = [f"{nm}={money(v)}" for nm, v in (("chg", ch), ("ins_paid", ip), ("pat_paid", pp), ("contr", co),
+                                                     ("noncontr", nc), ("pat_adj", pa), ("allowed", al)) if v]
+            self.p(f"   post {rel(posted, anchor)} {grp or ''}{('-' + rc) if rc else ''}{(' kind=' + kind) if kind else ''} "
+                   f"[{st2}]{(' action=' + act) if act else ''} {str(payer)[:18]} {' '.join(bits)}"
+                   f"{(' u=' + str(un)) if un else ''}{' chk' if chk else ''}")
+        return len(ps)
+
+    def ema_books_ledger(self, bill, code, dos, anchor):
+        """EMA's books for a service from the link map and the posting ledger (a world without aud_ema_lines_all)."""
+        links = self.ema_links_of_bill(bill)
+        if not links:
+            self.p(" BOOKS: no EMA claim tied to this bill by the link map or the A/R")
+        for link in links:
+            n = self.postings(link, dos, code, anchor)
+            if not n:
+                codes = [r[0] for r in self.w.execute("select distinct cpt from L.postings where link=? and svc=?",
+                                                     (link, dos))]
+                self.p(f" BOOKS: an EMA claim of the bill, no line for this code that day (codes that day: {codes})")
+            if has_table(self.w, "ema_ar"):
+                for a in self.w.execute("select balance_type, balance_cents, denial_cents, claim_status, claim_action, "
+                                        "bucket, party, follow_up, note_kind from ema_ar where link=? and svc=? and cpt=?",
+                                        (link, dos, code)):
+                    self.p(f"   A/R: type={a[0]} bal={money(a[1])} denial={money(a[2])} status={a[3]} action={a[4]} "
+                           f"bucket={a[5]} party={a[6]} note={a[8]}")
+
+    def send_day_twins(self, bill, anchor):
+        """EMA claims no link ties to any bill whose charges were first posted the day of the bill's first 837 send or
+        the day before, with exactly its lines (day, code, charge): the bill's send-day twins, with their postings."""
+        sends = self.w.execute("select claim_837_key, substr(bht_created,1,10), service_date from claims_837 where "
+                               "patient_control_number >= ? and patient_control_number < ? and coalesce(frequency_code,'1')"
+                               "<>'8' order by bht_created", (bill, bill + "~")).fetchall()
+        sends = [x for x in sends if bill_of(self.w.execute("select patient_control_number from claims_837 where "
+                                                            "claim_837_key=?", (x[0],)).fetchone()[0]) == bill]
+        if not sends:
+            self.p(" TWINS: no 837 send for this bill")
+            return []
+        k, day, sdate = sends[0]
+        agg = defaultdict(int)
+        for code, chg, ld in self.w.execute("select procedure_code, charge_cents, service_date from lines_837 where "
+                                            "claim_837_key=?", (k,)):
+            agg[(iso(ld) or iso(sdate), (code or "").upper())] += chg or 0
+        want = sorted((d, c, ch) for (d, c), ch in agg.items() if ch > 0)
+        lo = (dt.date.fromisoformat(day) - dt.timedelta(days=1)).isoformat()
+        cands = defaultdict(set)
+        for d, c, ch in want:
+            for (lk,) in self.w.execute("select link from L.postings where svc=? and cpt=? and charges>0 group by link "
+                                        "having sum(charges)=? and min(posted) between ? and ?", (d, c, ch, lo, day)):
+                cands[lk].add((d, c, ch))
+        tied = set()
+        if has_table(self.w, "ema_link_map"):
+            tied = {r[0] for r in self.w.execute("select link from ema_link_map where bill is not null")}
+        out = []
+        for lk, got in cands.items():
+            if lk in tied or sorted(got) != want:
+                continue
+            allc = self.w.execute("select count(distinct svc||cpt) from L.postings where link=? and charges>0",
+                                  (lk,)).fetchone()[0]
+            if allc != len(want):
+                continue
+            out.append(lk)
+        self.p(f" TWINS: first send {rel(day, anchor)}, {len(want)} line(s); EMA claims of the same lines first charged "
+               f"that day or the day before, tied to no bill: {len(out)}")
+        for i, lk in enumerate(out[:4]):
+            self.p(f"  twin #{i + 1}:")
+            for d, c, ch in want:
+                self.postings(lk, d, c, anchor)
+        return out
+
     def ema_books(self, bill, code, dos, anchor):
+        if not has_table(self.w, "aud_ema_lines_all"):
+            return self.ema_books_ledger(bill, code, dos, anchor)
         rows = self.w.execute(
             "select link, charges, ins_charges, ins_paid, pat_paid, contractual, noncontractual, pat_adj, open, patient_joined,"
             " patient_ambiguous, status, status_class, primary_payer_group, first_posted, last_posted, a835_line, a835_visit,"
