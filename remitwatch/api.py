@@ -1628,7 +1628,8 @@ def _status_now(conn: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
 def _evidence_of(raw: Any) -> dict:
     try:
         v = json.loads(raw) if isinstance(raw, str) else (raw or {})
-    except ValueError:
+    except ValueError as exc:
+        runlog.caught(exc, "status:evidence", level="warning")      # unreadable evidence: read as no remittance flag
         return {}
     return v if isinstance(v, dict) else {}
 
@@ -1655,7 +1656,8 @@ def _paid_on_file(fid: str) -> dict | None:
             return None
         st = states.state_of(conn, dict(row), today=_day(0))
     except Exception as exc:        # noqa: BLE001  (logged: without the state, a $0 Paid is refused as for any unpaid line)
-        _say(f"api: state for a $0 Paid failed for item {fid}: {type(exc).__name__}")
+        runlog.caught(exc, "status:paid_on_file", level="warning")
+        _say(runlog.scrub_text(f"api: state for a $0 Paid failed for item {fid}: {type(exc).__name__}"))
         return None
     finally:
         conn.close()
