@@ -7303,10 +7303,12 @@ class Detector:
                 if (self.standing.get(l["line_key"]) or 0) > 0:
                     s[0] = True
             share: dict[tuple, list] = defaultdict(lambda: [0, 0])
-            for (grp, code, _who, svc, _part), (paid, nk) in services.items():
+            # the service's own names (s_...): the parameters payer_group and code are the question asked, read after the
+            # loop (a loop that rebound them answered the run's first question for the last service read)
+            for (s_grp, s_code, _who, s_svc, _part), (paid, nk) in services.items():
                 if not paid and nk is not None:
-                    paid = any(ec._same_payer(g, grp) for g in ema_paid.get((nk, svc, code), ()))
-                a = share[(grp, code)]
+                    paid = any(ec._same_payer(g, s_grp) for g in ema_paid.get((nk, s_svc, s_code), ()))
+                a = share[(s_grp, s_code)]
                 a[1] += 1
                 a[0] += 1 if paid else 0
             self._share = dict(share)
