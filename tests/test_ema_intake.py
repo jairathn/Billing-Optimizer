@@ -670,7 +670,12 @@ def test_no_log_line_names_an_upload_on_either_host(tmp_path, vercel, monkeypatc
     root, client, state = vercel
     monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
     pair2 = _pair(root / "RemitWatch-state" / "intake", "Doe Jane 2026 Production.csv", F.production_csv(prod_rows(2026)), gz=True)
-    cloud.run_cloud_cycle(state, client, email=False, budget_s=600, log=lambda *a: said.append(" ".join(map(str, a))))
+    cloud.run_cloud_cycle(state, client, email=False, budget_s=600)
+    # on Vercel the cycle's lines go to its run log in the state folder (remitwatch.runlog), never to the function's log
+    from remitwatch import runlog
+    sink = runlog.sink_for(state=state)
+    _m, events = runlog.read_run(sink, runlog.read_index(sink)[-1]["run_id"])
+    said += [str((e.get("detail") or {}).get("text") or "") for e in events if e.get("event") == "log"]
     assert said and not [s for s in said if "Doe" in s], [s for s in said if "Doe" in s]
     assert any(f"upload {intake.upload_id_of(pair)}" in s for s in said)
     assert any(f"upload {intake.upload_id_of(pair2)}" in s for s in said)
@@ -1759,8 +1764,13 @@ def test_a_big_report_whose_first_bytes_could_not_be_fetched_is_looked_at_again(
             raise RuntimeError("download timed out")
         return real(path_or_id, chunk, timeout)
     monkeypatch.setattr(client, "download_chunks", flaky)
+    import dataclasses
+
+    from remitwatch import repair
+    monkeypatch.setitem(repair.REMEDIES, "network", dataclasses.replace(repair.REMEDIES["network"], delays=(0, 0, 0)))
     first = cycle(state, client)
-    assert first["ingest"]["download_errors"] == 1 and not first["ingest"]["failed"]
+    # the self-repair tries the read again in the same run (remitwatch.repair): nothing is left for the next run
+    assert calls["n"] >= 2 and first["ingest"]["download_errors"] == 0 and not first["ingest"]["failed"]
     cycle(state, client)
     conn = state_store(state)
     pid = er.provisional_id(client._entry(big)["content_hash"])

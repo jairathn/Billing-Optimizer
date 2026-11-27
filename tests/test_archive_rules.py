@@ -364,24 +364,33 @@ def test_rule7_two_units_of_one_code_and_worked_items_never_fold(store):
 
 # =========================================================================== 8. patient-group denials and CO-147
 def test_rule8_a_plan_exclusion_raises_an_item_saying_who_pays_and_what_to_fix(store):
+    """The owner's decision 2 (2026-11-26): a patient-group denial is worth what the patient owes as the payer set it (its
+    PR on the line, never more than the charge less what any payer paid); the payer's usual rate stays in the evidence."""
     remit(store, "2026-03-20", [cl("CB0000801C017", [ln("11900", 93.75, 0, 93.75, [("PR", "204", 93.75)])])])
     a = only(ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: 3767 if c == "11900" else None))
     assert (a["action"], a["signal"], a["carc"], a["carc_group"], a["expected_cents"], a["shortfall_cents"]) == \
-        ("raise_item", "DENIED_PLAN_EXCLUSION", "204", "PR", 3767, 3767)
+        ("raise_item", "DENIED_PLAN_EXCLUSION", "204", "PR", 9375, 9375)
     assert a["who_should_pay"].startswith("the patient") and "Who should pay" in a["hint"] and "What to fix" in a["hint"]
-    assert a["evidence"]["basis"] == "Acme Health Plan's usual 2026 rate for 11900"
+    assert a["evidence"]["basis"].startswith("what the payer put on the patient on its 835 (PR-204 $93.75)")
+    assert (a["evidence"]["payer_rate_cents"], a["evidence"]["payer_rate_basis"]) == (3767, "Acme Health Plan's usual 2026 rate for 11900")
+    assert a["evidence"]["patient_share"] == {"cents": 9375, "pr": [["PR-204", 9375]], "charge_cents": 9375, "payers_paid_cents": 0}
     # a fallback rate says where it came from (the Detector's usual_rate names Medicare's fee schedule, say)
     b = only(ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: (4100, "Medicare 2026 rate for 11900 (physician)")))
-    assert (b["shortfall_cents"], b["evidence"]["basis"]) == (4100, "Medicare 2026 rate for 11900 (physician)")
-    # with no usual rate, the whole charge the payer put down as 'allowed' is no price: no size
-    assert only(ar.pr_group_denials(store.conn, []))["shortfall_cents"] is None
+    assert (b["shortfall_cents"], b["evidence"]["payer_rate_basis"]) == (9375, "Medicare 2026 rate for 11900 (physician)")
+    # with no usual rate the patient's share still sizes it (it needs no rate)
+    c = only(ar.pr_group_denials(store.conn, []))
+    assert c["shortfall_cents"] == 9375 and "payer_rate_cents" not in c["evidence"]
 
 
-def test_rule8_a_medicaid_members_missing_referral_is_the_payers_to_pay(store):
+def test_rule8_a_medicaid_members_missing_referral_bills_the_patient_or_takes_a_retroactive_referral(store):
+    """The owner's decision 2: a Medicaid plan's patient-group answer follows the same rule (the payer itself assigned the
+    amount to the patient); the referral fix names the member's assigned primary care office."""
     remit(store, "2026-03-20", [cl("CB0000802C017", [ln("99204", 293.16, 0, None, [("PR", "288", 293.16)])], cfi="MC")],
           payer="STATE MEDICAID PLAN", payer_id="MCD1")
     a = only(ar.pr_group_denials(store.conn, []))
-    assert a["signal"] == "DENIED_REFERRAL" and "Medicaid member cannot be billed" in a["who_should_pay"]
+    assert a["signal"] == "DENIED_REFERRAL" and a["who_should_pay"].startswith("the patient"), a["who_should_pay"]
+    assert "assigned primary care office" in a["what_to_fix"] and a["what_to_fix"].startswith("Bill the patient")
+    assert a["shortfall_cents"] == 29316
 
 
 def test_rule8_cost_share_listed_lines_and_paid_services_raise_nothing(store):
@@ -1091,10 +1100,12 @@ def test_rule8_no_coverage_item_once_another_plan_answered_the_service(store):
 
 
 def test_rule8_size_counts_the_units_and_never_tops_the_charge(store):
-    """As detect.py sizes a denied line: the usual rate times the units billed, and never above the charge."""
+    """The patient's share sizes a patient-group denial (the owner's decision 2); the payer's usual rate, kept beside it,
+    is sized as detect.py sizes a denied line: the rate times the units billed, and never above the charge."""
     remit(store, "2026-03-20", [cl("CB0003006C017", [ln("17003", 41.86, 0, None, [("PR", "204", 41.86)], units=7)])])
     a = only(ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: 675))
-    assert a["shortfall_cents"] == 4186 and "x 7 units billed" in a["evidence"]["basis"] and "capped" in a["evidence"]["basis"]
+    assert a["shortfall_cents"] == 4186 and a["evidence"]["payer_rate_cents"] == 4186
+    assert "x 7 units billed" in a["evidence"]["payer_rate_basis"] and "capped" in a["evidence"]["payer_rate_basis"]
     remit(store, "2026-03-21", [cl("CB0003007C017", [ln("96372", 13.04, 0, None, [("PR", "204", 13.04)])])])
     b = only([x for x in ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: 1326) if x["procedure_code"] == "96372"])
     assert b["shortfall_cents"] == 1304

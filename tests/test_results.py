@@ -1062,7 +1062,8 @@ def test_a_serverless_page_reads_what_the_run_stored_and_never_works_money_out_i
     tc, st, s, publish = cloud_api
     publish(False)
     d = tc.get("/api/results").json()
-    assert d["ready"] is False and d["host"] == "serverless" and "daily run" in d["note"] and d["money"] is None
+    # the note says the figures come from an analysis, which on Vercel runs only on a press (the owner's decision 1)
+    assert d["ready"] is False and d["host"] == "serverless" and "Run the analysis now" in d["note"] and d["money"] is None
     assert d["live"]["states"]["work_now"]["n"] > 0                  # counts on the findings table are live on both hosts
     assert tc.get("/api/results/scoreboard").json()["recovered_cents"] is None
     publish(True)

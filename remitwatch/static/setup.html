@@ -33,6 +33,7 @@ a{color:var(--accent)}
 <main>
   <div id="swingBar" hidden></div>
   <h1>RemitWatch setup</h1>
+  <div id="pressLine" class="small" hidden></div>
   <div class="muted">Every setting this site needs, checked live. Work from the top. After you change a setting, apply it (on the server, with configure.sh; on Vercel, redeploy), then press Check again.</div>
 
   <div class="panel"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Checklist</h2><button id="recheck">Check again</button></div>
@@ -156,7 +157,10 @@ async function check(){
   if(!$('#genPw').textContent){ $('#genPw').textContent = rand(20); $('#genCron').textContent = rand(40); }
   $('#connect').style.display = (s.authorize_url && (s.connect_needed || $('#token').value)) ? '' : 'none';
   if(s.authorize_url) $('#authLink').href = s.authorize_url;
-  $('#hook').style.display = (s.ready && s.webhook_url) ? '' : 'none';
+  // a Dropbox notification starts nothing on the Vercel site (it analyses only on a press): no webhook to add there
+  $('#hook').style.display = (s.ready && s.webhook_url && !s.press_only) ? '' : 'none';
+  const pl = $('#pressLine');
+  if(pl){ pl.hidden = !s.press_only; if(s.press_only) pl.textContent = (s.press_text || '') + ' ' + (s.analysed && s.analysed.at ? 'It last analysed ' + String(s.analysed.at).replace('T',' ').slice(0,16) + ' UTC.' : 'It has not analysed yet.'); }
   if(s.webhook_url) $('#hookUrl').textContent = s.webhook_url;
   $('#load').style.display = s.ready ? '' : 'none';
   $('#modmed').style.display = s.locked ? 'none' : '';

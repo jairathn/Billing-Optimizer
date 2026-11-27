@@ -6,7 +6,7 @@ activity.refresh), then the refresh after detection when detection kept new bill
 Prints counts, dollars, signals, states and step times / memory only. Error texts of failed EMA steps (they can quote a
 value) go to p2/run_private.json (mode 600) and only the step name and exception type are printed.
 
-Usage: python3 -I -B p2_run.py [TODAY]
+Usage: F5_SRC=TREE P2_DIR=PRIVATE_DIR [P2_DB=world.sqlite] python3 -I -B cycle_run.py [TODAY]
 """
 import gc
 import json
@@ -15,11 +15,14 @@ import resource
 import sys
 import time
 
-A = "/tmp/claude-0/-home-user-Billing-Optimizer/5f451de0-d1a3-5988-9a9a-08fbd67159f6/scratchpad/audit"
-FERMI = os.environ.get("F5_SRC") or "/home/user/Billing-Optimizer/.claude/worktrees/agent-a4987059ac267c6d6"
-P2 = os.environ.get("P2_DIR") or "/tmp/claude-0/-home-user-Billing-Optimizer/5f451de0-d1a3-5988-9a9a-08fbd67159f6/scratchpad/fix5"
+# Paths come from the environment (a private folder of your own, never a path in the repository):
+#   F5_SRC  the code tree to run (a git archive or worktree of the commit to measure)
+#   P2_DIR  the private folder that holds the world copy and its ema_ledger.sqlite
+#   P2_DB   the world copy's file name in P2_DIR (default world.sqlite)
+FERMI = os.environ.get("F5_SRC") or sys.exit("set F5_SRC to the code tree to run")
+P2 = os.environ.get("P2_DIR") or sys.exit("set P2_DIR to the private folder holding the world copy")
 TMP = os.path.join(P2, "tmp")
-DB = os.path.join(P2, os.environ.get("P2_DB") or "world_f5.sqlite")
+DB = os.path.join(P2, os.environ.get("P2_DB") or "world.sqlite")
 LEDGER = os.path.join(P2, "ema_ledger.sqlite")
 TODAY = sys.argv[1] if len(sys.argv) > 1 else "2026-11-24"
 

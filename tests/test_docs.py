@@ -83,7 +83,10 @@ def app_modules() -> set[str]:
     return seen
 
 
-SETTING_READ = re.compile(r"""(?:environ(?:\.get)?\(|environ\[|getenv\(|\be\.get\(|\benv\.get\(|\benv\(|setdefault\()\s*["']([A-Z][A-Z0-9_]{2,})["']""")
+# every accessor the app reads a setting through, the self-check's (setting, _int_setting) and the archive's
+# (_env(env).get) included: a module wired into the cycles reads its settings live (review hook-r2-4)
+SETTING_READ = re.compile(r"""(?:environ(?:\.get)?\(|environ\[|getenv\(|\be\.get\(|\benv\.get\(|\benv\(|setdefault\(|\bsetting\(|"""
+                          r"""\b_int_setting\(|\b_env\(env\)\.get\()\s*["']([A-Z][A-Z0-9_]{2,})["']""")
 SETTING_CONST = re.compile(r"""^[A-Z_]*SETTING\s*=\s*["']([A-Z][A-Z0-9_]+)["']""", re.M)
 
 
@@ -109,7 +112,10 @@ def test_the_app_reads_the_settings_this_test_looks_for():
     got = settings_read()
     # a few every host has: if these go missing the pattern above no longer finds what the code reads
     for name in ("REMITWATCH_PASSWORD", "REMITWATCH_FAX_SENDER", "TRIZETTO_SFTP_SERVERLESS", "SRFAX_ACCESS_ID", "MODMED_CLIENT_ID",
-                 "REMITWATCH_ALLOW_OPEN", "REMITWATCH_NO_ANSWER_DAYS", "TRIZETTO_SFTP_PASSWORD_DAYS"):
+                 "REMITWATCH_ALLOW_OPEN", "REMITWATCH_NO_ANSWER_DAYS", "TRIZETTO_SFTP_PASSWORD_DAYS",
+                 # read through the self-check's and the archive's own accessors
+                 "REMITWATCH_RETENTION_MONTHS", "REMITWATCH_ARCHIVE_DIR", "REMITWATCH_AUDIT_WASTED_ITEMS",
+                 "REMITWATCH_CYCLE_BUDGET_SECONDS", "REMITWATCH_MEMORY_BUDGET_MB"):
         assert name in got, name
 
 
@@ -119,6 +125,20 @@ def test_every_setting_the_app_reads_is_named_for_each_host(page):
     text = doc(page)
     missing = {name: where for name, where in settings_read().items() if not _named(name, text)}
     assert not missing, f"{page} does not name these settings the app reads: {missing}"
+
+
+SIMULATION_ONLY = {"REMITWATCH_TODAY"}         # stands in for the day in tests and simulations: never for an operator
+
+
+def test_the_settings_the_self_check_and_the_archive_read_are_in_env_example():
+    """The self-check and the archive run in every cycle on both hosts (the hook): an operator finds each setting they
+    read in .env.example, with what it does (review hook-r2-4)."""
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+    live = {n: w for n, w in settings_read().items() if w in ("remitwatch/selfcheck.py", "remitwatch/archive.py")
+            and n not in SIMULATION_ONLY}
+    assert {"REMITWATCH_RETENTION_MONTHS", "REMITWATCH_AUDIT_WASTED_ITEMS", "REMITWATCH_ARCHIVE_DIR"} <= set(live), live
+    missing = {n: w for n, w in live.items() if not _named(n, text)}
+    assert not missing, f".env.example does not name these settings the self-check and the archive read: {missing}"
 
 
 def _read_anywhere() -> str:
@@ -606,7 +626,7 @@ def test_the_note_matching_docs_follow_find_note():
 # the button and label words the docs quote, as the pages show them
 PAGE_WORDS = ["It went out as billed: fax it", "Still unpaid in EMA: fax it anyway", "Fax them anyway", "Needs a person to match",
               "Send it to", "For a person", "Test the TriZetto connection", "Test the fax line", "Appeal everything appealable",
-              "Appeal by fax", "Not tried now", "Tie a fax that came in to this item"]
+              "Appeal by fax", "Not tried now", "Tie a fax that came in to this item", "Before you send it"]
 
 
 def test_the_words_the_docs_quote_are_on_the_pages():

@@ -107,6 +107,25 @@ CLERICAL_RARCS = frozenset({"M51", "M76", "M81", "MA63", "M20", "M67", "M77"})
 REOPENING_DAYS = 365
 # what EMA's current claim action says is pending at the payer (an item past every window still waits on it)
 PENDING_ACTIONS = ("appeal", "corrected", "records", "reprocess")
+# The owner's decision 2 (2026-11-26): archive rule 8's patient-group denials that are not the patient's deductible,
+# coinsurance or copay (archive_rules.PR_GROUP_CODES, group PR) are billed to the patient. A person records "Billed the
+# patient" (a status Sent whose note starts with BILLED_PATIENT: the item waits for the patient's payment in EMA) or "Done"
+# (a status Paid with $0 whose note starts with DONE_NOTE: done by that person). PATIENT_WAIT_DAYS: two monthly statements
+# before an unpaid patient balance comes back to Work now (every waiting item has a follow-up day, selfcheck followup_date)
+PATIENT_DENIAL_SIGNALS = ("DENIED_REFERRAL", "DENIED_COVERAGE_DATES", "DENIED_PLAN_EXCLUSION")
+PATIENT_DENIAL_CODES = frozenset({"288", "27", "26", "200", "49", "204"})
+BILLED_PATIENT = "Billed the patient"
+DONE_NOTE = "Done"
+PATIENT_WAIT_DAYS = 60
+# the rules of a patient-group denial whose work is on the patient's side (billing the patient, waiting on the patient's
+# payment, checking the patient's account, settled by the patient, or a person's Done): sized at the patient's share. Any
+# other work on it (a corrected claim or a resubmission sent to the payer, its follow-up) is with the payer and is worth
+# what the payer pays for the service (review r1-4)
+PATIENT_SIDE_RULES = frozenset({"bill_patient_denial", "patient_unpaid", "billed_patient", "cant_check_patient", "patient_paid",
+                                "moved_to_patient", "person_done"})
+# the rules a person's own decision-2 action leads to (Billed the patient, then the patient's payment or its absence; Done):
+# when that action is newer than the run that stored the item's state, the state it gives is the item's (story._state_of)
+PATIENT_PERSON_RULES = frozenset({"billed_patient", "patient_unpaid", "patient_paid", "person_done"})
 
 
 # ------------------------------------------------------------------------------------------------------------ helpers
@@ -150,6 +169,17 @@ def fax_day(sent_at: Any, created_at: Any) -> str:
     sent = sent if _d(sent) else ""
     made = made if _d(made) else ""
     return max(sent, made) if sent and made else (sent or made)
+
+
+def _newest_work(rows: list[dict]) -> dict | None:
+    """The newest of a person's work rows: by the practice's day, then by the moment it was recorded, so of two marks on
+    one day the later is the newest (review r2-3: Billed the patient after a Sent that morning is what the item waits on,
+    and a corrected claim sent after a Billed the patient that day waits on the payer). A row with no moment ranks
+    before one with a moment on its day."""
+    def key(e: dict) -> tuple:
+        m = _moment(e.get("at"))
+        return (e.get("date") or "", m.timestamp() if m else float("-inf"))
+    return max(rows, key=key, default=None)
 
 
 def _came_after(read: Any, day: Any, moment: datetime | None, reopen_day: str) -> bool:
@@ -1219,13 +1249,21 @@ def _evidence(fx: dict) -> list[dict]:
             kind = "sent" if e["to"] == "appealed" else "started"
             who = e["actor"] or "a person"
             note = str(e.get("note") or "")
+            if kind == "sent" and note.startswith(BILLED_PATIENT):
+                # "Billed the patient" (the owner's decision 2): the patient was billed for a patient-group denial
+                rest = note[len(BILLED_PATIENT):].lstrip(" :").strip()
+                out.append({"date": _pday(e["at"]), "at": e["at"], "kind": "billed", "patient": True, "source": "remitwatch",
+                            "dated_by": "event", "confirmed": True,
+                            "text": f"Patient billed by {who} on {day(e['at'])}" + (f": {rest}" if rest else "")})
+                continue
             if kind == "sent" and note.startswith("Billed:"):
                 # the page's Mark billed: the claim went to the next payer (or the patient), not an appeal to this one
-                out.append({"date": _pday(e["at"]), "kind": "billed", "source": "remitwatch", "dated_by": "event", "confirmed": True,
+                out.append({"date": _pday(e["at"]), "at": e["at"], "kind": "billed", "source": "remitwatch", "dated_by": "event",
+                            "confirmed": True,
                             "text": f"Marked billed by {who} on {day(e['at'])}" + (f": {note[len('Billed:'):].strip()}" if note[7:].strip() else "")})
                 continue
             text = f"Marked {'Sent' if kind == 'sent' else 'Started'} by {who} on {day(e['at'])}" + (f": {e['note']}" if e.get("note") else "")
-            out.append({"date": _pday(e["at"]), "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
+            out.append({"date": _pday(e["at"]), "at": e["at"], "kind": kind, "source": "remitwatch", "text": text, "dated_by": "event",
                         "confirmed": kind == "sent"})
         elif e["kind"] == "packet":
             out.append({"date": _pday(e["at"]), "kind": "packet", "source": "remitwatch", "dated_by": "event", "confirmed": False,
@@ -2204,6 +2242,74 @@ def _carc_group(fx: dict) -> str:
     return ""
 
 
+def patient_denial(f: dict) -> bool:
+    """A patient-group denial the owner's decision 2 bills to the patient: archive rule 8's PR-288, PR-27, PR-26, PR-200,
+    PR-49 or PR-204 (never CO-147, a contractual reason, and never the patient's cost share)."""
+    if (f.get("signal") or "") not in PATIENT_DENIAL_SIGNALS or str(f.get("carc") or "") not in PATIENT_DENIAL_CODES:
+        return False
+    return str(f.get("carc_group") or _ev(f).get("carc_group") or "").upper() == "PR"
+
+
+def patient_share(fx: dict) -> dict:
+    """What a patient-group denial asks of the patient: every PR amount the payer set on the item's own line, never more
+    than the charge less what any payer paid for the service (the standing payments of its other answers). {'cents', 'pr':
+    [(group, code, cents)], 'charge', 'paid', 'patient_paid' (what EMA's line shows the patient paid, when the patient's
+    money is not split across several lines), 'left' (cents less that: what is still to bill)}. With the item's own line
+    not in the facts (a copy without it), the size the detection run gave it."""
+    f = fx["item"]
+    own = [x for x in fx["r835"]["rows"] if x.get("line_key") and x["line_key"] == f.get("line_key") and x["status"] != "22"]
+    paid = sum(x["paid"] or 0 for x in standing_rows(fx["r835"]["rows"]) if x.get("line_key") and x["line_key"] != f.get("line_key")
+               and (x["paid"] or 0) > 0)
+    tot = _ema_line_totals(fx) if fx.get("ema") else None
+    by_patient = max(tot["pat_paid"], 0) if tot and tot["n"] and not tot["several"] else 0
+    if not own:
+        cents = max(int((_ev(f).get("patient_share") or {}).get("cents") or f.get("shortfall_cents") or 0), 0)
+        return {"cents": cents, "pr": [], "charge": int(f.get("charge_cents") or 0), "paid": paid, "patient_paid": by_patient,
+                "left": max(cents - by_patient, 0)}
+    pr = [(g, c, a) for x in own for g, c, a in x["adj"] if g == "PR" and a]
+    charge = sum(x["charge"] or 0 for x in own)
+    cents = max(min(sum(a for _g, _c, a in pr), charge - paid), 0)
+    # a payer that answered the service after this one (the next payer: a supplement, a Medicaid plan) set the patient's
+    # part itself: never more than the patient share it left; what it took off as contractual is not the patient's to pay
+    # (review r1-5). A next payer that put nothing on the patient leaves the share as it is (its contractual answer is said
+    # before billing: story._bill_patient_denial_step)
+    nxt = next_payer_answer(fx)
+    if nxt and nxt["pr"] > 0:
+        cents = min(cents, nxt["pr"])
+    return {"cents": cents, "pr": pr, "charge": charge, "paid": paid, "patient_paid": by_patient, "left": max(cents - by_patient, 0)}
+
+
+def next_payer_answer(fx: dict) -> dict | None:
+    """The newest standing answer of the item's service (its code and date) by another line after the item's own answer:
+    the next payer (a supplement, a Medicaid plan), with what it put on the patient and on the practice. {'row', 'pr',
+    'co', 'paid', 'pr_codes', 'co_codes'}, or None."""
+    f = fx["item"]
+    mine, svc, code = str(f.get("payment_date") or "")[:10], str(f.get("service_date") or "")[:10], f.get("procedure_code")
+    later = [x for x in standing_rows(fx["r835"]["rows"]) if x.get("line_key") and x["line_key"] != f.get("line_key")
+             and x.get("status") != "22" and x.get("code") == code and str(x.get("svc") or "")[:10] == svc
+             and str(x.get("date") or "")[:10] > mine]
+    if not later:
+        return None
+    x = max(later, key=lambda r: (str(r.get("date") or ""), r.get("line_key") or ""))
+    pr = [(c, a) for g, c, a in x["adj"] if g == "PR" and a > 0]
+    co = [(c, a) for g, c, a in x["adj"] if g == "CO" and a > 0]
+    return {"row": x, "pr": sum(a for _c, a in pr), "co": sum(a for _c, a in co), "paid": int(x.get("paid") or 0),
+            "pr_codes": sorted({f"PR-{c}" for c, _a in pr}), "co_codes": sorted({f"CO-{c}" for c, _a in co})}
+
+
+def patient_side_settled(tot: dict, owed: int, *, adjusted: bool) -> bool:
+    """EMA shows the patient's side of the line settled what is owed: one line (the patient's money not split across
+    several), the patient paid on it, and either the patient paid all of it, or the line closed with the patient's payments
+    and (adjusted) the adjustments EMA took off the patient's balance covering all of it. A line closed by a non-contractual
+    write-off is not the patient's side, however much the patient paid: that write-off needs a person's decision (the
+    owner's rule 2; review r1-6)."""
+    if not tot["n"] or tot["several"] or tot["pat_paid"] <= 0 or owed <= 0:
+        return False
+    if tot["pat_paid"] >= owed:
+        return True
+    return tot["balance"] <= 0 and adjusted and tot["pat_paid"] + tot["pat_adj"] >= owed
+
+
 def _owed(f: dict, fx: dict) -> int:
     """What the item is about, in cents: its shortfall, else its expected amount, else the line's charge less its routine
     reductions."""
@@ -2231,10 +2337,15 @@ def settled_in_ema(fx: dict) -> dict | None:
     if (f.get("paid_cents") or 0) > 0 or any((x["paid"] or 0) > 0 for x in own_rows(fx) if x["status"] != "22"):
         return None
     group = _carc_group(fx)
-    out = {"ins": tot["ins_paid"], "pat": tot["pat_paid"], "open": tot["balance"], "group": group}
+    # a patient-group denial (decision 2) is the patient's to pay in full, so what EMA took off the patient's balance
+    # settles it with the patient's payment; any other denial is settled by the patient's payment alone
+    adjusted = patient_denial(f)
+    out = {"ins": tot["ins_paid"], "pat": tot["pat_paid"], "open": tot["balance"], "group": group,
+           "adj": tot["pat_adj"] if adjusted and tot["pat_adj"] > 0 else 0}
     if tot["ins_paid"] > 0:
         return dict(out, kind="insurer")
-    if not tot["several"] and tot["pat_paid"] > 0 and tot["pat_paid"] * 2 >= _owed(f, fx):
+    owed = _owed(f, fx)
+    if not tot["several"] and tot["pat_paid"] > 0 and (tot["pat_paid"] * 2 >= owed or (adjusted and tot["pat_paid"] + tot["pat_adj"] >= owed)):
         # the patient's payment is the patient's share when a later answer of the line put it on the patient (the payer
         # reprocessed it to the deductible), when this denial only repeats a claim already answered (a duplicate), or when
         # the payer's answer put nothing on the practice (group PR or OA, or only the patient's share and the contract
@@ -2436,12 +2547,12 @@ def route_of(fx: dict, st: dict, conn: sqlite3.Connection | None = None) -> str:
         return "post"
     if rule in ("credit_refund", "possible_overpayment") or sig == "CREDIT_BALANCE" or cat == "refund":
         return "refund"
-    if rule == "bill_patient":
+    if rule in ("bill_patient", "bill_patient_denial", "patient_unpaid"):
         return "bill_patient"
     if sig == "SECONDARY_NOT_BILLED" and rule in ("open", "open_late", "stored"):
         return "bill_secondary"         # a stored state on the dashboard's copy keeps the signal's own work
     if rule in ("work_answered", "work_stale", "follow_up_due", "forwarded_late", "person_billed_paid", "stored_person",
-                "payment_never_arrived"):
+                "payment_never_arrived", "second_role_short"):
         return "call"
     if rule in ("check_first", "settled_in_ema", "patient_paid_co", "decided_no_appeal", "note_unread"):
         return "decide"
@@ -2560,6 +2671,12 @@ def _decide(fx: dict, today: str) -> dict:
         if f.get("auto_note"):
             return put("done", "auto_closed", str(f["auto_note"]), [{"source": "remitwatch", "kind": "auto_note", "text": f["auto_note"]}])
         rec = f" (recovered {usd(f['recovered_cents'])})" if f.get("recovered_cents") else ""
+        done_note = str((last_manual or {}).get("note") or "") if (last_manual or {}).get("to") == "resolved" else ""
+        if done_note.startswith(DONE_NOTE) and not f.get("recovered_cents"):
+            # a person's Done (the owner's decision 2): done by that person, nothing recovered, never a payment
+            rest = done_note[len(DONE_NOTE):].lstrip(" :").strip()
+            text = f"Marked done by {who} on {day(when)}" + (f": {rest}" if rest else "")
+            return put("done", "person_done", text, [{"source": "remitwatch", "kind": "status", "text": text}])
         return put("done", "person_paid", f"Marked Paid by {who} on {day(when)}{rec}",
                    [{"source": "remitwatch", "kind": "status", "text": f"Marked Paid by {who} on {day(when)}{rec}"}])
     if st in ("dismissed", "lost"):
@@ -2583,6 +2700,9 @@ def _decide(fx: dict, today: str) -> dict:
         anchor = max((e["date"] for e in sent if e.get("date")), default=None) or _pday(f.get("appealed_at") or f.get("status_changed_at"))
         if sig == "SECONDARY_NOT_BILLED":
             return _billed_second(res, fx, ev, anchor, who, today, put)
+        newest = _newest_work(sent)
+        if newest is not None and newest.get("patient") and patient_denial(f):
+            return _billed_patient(res, fx, newest, who, today, put)
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
         return _follow(res, fx, ev, anchor, work, f"Marked Sent by {who} on {day(anchor)}", today, deadline, confirmed=True,
                        conflict=conflict, person=True, put=put)
@@ -2683,6 +2803,12 @@ def _decide(fx: dict, today: str) -> dict:
         if got:
             res["proof"] = got
             return put("done", got["rule"], got["text"], [{"source": got["source"], "kind": "proof", "date": got.get("date"), "text": got["text"]}])
+    # the payer that denied it as primary paid as secondary less than it owes for the service in that role (the owner's
+    # decision 3 of 2026-11-26): what is left stays listed, that answer as its proof, until the window to dispute the
+    # answer closes. The detection run works it out again each time, so a later payment of the rest closes it there
+    sr = _ev(f).get("second_role")
+    if isinstance(sr, dict) and int(sr.get("left_cents") or 0) > 0 and cat in MONEY:
+        return _second_role_short(res, f, sr, today, put)
     # the archive rules found the payer paid this line twice: a possible overpayment to settle, never more to ask for (C05)
     if hint and (hint.get("reclass") == "overpaid" or (hint.get("possible_overpayment_cents") or 0) > 0):
         res["appeal_block"] = "credit"
@@ -2745,7 +2871,8 @@ def _decide(fx: dict, today: str) -> dict:
     if se:
         res["settled"] = se
         if se["kind"] == "patient_pr":
-            paid = f"EMA shows {usd(se['pat'])} paid by the patient and the line closed"
+            paid = (f"EMA shows {usd(se['pat'])} paid by the patient and {usd(se['adj'])} taken off the patient's balance, and the line closed"
+                    if se.get("adj") else f"EMA shows {usd(se['pat'])} paid by the patient and the line closed")
             text = {"later_pr": f"Settled by the patient: the payer's later answer of {day(se.get('date'))} put this service on the patient "
                                 f"({se.get('pr')}), and {paid}",
                     "duplicate": f"Settled by the patient: {paid}; this denial ({_carcs_text(fx)}) repeats a claim the payer already answered",
@@ -2816,6 +2943,34 @@ def _decide(fx: dict, today: str) -> dict:
             res["appeal_block"] = "waiting"
             return put("waiting", "archive_waiting", basis + f"; check on {day(follow)} if no new answer comes", follow=follow)
         return put("work_now", "follow_up_due", basis + f"; no new answer by {day(follow)}: ask the payer where it stands", follow=follow)
+    # a patient-group denial (the owner's decision 2 of 2026-11-26): the payer put the service on the patient, so the work is
+    # billing the patient, which no payer's window closes (as a payer's reprocessing to the patient's share, above)
+    if patient_denial(f):
+        share = patient_share(fx)
+        if share["cents"] > 0:
+            res["patient_share"] = share
+            if share["patient_paid"] >= share["cents"]:
+                text = f"Paid by the patient: EMA shows {usd(share['patient_paid'])} paid by the patient"
+                res["proof"] = {"rule": "patient_paid", "cents": 0, "date": None, "payer": None, "source": "production", "text": text}
+                res["appeal_block"] = "paid"
+                return put("done", "patient_paid", text, [{"source": "production", "kind": "proof", "text": text}])
+            res["appeal_block"] = "bill"
+            words = ", ".join(f"{g}-{c}" for g, c, _a in share["pr"]) or f"PR-{f.get('carc')}"
+            if not _ema_line_totals(fx)["n"] and not _covered(ctx, f.get("service_date")):
+                # RemitWatch sees the patient's side of a service only on EMA's line for it. With no line and no Production
+                # report covering the date of service it cannot tell whether the patient paid, was billed or had the share
+                # written off: a can't-check with its dollars (the owner's rule 3), never a bill on a guess. A person checks
+                # the patient's account in EMA, then presses Billed the patient or Done. Its age is not decided here: the
+                # payer's windows never close a patient's share, and an age limit is the owner's call
+                why = ("EMA's Production reports do not cover this date of service" if ctx.get("prod_as_of") else
+                       "no EMA Production report is on file")
+                return put("cant_check", "cant_check_patient", f"{f.get('payer_group') or 'The payer'} put this service on the patient "
+                           f"({words}, {usd(share['cents'])}), but {why}, so RemitWatch cannot see whether the patient paid it, was "
+                           "billed or had it written off: check the patient's account in EMA before billing")
+            ask = (f"the {usd(share['left'])} left (EMA shows {usd(share['patient_paid'])} of {usd(share['cents'])} paid by the patient)"
+                   if share["patient_paid"] > 0 else usd(share["cents"]))
+            return put("work_now", "bill_patient_denial", f"{f.get('payer_group') or 'The payer'} put this service on the patient "
+                       f"({words}): bill the patient {ask}")
     # past every window: nothing can be recovered (no grace in the work queue)
     if past_all and (cat in MONEY or sig in EMA_ONLY):
         return expired()
@@ -2873,6 +3028,68 @@ def _note_or_follow(res: dict, fx: dict, work_ev: list, today: str, put, expired
                    "EMA, then follow up", rows, follow=fu["follow_up"])
     res["appeal_block"] = "note"
     return put("work_now", "note_unread", f"{lead}: read it before working (RemitWatch cannot read what it says)", rows)
+
+
+def _billed_patient(res: dict, fx: dict, billed: dict, who: str, today: str, put) -> dict:
+    """A patient-group denial a person marked "Billed the patient" (the owner's decision 2): it waits for the patient's
+    payment in EMA and is done when EMA shows it (patient_side_settled: the patient paid what was billed, or the line closed
+    on the patient's side, never by a write-off); with it not paid by PATIENT_WAIT_DAYS after the billing it is work again
+    (send another statement, or mark it Done). The person's status stands throughout."""
+    f = fx["item"]
+    anchor = billed.get("date")
+    share = patient_share(fx)
+    tot = _ema_line_totals(fx)
+    lead = billed.get("text") or f"Patient billed by {who} on {day(anchor)}"
+    rows = [billed]
+    paid = tot["pat_paid"] if tot["n"] else 0
+    res["patient_share"] = share
+    if patient_side_settled(tot, share["cents"], adjusted=True):
+        closed = (f" and {usd(tot['pat_adj'])} taken off the patient's balance, and the line closed" if tot["pat_adj"] > 0 else " and the line closed")
+        text = f"Paid by the patient: EMA shows {usd(paid)} paid by the patient" + ("" if tot["balance"] > 0 else closed)
+        res["proof"] = {"rule": "patient_paid", "cents": 0, "date": None, "payer": None, "source": "production", "text": text}
+        res["appeal_block"] = "paid"
+        return put("done", "patient_paid", f"{text} ({_lower(lead)})", rows + [{"source": "production", "kind": "proof", "text": text}])
+    follow = _add(anchor, PATIENT_WAIT_DAYS) if anchor else None
+    res["work"] = billed
+    if tot["n"] and tot["balance"] <= 0 and (tot["noncontractual"] or 0) > 0 and paid < share["cents"]:
+        # EMA closed the line by writing the rest off as non-contractual: a write-off with no owner (the owner's rule 2), on
+        # Work now at what is left, never closed as paid by the patient (review r1-6)
+        res["appeal_block"] = "bill"
+        left = max(share["cents"] - paid, 0)
+        return put("work_now", "patient_unpaid", f"{lead}; EMA shows {usd(tot['noncontractual'])} written off on this line with no decision "
+                   f"recorded" + (f" and {usd(paid)} paid by the patient" if paid > 0 else "") + f": the {usd(left)} left is a write-off "
+                   "without an owner. Reverse it and send the patient a statement, or mark it Done with the reason", rows, follow=follow)
+    so_far = (f"; EMA shows {usd(paid)} of {usd(share['cents'])} paid so far" if paid > 0 else
+              "; EMA shows no line for this service, so the patient's payment cannot be seen here" if not tot["n"] else "")
+    if follow and follow >= today:
+        res["appeal_block"] = "waiting"
+        return put("waiting", "billed_patient", f"{lead}; it waits for the patient's payment in EMA, checked again on {day(follow)}{so_far}",
+                   rows, follow=follow)
+    res["appeal_block"] = "bill"
+    if not tot["n"]:
+        # the patient's payment cannot be seen here: never "nothing paid", and never another statement on a guess
+        return put("work_now", "patient_unpaid", f"{lead}; no payment from the patient can be seen by {day(follow)}{so_far}: check the "
+                   "patient's account in EMA, then send another statement or mark it Done", rows, follow=follow)
+    short = "not all of it paid" if paid > 0 else "nothing paid by the patient"
+    return put("work_now", "patient_unpaid", f"{lead}; {short} by {day(follow)}{so_far}: send another statement, or mark it Done",
+               rows, follow=follow)
+
+
+def _second_role_short(res: dict, f: dict, sr: dict, today: str, put) -> dict:
+    """What the payer still owes as secondary (detect.py's settled-as-secondary closure or archive rule 3 measured it):
+    work now, to ask the payer for the rest, until its window to dispute that answer closes (counted from the answer)."""
+    from .codes import appeal_rule, legal_deadline
+    text = str(sr.get("text") or "The payer paid as secondary less than it owes for the service in that role")
+    row = {"source": "835", "kind": "proof", "date": sr.get("date"), "text": text}
+    ar_ = appeal_rule(f.get("payer_group"), f.get("payer_kind"))
+    closes = _later(_add(sr.get("date"), ar_["days"]), legal_deadline(sr.get("date"), ar_)) if sr.get("date") else None
+    if closes and today > closes:
+        res["closed_on"], res["closed_basis"] = closes, ar_["label"]
+        return put("expired", "expired", f"{text.rstrip('.')}. The window to dispute that answer closed on {day(closes)}, with no work "
+                   "pending", [row])
+    res["appeal_block"] = "call"
+    res["deadline"], res["deadline_basis"] = closes, f"{ar_['label']}, from the answer as secondary of {day(sr.get('date'))}"
+    return put("work_now", "second_role_short", text, [row])
 
 
 def _billed_second(res: dict, fx: dict, ev: list, anchor: str | None, who: str, today: str, put) -> dict:

@@ -522,8 +522,9 @@ def load_registry(conn: sqlite3.Connection) -> dict[str, dict]:
 
 # --------------------------------------------------------------------------------------------- the work on items
 # A person's status Sent says what went by its note, as the app writes it: the fax send marks the item Sent "Faxed to
-# ...", Mark billed writes "Billed: ..." beside its own 'billed' line, Log what happened writes "Call or portal check: ...".
-STATUS_NOTE_KINDS = (("Faxed to", "fax"), ("Billed:", "billed"), ("Call or portal check:", "call"))
+# ...", Mark billed writes "Billed: ..." beside its own 'billed' line, Billed the patient writes "Billed the patient..." (the
+# owner's decision 2), Log what happened writes "Call or portal check: ...".
+STATUS_NOTE_KINDS = (("Faxed to", "fax"), ("Billed:", "billed"), ("Billed the patient", "billed"), ("Call or portal check:", "call"))
 FOLD_DAYS = 3               # a status line within this many days of the fax or 'billed' line it repeats is that same work
 BOOKKEEPING_KINDS = frozenset({"posted"})   # done after the money came (a payment marked posted): never what makes an item
                                             # "worked" in the comparison with similar unworked items
@@ -1549,6 +1550,10 @@ def _closure(r: dict, f: dict | None, money: int) -> str | None:
     outcome = str(f.get("ema_outcome") or "")
     if ws in OPEN_STATES or ws == "cant_check" or ws is None:
         return None
+    if st == "resolved" and not money and basis.startswith("marked done by"):
+        return "done"           # a person's Done on a patient-group denial (the owner's decision 2): no money, never a payment
+    if basis.startswith("paid by the patient") and not money:
+        return "patient_paid"   # billed to the patient, and EMA shows the patient's payment
     if st == "resolved" or money > 0 or outcome.startswith("paid_after"):
         return "paid"
     if ws == "accepted":
@@ -1562,7 +1567,8 @@ def _closure(r: dict, f: dict | None, money: int) -> str | None:
     return "other"
 
 
-CLOSURE_LABELS = {"paid": "Paid", "patient": "Moved to the patient", "secondary": "Settled by another payer", "policy": "Owner policy or hide rule",
+CLOSURE_LABELS = {"paid": "Paid", "patient": "Moved to the patient", "patient_paid": "Paid by the patient after billing",
+                  "done": "Marked done by a person", "secondary": "Settled by another payer", "policy": "Owner policy or hide rule",
                   "let_go": "Let go by a person", "expired": "Expired",
                   "other": "Otherwise settled (paid before the flag, or the same service listed twice)",
                   "gone": "No longer listed"}

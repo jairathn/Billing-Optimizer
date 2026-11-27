@@ -55,8 +55,14 @@ MAX_DOCX_XML_BYTES = 30 * 1024 * 1024
 
 def ensure_packets(conn: sqlite3.Connection) -> None:
     conn.executescript(PACKETS_DDL)
-    if "letter_redacted" not in {r[1] for r in conn.execute("PRAGMA table_info(appeal_packets)")}:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(appeal_packets)")}
+    if "letter_redacted" not in have:
         conn.execute("ALTER TABLE appeal_packets ADD COLUMN letter_redacted TEXT")
+        conn.commit()
+    if "checklist" not in have:
+        # "Before you send it" (the payer's published rule for the code, the owner's decision 4): kept with the packet so
+        # the fax window shows it where the fax goes out; never in the PDF, never faxed
+        conn.execute("ALTER TABLE appeal_packets ADD COLUMN checklist TEXT")
         conn.commit()
 
 
@@ -301,9 +307,31 @@ def dispute_context(detail: dict) -> dict:
     for ln in (detail.get("lines") or [])[:20]:
         mods = ",".join(json.loads(ln["modifiers"])) if ln.get("modifiers") else ""
         lines.append(f"{ln['procedure_code']}{'-' + mods if mods else ''}" + (f" (submitted as {ln['original_procedure_code']})" if ln.get("original_procedure_code") else ""))
+    # a code its payer almost never pays (the owner's decision 4): the payer's published rule and what the note or the claim
+    # must show, so the review checks the note against it (public text from remitwatch/data, no patient data)
+    from . import rarely_paid
+    rules = rarely_paid.review_input(f, detail.get("lines"), detail.get("payer_rules") if isinstance(detail.get("payer_rules"), list) else None)
     return {"mode": mode, "issue": issue, "billed_code": billed, "paid_code": code, "payer": f.get("payer_group") or f.get("payer_name"),
             "payer_reason": " ".join(x for x in [f.get("carc"), f.get("carc_text"), f.get("rarc"), f.get("rarc_text")] if x),
-            "claim_lines": lines}
+            "claim_lines": lines, "payer_rules": rules}
+
+
+def payer_rule_words(context: dict) -> str:
+    """The payer's researched rule for the disputed code, as the review is told it: the rule, what the note or the claim
+    must show, and the research's verdict (a rule no note can change is said so, for the recommendation)."""
+    out = []
+    for r in context.get("payer_rules") or []:
+        if not isinstance(r, dict) or not r.get("rule"):
+            continue
+        out.append(f"The payer's published rule for {r.get('code')} ({r.get('verdict_words') or r.get('verdict')}): {r['rule']}")
+        if r.get("what_to_show"):
+            out.append(f"What the note or the claim must show: {r['what_to_show']}")
+        if r.get("condition"):
+            out.append(f"For this claim: {r['condition']}")
+        if r.get("verdict") == "never_payable":
+            out.append("Under that rule no note makes this code payable. Unless the note shows exactly what the rule allows, "
+                       "recommend against the appeal and say why.")
+    return "\n".join(out)
 
 
 def review_note(context: dict, note_text: str | None, pdf_bytes: bytes | None = None, client: Any = None) -> dict:
@@ -311,7 +339,9 @@ def review_note(context: dict, note_text: str | None, pdf_bytes: bytes | None = 
     if client is None:
         import anthropic
         client = anthropic.Anthropic()
+    rule_words = payer_rule_words(context)
     ask = (f"Dispute: {context['issue']}\nPayer: {context['payer']}\nPayer's stated reason: {context['payer_reason'] or 'none given'}\n"
+           + (rule_words + "\n" if rule_words else "") +
            f"Lines on the claim: {', '.join(context['claim_lines']) or 'not available'}\n"
            f"Review type: {context['mode']} (em_level: does the note support the level billed; modifier_25: is the visit significant and "
            f"separately identifiable from the procedure; procedure: does the note document the disputed procedure as billed and, where "
@@ -505,10 +535,11 @@ def build_from_note(conn: sqlite3.Connection, detail: dict, raw_claim: dict | No
            "note_kind": kind, "deadline": packet.get("deadline"), "deadline_basis": packet.get("deadline_basis"),
            "corrected_claim_instructions": packet.get("corrected_claim_instructions")}
     pdf = render_pdf(out, note_text=text, note_pdf=data if kind in ("pdf", "pdf_scanned") else None)
+    out["checklist"] = packet.get("checklist") or []        # for the person, after the PDF: never in what goes to the payer
     conn.execute("""INSERT OR REPLACE INTO appeal_packets (packet_id, finding_id, created_at, mode, model, subject, letter, analysis, evidence, attachments,
-                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted, checklist) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                  (pid, out["finding_id"], out["created_at"], out["mode"], out["model"], out["subject"], out["letter"], json.dumps(analysis),
-                  out["evidence"], json.dumps(out["attachments"]), out["note_name"], sha, kind, data, pdf, redacted))
+                  out["evidence"], json.dumps(out["attachments"]), out["note_name"], sha, kind, data, pdf, redacted, json.dumps(out["checklist"])))
     conn.commit()
     if not reveal:
         out["letter"] = redacted
@@ -531,10 +562,11 @@ def build_letter_only(conn: sqlite3.Connection, detail: dict, raw_claim: dict | 
            "deadline": packet.get("deadline"), "deadline_basis": packet.get("deadline_basis"),
            "corrected_claim_instructions": packet.get("corrected_claim_instructions")}
     pdf = render_pdf(out)
+    out["checklist"] = packet.get("checklist") or []        # for the person, after the PDF: never in what goes to the payer
     conn.execute("""INSERT OR REPLACE INTO appeal_packets (packet_id, finding_id, created_at, mode, model, subject, letter, analysis, evidence, attachments,
-                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted, checklist) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                  (pid, out["finding_id"], out["created_at"], "letter", None, out["subject"], out["letter"], json.dumps(analysis),
-                  out["evidence"], json.dumps(out["attachments"]), "", None, "none", None, pdf, redacted))
+                  out["evidence"], json.dumps(out["attachments"]), "", None, "none", None, pdf, redacted, json.dumps(out["checklist"])))
     conn.commit()
     if not reveal:
         out["letter"] = redacted
@@ -650,7 +682,8 @@ def get_packet(conn: sqlite3.Connection, packet_id: str, with_pdf: bool = False,
     """One stored packet. The letter comes back with placeholders for the patient unless `reveal` is true."""
     ensure_packets(conn)
     conn.row_factory = sqlite3.Row
-    cols = "packet_id, finding_id, created_at, mode, model, subject, letter, letter_redacted, analysis, evidence, attachments, note_name, note_kind, emailed_to, emailed_at"
+    cols = ("packet_id, finding_id, created_at, mode, model, subject, letter, letter_redacted, analysis, evidence, attachments, note_name, "
+            "note_kind, emailed_to, emailed_at, checklist")
     r = conn.execute(f"SELECT {cols}{', pdf' if with_pdf else ''} FROM appeal_packets WHERE packet_id=?", (packet_id,)).fetchone()
     if not r:
         return None
@@ -660,6 +693,11 @@ def get_packet(conn: sqlite3.Connection, packet_id: str, with_pdf: bool = False,
         d["letter"] = redacted or "[The letter is in the PDF.]"
     d["analysis"] = json.loads(d["analysis"]) if d.get("analysis") else {}
     d["attachments"] = json.loads(d["attachments"]) if d.get("attachments") else []
+    try:
+        cl = json.loads(d.get("checklist") or "[]")
+    except ValueError:
+        cl = []
+    d["checklist"] = [str(x) for x in cl] if isinstance(cl, list) else []
     return d
 
 

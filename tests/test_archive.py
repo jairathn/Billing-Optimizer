@@ -389,10 +389,11 @@ def test_a_year_the_archive_took_keeps_the_rates_measured_on_the_whole_year(tmp_
     store.close()
 
 
-def test_without_a_kept_baseline_no_bill_of_that_year_moves(tmp_path):
+def test_without_a_kept_baseline_no_bill_of_that_year_moves(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "apply_frozen_rates", lambda det, **kw: {})     # a detection that kept no baseline
     store = Store(":memory:", compact=True)
     ingest(store, tmp_path, [(visits(1, 4, OLD), "20220415"), (visits(100, 2, NEW), "20260415")])
-    detect(store)                                   # the hook is not wired: no baseline kept
+    detect(store)                                   # no baseline kept
     res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY)
     assert res["bills"] == 0 and res["waiting_rates"] == 4 and res["waiting_years"] == ["2022"]
     assert store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 6
@@ -452,18 +453,17 @@ def test_the_baseline_hook_at_the_end_of_build_baselines_rewrites_the_locked_yea
     ingest(store, tmp_path, [(visits(1, 12, OLD), "20220415")])
     det = Detector(store, run_id="t", today=TODAY)
     det.load()
-    det.build_baselines()
-    snap = archive.apply_frozen_rates(det)
-    assert snap["snapshot"] == ["2022"]
+    det.build_baselines()                           # the hook at its end (detect.py) keeps the year's snapshot
+    assert "2022" in archive._frozen_years(store.conn)
     archive._meta_put(store.conn, archive.META_LOCKED, ["2022"])
     store.conn.execute("DELETE FROM lines WHERE line_key IN (SELECT line_key FROM lines LIMIT 10)")
     store.conn.commit()
     det = Detector(store, run_id="t2", today=TODAY)
     det.load()
-    det.build_baselines()
-    assert not any(k[1] == "2022" for k in det.rates)              # two lines left: no rate of its own
-    out = archive.apply_frozen_rates(det)
-    assert out["overridden"] == 1 and det.rates[("Anthem / BCBS", "2022", "99214", "unknown", "office")]["n"] == 12
+    det.build_baselines()                           # two lines left: the hook puts back the rate of the whole year
+    assert det.rates[("Anthem / BCBS", "2022", "99214", "unknown", "office")]["n"] == 12
+    assert archive.apply_frozen_rates(det)["overridden"] == 1        # what the hook did, once more (it changes nothing)
+    assert det.rates[("Anthem / BCBS", "2022", "99214", "unknown", "office")]["n"] == 12
     assert tuple(store.conn.execute("SELECT mode_cents, n FROM payer_rates WHERE year='2022'").fetchone()) == (11760, 12)
     store.close()
 
