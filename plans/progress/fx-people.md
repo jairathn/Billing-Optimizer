@@ -87,6 +87,12 @@ amount fix), `$U/compare.py` on the two snapshots; aggregates only.
 - The people fixes move no item in detection (pages and api only).
 
 ## Needs from others
+Failing tests in `plans/progress/fx-people_needs_tests.py` (not collected by the suite; run it by path).
+- F8 (codes.py): Humana's Medicaid plan is one plan under two payer groups. With CLP06 MC, "HUMANA" is "Humana
+  Medicaid" but the 835 name the rules read as Humana's Medicare Advantage brand becomes "Humana Medicare Advantage
+  Medicaid" (kind medicaid and windows right; the group name splits its piles and patterns, and the Medicaid step names
+  "Humana Medicare Advantage Medicaid"). On the world copy 20 of the 22 open missing-referral items of Medicaid members
+  carry the second name and 2 the first. Test: `test_a_humana_plan_filed_as_medicaid_is_one_group_whatever_its_835_name`.
 
 ## Open questions (for the owner)
 1. A Medicaid member's other patient-group reasons (plan exclusion, coverage ended, before coverage): the decision
