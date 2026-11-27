@@ -4069,6 +4069,16 @@ class Audit:
             # when that allowed amount is below the payer's own rate (A16 fix 7: per unit of the UNPAID part)
             rinfo = self.rate_for(fam, rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi, gst)
             apu = pr_allowed / max(1, sum(self.unpaid_part(A).ub for A in gl))
+            xr = self.xrank.get(id(g))
+            if xr is not None and xr[0] in ("misranked", "below_half") and rest == 1:
+                # A17 rule 3 (review a17-r1-5): a procedure the deductible took is ranked with the patient's day; when it
+                # is the one worth most but was allowed at a multiple-procedure half (or a later one was allowed below
+                # half), the day's gap in allowed amounts is owed on it, as on a paid procedure: the payer's allowed
+                # amount was short, whoever pays it
+                wend = self.appeal_end(fam, self.wprod(g.p), g.p.date, dos=s.dos, short=True)
+                basis = ("rate_l6" if rinfo[3] in ("payer", "provider_discount") else "rate_" + rinfo[3]) if rinfo else ""
+                return [("SHORT", "misranked_cross_claim" if xr[0] == "misranked" else "below_half_cross_claim", carc,
+                         fam, g.lk, g.p.date, int(xr[1]), basis, wend, self.inside_of(wend))]
             if rinfo is not None:
                 # the same tests as a payment: capped at the charge, an NP/PA's 85%, a multiple-procedure half
                 np_ok = self.np_ok_here(fam, rprod, s.code, s.comp, (s.dos or "0000")[:4], self.pos_class(g.p), g.npi,
@@ -7122,6 +7132,31 @@ def build_fix_store():
             [L_("17263", 17426, 6970, "2026-05-04", mods=["51"], allowed=8713, cas=[("CO", "59", 8713), ("PR", "2", 1743)])],
             prod="MB", **MKY)
     F.exp("counts", (b, "17263", "G", "2026-05-04"), {"PAID": 1, "MOVED_TO_PATIENT": 1})
+    # the deductible took a repair at the surgery center allowed at half, and the payer cut the office Mohs the same
+    # day to half too: the repair is worth more (its unreduced amount, twice its usual half, is above the Mohs' full
+    # rate), so the day is misranked and its gap ($305) is owed on the repair; the Mohs at half is right
+    TXD = dict(payer="TESTPAY XD", pid="T0132")
+    for i in range(6):
+        d = add_days("2026-03-16", i)
+        F.claim(F.tx(add_days(d, 21), **TXD), cid("3E") + "C017", "1", 80000, 60000,
+                one("17311", 80000, 60000, d, allowed=60000, cas=[("CO", "45", 20000)]), pos="11", prod="16", **TXD)
+        F.claim(F.tx(add_days(d, 21), **TXD), cid("3E") + "C017", "1", 80000, 30000,
+                one("14041", 80000, 30000, d, allowed=30000, cas=[("CO", "45", 50000)]), pos="24", prod="16", **TXD)
+    for i in range(2):
+        d = add_days("2026-04-01", i)
+        F.claim(F.tx(add_days(d, 21), **TXD), cid("3E") + "C017", "1", 80000, 60500,
+                one("14041", 80000, 60500, d, allowed=60500, cas=[("CO", "45", 19500)]), pos="24", prod="16", **TXD)
+    who = ("TESTLASTXE", "TESTFIRSTXE")
+    bm, br = cid("3F"), cid("3F")
+    F.claim(F.tx("2026-06-20", **TXD), br + "C017", "1", 80000, 0,
+            one("14041", 80000, 0, "2026-06-01", allowed=30000, cas=[("CO", "45", 50000), ("PR", "1", 30000)]),
+            pos="24", prod="16", patient=who, **TXD)
+    F.claim(F.tx("2026-06-22", **TXD), bm + "C017", "1", 80000, 30000,
+            one("17311", 80000, 30000, "2026-06-01", allowed=30000, cas=[("CO", "45", 50000)]), pos="11", prod="16",
+            patient=who, **TXD)
+    F.exp("sub", (br, "14041", "G", "2026-06-01"), ("SHORT", "misranked_cross_claim"))
+    F.exp("owed", (br, "14041", "G", "2026-06-01"), 30500)
+    F.exp("sub", (bm, "17311", "G", "2026-06-01"), ("PAID", "half_rate_mppr_cross_claim"), guard=True)
     # ============================================================================================ A17 rule 5
     # ---- review a17-r1-2: an EMA $0 row is judged with its claim's check
     F.fix = "A17 rule 5 (an EMA $0 row on its claim's paying check is the line's answer: review a17-r1-2)"
