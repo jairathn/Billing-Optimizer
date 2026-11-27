@@ -150,6 +150,11 @@ now" on the Vercel site, let the run finish, and run the move again. To move wit
 are listed in the answer as `journal_left_behind`, to be done again by hand on the server. `compare-cloud` counts such
 entries as a difference ("journal entries still waiting").
 
+A store image the Vercel site's last run did not save (an older copy put back, so the site's runs stop) is not moved:
+`import-cloud` says so in one sentence and exits 1. `compare-cloud` still compares that image and prints the same
+sentence first and last ("Not a proof of the move"), with exit code 1. Restore the newest version of the image from
+Dropbox's version history, or accept the one in place (`python -m remitwatch.cli accept-store --state-folder`), then move.
+
 Then open `https://<SITE_ADDRESS>/setup` (every required line green) and compare the site with Vercel page by page.
 Until the cutover no site faxes: the server has `REMITWATCH_FAX_SENDER=none`, and the Vercel site sends nothing unless
 it has `REMITWATCH_FAX_SENDER=serverless`. That keeps the record of every fax in one store: the cutover's forced move
