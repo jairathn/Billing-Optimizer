@@ -14,6 +14,45 @@ failing tests are written here: `tests/test_fx_ema.py`, 13 functions, 25 cases (
 both). All 25 fail on the tip (59f6822) and pass on the branch. Each fix was broken on purpose (`breaks.py`, 15 breaks):
 every break fails its test, every file restored byte for byte.
 
+
+## Fix round (2026-11-27, reviews fx-ema-r1 and fx-ema-r2): state
+Branch `wip/fx-ema`; the integration tip merged at 214f729 (bf1f17b, F8's routed needs in the brief) and 3542374 (47b1ba0:
+F1 fx-ledger merged; F3a and F3b not merged yet when this was written). The reviewers' tests are ported into
+`tests/test_fx_ema.py` sections 8 (review round) and 9 (F8's routed needs), invented data, both store kinds: 46 new cases,
+all failing on 68713a8 (the fix round's start) except the controls; 71 cases pass on the branch. Every fix was broken on
+purpose and restored byte for byte (cmp), each break failing its own tests.
+
+| Finding | Outcome | Where |
+|---|---|---|
+| r1-1, r2-1 (high) `_paid_share`'s loop rebinds `code` | fixed | detect `Detector._paid_share` (loop names s_grp, s_code, s_svc). The open never-pays test of tests/test_ema_wiring.py passes now |
+| r2-2 a payment EMA shows taken back counts as paid | fixed | detect `_share_ema_paid` sums every row (no `ins_paid > 0` filter) by payer group and name; `_paid_share` nets the payer's rows |
+| r2-3 rule 4.2 reads the catch-all as the state's Medicaid | fixed | `_paid_share` judges each EMA payment with `ema_checks._same_payer_named` |
+| r1-5 the catch-all's research applies whatever the measure | fixed | `rarely_paid.applies`: an exact entry of 'Medicaid (other)' speaks only for a pair the run found rarely paid (as another spelling's does); C5's patterns (`ema_checks.ema_denials`) show the measure whenever it is known (fold_payer_policy already did) |
+| r1-2, r2-6 C6 closes on payer + copay reaching half | fixed | `ema_checks._paid_with_patient` (used by `_outcome_of` and `paid_in_ema`): beside the patient's money the payer's payment must reach half of the share it owes (expected less what the patient paid); the five real copay closures keep closing (each payer paid 49% to 100% of its share), 9a116d67 stays listed ($279.59 < half of $585.21) |
+| r1-3 a copay closure's proof shows the payer's money only | fixed (date left) | `paid_in_ema` returns `patient_cents`/`patient_date`; `detect._close_from_ema` adds a `patient_payment` proof row (small edit in a function no fixer owns, said in the commit). The row has no date: the store keeps none for patient money (item B, below) |
+| r1-4 SNB lists a line the second payer adjudicated on its own check | fixed | `ema_checks.zero_answer_sql` (the shared predicate): a $0 row on a check of the payer that paid another line of the same EMA claim is that payer's answer. Decided: a lone bare $0 row (the reviewer's a1cb8473 family) stays no answer, as the brief's rule and the build round's A4 test say; it is listed with its row in EMA |
+| r2-4 the self-audit reads a second payer's bare $0 row as its answer | fixed | `selfcheck._cov_secondary`: roles from `answer_row_sql` rows, plus a reason posted by a payer of another group |
+| r2-5 the self-audit passes no plan fact | fixed | `selfcheck._Facts` (sc_svc gets contract_class and payer_id; EMA lines their plan), `_rule_facts`, `_cov_denials`, `_cov_short_pay`, `_cov_auto_writeoffs`, `_cov_unanswered` |
+| r2-7 C7/C9 date a write-off by another payer's item | fixed | `ema_checks._finding_line_deadlines` keeps each item's payer group; `_own_deadline` reads the write-off's own payer's item, else the payer's rule |
+| r2-8 an empty deadline stops C7 and C9 | fixed | `_finding_line_deadlines` skips a date that is empty or not a day |
+| F8's needs (brief, "Routed from F8") | done | `ema_ledger.refresh` calls `ema_reports.learn_payer_aliases` first, and re-groups the stored lines, payments, checks (Part B's marks) and A/R rows (`_regroup_ar`) when the name rules differ from meta ema:name_rules (`_name_rules_hash`); `_catch_all_company`'s example corrected; the build round's catch-all test no longer assumes 'Medicaid of Kentucky' is the catch-all |
+
+### Needs from others (fix round)
+- F1's need of the build round still stands (F1 merged at 47b1ba0 without it): states.paid_proof's paid-before branch
+  reads a payment under '<company> Medicaid Community Plan' as the state's Medicaid. The exact change and its test are in
+  the build round's "Needs from others" below.
+- states.paid_proof (F1's): for an outcome 'paid_after' whose payer's payment alone is under the threshold
+  (`o['patient_cover']` decided it), the done text names the patient's part beside the payer's ("Paid later: $15.50 by
+  ... and $40.00 by the patient on the line"); today it names the payer's $15.50 alone on a $55.50 item (the closure's
+  own note and proof rows name both since this round).
+
+### Left (fix round)
+- Item B, the patient money's posting date: still not stored (ema_lines keeps sums only), so r1-3's patient proof row is
+  undated. The change: a column `pat_paid_last` on ema_lines in ema_reports' DDL (ensure_schema adds it to older stores),
+  filled in `ema_ledger._part_a` from pa_agg (own rows) and pa_pat/pa_pj (joined rows), read into `_LINE_COLS`,
+  `_outcome_of` (`res['patient_paid_on']`), which `paid_in_ema` already returns as `patient_date`.
+- G ("already worked" routed to call): unchanged from the build round (below).
+
 ## Items (status)
 | # | Item | Function(s) changed | Status |
 |---|---|---|---|
