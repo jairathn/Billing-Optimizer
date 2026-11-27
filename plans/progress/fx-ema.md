@@ -16,28 +16,66 @@ every break fails its test, every file restored byte for byte.
 
 
 ## Fix round (2026-11-27, reviews fx-ema-r1 and fx-ema-r2): state
-Branch `wip/fx-ema`; the integration tip merged at 214f729 (bf1f17b, F8's routed needs in the brief) and 3542374 (47b1ba0:
-F1 fx-ledger merged; F3a and F3b not merged yet when this was written). The reviewers' tests are ported into
-`tests/test_fx_ema.py` sections 8 (review round) and 9 (F8's routed needs), invented data, both store kinds: 46 new cases,
-all failing on 68713a8 (the fix round's start) except the controls; 71 cases pass on the branch. Every fix was broken on
-purpose and restored byte for byte (cmp), each break failing its own tests.
+Branch `wip/fx-ema`. The integration tip was merged three times in the round: 214f729 (bf1f17b: F8's routed needs in the
+brief), 3542374 (47b1ba0: F1 fx-ledger merged), 775544d (fe9ad71: F3a merged at 09def4e, F3b at 8cb51f6, the batch-1
+routings). The measurement below includes all three. The reviewers' tests are ported into `tests/test_fx_ema.py` sections 8
+(review round) and 9 (F8's routed needs), invented data, both store kinds: 48 new cases, all failing on 68713a8 (the fix
+round's start) except the controls; the file's 73 cases pass. Every fix was broken on purpose and restored byte for byte
+(cmp), each break failing its own tests.
 
 | Finding | Outcome | Where |
 |---|---|---|
 | r1-1, r2-1 (high) `_paid_share`'s loop rebinds `code` | fixed | detect `Detector._paid_share` (loop names s_grp, s_code, s_svc). The open never-pays test of tests/test_ema_wiring.py passes now |
 | r2-2 a payment EMA shows taken back counts as paid | fixed | detect `_share_ema_paid` sums every row (no `ins_paid > 0` filter) by payer group and name; `_paid_share` nets the payer's rows |
 | r2-3 rule 4.2 reads the catch-all as the state's Medicaid | fixed | `_paid_share` judges each EMA payment with `ema_checks._same_payer_named` |
-| r1-5 the catch-all's research applies whatever the measure | fixed | `rarely_paid.applies`: an exact entry of 'Medicaid (other)' speaks only for a pair the run found rarely paid (as another spelling's does); C5's patterns (`ema_checks.ema_denials`) show the measure whenever it is known (fold_payer_policy already did) |
-| r1-2, r2-6 C6 closes on payer + copay reaching half | fixed | `ema_checks._paid_with_patient` (used by `_outcome_of` and `paid_in_ema`): beside the patient's money the payer's payment must reach half of the share it owes (expected less what the patient paid); the five real copay closures keep closing (each payer paid 49% to 100% of its share), 9a116d67 stays listed ($279.59 < half of $585.21) |
+| r1-5 the catch-all's research applies whatever the measure | fixed | `rarely_paid.applies`: an exact entry of 'Medicaid (other)' speaks only for a pair the run found rarely paid (as another spelling's does); C5's patterns (`ema_checks.ema_denials`) show the measure whenever it is known (fold_payer_policy already did). tests/test_payer_code_rules.py::test_one_rule_for_several_codes_of_a_claim_is_told_once now gives the catch-all's research the run's evidence (`researched_blocks`/`block_for` with pairs); its assertions are unchanged |
+| r1-2, r2-6 C6 closes on payer + copay reaching half | fixed | `ema_checks._paid_with_patient` (used by `_outcome_of` and `paid_in_ema`): beside the patient's money the payer's payment must reach half of the share it owes (expected less what the patient paid). On the real copy the four copay closures keep closing (each payer paid 98% to 100% of its share); 9a116d67 stays listed (its payer paid 48% of its share) |
 | r1-3 a copay closure's proof shows the payer's money only | fixed (date left) | `paid_in_ema` returns `patient_cents`/`patient_date`; `detect._close_from_ema` adds a `patient_payment` proof row (small edit in a function no fixer owns, said in the commit). The row has no date: the store keeps none for patient money (item B, below) |
-| r1-4 SNB lists a line the second payer adjudicated on its own check | fixed | `ema_checks.zero_answer_sql` (the shared predicate): a $0 row on a check of the payer that paid another line of the same EMA claim is that payer's answer. Decided: a lone bare $0 row (the reviewer's a1cb8473 family) stays no answer, as the brief's rule and the build round's A4 test say; it is listed with its row in EMA |
+| r1-4 SNB lists a line the second payer adjudicated on its own check | fixed | `ema_checks.zero_answer_sql` (the shared predicate): a $0 row on a check of the payer that paid another line of the same EMA claim is that payer's answer. The measurement found it also hid the reviewer's "right to list" line (1a15880b): a supplement's $0 on the crossover check answered a line the crossover had denied, and Medicare's later reprocess (not crossed over) made the share. Fixed at b506b77: in `run_secondary_not_billed` such a same-check $0 does not answer a share made by a later reprocess when the crossover it answered carried no share of the line (`_ema_lines_for` keeps both readings: `answer_row_sql(..., same_check=False)`); test_a_supplements_zero_on_the_crossover_that_denied_the_line_never_answers_the_share_a_reprocess_made. Decided: a lone bare $0 row (the reviewer's a1cb8473 family) stays no answer, as the brief's rule and the build round's A4 test say; it is listed with its row in EMA |
 | r2-4 the self-audit reads a second payer's bare $0 row as its answer | fixed | `selfcheck._cov_secondary`: roles from `answer_row_sql` rows, plus a reason posted by a payer of another group |
 | r2-5 the self-audit passes no plan fact | fixed | `selfcheck._Facts` (sc_svc gets contract_class and payer_id; EMA lines their plan), `_rule_facts`, `_cov_denials`, `_cov_short_pay`, `_cov_auto_writeoffs`, `_cov_unanswered` |
 | r2-7 C7/C9 date a write-off by another payer's item | fixed | `ema_checks._finding_line_deadlines` keeps each item's payer group; `_own_deadline` reads the write-off's own payer's item, else the payer's rule |
 | r2-8 an empty deadline stops C7 and C9 | fixed | `_finding_line_deadlines` skips a date that is empty or not a day |
 | F8's needs (brief, "Routed from F8") | done | `ema_ledger.refresh` calls `ema_reports.learn_payer_aliases` first, and re-groups the stored lines, payments, checks (Part B's marks) and A/R rows (`_regroup_ar`) when the name rules differ from meta ema:name_rules (`_name_rules_hash`); `_catch_all_company`'s example corrected; the build round's catch-all test no longer assumes 'Medicaid of Kentucky' is the catch-all |
 
+### Measured (fix round)
+Private world copy of 2026-11-24, one server cycle each, fresh copies: the tip fe9ad71 (code 8cb51f6: F1, F3a and F3b
+merged) against the branch 775544d (the same tip merged). The machine was loaded (load 12 on 4 CPUs): detect 437 s on the
+tip, 457 s on the branch; the branch's ema_refresh took 22.9 s once (Part B re-grouped the stored rows under the name
+rules of now), the tip's 0.1 s. Both world copies deleted.
+119 items moved:
+- 110 EMA_DENIED, now VA Community Care (the tip: Optum (UHC)), work now -> expired, $52,989.39. The EMA payer the
+  practice names after the VA network's administrator is learned as the VA's (405 of 405 of its weekly-export rows that
+  carry a payer id carry VACCN), so the denials are dated by the VA's 90-day window, not UHC's 12 months. All 110: the
+  deadline is the posting less the 9-day posting lag plus 90 days; the denials were posted 90 to 360 days ago; every line
+  is Resolved/Other in EMA (written off); 106 are 77600 (CO-96 74 lines, CO-29 34, CO-B15 24).
+- 1 NO_ANSWER VA, work now -> expired ($64.00): VA CCN's 180-day first-filing limit plus its 90-day window.
+- 1 NOT_SENT VA, expired -> work now ($31.19): VA CCN's 180-day filing limit leaves 75 days (the tip read the commercial
+  90-day default).
+- 1 EMA_DENIED WellCare / Ambetter (Centene), work now -> waiting ($54.79): the re-grouped checks give WellCare's Medicare
+  plans their own posting lag (p95 8 days over 28 checks; the tip's 48 days came from the Medicaid plan's checks grouped in
+  by the older rules and put the EOB before the date of service); the deadline moves from 22 days ago to 18 days ahead and
+  the A/R note about the appeal makes it waiting.
+- 4 closed by C6 with the patient's copay: Humana Medicare Advantage $79.14, Anthem / BCBS $75.16, Anthem / BCBS Medicare
+  Advantage $55.50 (work now -> done) and UnitedHealthcare $93.87 (expired -> done): each payer paid 98% to 100% of its
+  share later on a check; each balance is 0.
+- 2 SECONDARY_NOT_BILLED appeared, Medicare KY -> Medicare Supplement carriers, $33.12 (1a15880b $17.90, a1cb8473 $15.22).
+A17 (tip -> branch), Work-now view: already done (open) 1,265 -> 1,264 (the 3 copay closures leave it, the 2 SNB items join
+it), correct (closed) 10,316 -> 10,315, wrong amount (closed) 485 -> 489 (the 4 closures record the payer's own payment as
+recovered; A17 counts the copay too), undecided (open) 986 -> 875 and (closed) 170 -> 281 (the VA items: A17 has no unit
+for them either way). Status view: already done 2,736 -> 2,734, wrong amount (closed) 485 -> 489. No verdict changed
+for an item that did not move. A17 reads 463 of the tip's 490 SNB items as already paid: it judges the service by the
+first payer's payment, so its verdict on the 2 new SNB items says nothing of the second payer's share.
+Hand-trace (`$S/tk/units/fx-ema/hand_trace_fix_round.txt`, raw rows beside it): 21 moved items one by one (the 9 that are
+not VA denials, 12 VA denials at random) and all 110 VA denials in aggregate: 21 right, 0 wrong, 0 unclear. Flags: the VA
+items are right by codes.py as it stands, and the VA's 90-day window there is marked "not confirmed against the payer's
+current manual" (F8 / integrator, under Needs).
+
 ### Needs from others (fix round)
+- F8 / integrator: confirm the VA Community Care windows in codes.py (90 days from the denial; 180 days to file). With the
+  VA's name learned (F8's routed need, done here), the 90-day window decides 110 EMA_DENIED items ($52,989.39) and 1
+  never-answered claim ($64.00) on the 11-24 copy: they move from Work now to expired. If the network's own manual gives a
+  longer window, they belong back in Work now.
 - F1's need of the build round still stands (F1 merged at 47b1ba0 without it): states.paid_proof's paid-before branch
   reads a payment under '<company> Medicaid Community Plan' as the state's Medicaid. The exact change and its test are in
   the build round's "Needs from others" below.
@@ -52,6 +90,17 @@ purpose and restored byte for byte (cmp), each break failing its own tests.
   filled in `ema_ledger._part_a` from pa_agg (own rows) and pa_pat/pa_pj (joined rows), read into `_LINE_COLS`,
   `_outcome_of` (`res['patient_paid_on']`), which `paid_in_ema` already returns as `patient_date`.
 - G ("already worked" routed to call): unchanged from the build round (below).
+- The same-check reading (r1-4) lives in the row predicates (`zero_answer_sql`, `answer_row_sql`, `first_answer_days`);
+  `line_answered_sql` reads a line's own figures and does not see it. Claim-level uses take the claim's lines together and
+  agree (another line was paid on that check); the per-line uses (the blind dollars, the self-audit's facts, rule 4.2's
+  EMA counts, the ledger's status class) read such a line as unanswered. On the 11-24 copy: 436 lines, $41,725.50 of
+  balance; none of them is classed as given up, so the status class is not changed by it there. The fix belongs in the
+  ledger's line figures (count a $0 row on a check that paid another line of the claim as an answer row in `_part_a`),
+  not in the SQL.
+- C5 dates an EMA-only denial by `appeal_rule(group, kind)` with no plan facts (contract class, payer id); the self-audit
+  now passes them (r2-5). Not raised by the reviews; no real-data count.
+- Routed from F3b after this round started (the brief: "for F4's fix round, or after the merge"): `claim_answers`' content
+  bridge for an exports' claim whose EMA claim is outside Production's dates. Not done here.
 
 ## Items (status)
 | # | Item | Function(s) changed | Status |
