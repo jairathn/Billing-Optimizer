@@ -1500,8 +1500,11 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
             LEFT JOIN {W}.pa_alw w ON w.link = a.link AND w.svc = a.svc AND w.cpt = a.cpt""")
     _drop(conn, "pa_agg", "pa_py", "pa_pat", "pa_pj", "pa_pad", "pa_alw")     # their pages are reused from here on
     _line_indexes(conn)
+    # whether an insurer answered the line, as the never-answered rule reads it (ema_checks.line_answered_sql): a bare $0
+    # row under a check is no answer, so a claim closed 'Resolved/Other' on one is given up, not settled
+    from .ema_checks import line_answered_sql
     x(f"""UPDATE {W}.pa_full SET balance = charges - ins_paid - contractual - noncontractual - pat_paid_joined - pat_adj_joined,
-              status_class = rw_status_class(status, ins_answer_rows > 0),
+              status_class = rw_status_class(status, {line_answered_sql('pa_full')}),
               twin_link = CASE WHEN person IS NULL THEN NULL ELSE (SELECT MIN(t.link) FROM {W}.pa_full t
                   WHERE t.person = pa_full.person AND t.svc = pa_full.svc AND t.cpt = pa_full.cpt AND t.link <> pa_full.link) END""")
     n_ev = _events(conn)

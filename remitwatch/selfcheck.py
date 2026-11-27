@@ -3076,7 +3076,11 @@ def _charges_since(conn: sqlite3.Connection, newest: str, today: str) -> tuple[i
     if _has_table(conn, "ema_lines") and conn.execute("SELECT 1 FROM ema_lines LIMIT 1").fetchone():
         cols = set(_cols(conn, "ema_lines"))
         if {"svc", "charges"} <= cols:
-            no_answer = "COALESCE(ins_answer_rows, 0) = 0" if "ins_answer_rows" in cols else "1"
+            # a line the insurer answered, as the never-answered rule reads it (a bare $0 row under a check is no answer)
+            from .ema_checks import line_answered_sql
+            need = {"ins_paid", "contractual", "noncontractual", "allowed", "ins_answer_rows", "zero_pay_rows"}
+            no_answer = (f"NOT {line_answered_sql('ema_lines')}" if need <= cols else
+                         "COALESCE(ins_answer_rows, 0) = 0" if "ins_answer_rows" in cols else "1")
             to_ins = "COALESCE(ins_charges, 0) > 0" if "ins_charges" in cols else "1"
             n = conn.execute(f"""SELECT COALESCE(SUM(charges), 0) FROM ema_lines WHERE svc > ? AND {to_ins} AND {no_answer}""",
                              (str(newest)[:10],)).fetchone()[0]
@@ -3313,12 +3317,14 @@ def audit_due(conn: sqlite3.Connection, today: Any = None) -> bool:
     return not last or (_days(last, t) or 0) >= AUDIT_EVERY_DAYS
 
 
-def _windows(group: str | None, kind: str | None) -> tuple[int, int]:
-    """(appeal days, filing days) for a payer group: codes.py's windows, read as data (as the answer keys did)."""
+def _windows(group: str | None, kind: str | None, **facts: Any) -> tuple[int, int]:
+    """(appeal days, filing days) for a payer group: codes.py's windows, read as data (as the answer keys did), with the
+    plan facts the product passes (codes.rule_facts: the payer's name, the filing indicator, the reason, paid or not), so
+    one plan of a group is never given another's window."""
     try:
         from .codes import appeal_rule, filing_rule
-        a = appeal_rule(group, kind)
-        f = filing_rule(group, kind)
+        a = appeal_rule(group, kind, **facts)
+        f = filing_rule(group, kind, **facts)
         legal = a.get("legal") or {}
         days = int(a.get("days") or 180)
         if legal.get("days"):
@@ -3330,6 +3336,31 @@ def _windows(group: str | None, kind: str | None) -> tuple[int, int]:
         return 180, 365
 
 
+def _appeal_end(group: str | None, kind: str | None, answered: str | None, svc: str | None, **facts: Any) -> str | None:
+    """The last day to work a line the payer answered on `answered`, as the product dates its item (states.windows, with the
+    plan facts codes.rule_facts gives): the payer's dispute window from that answer, its own limit where later
+    (codes.window_end, codes.legal_deadline); for a payer that takes no appeal of an ordinary claim denial (Kentucky
+    Medicaid, 907 KAR 1:671) its corrected or new claim's window from the date of service (codes.corrected_rule)."""
+    try:
+        from . import codes
+        r = codes.appeal_rule(group, kind, **facts)
+        if r.get("no_appeal"):
+            cr = codes.corrected_rule(group, kind, **facts)
+            return codes.window_end(svc, cr) if cr and svc else None
+        ends = [d for d in (codes.window_end(answered, r), codes.legal_deadline(answered, r)) if d]
+        return max(ends) if ends else None
+    except Exception as exc:          # noqa: BLE001  (a rule that cannot date the line dates it by the usual 180 days)
+        _caught(exc, "selfcheck.appeal_end")
+        return _add(answered, 180)
+
+
+def _own_deadline(idx: dict, key: tuple) -> str | None:
+    """The latest last day of the items RemitWatch holds for a line (the item's own deadline, or the payer's own limit
+    where later), or None when no item dates it: the audit counts a line by the date the product gave its item."""
+    got = [e[5] for e in idx["service"].get(key) or () if len(e) > 5 and e[5]]
+    return max(got) if got else None
+
+
 def _item_index(conn: sqlite3.Connection) -> dict:
     """Which services RemitWatch lists, and how: {(bill, svc, code): [(finding_id, work_state, status, signal, automatic)]}
     (automatic: closed by RemitWatch itself, with its note), with the finding's EMA claim number too, so a line can be
@@ -3338,15 +3369,17 @@ def _item_index(conn: sqlite3.Connection) -> dict:
     ws = "work_state" if "work_state" in cols else "NULL"
     link = "ema_link" if "ema_link" in cols else "NULL"
     auto = "auto_note IS NOT NULL" if "auto_note" in cols else "0"
+    last = ("MAX(COALESCE(appeal_deadline, ''), COALESCE(legal_deadline, ''))" if {"appeal_deadline", "legal_deadline"} <= cols
+            else "appeal_deadline" if "appeal_deadline" in cols else "NULL")
     by_service: dict[tuple, list] = defaultdict(list)
     by_link: dict[tuple, list] = defaultdict(list)
     by_bill: dict[str, list] = defaultdict(list)
-    for fid, pcn, svc, pc, opc, bc, wk, st, lk, sig, is_auto in conn.execute(
+    for fid, pcn, svc, pc, opc, bc, wk, st, lk, sig, is_auto, dl in conn.execute(
             f"""SELECT finding_id, patient_control_number, service_date, procedure_code, original_procedure_code,
-                       {'billed_code' if 'billed_code' in cols else 'NULL'}, {ws}, status, {link}, signal, {auto} FROM findings
+                       {'billed_code' if 'billed_code' in cols else 'NULL'}, {ws}, status, {link}, signal, {auto}, {last} FROM findings
                 WHERE COALESCE(stale, 0) = 0"""):
         b = bill_of(pcn)
-        entry = (fid, wk, st, sig, bool(is_auto))
+        entry = (fid, wk, st, sig, bool(is_auto), str(dl)[:10] if dl else None)
         for code in {pc, opc, bc} - {None}:
             by_service[(b, str(svc or "")[:10], code)].append(entry)
             if lk is not None:
@@ -3359,7 +3392,7 @@ def _item_index(conn: sqlite3.Connection) -> dict:
 def _decided(entry: tuple) -> bool:
     """A person's or the owner's decision holds the line: let go or lost, a pattern the owner's policy accepts, or marked
     paid by a person (resolved with no automatic note)."""
-    _f, wk, st, _sig, is_auto = entry
+    _f, wk, st, _sig, is_auto = entry[:5]
     return st in ("dismissed", "lost") or wk == "accepted" or (st == "resolved" and not is_auto)
 
 
@@ -3550,17 +3583,22 @@ class _Facts:
                 for link, bill in conn.execute(f"SELECT link, bill FROM {table} WHERE link IS NOT NULL AND bill IS NOT NULL"):
                     self.bill_of_link[int(link)] = bill
         if _has_table(conn, "ema_lines"):
+            # whether and when a payer answered each line, as the never-answered rule reads it (ema_checks: a bare $0 row
+            # under a check, no reason, allowed amount or adjustment, answers nothing)
+            from .ema_checks import first_answer_days, line_answered_sql
+            fa = first_answer_days(conn, "sc_fa") if _has_table(conn, "ema_line_payments") and _has_table(conn, "ema_line_reasons") else None
+            first_sql = f"(SELECT a.d FROM temp.{fa} a WHERE a.link = l.link AND a.svc = l.svc AND a.cpt = l.cpt)" if fa else "l.first_ins_posting"
             for (bill, link, svc, cpt, grp, kind, second, charges, ins_charges, ins, bal, nonroutine, den_first, first_ans,
-                 last_paid, status_class, fac, answers, first_charge) in conn.execute(
-                    """SELECT bill, link, svc, cpt, payer_group, payer_kind, secondary_payer, COALESCE(charges, 0),
-                              COALESCE(ins_charges, 0), COALESCE(ins_paid, 0), COALESCE(balance, 0), COALESCE(nonroutine, 0),
-                              denial_first_posted, first_ins_posting, last_ins_paid, status_class, COALESCE(facility, 0),
-                              COALESCE(ins_answer_rows, 0), first_charge_posted
-                       FROM ema_lines WHERE svc >= ?""", (SERVICE_FROM,)):
+                 last_paid, status_class, fac, answers, first_charge, payer) in conn.execute(
+                    f"""SELECT l.bill, l.link, l.svc, l.cpt, l.payer_group, l.payer_kind, l.secondary_payer, COALESCE(l.charges, 0),
+                              COALESCE(l.ins_charges, 0), COALESCE(l.ins_paid, 0), COALESCE(l.balance, 0), COALESCE(l.nonroutine, 0),
+                              l.denial_first_posted, {first_sql}, l.last_ins_paid, l.status_class, COALESCE(l.facility, 0),
+                              {line_answered_sql('l')}, l.first_charge_posted, l.primary_payer
+                       FROM ema_lines l WHERE l.svc >= ?""", (SERVICE_FROM,)):
                 key = (bill or self.bill_of_link.get(int(link)) or f"link:{link}", str(svc)[:10], cpt or "")
                 e = self.ema.get(key)
                 if e is None:
-                    e = self.ema[key] = {"links": [], "group": grp, "kind": kind, "second": second, "charges": 0, "ins_charges": 0,
+                    e = self.ema[key] = {"links": [], "group": grp, "kind": kind, "second": second, "payer": payer, "charges": 0, "ins_charges": 0,
                                          "ins_paid": 0, "balance": 0, "nonroutine": 0, "den_first": None, "first_ans": None,
                                          "last_paid": None, "status": set(), "facility": False, "answers": 0, "first_charge": None}
                 e["links"].append(link)
@@ -3573,6 +3611,8 @@ class _Facts:
                 e["first_charge"] = min(x for x in (e["first_charge"], first_charge) if x) if (e["first_charge"] or first_charge) else None
                 e["status"].add(status_class)
                 e["facility"] = e["facility"] or bool(fac)
+            if fa:
+                conn.execute(f"DROP TABLE IF EXISTS temp.{fa}")
         self.reasons: dict[tuple, set] = defaultdict(set)
         if _has_table(conn, "ema_line_reasons") and _has_table(conn, "ema_lines"):
             for bill, link, svc, cpt, code, cls in conn.execute(
@@ -3694,8 +3734,8 @@ def _cov_denials(facts: _Facts, idx: dict) -> list[dict]:
         got = max(r835, int(e.get("ins_paid") or 0))
         if got >= SETTLED_SHARE * exp or moved >= 0.8 * exp or "paid" in (e.get("status") or set()):
             continue
-        appeal_days, _f = _windows(grp, kind)
-        deadline = _add(paid_on, appeal_days)
+        deadline = _own_deadline(idx, key) or _appeal_end(grp, kind, paid_on, key[1], payer_name=payer, cfi=cfi, carc=carc,
+                                                          paid=False)
         if not deadline or deadline < facts.today:
             continue
         cents = max(0, min(int(charge), int(exp) - max(0, got)))
@@ -3726,8 +3766,9 @@ def _cov_auto_writeoffs(facts: _Facts, idx: dict) -> list[dict]:
         exp = facts.usual.get((grp, key[2])) or e["nonroutine"]
         if e["ins_paid"] >= SETTLED_SHARE * exp or (e["last_paid"] and e["last_paid"] > e["den_first"]):
             continue
-        appeal_days, _f = _windows(grp, kind)
-        deadline = _add(e["den_first"], appeal_days)
+        top = sorted(c for c, _cls in facts.reasons.get(key, set()))
+        deadline = _own_deadline(idx, key) or _appeal_end(grp, kind, e["den_first"], key[1], payer_name=e.get("payer"),
+                                                          carc=top[0] if len(top) == 1 else None, paid=e["ins_paid"] > 0)
         if not deadline or deadline < facts.today:
             continue
         cents = min(int(e["nonroutine"]), int(e["charges"])) if e["charges"] > 0 else int(e["nonroutine"])
@@ -3756,8 +3797,8 @@ def _cov_unanswered(facts: _Facts, idx: dict) -> list[dict]:
         wait = max(30, int(g.get("svc_p95") or g.get("p95") or 45)) if isinstance(g, dict) else 45
         if (_days(e["first_charge"], facts.today) or 0) < wait:
             continue
-        appeal_days, filing_days = _windows(e["group"], e["kind"])
-        deadline = _add(key[1], filing_days + appeal_days)
+        appeal_days, filing_days = _windows(e["group"], e["kind"], payer_name=e.get("payer"))
+        deadline = _own_deadline(idx, key) or _add(key[1], filing_days + appeal_days)
         if not deadline or deadline < facts.today:
             continue
         cents = min(int(e["balance"]), int(e["charges"])) if e["charges"] > 0 else int(e["balance"])
@@ -3839,14 +3880,31 @@ def _cov_secondary(facts: _Facts, idx: dict) -> list[dict]:
         crossed = any(st == "19" for _d, _p, st, _py, _cfi, _pr, _lk in ans)
         if crossed and (_days(e["last_paid"], facts.today) or 0) < 45:
             continue
-        _a, filing_days = _windows(second, "supplement")
-        deadline = _add(e["last_paid"], filing_days)
+        # the second payer's own first-filing rule, as it counts a claim it gets second (codes.second_claim_window, as the
+        # product dates the item), from the group its name gives: never its name read as a group
+        deadline = _own_deadline(idx, key) or _second_end(conn, second, key[1], e["last_paid"], own_group)
         if not deadline or deadline < facts.today:
             continue
         out.append({"key": "|".join(key), "category": "open_balance_in_window" if crossed else "secondary_not_billed",
                     "reason": "crossover_no_answer" if crossed else "second_payer", "payer_group": own_group,
                     "month": key[1][:7], "cents": int(e["balance"]), "deadline": deadline, "held": _held(idx, key)})
     return out
+
+
+def _second_end(conn: sqlite3.Connection, second: str, svc: str | None, first_paid: str | None, first_group: str | None) -> str | None:
+    """A second payer's last day for a share the first payer left: its group by EMA's name rules, its first-filing rule
+    with its name as the plan fact, counted as it counts a second claim (codes.second_claim_window: the safe date, the
+    payer's own last day where later), as the product dates SECONDARY_NOT_BILLED."""
+    try:
+        from . import codes
+        from .ema_reports import payer_group_of
+        sgrp, skind = payer_group_of(conn, second)
+        rule = codes.filing_rule(sgrp, skind, payer_name=second)
+        safe, last, _how = codes.second_claim_window(rule, svc, str(first_paid or "")[:10] or None, first_payer=first_group)
+        return last or safe
+    except Exception as exc:          # noqa: BLE001  (a rule that cannot date the share dates it a year from the payment)
+        _caught(exc, "selfcheck.second_end")
+        return _add(first_paid, 365)
 
 
 def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
@@ -3892,11 +3950,10 @@ def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
         ratio = allowed / rate
         if any(abs(ratio - r) <= 0.02 for r in (0.85, 0.5, 0.75, 0.25)) and (code in mppr or abs(ratio - 0.85) <= 0.02):
             continue
-        appeal_days, _f = _windows(grp, kind)
-        deadline = _add(paid_on, appeal_days)
+        key = (bill_of(pcn), str(svc)[:10], code)
+        deadline = _own_deadline(idx, key) or _appeal_end(grp, kind, paid_on, str(svc)[:10], payer_name=name, cfi=cfi, paid=True)
         if not deadline or deadline < facts.today:
             continue
-        key = (bill_of(pcn), str(svc)[:10], code)
         out.append({"key": "|".join(key), "category": "short_vs_payer_rate", "reason": "below_own_rate", "payer_group": grp,
                     "month": key[1][:7], "cents": int(short), "deadline": deadline, "held": _held(idx, key)})
     return out

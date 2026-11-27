@@ -7855,10 +7855,12 @@ class Detector:
                 self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
                 self.conn.execute("CREATE TEMP TABLE dt_links (link INTEGER, svc TEXT, cpt TEXT)")
                 self.conn.executemany("INSERT INTO temp.dt_links VALUES (?,?,?)", {(r[3], r[1], r[2]) for r in rows})
-                for lk, svc, cpt, grp, cents, posted in self.conn.execute(
-                        """SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0), y.posted FROM temp.dt_links d
-                           JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
-                    pays[(lk, svc, cpt)].append((grp, cents, posted))
+                # each payment row and whether it answers (ema_checks.answer_row_sql: a bare $0 row under a check, with no
+                # reason, allowed amount or adjustment, is no second payer's answer)
+                for lk, svc, cpt, grp, cents, posted, answer in self.conn.execute(
+                        f"""SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0), y.posted, {ec.answer_row_sql('y')}
+                            FROM temp.dt_links d JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
+                    pays[(lk, svc, cpt)].append((grp, cents, posted, bool(answer)))
                 for lk, svc, cpt, zg, code, payer, first, cents in self.conn.execute(
                         """SELECT z.link, z.svc, z.cpt, z.grp, z.code, z.payer, z.first_posted,
                                   COALESCE(z.contractual,0) + COALESCE(z.noncontractual,0) FROM temp.dt_links d
@@ -7879,11 +7881,13 @@ class Detector:
                         elsewhere[(nk, svc, cpt)].append((lk, grp, cents))
                     self.conn.execute("DROP TABLE IF EXISTS temp.dt_nk")
             for b, svc, cpt, lk, sec, prim, grp, bal, pat, chg, nk in rows:
-                other = sum(c for g, c, _p in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
+                other = sum(c for g, c, _p, _a in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
                 other += sum(c for olk, g, c in elsewhere.get((nk, svc, cpt), []) if olk != lk and c > 0 and g and grp
                              and not ec._same_payer(g, grp))
-                # every answer on the line from a payer other than the primary: a payment row ($0 included) or its own reason
-                answers = [(p or "", g, c, "payment") for g, c, p in pays.get((lk, svc, cpt), []) if g and grp and not ec._same_payer(g, grp)]
+                # every answer on the line from a payer other than the primary: a payment row ($0 included, with its proof) or
+                # its own reason
+                answers = [(p or "", g, c, "payment") for g, c, p, a in pays.get((lk, svc, cpt), [])
+                           if a and g and grp and not ec._same_payer(g, grp)]
                 for zg, code, payer, first, cents in reasons.get((lk, svc, cpt), []):
                     if payer not in groups_of:
                         groups_of[payer] = er.payer_group_of(self.conn, payer)[0] if payer else None
