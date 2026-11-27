@@ -28,10 +28,9 @@ def test_a_second_payers_takeback_title_says_bill_the_patient_only_when_the_firs
     takeback" for every claim status 2 or 3. F5's state (states._decide, the FEES branch routed to F5) bills the patient
     only as far as the first payer's standing answer left the amount on the patient: where the first payer denied the
     service as the practice's (CO-50, nothing on the patient) or its answer is not on file, the basis says find out why,
-    then dispute or bill the right payer, but the title still says bill the patient. On the world copy of 11-24, 2 of
-    the 11 second-payer takebacks ($88.14): one whose first payer's standing answer is a CO-150 denial, one whose first
-    payer's answer is not on file. The title should follow the same rule (states.first_payer_answer gives the first
-    payer's answer)."""
+    then dispute or bill the right payer, but the title still says bill the patient. On the world copy of 11-24, 1 of
+    the 11 second-payer takebacks ($63.64): its first payer's standing answer is a CO-150 denial. The title should follow
+    the same rule (states.first_payer_answer gives the first payer's answer, from any submission of the bill)."""
     from tests.review3.r3helpers import clm, sv, visit_paid
     from tests.test_features import clean_visits
     from tests.test_fx_ledger import GAP, KY, OTHER, World
