@@ -882,6 +882,36 @@ def test_a_takeback_after_the_services_later_answer_is_not_lost_to_that_answers_
     w.store.close()
 
 
+@pytest.mark.parametrize("today,open_", [("2027-12-20", True), ("2028-02-20", False)])
+def test_a_restatement_split_into_pieces_is_not_the_takebacks_work(tmp_path, kind, today, open_):
+    """(r1-1, found by the hand trace of the real copy) Humana pays C024's 17000 $23.04 (the patient's $25.00 copay and a
+    $12.13 contractual beside it) on May 20, 2026; five days later it restates the claim in pieces on its own lines, each
+    paying nothing: the $23.04 payment marked B13, the $12.13 CO-45 and the $25.00 PR-3; on July 30 it withholds the $23.04
+    naming C024. The pieces are one restatement of the payment, never the takeback's work: the TAKEBACK is listed within its
+    own window (Humana's 18 months from July 30, 2026), the B13 restatement is done with the takeback named."""
+    hum = {"payer": "HUMANA", "payer_id": "HUMAN"}
+    pcn = f"{BILL}C024"
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "17000", "60.64", "23.04"), "20260301", **hum)
+    lcn = "REF*6R*1~"            # the payer keeps the line's control number on every piece of its restatement
+    w.remit([clm(pcn, "1", "60.64", "23.04", sv("17000", "60.64", "23.04", 1, "CAS*PR*3*25.00~CAS*CO*45*12.13~") + lcn, payer_ctl="HU1")],
+            "20260520", **hum)
+    w.remit([clm(pcn, "1", "60.64", "0.00", sv("17000", "12.13", "0.00", 1, "CAS*CO*45*12.13~") + lcn + sv("17000", "23.04", "0.00", 1, "CAS*CO*B13*23.04~")
+                 + lcn + sv("17000", "25.00", "0.00", 1, "CAS*PR*3*25.00~") + lcn, payer_ctl="HU1")], "20260525", **hum)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="HU9")], "20260730",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {pcn}*23.04~", **hum)
+    w.run("r1", today=today)
+    rows = w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0")
+    print(today, [(r["signal"], r["work_state"], r["appeal_deadline"], r["state_basis"]) for r in rows])
+    tb = [r for r in rows if r["signal"] == "TAKEBACK"]
+    assert len(tb) == 1, f"the takeback of the restated payment is on no item of its own: {brief(rows)}"
+    assert tb[0]["work_state"] == ("work_now" if open_ else "expired"), (tb[0]["work_state"], tb[0]["appeal_deadline"])
+    for r in rows:
+        if r["signal"] != "TAKEBACK":
+            assert r["work_state"] == "done" and "worked on its own takeback item" in (r["state_basis"] or ""), (r["signal"], r["work_state"], r["state_basis"])
+    w.store.close()
+
+
 @pytest.mark.parametrize("today,open_", [("2028-06-01", True), ("2028-08-20", False)])
 def test_the_denial_that_carries_a_takeback_keeps_the_takebacks_window(tmp_path, kind, today, open_):
     """(r1-1, the other way) Anthem denies C017's 99214 as not medically necessary on April 15, 2026; the corrected claim

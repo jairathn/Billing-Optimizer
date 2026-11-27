@@ -8651,12 +8651,19 @@ class Detector:
         return out
 
     def _restates(self, l: dict) -> bool:
-        """A duplicate denial (CARC 18 or B13 by the payer, on the line or its claim) that pays nothing: the payer restating a
-        payment it made, never an answer of the service of its own (fx-ledger-r1-1)."""
+        """A duplicate denial (CARC 18 or B13 by the payer) that pays nothing: the payer restating a payment it made, never an
+        answer of the service of its own (fx-ledger-r1-1). The reason sits on the line, on its claim, or on another $0 line
+        of the same code and date on its claim: a payer splits its restatement of a paid line into pieces, the payment
+        marked B13 and the original adjustments (CO-45, CO-253, PR-3) on lines of their own, each a piece of the same
+        restatement."""
         if (l.get("paid_cents") or 0) > 0:
             return False
-        return any(rc in DUP_CARCS and g != "PR" for g, rc, _a in self.adj.get(l["line_key"], [])) \
-            or any(rc in DUP_CARCS and g != "PR" for g, rc, _a in self.claim_adj.get(l.get("claim_key"), []))
+        dup = lambda key: any(rc in DUP_CARCS and g != "PR" for g, rc, _a in self.adj.get(key, []))      # noqa: E731
+        if dup(l["line_key"]) or any(rc in DUP_CARCS and g != "PR" for g, rc, _a in self.claim_adj.get(l.get("claim_key"), [])):
+            return True
+        return any(dup(x["line_key"]) for x in self.lines_by_claim.get(l.get("claim_key"), [])
+                   if x["line_key"] != l["line_key"] and x.get("procedure_code") == l.get("procedure_code")
+                   and x.get("service_date") == l.get("service_date") and (x.get("paid_cents") or 0) <= 0)
 
     def _carry_takeback_window(self, f: dict, p: dict, day: str) -> None:
         """An item that carries a takeback (the payer's own denial of the service, which the payment taken back had answered)
