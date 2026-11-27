@@ -252,7 +252,9 @@ def test_a_company_plan_in_the_medicaid_catch_all_is_never_the_states_medicaid(t
     ky = {"payer_group": "Medicaid KY", "payer_name": "KENTUCKY MEDICAID"}
     company = "UNITEDHEALTHCARE COMMUNITY PLAN MEDICAID"
     state = "MEDICAID OF KENTUCKY"
-    assert codes.normalize_payer(company)[0] == codes.normalize_payer(state)[0] == "Medicaid (other)"
+    # the company's plan is in the catch-all; the state's own name may be read as the catch-all or, by the newer name
+    # rules, as Kentucky's own group: either way the groups passed below decide
+    assert codes.normalize_payer(company)[0] == "Medicaid (other)"
     assert same("Medicaid (other)", ky, company) is False
     assert same("Medicaid (other)", ky, state) is True
     assert same("Medicaid (other)", {"payer_group": "UnitedHealthcare Medicaid"}, company) is True
@@ -903,3 +905,68 @@ def test_an_item_with_an_empty_deadline_never_stops_the_write_off_counts(tmp_pat
     got = ec.timely_writeoffs(s.conn, today="2026-08-01")
     assert got["cents"] == 15000, got
     assert isinstance(ec.denial_as_contractual(s.conn, today="2026-08-01"), list)
+
+
+# ============================================ 9. routed from fix-wave F8: the EMA summaries read the payer-name rules of now
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_ema_denial_from_the_va_network_named_after_its_administrator_is_the_vas(tmp_path, kind):
+    """F8's need (ema_ledger.refresh learns the aliases): EMA names the VA's community care network after its administrator,
+    and its weekly exports carry the network's payer id (VACCN) on that name's rows. A denial EMA posted for such a claim,
+    with no 835, is the VA's: group 'VA Community Care' and its windows (before: nothing called learn_payer_aliases, so the
+    item was the administrator's commercial group with its 12 months)."""
+    from tests import test_ema_checks as TC
+    from tests.test_workable import ema
+    s = Store(str(tmp_path / "s.sqlite")) if kind == "file" else Store(":memory:", compact=True)
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (TC.SALT_HEX,))
+    s.conn.commit()
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        name = F.PAYERS["optum"]
+        for i in range(25):                 # the weekly exports' rows of that name carry the network's payer id
+            ema(s.conn, f"CB0000V{i:02d}C017", payer=name, payer_id="VACCN", claim_status="Resolved/Paid")
+        s.conn.commit()
+        TC.denial_world(s, lg, tmp_path, TC.c5_rows(link=2, reason="CO-16", payer=name))
+        got = [i for i in ec.ema_denials(s.conn, today=TC.TODAY) if i["claim"]["payer_name"] == name]
+        assert len(got) == 1, got
+        assert (got[0]["claim"]["payer_group"], got[0]["claim"]["payer_kind"]) == ("VA Community Care", "va"), got[0]["claim"]
+    finally:
+        lg.close()
+        s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_ema_summaries_take_a_changed_name_rule_without_a_new_report(tmp_path, kind, monkeypatch):
+    """F8's need (ema_ledger.refresh re-groups on a changed name rule): the EMA summaries keep the payer group the name rules
+    gave when they were last built, and Part A runs only when the posting ledger changed. A release that changes the name
+    rules (here one that reads EMA's 'Medicaid of Kentucky' as Kentucky's own program, as F8 does) re-groups the stored
+    lines and the A/R's rows at the next refresh, without waiting for the next Production report (before: the old group,
+    and its windows, until then)."""
+    from tests import test_ema_checks as TC
+    name = "Medicaid of Kentucky"
+    old_rules = [r for r in codes.PAYER_RULES if r[1] != "Medicaid KY"]       # the release before: the catch-all
+    new_rules = [(r"MEDICAID OF KENTUCKY", "Medicaid KY", "medicaid")] + list(codes.PAYER_RULES)
+    s = Store(str(tmp_path / "s.sqlite")) if kind == "file" else Store(":memory:", compact=True)
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (TC.SALT_HEX,))
+    s.conn.commit()
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        monkeypatch.setattr(codes, "PAYER_RULES", old_rules)
+        er._GROUPERS.clear()
+        ar = [F.ar_row(claim=F.claim_id(2), link=F.link_no(2), status="Denied", denial=150, current=150, svc=SVC, patient=1,
+                       primary=name)]
+        TC.load(s, lg, tmp_path, TC.c5_rows(link=2, reason="CO-16", payer=name), ar_rows=ar)
+        lines = {g for (g,) in s.conn.execute("SELECT DISTINCT payer_group FROM ema_lines WHERE primary_payer = ?", (name,))}
+        ars = {g for (g,) in s.conn.execute("SELECT DISTINCT payer_group FROM ema_ar WHERE primary_payer = ?", (name,))}
+        assert (lines, ars) == ({"Medicaid (other)"}, {"Medicaid (other)"}), (lines, ars)    # what the earlier release stored
+        monkeypatch.setattr(codes, "PAYER_RULES", new_rules)            # the release with the new rule starts
+        er._GROUPERS.clear()
+        el.refresh(s, lg, parts="auto", log=TC.Log())
+        lines = {g for (g,) in s.conn.execute("SELECT DISTINCT payer_group FROM ema_lines WHERE primary_payer = ?", (name,))}
+        ars = {g for (g,) in s.conn.execute("SELECT DISTINCT payer_group FROM ema_ar WHERE primary_payer = ?", (name,))}
+        assert (lines, ars) == ({"Medicaid KY"}, {"Medicaid KY"}), (lines, ars)
+        assert el.refresh(s, lg, parts="auto", log=TC.Log())["part_b"] is None          # once: nothing left to re-group
+    finally:
+        lg.close()
+        s.close()

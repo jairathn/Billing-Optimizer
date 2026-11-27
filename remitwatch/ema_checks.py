@@ -300,9 +300,10 @@ def _same_payer(a: Any, b: Any) -> bool:
 def _catch_all_company(group: Any, name: Any) -> str | None:
     """The family of the company an EMA payer name begins with, for a name the payer-name rules put in the Medicaid
     catch-all ('Medicaid (other)', states.MEDICAID_CATCH_ALL): EMA names a company's Medicaid plan '<company> Medicaid
-    Community Plan' and the state's own program 'Medicaid of <state>', and both land there, so only the name tells a
-    company's plan from the state's Medicaid (fix6's reading, states._ema_payer_is_denier). None for any other payment:
-    its group decides."""
+    Community Plan', and a state's own program under a spelling the rules do not place (say 'Medicaid of Ohio'; the
+    rules read Kentucky's and Indiana's as their own groups) lands there too, so only the name tells a company's plan
+    from a state's Medicaid (fix6's reading, states._ema_payer_is_denier). None for any other payment: its group
+    decides."""
     from .states import MEDICAID_CATCH_ALL
     if group != MEDICAID_CATCH_ALL or not name:
         return None
