@@ -1527,19 +1527,28 @@ def test_a_payment_emas_report_shows_names_its_amount_claim_and_report(store):
 def test_a_closure_by_the_payers_own_settling_answer_is_proof(store):
     """detect._close_by_answer closes a denial the same payer later settled (processed it as secondary applying the
     primary's answer, or put it on the patient's share): nothing more is owed, and the payer's dated answer on its claim
-    is the proof (evidence settled_by), with no money. Found by wiring: such closures held the run. A settled_by with
-    no date or no claim is no proof."""
+    is the proof (evidence settled_by), with no money. Found by wiring: such closures held the run. The answer's lines are
+    its proof rows, and they must add up to the cent (fix wave F2, review privacy-3): a settled_by with no date or no
+    claim, with no proof rows, or with rows that do not add up is no proof."""
     c = store.conn
     sb = {"payer": "Medicaid KY", "date": "2026-11-10", "claim": "ZZ00T0001C017", "how": "processed as secondary", "paid_cents": 0}
-    later = {"payment_date": "2026-11-10", "claim": "ZZ00T0001C017", "trace": "TRACE0001", "paid_cents": 0, "how": "processed as secondary"}
+    row = {"date": "2026-11-10", "claim": "ZZ00T0001C017", "kind": "answer", "charge_cents": 22365, "allowed_cents": 7000,
+           "amount_cents": 0, "adjustments": [{"group": "OA", "carc": "23", "amount_cents": 7000},
+                                              {"group": "CO", "carc": "45", "amount_cents": 15365}]}
+    later = {"payment_date": "2026-11-10", "claim": "ZZ00T0001C017", "trace": "TRACE0001", "paid_cents": 0, "how": "processed as secondary",
+             "proof": [row]}
     add_item(c, "F-settled", status="resolved", work_state="done", auto_note="Processed as secondary",
              evidence={"settled_by": sb, "paid_later": later})
     add_item(c, "F-undated", status="resolved", work_state="done", auto_note="Processed as secondary",
-             evidence={"settled_by": dict(sb, date=None), "paid_later": dict(later, payment_date=None)})
+             evidence={"settled_by": dict(sb, date=None), "paid_later": dict(later, payment_date=None, proof=[dict(row, date=None)])})
     add_item(c, "F-no-claim", status="resolved", work_state="done", auto_note="Processed as secondary",
-             evidence={"settled_by": dict(sb, claim=None), "paid_later": dict(later, claim=None, trace=None)})
+             evidence={"settled_by": dict(sb, claim=None), "paid_later": dict(later, claim=None, trace=None, proof=[dict(row, claim=None)])})
+    add_item(c, "F-no-rows", status="resolved", work_state="done", auto_note="Processed as secondary",
+             evidence={"settled_by": sb, "paid_later": dict(later, proof=[])})
+    add_item(c, "F-short", status="resolved", work_state="done", auto_note="Processed as secondary",
+             evidence={"settled_by": sb, "paid_later": dict(later, proof=[dict(row, charge_cents=25000)])})
     r = sc.check_closure_proof(c, TODAY)
-    assert sorted(r["examples"]) == ["F-no-claim", "F-undated"], r["examples"]
+    assert sorted(r["examples"]) == ["F-no-claim", "F-no-rows", "F-short", "F-undated"], r["examples"]
 
 
 def test_items_regrouped_by_a_pattern_this_run_made_are_not_kept(store):

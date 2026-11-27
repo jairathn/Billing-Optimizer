@@ -942,7 +942,8 @@ def check_open_and_closed(conn: sqlite3.Connection, today: str) -> dict:
     return _result("open_and_closed", [(f, c, f) for f, c, _k in rows], info={"by_kind": dict(kinds)})
 
 
-NO_MONEY_KINDS = frozenset({"denial", "to_patient", "baseline"})    # proof rows that show an answer, never a payment
+NO_MONEY_KINDS = frozenset({"denial", "to_patient", "baseline", "answer"})    # proof rows that show an answer, never a payment
+ANSWER_KINDS = frozenset({"answer", "to_patient", "payment"})        # the rows of a payer's answer lines (detect._answer_rows)
 TAKEBACK_KINDS = frozenset({"reversal", "takeback"})                 # money taken back, whatever the sign it is written with
 
 
@@ -964,9 +965,33 @@ def proof_money(rows: Iterable[Any]) -> int:
     return net if pos > 0 and net > 0 else 0
 
 
+def answer_reconciles(row: Any) -> bool:
+    """One proof row of a payer's answer line (detect._answer_rows) adds up to the cent (review privacy-3): its charge is
+    what the payer paid plus every adjustment it gave on the line (with the claim-level ones it carries, where the payer
+    put its reason on the claim), and where it puts the allowed amount on the patient (kind to_patient) the allowed amount
+    is what was paid plus the patient's share. A row without those amounts does not reconcile."""
+    if not isinstance(row, dict):
+        return False
+    try:
+        charge, paid = int(row["charge_cents"]), int(row["amount_cents"])
+        adj = [(str(a.get("group") or ""), int(a["amount_cents"])) for a in row.get("adjustments") or []]
+        extra = [int(a["amount_cents"]) for a in row.get("claim_adjustments") or []]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+    own = sum(a for _g, a in adj)
+    if charge != paid + own and not (extra and charge == paid + own + sum(extra)):
+        return False
+    if row.get("kind") == "to_patient":
+        allowed = row.get("allowed_cents")
+        return isinstance(allowed, (int, float)) and int(allowed) == paid + sum(a for g, a in adj if g == "PR")
+    return True
+
+
 def has_proof(ev: dict) -> bool:
     """An automatic closure names the payment that closed it: proof rows that show money paid (proof_money), or a payment
-    above $0 with its date and the trace or claim it came on."""
+    above $0 with its date and the trace or claim it came on. A closure by the payer's own later answer that settled it
+    with nothing owed (detect._close_by_answer: settled_by) has its proof in that answer's lines, each dated, on its claim,
+    and adding up to the cent (answer_reconciles); settled_by alone is no proof (review privacy-3)."""
     pl = ev.get("paid_later") if isinstance(ev.get("paid_later"), dict) else {}
     ar = ev.get("archive_rule") if isinstance(ev.get("archive_rule"), dict) else {}
     rows = list(pl.get("proof") or []) + (list(ar.get("proof") or []) if ar.get("action") == "close_with_proof" else [])
@@ -974,7 +999,9 @@ def has_proof(ev: dict) -> bool:
         return True
     sb = ev.get("settled_by") if isinstance(ev.get("settled_by"), dict) else {}
     if sb.get("date") and sb.get("claim") and sb.get("how"):
-        return True             # the payer's own later answer settled it (detect._close_by_answer): dated, on its claim, nothing owed
+        answers = [r for r in pl.get("proof") or [] if isinstance(r, dict) and r.get("kind") in ANSWER_KINDS]
+        if answers and all(r.get("date") and r.get("claim") and answer_reconciles(r) for r in answers):
+            return True         # the payer's own later answer settled it: its lines, dated, on its claim, adding up to the cent
     paid = pl.get("paid_cents")
     if not (isinstance(paid, (int, float)) and paid > 0):
         return False

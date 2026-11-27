@@ -144,6 +144,10 @@ ITEM_KEYS = ("finding_id", "signal", "category", "status", "line_key", "claim_ke
              "service_date", "payment_date", "procedure_code", "original_procedure_code", "billed_code", "ema_link", "payer_group",
              "payer_kind", "carc")
 EVIDENCE_KEYS = ("unpaid", "lines", "codes", "ema_link", "ema_links")
+# a routine-rate review (one item for many claims): a recovery on any of its claims counts for it (fix wave F2). The registry
+# keeps every claim the review ever listed (its item's 'ever': [claim id, date of service, code, line key]), so a claim the
+# payer repaid, which leaves the review for it, keeps counting
+PATTERN_SIGNALS = ("SECOND_RATE", "OLD_FEE_SCHEDULE")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS results_items (
@@ -430,11 +434,51 @@ def _deadline_of(f: dict) -> str | None:
     return max(vals) if vals else None
 
 
-def _item_json(f: dict) -> str:
-    """What states.facts_of needs to find an item's payments again after it drops off the list (no names)."""
+def _pattern_refs(signal: Any, code: Any, ev: dict, left: bool = True) -> list[list]:
+    """The claims a routine-rate review names, [claim id, date of service, code, line key or None]: those it lists
+    ('claims', their lines in 'line_keys'; a repricing request's claims carry their own code), and with `left` those that
+    left it because the payer took them back or repaid them ('left'; a repricing request's 'repriced' and 'taken_back')."""
+    def rows(k: str) -> list:
+        v = ev.get(k)
+        return [c for c in v if isinstance(c, list) and len(c) >= 2 and c[0]] if isinstance(v, list) else []
+    keys = ev.get("line_keys") if isinstance(ev.get("line_keys"), list) else []
+    claims = ev.get("claims") if isinstance(ev.get("claims"), list) else []
+    old = signal == "OLD_FEE_SCHEDULE"
+    out = [[c[0], c[1], c[2] if old and len(c) > 2 else code, keys[i] if i < len(keys) else None]
+           for i, c in enumerate(claims) if isinstance(c, list) and len(c) >= 2 and c[0]]
+    if left:
+        out += [[c[0], c[1], code, c[4] if len(c) > 4 else None] for c in rows("left")]
+        out += [[c[0], c[1], c[2], c[at] if len(c) > at else None] for k, at in (("repriced", 6), ("taken_back", 4))
+                for c in rows(k) if len(c) > 2]
+    return out
+
+
+def _pattern_ever(f: dict, ev: dict, prev: Any) -> list[list]:
+    """Every claim a routine-rate review listed: this run's and those the registry kept from earlier runs (`prev`, the
+    review's registered item). On the review's first registration (or its first by this code) the claims that had left it
+    are taken in too; after that, a claim that came and went between two runs, never listed, is not."""
+    old = _json(_json(prev).get("evidence")).get("ever") if prev else None
+    have: dict[tuple, list] = {}
+    for c in old if isinstance(old, list) else []:
+        if isinstance(c, list) and len(c) >= 3 and c[0]:
+            have[(c[0], c[1], c[2])] = [c[0], c[1], c[2], c[3] if len(c) > 3 else None]
+    for c in _pattern_refs(f.get("signal"), f.get("procedure_code"), ev, left=not isinstance(old, list)):
+        k = (c[0], c[1], c[2])
+        if k not in have:
+            have[k] = c
+        elif c[3] and not have[k][3]:
+            have[k][3] = c[3]
+    return sorted(have.values(), key=lambda c: (str(c[1] or ""), str(c[0] or ""), str(c[2] or "")))
+
+
+def _item_json(f: dict, prev: Any = None) -> str:
+    """What states.facts_of needs to find an item's payments again after it drops off the list (no names). A routine-rate
+    review keeps every claim it ever listed (`prev`: its item as the registry holds it)."""
     out = {k: f.get(k) for k in ITEM_KEYS if f.get(k) not in (None, "")}
     ev = _json(f.get("evidence"))
     sub = {k: ev[k] for k in EVIDENCE_KEYS if k in ev}
+    if f.get("signal") in PATTERN_SIGNALS:
+        sub["ever"] = _pattern_ever(f, ev, prev)
     if sub:
         out["evidence"] = json.dumps(sub, separators=(",", ":"), default=str)
     return json.dumps(out, separators=(",", ":"), default=str)
@@ -456,8 +500,10 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
     ensure_schema(conn)
     t = _today(today)
     have: dict[str, tuple] = {}
-    for r in conn.execute("""SELECT finding_id, first_flagged, last_state, expired_on, lost_on, lost_cents, ever_open, flagged_cents,
-                                    gone_on, flag_info FROM results_items"""):
+    # a routine-rate review's registered item: the claims it listed before (_pattern_ever)
+    pats = ",".join(f"'{s}'" for s in PATTERN_SIGNALS)
+    for r in conn.execute(f"""SELECT finding_id, first_flagged, last_state, expired_on, lost_on, lost_cents, ever_open, flagged_cents,
+                                     gone_on, flag_info, CASE WHEN signal IN ({pats}) THEN item END FROM results_items"""):
         have[r[0]] = r
     if not _fx(conn):
         return {"listed": 0, "new": 0, "gone": 0, "lost": 0}
@@ -493,7 +539,7 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
                 n_lost += 1
         rows.append((fid, first, t, None, ever_open, f.get("signal"), f.get("category"), f.get("payer_group"), f.get("payer_kind"),
                      f.get("procedure_code"), f.get("carc"), f.get("service_date"), flagged, f.get("shortfall_cents"), ws,
-                     f.get("status"), expired_on, lost_on, lost_cents, info, _item_json(f)))
+                     f.get("status"), expired_on, lost_on, lost_cents, info, _item_json(f, prev[10] if prev else None)))
     conn.executemany("""INSERT OR REPLACE INTO results_items (finding_id, first_flagged, last_seen, gone_on, ever_open, signal, category,
                         payer_group, payer_kind, procedure_code, carc, service_date, flagged_cents, shortfall_cents, last_state,
                         last_status, expired_on, lost_on, lost_cents, flag_info, item) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -693,6 +739,96 @@ def _facts(conn: sqlite3.Connection, items: list[dict], today: str, errors: list
                 ctx = fx.get("ctx")
         del got
     return out
+
+
+def _pattern_claims(items: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str]]:
+    """Each claim a routine-rate review ever listed, as an item of its own (its claim id, date of service, code and paying
+    line; the review's payer, kind, status and work), so its money is worked out as any line's is: ({claim's id: registry
+    row}, {claim's id: the review's finding id}). A recovery on any of its claims is the review's (fix wave F2: the review
+    has no claim of its own, so nothing was ever found for it). Each claim's first-flag day starts as the review's
+    (_pattern_facts moves it to the day the payer paid that claim when that came later)."""
+    subs: dict[str, dict] = {}
+    of: dict[str, str] = {}
+    for fid, r in items.items():
+        it = r["item"]
+        if it.get("signal") not in PATTERN_SIGNALS:
+            continue
+        ev = _json(it.get("evidence"))
+        refs = ev.get("ever") if isinstance(ev.get("ever"), list) else _pattern_refs(it.get("signal"), it.get("procedure_code"), ev)
+        for i, c in enumerate(refs):
+            if not isinstance(c, list) or len(c) < 3 or not c[0] or not c[2]:
+                continue
+            sid = f"{fid}#{i}"
+            sub = {"finding_id": sid, "signal": it.get("signal"), "category": it.get("category"), "status": it.get("status"),
+                   "patient_control_number": c[0], "service_date": c[1], "procedure_code": c[2],
+                   "payer_group": it.get("payer_group"), "payer_kind": it.get("payer_kind"),
+                   "line_key": c[3] if len(c) > 3 else None}
+            subs[sid] = dict(r, finding_id=sid, item=sub, last_status=None)
+            of[sid] = fid
+    return subs, of
+
+
+def _pattern_facts(subs: dict[str, dict], facts: dict[str, dict]) -> None:
+    """A routine-rate review's claims keep only its payer's records (what a second payer pays on them is no answer to a
+    rate the first payer set), and each claim's first-flag day is the review's, or the day the payer paid that claim when it
+    came later (a claim that joined the review after its flag: its own payment is never money back, and a takeback of it is
+    money paid before that claim's flag)."""
+    for sid, r in subs.items():
+        fx = facts.get(sid)
+        if fx is None:
+            continue
+        grp = r.get("payer_group")
+        fx["rows"] = [x for x in fx.get("rows") or [] if _same_payer(_row_payer(x), grp)]
+        fx["pays"] = [p for p in fx.get("pays") or [] if _same_payer(p.get("group"), grp)]
+        lk = r["item"].get("line_key")
+        own = [x for x in fx["rows"] if lk and x.get("line_key") == lk]
+        paid = own or [x for x in fx["rows"] if x.get("status") != "22" and _amount(x) > 0]
+        days = [str(x.get("date") or "")[:10] for x in paid if x.get("date")]
+        if days and min(days) > (r["F"] or ""):
+            r["F"] = min(days)
+
+
+def _fold_patterns(sub_of: dict[str, str], items: dict, out_items: dict, item_events: dict, group_of: dict, group_members: dict,
+                   record_days: dict, answered: dict, denied_again: dict, work: dict, keep_events: int) -> None:
+    """A routine-rate review's claims, worked out as items of their own (_pattern_claims), give their money to the review:
+    what came back on each claim (each claim's takebacks offset its own payments only), their events, and their groups (a
+    claim's group is the review's: the review was put in every group of its claims)."""
+    if not sub_of:
+        return
+    claims_of: dict[str, list] = defaultdict(list)
+    for c, f in sub_of.items():
+        claims_of[f].append(c)
+    for f, cs in claims_of.items():
+        got = [out_items.pop(c) for c in sorted(cs) if c in out_items]
+        evs = [e for c in sorted(cs) for e in item_events.pop(c, [])]
+        if evs:
+            item_events[f] = list(item_events.get(f) or []) + evs
+        if not got:
+            continue
+        kept = sorted((e for o in got for e in o.get("events") or []), key=lambda e: (e["date"], e["cents"] < 0))
+        firsts = [o["first_money"] for o in got if o.get("first_money")]
+        out_items[f] = dict({b: sum(o[b] for o in got) for b in BUCKETS}, returned=sum(o["returned"] for o in got),
+                            taken_back=sum(o["taken_back"] for o in got), events=kept[:keep_events],
+                            n_events=sum(o.get("n_events") or 0 for o in got), members=[f], F=items[f]["F"],
+                            first_money=min(firsts) if firsts else None)
+    for c in sub_of:
+        for d in (group_of, answered, denied_again, work):
+            d.pop(c, None)
+    for rep in list(group_members):
+        mem = group_members[rep]
+        if rep in sub_of or any(m in sub_of for m in mem):
+            new = sorted({sub_of.get(m, m) for m in mem})
+            to = sub_of.get(rep, rep)
+            del group_members[rep]
+            group_members[to] = sorted(set(group_members.get(to) or []) | set(new))
+            if rep != to:
+                record_days[to] = sorted(set(record_days.get(to) or []) | set(record_days.pop(rep, None) or []))
+            for m in new:
+                group_of[m] = to
+    for fid, o in out_items.items():
+        rep = group_of.get(fid)
+        if rep in group_members:
+            o["members"] = group_members[rep]
 
 
 def _row_id(x: dict) -> tuple:
@@ -1103,8 +1239,20 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     work = work_of(conn, [f for f in reg if f not in archived])
     for fid in archived:
         work[fid] = list(saved[fid].get("work") or [])
-    cands = sorted(_candidates(conn, items))
-    facts = _facts(conn, [items[f]["item"] for f in cands], t, errors)
+    # a routine-rate review's money is its claims': each claim is worked out as an item of its own (_pattern_claims; its
+    # first-flag day and its payer's records, _pattern_facts), in the review's group, then folded into the review
+    subs, sub_of = _pattern_claims(items)
+    hit = _candidates(conn, dict(items, **subs))
+    subs = {c: r for c, r in subs.items() if c in hit}
+    sub_of = {c: f for c, f in sub_of.items() if c in subs}
+    cands = sorted(hit | set(sub_of.values()))
+    facts = _facts(conn, [(subs.get(f) or items[f])["item"] for f in sorted(hit)], t, errors)
+    _pattern_facts(subs, facts)
+    plain_items = items
+    items = dict(items, **subs)
+    regx = dict(reg, **subs) if subs else reg
+    for c, f in sub_of.items():
+        work[c] = work.get(f) or []
     _via835(conn, facts)
     # one group per set of items that share a payment record (union by the records' identities)
     parent: dict[str, str] = {}
@@ -1127,6 +1275,8 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             union(fid, first_of.setdefault(_row_id(x), fid))
         for p in fx.get("pays", []):
             union(fid, first_of.setdefault(_pay_id(p), fid))
+    for c, f in sub_of.items():
+        union(c, f)
     members: dict[str, list] = defaultdict(list)
     claim_of: dict[tuple, list] = defaultdict(list)
     for fid in cands:
@@ -1136,7 +1286,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             claim_of[_row_id(x)].append(fid)
         for p in fx.get("pays", []):
             claim_of[_pay_id(p)].append(fid)
-    found = _found_postings(conn, items)
+    found = _found_postings(conn, plain_items)
     out_items: dict[str, dict] = {}
     group_of: dict[str, str] = {}
     group_members: dict[str, list] = {}
@@ -1147,7 +1297,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     answered: dict[str, str] = {}
 
     def settle(fid: str, evs: list[dict]) -> None:
-        r = items.get(fid) or reg[fid]
+        r = items.get(fid) or regx[fid]
         stack: list[list] = []
         took = 0
         kept: list[dict] = []
@@ -1155,8 +1305,8 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
         for e in sorted(evs, key=lambda e: (e["date"], e["cents"] < 0, str(e["id"]))):
             rec = {k: v for k, v in e.items() if k not in ("id", "covers")}
             if e["cents"] > 0:
-                cover = [m for m in (e.get("covers") or [fid]) if m in reg] or [fid]
-                b, credit, win, why = _bucket(conn, e, cover, reg, work, cache)
+                cover = [m for m in (e.get("covers") or [fid]) if m in regx] or [fid]
+                b, credit, win, why = _bucket(conn, e, cover, regx, work, cache)
                 # money paid before the flag that the payer took back earlier: a later payment first pays that back, and only
                 # what it brings beyond it is new money (a reprocessing split over two remittances counts as one on the same day)
                 repay = min(took, e["cents"])
@@ -1205,8 +1355,15 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             for p in fx.get("pays", []):
                 pays.setdefault(_pay_id(p), p)
         group_members[rep] = sorted(mem)
-        record_days[rep] = sorted({str(x.get("date") or "")[:10] for x in rows.values() if _amount(x) and x.get("date")}
-                                  | {str(p.get("posted") or "")[:10] for p in pays.values() if int(p.get("cents") or 0) and p.get("posted")})
+
+        def early(rid: tuple, d: str) -> bool:
+            # a record of a routine-rate review's claim dated on or before that claim's own flag (its own payment)
+            cov = claim_of.get(rid) or []
+            return bool(cov) and all(c in sub_of and d <= items[c]["F"] for c in cov)
+        record_days[rep] = sorted({str(x.get("date") or "")[:10] for rid, x in rows.items() if _amount(x) and x.get("date")
+                                   and not early(rid, str(x.get("date") or "")[:10])}
+                                  | {str(p.get("posted") or "")[:10] for pid, p in pays.items() if int(p.get("cents") or 0) and p.get("posted")
+                                     and not early(pid, str(p.get("posted") or "")[:10])})
         _pair_group(rows)
         per = _assign_events(rows, pays, claim_of, items)
         for m in mem:
@@ -1236,6 +1393,8 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
                 answered[m] = "win"
             elif denied:
                 answered[m] = "loss"
+    _fold_patterns(sub_of, items, out_items, item_events, group_of, group_members, record_days, answered, denied_again, work,
+                   keep_events)
     # an unposted payment found posted, on an item no 835 or EMA line ties to another
     for fid, evs in found.items():
         if fid not in group_of:
@@ -1294,7 +1453,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     money_of_group = {rep: group_money(rep) for rep in group_members}
     return {"items": out_items, "groups": group_of, "group_members": group_members, "group_money": money_of_group, "work": work,
             "denied_again": denied_again, "answered": answered, "mark_back": sorted(set(mark_back)), "archived": sorted(archived),
-            "candidates": len(cands), "newest": newest, "errors": errors}
+            "candidates": sum(1 for c in cands if c not in sub_of), "newest": newest, "errors": errors}
 
 
 # ------------------------------------------------------------------------------------------------------------- lift

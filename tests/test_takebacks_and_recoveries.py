@@ -326,7 +326,9 @@ def test_a_recovery_counts_the_items_own_unit_not_another_unit_paid_again(tmp_pa
 
 def test_a_downcode_paid_again_in_full_records_what_it_brought_beyond_the_first_payment(tmp_path, kind):
     """99214 paid $76.15 with the level cut (CO-186), 2026-04-15. On 2026-06-10 the payer reverses that payment and pays
-    $130.00: the item recovered $53.85, the payment less what stood before it."""
+    $130.00: $53.85 arrived beyond what stood before, and the item records its whole $41.45 shortfall as recovered, the most
+    one item records (fix wave F2, review money-4: the recovery is capped at the item's shortfall; what is past it stays
+    free for another item's recovery)."""
     w = World(tmp_path, kind)
     w.remit(clean_visits(1, 25, "99214", "223.65", "117.60"), "20260301")
     w.remit([clm("CB0000202C017", "1", "223.65", "76.15", sv("99214", "223.65", "76.15", 1, "CAS*CO*186*41.45~CAS*CO*45*106.05~",
@@ -336,7 +338,8 @@ def test_a_downcode_paid_again_in_full_records_what_it_brought_beyond_the_first_
                  payer_ctl="PC2")], "20260610")
     w.run("r1")
     r = w.items("signal='DOWNCODE_LEVEL_REDUCED'")["CB0000202C017:99214:DOWNCODE_LEVEL_REDUCED"]
-    assert r["status"] == "resolved" and r["recovered_cents"] == 5385, (r["recovered_cents"], r["auto_note"])
+    assert r["shortfall_cents"] == 4145, r["shortfall_cents"]
+    assert r["status"] == "resolved" and r["recovered_cents"] == 4145, (r["recovered_cents"], r["auto_note"])
     w.store.close()
 
 

@@ -72,11 +72,22 @@ from functools import lru_cache
 from statistics import median
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .codes import carc_text, code_category, is_unlisted, payer_group_kind, rarc_text
+from .codes import carc_text, code_category, component_of, is_unlisted, payer_group_kind, rarc_text
 
 CHUNK = 500
 PAYMENT_STATUSES = ("1", "2", "3", "19", "20", "21")
 PRIMARY_STATUSES = ("1", "19")
+# CARC 22 (covered by another payer) or 23 (the prior payer's adjudication), by the payer: the answer was processed after
+# another payer's, whatever claim status it reports (states.AFTER_OTHER_CARCS, detect.AFTER_OTHER_CARCS)
+AFTER_OTHER_CARCS = frozenset({"22", "23"})
+
+
+def _after_other_payer(x) -> bool:
+    """This answer was processed after another payer's (CARC 22 or 23 on its line or its claim, by the payer): a supplement
+    answering with claim status 1 pays its share as second payer, never another plan's payment as primary (F1's
+    fx-ledger-r1-3 reads it the same way in states.paid_proof and detect._taken_back_items)."""
+    claim = getattr(x, "claim", None)
+    return any(r in AFTER_OTHER_CARCS and g != "PR" for g, r, _c in list(x.adj or []) + list(getattr(claim, "adj", None) or []))
 SECONDARY_STATUSES = ("2", "3", "20", "21")
 REVERSAL_STATUS = "22"
 COST_SHARE_CARCS = frozenset({"1", "2", "3"})           # the patient's deductible, coinsurance and copay: never a denial
@@ -248,7 +259,7 @@ class Claim:
     recorded."""
     __slots__ = ("claim_key", "txn", "pcn", "bill", "status", "charge", "paid", "patient_resp", "pccn", "freq", "crossover",
                  "payer", "payer_name", "group", "kind", "paid_on", "trace", "adj", "rem", "lines", "original_ref", "halves",
-                 "same_id", "reanswer", "restated", "net", "seq")
+                 "same_id", "reanswer", "restated", "net", "seq", "plan")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -296,9 +307,13 @@ class Archive:
     def answers_of(self, a: Ans) -> list[Ans]:
         """Every answer on the item's service: its bill, the code the practice billed (whatever code the payer answered
         under) and its date of service, oldest first. A line billed under another code is another service, even where the
-        payer answered both under one code (77600 recoded to 77436 beside a billed 77436)."""
+        payer answered both under one code (77600 recoded to 77436 beside a billed 77436). A line billed for one part of
+        the service (the reading, 26, or the technical part, TC) is answered only by answers of that part or of the whole
+        service, and the whole service only by answers of the whole: a TC payment pays nothing of the reading (T-C1,
+        review money-7; the detector counts two parts paid as the whole service, the rules here leave that to it)."""
         code = a.billed_code
-        out = {x.line_key: x for x in self.service(a.bill, code, a.dos) if x.billed_code == code}
+        want = component_of(a.mods)
+        out = {x.line_key: x for x in self.service(a.bill, code, a.dos) if x.billed_code == code and _answers_part(component_of(x.mods), want)}
         out[a.line_key] = a
         return sorted(out.values(), key=lambda x: (x.paid_on or "", x.trace or "", x.line_key))
 
@@ -366,11 +381,11 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
         wanted = set(bills)
         keep = []
         # every claim id from the bill up to the bill followed by 'D': the bill itself and its submissions (bill + 'C' + digits)
-        for (ck, txn, pcn, st, charge, paid, pr, pccn, freq, cross, oref, cpay, cfi, seq, tpay, trace, pname, pid) in conn.execute(
+        for (ck, txn, pcn, st, charge, paid, pr, pccn, freq, cross, oref, cpay, cfi, seq, tpay, trace, pname, pid, plan) in conn.execute(
                 """SELECT c.claim_key, c.transaction_key, c.patient_control_number, c.claim_status_code, c.charge_cents, c.paid_cents,
                           c.patient_responsibility_cents, c.payer_claim_control_number, c.claim_frequency_code, c.crossover_carrier_name,
                           c.original_reference_number, c.payment_date, c.claim_filing_indicator, c.claim_seq,
-                          t.payment_date, t.trace_number, t.payer_name, t.payer_id
+                          t.payment_date, t.trace_number, t.payer_name, t.payer_id, c.contract_class
                    FROM temp.b2_bills b
                    JOIN claims c ON c.patient_control_number >= b.bill AND c.patient_control_number < b.hi
                    JOIN transactions t ON t.transaction_key = c.transaction_key
@@ -381,7 +396,8 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
             grp, kind = payer_group_kind(pname, cfi)
             cl = Claim(claim_key=ck, txn=txn, pcn=pcn, bill=b, status=st, charge=charge or 0, paid=paid or 0, patient_resp=pr, pccn=pccn,
                        freq=freq, crossover=cross, original_ref=oref, payer=_payer_key(pid, pname), payer_name=pname,
-                       group=grp, kind=kind, paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[], restated=False, seq=seq)
+                       group=grp, kind=kind, paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[], restated=False, seq=seq,
+                       plan=(plan or "").strip() or None)
             arch.claims[ck] = cl
             arch.by_bill[b].append(cl)
             keep.append((ck,))
@@ -602,6 +618,12 @@ def _name_key(name: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(name or "").upper())
 
 
+def _answers_part(got: str, want: str) -> bool:
+    """Whether an answer for part `got` of a service (component_of: '26', 'TC', or '' for the whole) is an answer of a
+    line billed for part `want`: the same part, or the whole service answering a part (T-C1)."""
+    return got == want or (got == "" and want != "")
+
+
 def _two_plans(a, b) -> bool:
     """Two plans of one company: the claim filing indicators make them different kinds (its Medicaid plan and its
     Medicare Advantage plan, or its commercial plan), whatever name or payer id they share. A kind the rules do not
@@ -731,6 +753,14 @@ def _group_of(a: Ans, x: Ans, gm: tuple) -> tuple | None:
         if len(same) == 1:
             k = same[0]
     return k
+
+
+def _answer_sig(a: Ans) -> tuple:
+    """One answer of a line, as a second delivery of it repeats it (fold_repeat_denials): the claim id, status, code,
+    date, modifiers, charge, payment and every reason with its amount, under the same plan (REF*CE: an answer under
+    another plan is not a copy of it)."""
+    return (a.pcn, a.status, a.code, a.dos, tuple(sorted(a.mods or ())), a.charge, a.paid, tuple(sorted(a.adj or ())),
+            getattr(a.claim, "plan", None))
 
 
 def _attribute(a: Ans, x: Ans, gm: tuple | None = None) -> str:
@@ -1144,6 +1174,35 @@ def _denied_units(a: Ans, prim: Sequence[Ans]) -> float:
     return m.billed_units if m is not None else a.billed_units
 
 
+def _medicaid_owes(f: Mapping, kind: Any, paid_first: Mapping[tuple, int]) -> int | None:
+    """What a Medicaid plan that denied a whole claim after another payer paid it owes by its own rate: for each service,
+    its expected amount by Medicaid's own rate less what the first payer paid for it, never below $0 (Medicaid pays the
+    lesser of the share the first payer left and that), added over the claim's services. `paid_first`: (code, date) ->
+    the first payer's standing payment. None where the payer is not Medicaid, or a service of the claim has no amount by
+    the payer's own rate (an estimate caps nothing: run_claim_rules' rate_expected). Fix wave F2: the share named by a
+    second payer's claim-level denial was more than Medicaid's own rate."""
+    per = _ev(f).get("rate_expected")
+    if kind != "medicaid" or not isinstance(per, dict) or not per:
+        return None
+    out, priced = 0, set()
+    for key, exp in per.items():
+        code, _sp, dos = str(key).partition(" ")
+        if not isinstance(exp, int):
+            return None
+        priced.add((code, dos or None))
+        out += max(0, exp - int(paid_first.get((code, dos or None), 0)))
+    return out if set(paid_first) <= priced else None
+
+
+def _owes_words(who: str, owes: int, share: int) -> str:
+    """Why a Medicaid plan answering second owes less than the share the first payer left (_medicaid_owes)."""
+    if not owes:
+        return (f" {who} pays a service it answers second only up to its own rate less what the first payer paid, and that leaves "
+                f"nothing of the {_usd(share)} share: it is written off (a Medicaid member is never billed)")
+    return (f" {who} pays a service it answers second only up to its own rate less what the first payer paid: it owes {_usd(owes)} "
+            f"of the {_usd(share)} share, and the rest is written off (a Medicaid member is never billed)")
+
+
 def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
                            standing: Mapping[str, int] | None = None) -> list[dict]:
     """A payer's denial of a service another payer had already paid as primary (a payment that still stands, before the
@@ -1171,7 +1230,7 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
     for f, a in _line_items(items, arch, zero_paid=True):
         ans = arch.answers_of(a)
         prim = [x for x in ans if x.line_key != a.line_key and x.standing > 0 and not _same_payer_loose(x, a) and x.status in PRIMARY_STATUSES
-                and (_before(x, a) or ((x.paid_on or "") == (a.paid_on or "") and x.trace != a.trace))]
+                and not _after_other_payer(x) and (_before(x, a) or ((x.paid_on or "") == (a.paid_on or "") and x.trace != a.trace))]
         if not prim:
             continue
         p = prim[0]
@@ -1300,6 +1359,12 @@ def _claim_after_primary(items: list, arch: Archive) -> list[dict]:
         settled = sum(x.standing for x in later) + sum(x.pr_cents(COST_SHARE_CARCS) for x in later if x.status in SECONDARY_STATUSES) + claim_paid
         denier_paid = claim_paid + sum(x.standing for x in later if _same_payer(x, cl))
         left = max(0, share - settled)
+        # a Medicaid plan owes the share only up to its own rate less the first payer's payment (fix wave F2)
+        first_paid: dict[tuple, int] = defaultdict(int)
+        for x in mine:
+            first_paid[(x.billed_code, x.dos)] += max(x.standing, 0)
+        owes = _medicaid_owes(f, cl.kind, first_paid)
+        owed_by_it = False              # the share is the denying payer's to pay (sent to it again as secondary)
         who = cl.payer_name or "the payer"
         rs = _claim_reasons(cl)
         reasons = {r for _g, r, _c in rs}
@@ -1329,12 +1394,17 @@ def _claim_after_primary(items: list, arch: Archive) -> list[dict]:
             hint += (f": {who} says another payer covers this claim first ({said}): it is not its to pay as primary. Send it as a "
                      f"secondary claim with {p.payer_name}'s payment: the patient's share the primary left, {_usd(left)}, is what is left "
                      "(never billed to a Medicaid member).")
+            owed_by_it = True
         elif left:
             hint += (f": this claim denial by {who} ({said}) is about the patient's share the primary left, {_usd(left)}, not the whole "
                      "claim. Fix what it asks and send it as a secondary claim, or bill the patient where the plan allows it (never a "
                      "Medicaid member).")
+            owed_by_it = True
         else:
             hint += f": this claim denial by {who} is another payer's answer, not a denial to appeal. Nothing is left to collect from a payer."
+        if owed_by_it and owes is not None and owes < left:
+            size, state = owes, ("work_now" if owes else "done")
+            hint = hint.rstrip(". ") + "." + _owes_words(who, owes, left) + "."
         proof = [_proof(x, "payment", True) for x in paid] + [_proof(x, _kind(x), False) for x in later]
         proof += [_proof(cl.lines[0], _kind(cl.lines[0]), False)] if cl.lines else []
         out.append(_reclass(R_OTHER_PAYER, f, "other_payer_paid", "Paid by another payer first", hint, size, state, proof, "proven",
@@ -2173,12 +2243,27 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
     for f, a in _line_items(items, arch, zero_paid=True, categories=("denial", "bundling", "downcoding")):
         # one billed line: two lines of one code on a claim (77401 and 77401-59) are two units, never repeats of each other
         groups[(a.bill, a.billed_code, a.dos, _line_identity(a, arch), a.group or a.payer)].append((f, a))
-    # each payer's newest answer of each line: its newest listings that are not a copy's denial (else its newest)
+    # each payer's newest answer of each line: its newest listings that are not a copy's denial (else its newest). The same
+    # answer delivered again the same day on another remittance (the very same claim id, status, code, date, modifiers,
+    # charge, payment and reasons) is no unit of that answer: it folds into the first delivery, a worked one first (review
+    # money-11; detect._answer_copies passes most such deliveries by, under one payer id)
+    if worked is None:
+        worked = worked_ids(conn, [f["finding_id"] for v in groups.values() if len(v) > 1 for f, _a in v])
     heads: dict[tuple, tuple[list, str]] = {}
+    again: dict[int, tuple] = {}            # id(item) of a delivery again -> the first delivery it folds into
     for k, v in groups.items():
         pool = [p for p in v if not _copy_denial(p[1])] or v
         newest = max((a.paid_on or "") for _f, a in pool)
-        heads[k] = (sorted((p for p in pool if (p[1].paid_on or "") == newest), key=lambda p: (p[1].trace or "", p[1].line_key)), newest)
+        first: dict[tuple, tuple] = {}
+        for p in sorted((p for p in pool if (p[1].paid_on or "") == newest),
+                        key=lambda p: (p[0]["finding_id"] not in worked, p[1].txn or "", p[1].trace or "", p[1].line_key)):
+            sig = _answer_sig(p[1])
+            if sig in first and first[sig][1].txn != p[1].txn:
+                again[id(p[0])] = first[sig]
+            else:
+                first.setdefault(sig, p)
+        heads[k] = (sorted((p for p in pool if (p[1].paid_on or "") == newest and id(p[0]) not in again),
+                           key=lambda p: (p[1].trace or "", p[1].line_key)), newest)
     # a payer that said the line is not its to pay hands it to the payer that answered it since
     moved: dict[tuple, tuple] = {}
     for k, (carriers, newest) in heads.items():
@@ -2188,21 +2273,24 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
                  and not any(_same_payer_loose(a2, a) for _f2, a2 in h[0] for _f, a in carriers)]
         if later:
             moved[k] = max(later, key=lambda kh: (kh[1][1], str(kh[0][4] or "")))[1][0][0]
-    folding = [p for k, v in groups.items() if len(v) > 1 or k in moved for p in v]
-    if worked is None:
-        worked = worked_ids(conn, [f["finding_id"] for f, _a in folding])
+    lone = [f["finding_id"] for k, v in groups.items() if len(v) < 2 and k in moved for f, _a in v]
+    if lone:
+        worked = set(worked) | set(worked_ids(conn, lone))
     out = []
     for k, v in groups.items():
         if len(v) < 2 and k not in moved:
             continue
         carriers, _newest = heads[k]
         here = k not in moved
-        carrier, carrier_ans = moved[k] if not here else carriers[0]
         for f, a in sorted(v, key=lambda p: (p[1].paid_on or "", p[1].line_key)):
             if here and any(f is c for c, _x in carriers):
                 continue                # the lines of the payer's newest answer stay as they are
+            carrier, carrier_ans = (again[id(f)] if id(f) in again else moved[k] if not here else carriers[0])
             what = f"{_reasons_text(a)} on {a.paid_on}"
-            if not here:
+            if id(f) in again:
+                note = (f"The payer delivered this same answer ({what}) twice the same day, on two remittances: it is one answer, "
+                        f"and this listing is part of the first delivery's item.")
+            elif not here:
                 note = (f"{a.payer_name or 'The payer'} said this service is not its to pay ({what}); {carrier_ans.payer_name or 'another payer'} "
                         f"answered it since, on {carrier_ans.paid_on}: that answer is the one to work, and this listing is part of its item.")
             elif _copy_denial(a) and not _copy_denial(carrier_ans):
