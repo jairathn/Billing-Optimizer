@@ -143,15 +143,12 @@ restored 202 passed, `git status` clean), output `$U/breaks2.out`.
   restored 4 passed).
 
 ## Half done
-- Nothing of the fix round (2026-11-27 04:20 UTC): every finding fixed or written as a need (above), the hand trace's fix
-  in, 16 breaks done, both measurements and both full suites done (below), the integration tip merged again (da2f255).
-  Running last: `$U/timed_cycle.sh` (F1's functions timed in one detection run of the branch on a world copy it deletes;
-  output `$U/timed_branch.out`), to put a number on run 4's slower branch detection; the result is below if it finished.
+- Nothing (2026-11-27 04:30 UTC): every finding fixed or written as a need (above), the hand trace's fix in, 16 breaks
+  done, both measurements, the timed pair and both full suites done (below), the integration tip merged again (da2f255,
+  then 1fd1a9d), world copies deleted, the measuring worktrees removed.
 
 ## Next
 - The integrator: merge wip/fx-ledger; route "Needs from others" (each with its failing test) and read the open questions.
-- If the timed run is missing below: `bash $U/timed_cycle.sh <tree at this branch> timed_branch` (needs 6 GB free), and
-  the same on the integration tip, to compare F1's own seconds.
 
 ## Tests
 - Fix round: tests/test_fx_ledger.py 202 tests, both store kinds (the reviewers' r1 and r2 tests ported, the hand trace's
@@ -169,8 +166,8 @@ restored 202 passed, `git status` clean), output `$U/breaks2.out`.
     shard after test_ema_intake's serialize failures and passes alone and in the same file order on both this branch and
     the tip (27 failed, the serialize ones, 237 passed on each). None is in the ledger's, the states' or the takebacks'
     tests.
-- Then the integration tip moved to bf1f17b (a brief only, nothing routed to F1), merged at da2f255; tests/test_fx_ledger.py
-  202 passed again.
+- Then the integration tip moved to bf1f17b (a brief only, nothing routed to F1), merged at da2f255, and to 34e3573 (a
+  brief: an F3a need routed to F6), merged at 1fd1a9d; tests/test_fx_ledger.py 202 passed after each.
 - tests/test_fx_ledger.py (round 1): 126 tests, both store kinds (58 ported from the reviewers and verifiers, the rest F1's own edges
   and the residuals'), all passing. Every fix broken on purpose and restored (`$U/breaks.py`).
 - Full suite before the last merge (commit 741b25e): python3 3.13 / SQLite 3.53: 3016 passed, 29 skipped, 1 xfailed,
@@ -193,8 +190,13 @@ Two runs, each on a fresh private world copy (store 11-24 with EMA's reports, se
   at 59f6822, which has not moved since).
 Detection: run 3 204.6 s (tip) and 192.6 s (branch); run 4 250.9 s and 378.3 s, peak 1,105 and 1,106 MB. Run 4's branch ran
 under a load average of 12 on 4 CPUs (other units' runs): the steps F1 does not touch slowed as much (activity refresh 18.0
-to 28.8 s, EMA turnaround 7.8 to 10.3 s), and run 3 measured the same F1 code faster than its tip. A rerun with F1's
-functions timed (`$U/timed_cycle.sh`, ready) needs 6 GB free on the disk, which it did not have at the end.
+to 28.8 s, EMA turnaround 7.8 to 10.3 s), and run 3 measured the same F1 code faster than its tip. Then a timed pair
+(04:16 to 04:27 UTC, `$U/timed_cycle.sh`: F1's functions wrapped with timers, the branch at da2f255 then the tip at
+bf1f17b, each on a fresh copy deleted after; load average falling from 12 to 8): detection 323.2 s (branch) and 244.2 s
+(tip), yet F1's functions took 22.4 s against 20.0 s: `_r835` 13.8 / 13.7 (9 calls each), `_build_ledger` 3.8 / 2.5,
+`run_aggregate_rules` 3.1 / 2.5, `paid_proof` 1.0 / 0.7 (14,114 calls), `_taken_back_items` 0.7 / 0.6, the rest (the new
+`_ema_pay_taken`, `_restates`, `_recouped_not_on_file`, `_carry_takeback_window`, `_voided_services`) under 0.1 s. F1
+adds about 2.4 s to a detection; the rest of the gap is the load (the branch ran first both times, as the load fell).
 
 Moved in run 4: 156 items (run 3: the same 156 but two, below).
 - Claim-level recoupment listings removed 124, $440,716.06 (Medicare KY 75 $347,554.69, Medicare IN 43 $87,299.12,
