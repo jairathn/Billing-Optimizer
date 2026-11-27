@@ -13,15 +13,21 @@ Read since READ_VERSION 2 (the fix wave's F3a), per claim:
   claim filing indicator (SBR09) and the patient's relationship to the subscriber (SBR02 18 when the subscriber is the
   patient, else PAT01 of the patient loop);
 - the patient: the dependent of the patient loop (2000C/2010CA, NM1*QC and its DMG) where the 837 has one, else the
-  subscriber (2010BA, NM1*IL and its DMG). The store keeps only keyed values of the patient's name (patient_key) and of
-  the name with the birth date (person_key), made with the store's own key salt as EMA's reports' are
-  (ema_reports.name_key_parts and person_key), never the name or the birth date: a dependent's claim carries the
-  subscriber's member id, and only the patient tells two family members on one id apart;
-- for a claim sent to a payer after another payer answered it (2320/2330B): the other payer that answered last (its
-  name, id and responsibility), what the other payers paid (AMT*D), and what that payer left to the patient (AMT*EAF,
-  else its CAS*PR adjustments on the claim and on the lines' 2430 SVD): what a secondary payer is asked to pay.
+  subscriber (2010BA, NM1*IL and its DMG). The store keeps only keyed values of the patient's name (patient_key), of
+  the name with the birth date (person_key) and, since READ_VERSION 3, of the first name alone (first_key: one person's
+  name written two ways, O'TESTER and OTESTER, keeps one first name), made with the store's own key salt as EMA's
+  reports' are (ema_reports.name_key_parts and person_key), never the name or the birth date: a dependent's claim
+  carries the subscriber's member id, and only the patient tells two family members on one id apart;
+- for a claim sent to a payer after another payer answered it (2320/2330B): the other payer that answered just before
+  it (its name, id and responsibility), what the payers before it paid (AMT*D), and what that payer left to the patient
+  (AMT*EAF, else its CAS*PR adjustments on the claim and on the lines' 2430 SVD): what a secondary payer is asked to pay.
+  The payers before a claim are those whose place (2320 SBR01) comes before the claim's own (SBR01): the guide asks for
+  loop 2320 whenever another payer may pay, so a claim to the primary lists the secondary there with nothing adjudicated,
+  and a secondary's claim may list the tertiary after it. With no place on the claim, only an other payer's loop that
+  shows an adjudication (AMT*D, AMT*EAF, CAS or SVD) answered before it (READ_VERSION 3; version 2 took the last place).
 The segments of the other payer's loops (2320 to 2330G) never change the claim's own payer, subscriber or rendering
-clinician, as they did before (a second claim of the same subscriber loop took the other payer as its payer).
+clinician, as they did before (a second claim of the same subscriber loop took the other payer as its payer); reading a
+file again (reread_837_bytes) rewrites what the reader before took from those loops.
 """
 from __future__ import annotations
 
@@ -32,7 +38,9 @@ from typing import Any
 
 from .x12_835 import Seg, cents, iso_date, iter_segments, sniff_delims, split_envelopes, to_float
 
-READ_VERSION = 2            # claims read since the patient loop, SBR01/SBR09 and the other payer's loop were read
+# claims read since the patient loop, SBR01/SBR09 and the other payer's loop were read (2), and since the other payer is
+# the one before the claim's own place, with the patient's keyed first name (3)
+READ_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS claims_837 (
@@ -55,8 +63,11 @@ CREATE INDEX IF NOT EXISTS ix_l837_pcn ON lines_837(patient_control_number);
 EXTRA_CLAIM_COLS = {
     "payer_resp": "TEXT", "relationship": "TEXT", "filing_indicator": "TEXT", "patient_key": "INTEGER", "person_key": "INTEGER",
     "other_payer_name": "TEXT", "other_payer_id": "TEXT", "other_payer_resp": "TEXT", "other_paid_cents": "INTEGER",
-    "other_left_cents": "INTEGER", "other_pr_cents": "INTEGER", "read_version": "INTEGER",
+    "other_left_cents": "INTEGER", "other_pr_cents": "INTEGER", "read_version": "INTEGER", "first_key": "INTEGER",
 }
+# what the reader before READ_VERSION 2 could take from another payer's loop (2330A NM1*IL, 2330B NM1*PR, 2330D NM1*82):
+# reading a file again rewrites them from the fresh read (reread_837_bytes)
+REREAD_CLAIM_COLS = ["payer_name", "payer_id", "subscriber_id", "rendering_npi"]
 CLAIM_COLS = ["claim_837_key", "file_sha256", "source_name", "st_control", "bht_created", "patient_control_number", "total_charge_cents",
               "frequency_code", "place_of_service", "payer_name", "payer_id", "billing_npi", "rendering_npi", "subscriber_id",
               "service_date", "original_reference_number", "prior_auth", "line_count"] + list(EXTRA_CLAIM_COLS)
@@ -89,8 +100,43 @@ def _cas_pr(seg: Seg) -> int:
 
 def _resp_rank(resp: str | None) -> int:
     r = (resp or "").strip().upper()
-    i = _RESP_ORDER.find(r) if r else -1
+    i = _RESP_ORDER.find(r) if len(r) == 1 else -1
     return i if i >= 0 else len(_RESP_ORDER)
+
+
+def _payers_before(others: list[dict], own: str | None) -> list[dict]:
+    """The other payers that answered before the claim's own payer: those whose place (2320 SBR01) comes before the
+    claim's own (SBR01: P before S before T ...). A claim with no known place of its own (no SBR01, or U) has only the
+    other payers whose loop shows an adjudication (AMT*D, AMT*EAF, CAS or SVD) answering before it: the guide asks for
+    loop 2320 whenever another payer may pay, so a payer listed there has not answered unless its loop says so."""
+    rank = _resp_rank(own)
+    if rank < len(_RESP_ORDER):
+        return [o for o in others if _resp_rank(o["resp"]) < rank]
+    return [o for o in others if o["adjudicated"]]
+
+
+def later_payers_send(resp: str | None, got: dict) -> bool:
+    """Whether a claim went to its payer as a second or later payer, after another payer answered it: its own place
+    (SBR01) is a later one than P; with no place of its own on file (no SBR01, or U), only when the loop of the payer
+    before it shows an answer (what it paid, what it left the patient, its PR adjustments; or, read since READ_VERSION 3,
+    any adjudication). A claim to its primary that lists the secondary in loop 2320, as the guide asks, is the primary's
+    (fx-837-r1-4, r2-1). got: the claim's other_* fields and read_version, as claims_837 keeps them."""
+    r = (resp or "").strip().upper()
+    if _resp_rank(r) < len(_RESP_ORDER):
+        return r != "P"
+    if any(got.get(k) is not None for k in ("other_paid_cents", "other_left_cents", "other_pr_cents")):
+        return True
+    return bool(got.get("other_payer_name") and (got.get("read_version") or 0) >= 3)
+
+
+def _svd_owner(others: list[dict], svd_payer: str | None, own: str | None) -> dict:
+    """The other payer a line's adjudication (2430 SVD, SVD01 its payer id) belongs to: the one with that id, else the
+    payer just before the claim's own place, else the last listed."""
+    hit = next((x for x in others if x["id"] and x["id"] == svd_payer), None)
+    if hit is not None:
+        return hit
+    before = [o for o in others if _resp_rank(o["resp"]) < _resp_rank(own)]
+    return max(before, key=lambda o: _resp_rank(o["resp"])) if before else others[-1]
 
 
 def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) -> dict[str, list[dict]]:
@@ -122,14 +168,15 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
         others: list[dict] = []
         svd_payer = None
 
-        def keys() -> tuple[Any, Any, Any]:
+        def keys() -> tuple[Any, Any, Any, Any]:
             who = pat if pat is not None else sub
             rel = (pat or {}).get("rel") if pat is not None else sub.get("rel")
             if salt is None or not (who.get("last") or who.get("first")):
-                return rel, None, None
+                return rel, None, None, None
             pk = name_key_parts(salt, who.get("last"), who.get("first"))
             name = f"{who.get('last') or ''}, {who.get('first') or ''}"
-            return rel, pk, (person_key(salt, name, who["dob"]) if who.get("dob") else None)
+            return (rel, pk, (person_key(salt, name, who["dob"]) if who.get("dob") else None),
+                    name_key_parts(salt, None, who.get("first")))
 
         def finish_claim():
             nonlocal claim, line, others
@@ -138,10 +185,12 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                 line = None
             if claim is not None:
                 claim["line_count"] = sum(1 for x in lines if x["claim_837_key"] == claim["claim_837_key"])
-                if others:
-                    last = max(others, key=lambda o: _resp_rank(o["resp"]))
+                before = _payers_before(others, claim.get("payer_resp"))
+                if before:
+                    # the payer just before this claim's own place answered last; what every payer before it paid
+                    last = max(before, key=lambda o: _resp_rank(o["resp"]))
                     claim["other_payer_name"], claim["other_payer_id"], claim["other_payer_resp"] = last["name"], last["id"], last["resp"]
-                    paid = [o["paid"] for o in others if o["paid"] is not None]
+                    paid = [o["paid"] for o in before if o["paid"] is not None]
                     claim["other_paid_cents"] = sum(paid) if paid else None
                     claim["other_left_cents"] = last["left"]
                     pr = last["pr"] + last["line_pr"]
@@ -183,7 +232,7 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                     # 2320: another payer of this claim (its responsibility); its loops follow until the service lines
                     where = "other"
                     others.append({"resp": seg.get(1) or None, "name": None, "id": None, "paid": None, "left": None, "pr": 0,
-                                   "line_pr": 0, "has_pr": False})
+                                   "line_pr": 0, "has_pr": False, "adjudicated": False})
             elif sid == "PAT" and claim is None:
                 if pat is not None and seg.get(1):
                     pat["rel"] = seg.get(1)
@@ -222,7 +271,7 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                 line_seq = 0
                 where = "claim"
                 pos = seg.comp(5, d)
-                rel, pk, prk = keys()
+                rel, pk, prk, fk = keys()
                 claim = {
                     "claim_837_key": f"{sha[:16]}:{env_index}:{st_control}:{claim_seq}", "file_sha256": sha,
                     "source_name": os.path.basename(source) if source else None, "st_control": st_control, "bht_created": bht_created,
@@ -233,6 +282,7 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                     "line_count": 0, "payer_resp": sub["resp"], "relationship": rel, "filing_indicator": sub["cfi"],
                     "patient_key": pk, "person_key": prk, "other_payer_name": None, "other_payer_id": None, "other_payer_resp": None,
                     "other_paid_cents": None, "other_left_cents": None, "other_pr_cents": None, "read_version": READ_VERSION,
+                    "first_key": fk,
                 }
             elif claim is None:
                 continue
@@ -241,20 +291,26 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                 if where == "other" and others:
                     others[-1]["pr"] += pr
                     others[-1]["has_pr"] = others[-1]["has_pr"] or seg.get(1) == "PR"
+                    others[-1]["adjudicated"] = True
                 elif where == "line_other" and others:
-                    o = next((x for x in others if x["id"] and x["id"] == svd_payer), others[-1])
+                    o = _svd_owner(others, svd_payer, claim.get("payer_resp"))
                     o["line_pr"] += pr
                     o["has_pr"] = o["has_pr"] or seg.get(1) == "PR"
+                    o["adjudicated"] = True
             elif sid == "AMT":
                 if where == "other" and others:
                     q = seg.get(1)
                     if q == "D":
                         others[-1]["paid"] = cents(seg.get(2))
+                        others[-1]["adjudicated"] = True
                     elif q == "EAF":
                         others[-1]["left"] = cents(seg.get(2))
+                        others[-1]["adjudicated"] = True
             elif sid == "SVD":
                 where = "line_other"
                 svd_payer = seg.get(1) or None
+                if others:
+                    _svd_owner(others, svd_payer, claim.get("payer_resp"))["adjudicated"] = True
             elif sid == "REF":
                 q, v = seg.get(1), seg.get(2)
                 if where in ("other", "line_other"):
@@ -346,12 +402,17 @@ def files_to_reread(conn: sqlite3.Connection) -> list[str]:
 
 def reread_837_bytes(conn: sqlite3.Connection, data: bytes) -> dict:
     """Fill in what an 837 file read before READ_VERSION left out (the claim's patient, the payer's responsibility, the
-    claim filing indicator and the other payer), by each claim's key: the same file read again makes the same keys. The
-    rest of each row, and the lines, stay as they are. A file the store never read changes nothing."""
+    claim filing indicator and the other payer), and rewrite what the reader before READ_VERSION 2 took from another
+    payer's loops (a claim's payer, payer id, member id and rendering clinician, and its lines' rendering clinician), by
+    each claim's and line's key: the same file read again makes the same keys. The rest of each row stays as it is. A
+    file the store never read changes nothing."""
     ensure_schema(conn)
     parsed = parse_837_bytes(data, salt=_salt(conn))
-    cols = list(EXTRA_CLAIM_COLS)
+    cols = list(EXTRA_CLAIM_COLS) + REREAD_CLAIM_COLS
     cur = conn.executemany(f"UPDATE claims_837 SET {', '.join(c + '=?' for c in cols)} WHERE claim_837_key=?",
                            [tuple(c.get(k) for k in cols) + (c["claim_837_key"],) for c in parsed["claims"]])
+    updated = cur.rowcount if cur.rowcount is not None else 0
+    conn.executemany("UPDATE lines_837 SET rendering_npi=? WHERE line_837_key=?",
+                     [(ln.get("rendering_npi"), ln["line_837_key"]) for ln in parsed["lines"]])
     conn.commit()
-    return {"claims": len(parsed["claims"]), "updated": cur.rowcount if cur.rowcount is not None else 0}
+    return {"claims": len(parsed["claims"]), "updated": updated}

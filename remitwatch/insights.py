@@ -622,11 +622,14 @@ LOST_BATCH_TIMES = 3
 
 
 def unanswered_weeks(conn: sqlite3.Connection) -> dict:
-    """The claims listed as never answered (NO_ANSWER items still to work), by the week they were sent (the item's evidence
-    'sent'), against the claims the 837s show sent that week (detect.WAITING_837_META's sent_by_week): {"weeks": [{"week",
-    "unanswered", "cents", "sent", "share", "payers": [[group, n]]}], "usual_share", "stand_out": [the weeks that stand out]}.
+    """The claims listed as never answered (NO_ANSWER items still to work) whose send the 837s show, by the week of that
+    send (the item's evidence 'sent_837'), against the claims the 837s show sent that week (detect.WAITING_837_META's
+    sent_by_week): {"weeks": [{"week", "unanswered", "cents", "sent", "share", "payers": [[group, n]]}], "usual_share",
+    "stand_out": [the weeks that stand out]}. Both sides count the same claims, the 837s' sends: a claim no 837 carried
+    (EMA's exports alone date it) is in neither, so a week never shows more claims unanswered than sent (fx-837-r2-7).
     Reads only the findings and the meta, so the dashboard's copy shows it too."""
     from .detect import WAITING_837_META, week_of
+    from . import runlog
     meta = _meta(conn, WAITING_837_META) or {}
     sent = meta.get("sent_by_week") if isinstance(meta, dict) else None
     sent = sent if isinstance(sent, dict) else {}
@@ -634,12 +637,15 @@ def unanswered_weeks(conn: sqlite3.Connection) -> dict:
     try:
         rows = conn.execute("""SELECT evidence, shortfall_cents, payer_group FROM findings WHERE signal = 'NO_ANSWER'
                                AND COALESCE(stale, 0) = 0 AND status NOT IN ('resolved', 'lost', 'dismissed')""").fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "insights.unanswered_weeks")
         rows = []
     for ev, cents, grp in rows:
         try:
-            day = (json.loads(ev or "{}") or {}).get("sent")
-        except (ValueError, TypeError):
+            s837 = (json.loads(ev or "{}") or {}).get("sent_837")
+            day = s837.get("day") if isinstance(s837, dict) else None
+        except (ValueError, TypeError) as exc:
+            runlog.caught(exc, "insights.unanswered_weeks")
             day = None
         wk = week_of(day)
         if not wk:

@@ -218,8 +218,8 @@ def _rows_837(conn: sqlite3.Connection, fx: dict) -> tuple[list[dict], list[str]
     out: list[dict] = []
     if b and S._table(conn, "claims_837"):
         cols = S._cols(conn, "claims_837")
-        more = ("payer_resp, other_payer_name, other_paid_cents, other_left_cents, other_pr_cents" if "payer_resp" in cols
-                else "NULL, NULL, NULL, NULL, NULL")
+        more = ("payer_resp, other_payer_name, other_paid_cents, other_left_cents, other_pr_cents, read_version" if "payer_resp" in cols
+                else "NULL, NULL, NULL, NULL, NULL, NULL")
         sends = conn.execute(f"""SELECT claim_837_key, patient_control_number, bht_created, TRIM(COALESCE(frequency_code, '')), payer_name,
                                         total_charge_cents, {more}
                                  FROM claims_837 WHERE patient_control_number >= ? AND patient_control_number < ?
@@ -230,7 +230,8 @@ def _rows_837(conn: sqlite3.Connection, fx: dict) -> tuple[list[dict], list[str]
                     """SELECT claim_837_key, procedure_code, service_date, modifiers, charge_cents, units FROM lines_837
                        WHERE patient_control_number >= ? AND patient_control_number < ? ORDER BY claim_837_key, line_seq""", (b, b + "~")):
                 lines.setdefault(key, []).append((code, str(dos or "")[:10], mods, chg, units))
-        for key, cid, bht, freq, payer, total, resp, other, other_paid, left, pr in sends:
+        from .x12_837 import later_payers_send
+        for key, cid, bht, freq, payer, total, resp, other, other_paid, left, pr, version in sends:
             if S.bill_of(cid) != b:
                 continue
             own = [x for x in lines.get(key, []) if (x[1], x[0]) in keys] if keys else lines.get(key, [])
@@ -240,7 +241,11 @@ def _rows_837(conn: sqlite3.Connection, fx: dict) -> tuple[list[dict], list[str]
             what = _FREQ_WORDS.get(freq, "a claim")
             place = _PLACE_WORDS.get(str(resp or "").upper())
             bits = [f"Sent electronically to {payer or 'the payer'} as claim {cid}, {what}" + (f", as its {place} payer" if place and place != "primary" else "")]
-            if other or other_paid is not None:
+            later = later_payers_send(resp, {"other_payer_name": other, "other_paid_cents": other_paid, "other_left_cents": left,
+                                             "other_pr_cents": pr, "read_version": version})
+            if later and (other or other_paid is not None):
+                # sent after the payer before it answered (a claim to the primary lists the secondary in its other-payer
+                # loop without any answer: that is no 'after X answered', fx-837-r1-4, r2-1)
                 lft = left if left is not None else pr
                 bits.append(f"after {other or 'another payer'} answered it" + (f" (paid {usd(other_paid)}" if other_paid is not None else "")
                             + (f", left the patient {usd(lft)})" if lft is not None else (")" if other_paid is not None else "")))

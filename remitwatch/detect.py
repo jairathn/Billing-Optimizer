@@ -6402,11 +6402,6 @@ class Detector:
         days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
         payer_id = k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None
         grp, kind = cd["group"]             # the VA's network by its payer id, though EMA names its administrator: the VA's limits apply
-        rule = filing_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
-        file_by = window_end(days[0], rule)
-        file_legal = legal_deadline(days[0], rule)      # the payer's own last day where later (Medicare's next workday)
-        # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
-        early_by = _add_days(days[0], rule["earliest"]) if rule.get("earliest") else None
         billed = sum(x[2] or 0 for x in items)
         pat_paid = max(0, k["pat_paid"] + sum(v[2] for v in k["ins"].values()))
         if gave_up and billed and pat_paid >= billed:
@@ -6421,6 +6416,11 @@ class Detector:
             comp = component_of(src[4])
             if comp:
                 ln.append(comp)             # the part the line bills, for its story and the checks
+        # the modifiers that make a line a separate service (59, XS, RT, ...): the one-visit rule compares two bills' lines by
+        # them, and an exports' claim's item is the only record of its own when its 837 is not on file (fx-837-r2-4)
+        # (as [the line's place in 'lines', '59,RT']: the priced lines keep the billed lines' order)
+        sep = [[i, ",".join(_visit_line((src[0], src[1], None, None, None, src[4]))[3])] for i, src in enumerate(billed_lines)]
+        sep = [x for x in sep if x[1]]
         if all(_no_charge(x[2]) for x in items):
             # every line billed at $0 or a token under $1: nothing is owed on the claim, so it is not chased (answers-3);
             # counted for the maintainers (meta ema:wiring)
@@ -6443,6 +6443,8 @@ class Detector:
             ev["not_sent"] = True
         if cd.get("ema_bare_zero"):
             ev["ema_bare_zero"] = cd["ema_bare_zero"]       # the $0 row on a check EMA shows, which is no answer
+        if sep:
+            ev["line_modifiers"] = sep
         r8 = cd.get("s837")
         if r8 is not None:
             # the 837 behind the send date: its day, frequency, payer, how many times the claim id was sent, and the store's
@@ -6453,10 +6455,12 @@ class Detector:
             resp = (got.get("payer_resp") or "").strip().upper()
             if got.get("read_version"):
                 ev["sent_837"].update(payer_resp=resp or None, filing_indicator=got.get("filing_indicator"))
-            if (resp and resp != "P") or got.get("other_payer_resp") or got.get("other_paid_cents") is not None:
-                # sent to this payer after another payer answered it (its secondary or later payer: SBR01, and the other
-                # payer's loop): it owes at most what that payer left to the patient (AMT*EAF, else that payer's PR
-                # adjustments), never its own full rate
+            from .x12_837 import later_payers_send
+            if later_payers_send(resp, got):
+                # sent to this payer after another payer answered it (its secondary or later payer: SBR01, and the loop of
+                # the payer before it): it owes at most what that payer left to the patient (AMT*EAF, else that payer's PR
+                # adjustments), never its own full rate. A claim sent to its primary (SBR01 P) that lists the secondary in
+                # its other-payer loop, as the guide asks, is the primary's (fx-837-r1-4, r2-1)
                 left = got["other_left_cents"] if got.get("other_left_cents") is not None else got.get("other_pr_cents")
                 ev["sent_as"] = {"place": resp or None, "other_payer": got.get("other_payer_name"),
                                  "other_paid_cents": got.get("other_paid_cents"), "left_cents": left}
@@ -6486,6 +6490,14 @@ class Detector:
                     self.ema_counts["open_claim_second_paid_all"] += 1
                     self.ema_counts["open_claim_second_paid_all_cents"] += sec_paid
                     return False
+        oe = cd.get("own_earlier")
+        if oe and oe[2] > 0 and short:
+            # its own payer already paid on an older submission of the bill, as a later payer: that money came in for the visit,
+            # so it comes off what is left, as another payer's does (T-C2), never below nothing (fx-837-r2-3)
+            short = max(0, short - oe[2])
+            if short == 0:
+                self.ema_counts["open_claim_own_payer_paid_all"] += 1
+                return False
         cob = cd.get("cob")
         if cob and sec:
             # the payer it was sent to denied it as primary because another payer covers it first, then answered as secondary:
@@ -6496,34 +6508,10 @@ class Detector:
         if cd.get("through") and cd["through"] != newest:
             ev["answers_through"] = cd["through"]       # EMA's postings show this payer's answers through this day
         label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
-        # sent on time: past the first-filing date the payer still owes a claim it has, and most take proof of timely filing
-        # for one they have no record of (Medicare's year from the date of service is firm). Its date runs the payer's
-        # appeal window past the first-filing limit, so it never expires on that limit, whatever day the page is opened.
-        # The date of service says nothing of when a claim went out, so a claim EMA gives no date for is dated by the limit;
-        # where the payer's limit is not known, only a claim sent within the shortest common limit was surely on time.
-        timely = bool(not rejected and not unsent and kind != "medicare" and file_by and cd["basis"] != SENT_DOS
-                      and sent <= (early_by or file_by))
-        limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
-        if timely:
-            ap = appeal_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
-            deadline = window_end(max(file_by, due), ap)
-            by = f"by {early_by} where you can, and by {file_by} at the latest" if early_by else f"by {file_by}"
-            dbasis = (f"Sent on time ({sent}). If the payer has no record of it, send it again {by}, the first-filing "
-                      f"limit ({limit}); after that, most payers take proof of timely filing (EMA's submission date, or the "
-                      f"clearinghouse's acceptance report). The date shown runs the payer's appeal window past that limit "
-                      f"({ap['label']}), not confirmed for a claim the payer never answered")
-        else:
-            deadline = file_by
-            if unsent:
-                lead = "EMA shows the claim waiting in its print batch, with no date it was sent. Print and mail it, or send it electronically"
-                dbasis = (f"{lead}, by {early_by} where you can; it must reach the payer by this date at the latest: {limit}" if early_by
-                          else f"{lead}, so that it reaches the payer by this date: {limit}")
-            else:
-                dbasis = (f"If the payer has no record of the claim, send it again by {early_by} where you can; it must reach the payer "
-                          f"by this date at the latest: {limit}" if early_by else
-                          f"If the payer has no record of the claim, it must reach the payer by this date: {limit}")
-        first = early_by or (file_by if timely else deadline)
-        soon = bool(first) and first <= _add_days(newest, 30)
+        dt = self._open_claim_dates(grp, kind, ema_payer, payer_id, days[0], sent, due, cd["basis"], rejected, unsent,
+                                    cd.get("visit_first"))
+        timely, deadline, dbasis, file_legal = dt["timely"], dt["deadline"], dt["basis"], dt["legal"]
+        soon = bool(dt["first"]) and dt["first"] <= _add_days(newest, 30)
         if rejected or unsent:
             made = f" (bill made {sent})" if cd["basis"] == SENT_BILLED else ""
             title = (f"In EMA's print batch, never sent to {grp}{made}: {label}" if unsent else
@@ -6569,6 +6557,14 @@ class Detector:
                          + (f"paying ${sec_paid/100:,.2f}" if sec_paid > 0 else "paying nothing") + ". The primary payer's remittance is "
                          f"not on file: find which payer covers the patient first (EMA's coverage, or ask {sec_payer}), then get its "
                          "remittance from its portal or ask it to send it again")
+        elif sec and cd.get("sec_bills"):
+            # only another payer answered the visit, on the bill the practice made again (fx-837-r1-1)
+            again_on = ", ".join(sorted(cd["sec_bills"]))
+            hints.append(f"The practice billed this visit again as claim {again_on}, and {sec_payer} answered that claim on {sec_on} "
+                         + ("as secondary" if as_second else "but not as its primary payer")
+                         + (f", paying ${sec_paid/100:,.2f} for these services" if sec_paid > 0 else ", paying nothing")
+                         + f". The primary's answer, from {grp}, is not on file: look this claim up on the payer's portal, or ask the "
+                         "payer to send its remittance again, before sending the claim again")
         elif sec:
             hints.append((f"{sec_payer} processed this claim as secondary on {sec_on}" + (f" and paid ${sec_paid/100:,.2f}, its share" if sec_paid > 0 else ", paying nothing")
                           if as_second else f"{sec_payer} answered this claim on {sec_on}, but not as its primary payer"
@@ -6590,6 +6586,18 @@ class Detector:
         elif cd.get("bill_answered"):
             hints.append(f"Another submission of this bill was answered on {cd['bill_answered']}: if that answer was for this claim, "
                          "work it from that remittance")
+        if oe:
+            # its own payer's answer to an older submission of the bill, or to this claim before it went out again, is neither
+            # this send's answer nor another payer's (fx-837-r2-3): said, so the biller sees the payer has the bill on file
+            how = (" as secondary" if oe[3] in ("2", "3", "20", "21") else f" (claim status {oe[3]})" if oe[3] else "")
+            what = (f"this claim on {oe[0]}{how}, before it was sent again" if oe[1] == pcn else
+                    f"an earlier submission of this bill, claim {oe[1]}, on {oe[0]}{how}")
+            hints.append(f"{grp} answered {what}" + (f", paying ${oe[2]/100:,.2f} (taken off this item)" if oe[2] > 0 else ", paying nothing")
+                         + f"; nothing answered the claim sent {sent}: look it up on the payer's portal")
+        if cd.get("older_bills"):
+            older = ", ".join(f"{p} (sent {d})" for d, p in sorted(cd["older_bills"]))
+            hints.append(f"This visit was billed before on claim {older}, which no payer answered as primary: the practice made the "
+                         "bill again, so only this newer bill is chased")
         sa = ev.get("sent_as")
         if sa:
             place = {"S": "secondary", "T": "tertiary"}.get(sa.get("place") or "", "second or later")
@@ -6608,6 +6616,55 @@ class Detector:
         if hints:
             f["hint"] = ". ".join(hints)
         return True
+
+    def _open_claim_dates(self, grp: str | None, kind: str | None, ema_payer: str | None, payer_id: str | None, dos: str, sent: str,
+                          due: str | None, basis: str, rejected: bool, unsent: bool, visit_first: tuple | None = None) -> dict:
+        """The date a never-answered claim's item is due by, and why ({'timely', 'deadline', 'basis', 'legal', 'first'}):
+        sent on time, past the first-filing date the payer still owes a claim it has, and most take proof of timely filing
+        for one they have no record of (Medicare's year from the date of service is firm). Its date runs the payer's appeal
+        window past the first-filing limit, so it never expires on that limit, whatever day the page is opened. The date of
+        service says nothing of when a claim went out, so a claim EMA gives no date for is dated by the limit; where the
+        payer's limit is not known, only a claim sent within the shortest common limit was surely on time. visit_first:
+        (day, claim id) of the visit's first send on an older bill a newer bill now carries (the one-visit rule): sent on
+        time there, the visit keeps its timely filing, and the basis names that send (fx-837-r1-2)."""
+        rule = filing_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
+        file_by = window_end(dos, rule)
+        file_legal = legal_deadline(dos, rule)      # the payer's own last day where later (Medicare's next workday)
+        # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
+        early_by = _add_days(dos, rule["earliest"]) if rule.get("earliest") else None
+        on_time_by = early_by or file_by
+        timely = bool(not rejected and not unsent and kind != "medicare" and file_by and basis != SENT_DOS and sent <= on_time_by)
+        prior = (visit_first if (not timely and visit_first and visit_first[0] and not unsent and kind != "medicare" and file_by
+                                 and visit_first[0] <= on_time_by and visit_first[0] < (sent or "9999")) else None)
+        limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
+        if timely or prior:
+            ap = appeal_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
+            deadline = window_end(max(file_by, due or file_by), ap)
+            by = f"by {early_by} where you can, and by {file_by} at the latest" if early_by else f"by {file_by}"
+            if prior:
+                dbasis = (f"First sent on time ({prior[0]}, as claim {prior[1]}, which no payer answered); the bill was made again "
+                          f"and went out {sent}, past the first-filing limit ({limit}). Most payers take proof of timely filing: "
+                          f"the clearinghouse's acceptance report for the {prior[0]} send, or EMA's submission date. The date shown "
+                          f"runs the payer's appeal window past that limit ({ap['label']}), not confirmed for a claim the payer "
+                          "never answered")
+            else:
+                dbasis = (f"Sent on time ({sent}). If the payer has no record of it, send it again {by}, the first-filing "
+                          f"limit ({limit}); after that, most payers take proof of timely filing (EMA's submission date, or the "
+                          f"clearinghouse's acceptance report). The date shown runs the payer's appeal window past that limit "
+                          f"({ap['label']}), not confirmed for a claim the payer never answered")
+        else:
+            deadline = file_by
+            if unsent:
+                lead = "EMA shows the claim waiting in its print batch, with no date it was sent. Print and mail it, or send it electronically"
+                dbasis = (f"{lead}, by {early_by} where you can; it must reach the payer by this date at the latest: {limit}" if early_by
+                          else f"{lead}, so that it reaches the payer by this date: {limit}")
+            else:
+                dbasis = (f"If the payer has no record of the claim, send it again by {early_by} where you can; it must reach the payer "
+                          f"by this date at the latest: {limit}" if early_by else
+                          f"If the payer has no record of the claim, it must reach the payer by this date: {limit}")
+        on_time = timely or bool(prior)
+        return {"timely": on_time, "deadline": deadline, "basis": dbasis, "legal": file_legal,
+                "first": early_by or (file_by if on_time else deadline), "prior": prior}
 
     def run_837_open_claims(self) -> None:
         """Claims the 837s show sent that no payer answered and that EMA's weekly exports do not list (the catch-up trace's
@@ -6652,7 +6709,9 @@ class Detector:
             return
         newest = feed_date(c) or newest
         recent = _add_days(newest, -400) or ""
-        self._wait_since = recent
+        # the claims a send week's never-answered claims are measured against: every send since the oldest a claim of this
+        # pass may be listed for (sent within 400 days, or since the remittances on file begin: fx-837-r2-7)
+        self._wait_since = min(recent, oldest) if oldest else ""
         # the newest submission of each bill no payer answered as primary, that EMA's weekly exports do not list
         cand: dict[str, list] = {}
         for pcn, r in sends.items():
@@ -6761,29 +6820,28 @@ class Detector:
         no_era: dict[str, dict] = {}
         cds: list[dict] = []
         cob = self._cob_only()
-        # who each claim's patient is (the 837's own patient, else the one the bill's remittances or EMA's claim name), and
-        # one visit billed again under a new bill: only the newest bill carries it (answers-1)
-        # the weekly exports' own never-answered claims carry a visit too: an older bill only the 837s know yields to a newer
-        # bill the exports chase (answers-1 across the passes; the exports' pass makes its older claims yield to a newer 837)
-        ext = self._837_export_carriers(sends) if self._export_claims else {}
-        who = self._837_patients({**cand, **{p: v["row"] for p, v in ext.items() if p not in cand}})
-        carrier = self._837_one_visit(cand, lines, who, {p: (v["sent"], v["lines"]) for p, v in ext.items()})
-        heirs: dict[str, list] = defaultdict(list)
+        # 1. each claim's own answer and the services it chases, before the one-visit rule: a newer bill of the visit that a
+        # payer answered as non-primary carries an older bill's services only when that payer is the older bill's own
+        # (fx-837-r1-1)
+        answered_by: dict[str, set] = {}   # claim id -> the companies (and payer ids) of its own payer that answered it
+        answered_rows: dict[str, list] = {}  # claim id -> those answers (rows835's shape)
+        own_items: dict[str, list] = {}
         for pcn, r in sorted(cand.items()):
-            b = bill_of(pcn)
-            ans = rows835.get(b) or []
-            cb = cob.get(b)                 # its payer denied it as primary for coordination, then answered as secondary
-            again = resends.get(pcn)        # a resend of a bill answered as primary (answers-5)
+            ans = rows835.get(bill_of(pcn)) or []
             mine = named(r)
             # an answer is this send's only when it came on or after the send, to this claim id or to a newer submission of
             # the bill (answers-4: a payer's answer to an earlier submission, before the bill went out again, is not it)
             after = [a for a in ans if a[0] >= r[0] and (a[5] == pcn or sub_no(a[5]) > sub_no(pcn))]
-            if not cb and (any(a[4] and r[4] and a[4] == r[4] for a in after) or any(payer_company(a[1]) in mine for a in after)):
+            hit = [a for a in after if (a[4] and r[4] and a[4] == r[4]) or payer_company(a[1]) in mine]
+            if not cob.get(bill_of(pcn)) and hit:
                 self.ema_counts["837_answered_by_its_payer"] += 1
+                answered_by[pcn] = {payer_company(a[1]) for a in hit} | {("id", a[4]) for a in hit if a[4]}
+                answered_rows[pcn] = hit
                 continue                    # the payer the 837 named answered it (as its secondary, say)
             # a line billed at $0, or at a token charge under $1 (a post-operative visit EMA bills at a penny so the line
             # goes out), is nothing owed
             items = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in lines.get(r[7], []) if (chg or 0) >= 100]
+            again = resends.get(pcn)        # a resend of a bill answered as primary (answers-5)
             if again:
                 # a resend of a bill answered as primary: only the services no remittance of the bill answered are its own;
                 # the rest are the answer's work (states.py waits for the resend's answer to them)
@@ -6791,6 +6849,46 @@ class Detector:
                 if not items:
                     self.ema_counts["837_resend_all_answered"] += 1
                     continue
+            own_items[pcn] = items
+        # 2. who each claim's patient is (the 837's own patient, else the one the bill's remittances or EMA's claim name), and
+        # one visit billed again under a new bill: only the newest bill carries it (answers-1). The weekly exports' own
+        # never-answered claims carry a visit too (answers-1 across the passes: an older bill only the 837s know yields to a
+        # newer bill the exports chase), and so does a newer bill a payer answered as primary: its answer is the visit's
+        # (fx-837-r2-6)
+        ext = self._837_export_carriers(sends) if self._export_claims else {}
+        who = self._837_patients({**cand, **{p: v["row"] for p, v in ext.items() if p not in cand}})
+        done = self._837_answered_carriers(cand, lines, who, s8["prim_bills"])
+        if done:
+            who.update(self._837_patients({p: v["row"] for p, v in done.items()}))
+
+        def may_carry(x: str, y: str) -> bool:
+            """Whether newer bill x may carry older bill y's service: it is chased, waits for its answer, is the exports' or
+            was answered as primary; a bill its own payer answered only as a later payer carries it only when that payer
+            is y's own (y's payer answered the visit), never for another payer's secondary answer (fx-837-r1-1)."""
+            got = answered_by.get(x)
+            if got is None:
+                return True
+            ry = cand[y]
+            return bool(got & (named(ry) | ({("id", ry[4])} if ry[4] else set())))
+        carriers = {p: (v["sent"], v["lines"], 1) for p, v in ext.items()}       # an exports' bill wins a same-day tie
+        carriers.update({p: (v["sent"], v["lines"], 0) for p, v in done.items() if p not in carriers})
+        carrier, refused = self._837_one_visit(cand, lines, who, carriers, may_carry)
+        heirs: dict[str, list] = defaultdict(list)
+        older_of: dict[str, list] = defaultdict(list)       # newer claim id -> [(first send, older claim id)] it carries
+        for pcn, items in own_items.items():
+            for nb in {carrier.get(pcn, {}).get(_visit_line(x)) for x in items} - {None}:
+                older_of[nb].append((cand[pcn][1], pcn))
+        # the answers of the newer bills that may not carry a visit: another payer answered them only as a later payer
+        sec_lines = self._837_answer_lines({x: answered_rows[x] for ref in refused.values() for xs in ref.values() for x in xs
+                                            if x in answered_rows})
+        # 3. each claim's item
+        for pcn, items in sorted(own_items.items()):
+            r = cand[pcn]
+            b = bill_of(pcn)
+            ans = rows835.get(b) or []
+            cb = cob.get(b)                 # its payer denied it as primary for coordination, then answered as secondary
+            again = resends.get(pcn)
+            mine = named(r)
             if carrier:
                 kept = [x for x in items if not carrier.get(pcn, {}).get(_visit_line(x))]
                 if len(kept) < len(items):
@@ -6800,6 +6898,8 @@ class Detector:
                             heirs[nb].append(pcn)
                             if nb in ext:
                                 self.ema_counts["837_visit_under_exports_bill"] += 1
+                            elif nb in done:
+                                self.ema_counts["837_visit_under_answered_bill"] += 1
                     self.ema_counts["837_visit_under_newer_bill"] += len(items) - len(kept)
                 items = kept
             if not items:
@@ -6844,12 +6944,29 @@ class Detector:
                     held["claims"] += 1
                     held["billed_cents"] += billed
                     continue                # its payer's remittances stop before its due day (CH-8): counted, not listed
-            # (a resend of a bill answered as primary: its new services have no answer at all, and the bill's answers were the
-            # primary's own, so no other payer answered them as secondary)
+            # only another payer answered it (T-C2). Its own payer's answers to an older submission of the bill are neither
+            # this send's answer nor another payer's (fx-837-r2-3): they are named in the hint. (A resend of a bill answered
+            # as primary: its new services have no answer at all, and the bill's answers were the primary's own, so no other
+            # payer answered them as secondary.)
+            own_pay = [a for a in ans if (a[4] and r[4] and a[4] == r[4]) or payer_company(a[1]) in mine]
+            others_ = [a for a in ans if a not in own_pay]
             sec = [] if again else ([x for xs in cb["answers"].values() for x in xs] if cb else
-                                    [(a[0], a[1], a[2], a[3]) for a in ans if a[5] == pcn] or [(a[0], a[1], a[2], a[3]) for a in ans])
+                                    [(a[0], a[1], a[2], a[3]) for a in others_ if a[5] == pcn] or [(a[0], a[1], a[2], a[3]) for a in others_])
+            sec_bills: set[str] = set()
+            if not again and not cb:
+                # the visit billed again on a newer bill another payer answered only as a later payer (fx-837-r1-1): its answer
+                # is this claim's T-C2, what it paid for these services taken off
+                for x in sorted({x for xx in items for x in (refused.get(pcn, {}).get(_visit_line(xx)) or ())}):
+                    got = sec_lines.get(x)
+                    if not got:
+                        continue
+                    paid = sum(c for d, code, part, c in got["lines"]
+                               if any(d == xx[1] and code == xx[0] and part_fits(item_part(xx), {part}) for xx in items))
+                    sec.append((got["date"], got["group"], paid, got["status"]))
+                    sec_bills.add(x)
             k = {"payer_ids": Counter({r[4]: 1}) if r[4] else Counter(), "pat_paid": 0, "ins": {}, "providers": Counter(),
                  "status_at": ("", "", -1), "amb_paid": 0, "days": set(days), "member": r[8]}
+            firsts = sorted(older_of.get(pcn) or ())
             cds.append({"pcn": pcn, "k": k, "b": b, "items": items, "sent": sent, "basis": SENT_837, "due": due, "again_after": False,
                         "rejected": False, "unsent": False, "gave_up": False, "status": None, "ema_payer": r[5] or grp,
                         "group": (grp, kind), "grp": grp, "kind": kind, "through": through, "payer_last": last, "secondary": sec,
@@ -6857,7 +6974,13 @@ class Detector:
                         "added_after_answer": bool(again), "id_signal": OPEN_837_ID,
                         "source": "837", "no_era": pid if pid in no_era_ids else None, "cob": cb, "who": who.get(pcn),
                         # EMA's claims are found under the group EMA gives the 837's payer (_ema_group)
-                        "match_group": self._ema_group(r[5])})
+                        "match_group": self._ema_group(r[5]),
+                        # the older bills of the visit this one carries, and the visit's first send on them (fx-837-r1-2)
+                        "older_bills": firsts, "visit_first": firsts[0] if firsts and firsts[0][0] < sent else None,
+                        "sec_bills": sec_bills,
+                        # its own payer's answers to an older submission (its latest, and what they paid in all)
+                        "own_earlier": ((max(own_pay)[0], max(own_pay)[5], sum(a[2] for a in own_pay), max(own_pay)[3])
+                                        if own_pay and not again and not cb else None)})
         # a service a primary payer paid under another bill of the same member (a bill made again) is paid (T-N10)
         cds = self._837_paid_elsewhere(cds)
         if self.ema_on and cds:
@@ -6888,6 +7011,10 @@ class Detector:
                 note = (f"This visit was billed before on claim {', '.join(olds)}, which no payer answered either: the practice made "
                         "the bill again, so only this newer bill is chased")
                 f["hint"] = f"{f['hint']}. {note}" if f.get("hint") else note
+                self._redate_carrier(f, min(older_of.get(e) or [("", "")]))
+        # an older bill whose visit a newer bill a payer answered as primary carries: that answer's item takes its work
+        # (fx-837-r2-6)
+        self._hand_to_answers({e: sorted(set(heirs[e])) for e in set(heirs) & set(done)}, done)
         self.payers_behind = sorted(behind.values(), key=lambda h: (-h["billed_cents"], h["payer"]))
         self.no_era = sorted(no_era.values(), key=lambda h: (-h["billed_cents"], h["payer"]))
 
@@ -6923,19 +7050,23 @@ class Detector:
                 wk = week_of(real_day(bht))
                 if wk:
                     weeks[wk] += n
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            from . import runlog
+            runlog.caught(exc, "detect.finish_waiting")       # the send weeks are left without counts; the run's log says why
             weeks = Counter()
         out["sent_by_week"] = dict(sorted(weeks.items()))
         self.waiting_837 = out
 
     def _837_send_info(self, keys) -> dict[str, dict]:
-        """What the 837 reader keeps since READ_VERSION 2 for these sends ({claim_837_key: {...}}): the patient's keyed name
-        and keyed name and birth date, the relationship, the payer's place on the claim (SBR01), the claim filing indicator
-        and the other payer's answer (x12_837). A send read before has none of them (read_version 0)."""
+        """What the 837 reader keeps since READ_VERSION 2 for these sends ({claim_837_key: {...}}): the patient's keyed name,
+        keyed name and birth date and (since READ_VERSION 3) keyed first name, the relationship, the payer's place on the
+        claim (SBR01), the claim filing indicator and the other payer's answer (x12_837). A send read before has none of
+        them (read_version 0)."""
         c = self.conn
         cols = {r[1] for r in c.execute("PRAGMA table_info(claims_837)")}
-        want = ("patient_key", "person_key", "relationship", "payer_resp", "filing_indicator", "other_payer_name", "other_payer_id",
-                "other_payer_resp", "other_paid_cents", "other_left_cents", "other_pr_cents", "read_version")
+        want = tuple(k for k in ("patient_key", "person_key", "relationship", "payer_resp", "filing_indicator", "other_payer_name",
+                                 "other_payer_id", "other_payer_resp", "other_paid_cents", "other_left_cents", "other_pr_cents",
+                                 "read_version", "first_key") if k in cols)
         if "read_version" not in cols:
             return {}
         cache = self.__dict__.setdefault("_s837_info", {})
@@ -6949,12 +7080,14 @@ class Detector:
 
     def _837_patients(self, cand: dict[str, list]) -> dict[str, dict]:
         """Who each never-answered 837 claim's patient is ({claim id: {'names': {keyed names}, 'persons': {keyed name and birth
-        date}, 'member': member id, 'from': where}}): the patient its 837 names (the patient loop, else the subscriber, read
-        since READ_VERSION 2) where it does; else the patient the remittances of its own bill name (any payer's answer to any
-        submission of it), and EMA's patient for its bill (the claim id the A/R pairs, or the bill map). Never the member id
-        alone: a subscriber's id covers the family, so a claim nothing names has no patient here."""
+        date}, 'firsts': {keyed first names}, 'member': member id, 'from': where}}): the patient its 837 names (the patient
+        loop, else the subscriber, read since READ_VERSION 2; the first name since 3) where it does; else the patient the
+        remittances of its own bill name (any payer's answer to any submission of it), and EMA's patient for its bill (the
+        claim id the A/R pairs, or the bill map; EMA keys no first name alone). Never the member id alone: a subscriber's id
+        covers the family, so a claim nothing names has no patient here."""
         c = self.conn
-        out: dict[str, dict] = {pcn: {"names": set(), "persons": set(), "member": r[8], "from": None} for pcn, r in cand.items()}
+        out: dict[str, dict] = {pcn: {"names": set(), "persons": set(), "firsts": set(), "member": r[8], "from": None}
+                                for pcn, r in cand.items()}
         info = self._837_send_info([r[7] for r in cand.values()])
         for pcn, r in cand.items():
             i = info.get(r[7]) or {}
@@ -6962,6 +7095,8 @@ class Detector:
                 out[pcn]["names"].add(i["patient_key"])
                 if i.get("person_key") is not None:
                     out[pcn]["persons"].add(i["person_key"])
+                if i.get("first_key") is not None:
+                    out[pcn]["firsts"].add(i["first_key"])
                 out[pcn]["from"] = "837"
         rest = {pcn: bill_of(pcn) for pcn, w in out.items() if w["from"] is None}
         if not rest:
@@ -6974,19 +7109,23 @@ class Detector:
             by_bill[b].append(pcn)
         names: dict[str, set] = defaultdict(set)
         persons: dict[str, set] = defaultdict(set)
+        firsts: dict[str, set] = defaultdict(set)
         bills = sorted(by_bill)
         for i in range(0, len(bills), 500):
             c.execute("DROP TABLE IF EXISTS temp.d837_wb")
             c.execute("CREATE TEMP TABLE d837_wb (bill TEXT PRIMARY KEY, hi TEXT)")
             c.executemany("INSERT OR IGNORE INTO temp.d837_wb VALUES (?, ?)", [(b, b + "~") for b in bills[i:i + 500]])
-            for b, pcn, nk, cnk in c.execute("""SELECT x.bill, cl.patient_control_number, rw_name_key(cl.patient_last, cl.patient_first),
-                                                       CASE WHEN cl.corrected_patient_last IS NOT NULL OR cl.corrected_patient_first IS NOT NULL
-                                                            THEN rw_name_key(COALESCE(cl.corrected_patient_last, cl.patient_last),
-                                                                             COALESCE(cl.corrected_patient_first, cl.patient_first)) END
-                                                FROM temp.d837_wb x JOIN claims cl ON cl.patient_control_number >= x.bill
-                                                     AND cl.patient_control_number < x.hi"""):
+            for b, pcn, nk, cnk, fk, cfk in c.execute(
+                    """SELECT x.bill, cl.patient_control_number, rw_name_key(cl.patient_last, cl.patient_first),
+                              CASE WHEN cl.corrected_patient_last IS NOT NULL OR cl.corrected_patient_first IS NOT NULL
+                                   THEN rw_name_key(COALESCE(cl.corrected_patient_last, cl.patient_last),
+                                                    COALESCE(cl.corrected_patient_first, cl.patient_first)) END,
+                              rw_name_key(NULL, cl.patient_first), rw_name_key(NULL, cl.corrected_patient_first)
+                       FROM temp.d837_wb x JOIN claims cl ON cl.patient_control_number >= x.bill
+                            AND cl.patient_control_number < x.hi"""):
                 if bill_of(pcn) == b:
                     names[b] |= {nk, cnk} - {None}
+                    firsts[b] |= {fk, cfk} - {None}
             if "ema_claim_links" in tables and "ema_lines" in tables:
                 links: dict[int, set] = defaultdict(set)
                 for b, cid, lk in c.execute("""SELECT x.bill, e.claim_id, e.link FROM temp.d837_wb x JOIN ema_claim_links e
@@ -7011,21 +7150,27 @@ class Detector:
         for b, pcns in by_bill.items():
             for pcn in pcns:
                 if names.get(b) or persons.get(b):
-                    out[pcn].update(names=set(names.get(b) or ()), persons=set(persons.get(b) or ()), **{"from": "bill"})
+                    out[pcn].update(names=set(names.get(b) or ()), persons=set(persons.get(b) or ()), firsts=set(firsts.get(b) or ()),
+                                    **{"from": "bill"})
         return out
 
-    def _837_one_visit(self, cand: dict[str, list], lines: dict, who: dict, carriers: dict | None = None) -> dict[str, dict]:
+    def _837_one_visit(self, cand: dict[str, list], lines: dict, who: dict, carriers: dict | None = None,
+                       may_carry=None) -> tuple[dict[str, dict], dict[str, dict]]:
         """One visit billed again under a new bill (answers-1): for each never-answered 837 claim, its services that a newer
-        bill of the same patient carries ({claim id: {visit line: the newer claim id}}). The same patient is the same keyed
-        name and birth date, or the same keyed name under the same member id (never the member id alone, so family members on
-        one subscriber id stay apart); the same service is the same date, code, part and distinct-service modifiers
-        (_visit_line); the newer bill is the one sent later (then the higher claim id). The surgery center's facility claims
-        and the clinicians' claims are never one bill of each other. carriers: the weekly exports' never-answered claims
-        ({claim id: (sent, its chased services as (code, date, charge, units, item, modifiers))}, _837_export_carriers), which
-        carry a visit too and win a tie with an 837 bill sent the same day (the exports' pass never makes its claim yield to
-        a bill sent the same day)."""
+        bill of the same patient carries ({claim id: {visit line: the newer claim id}}), and the newer bills of the same
+        patient's visit that may not carry a service ({claim id: {visit line: {newer claim ids}}}: may_carry(newer, older)
+        said no). The same patient is the same keyed name and birth date, or the same keyed name under the same member id
+        when one of the two bills gives no birth date (never the member id alone, so family members on one subscriber id
+        stay apart; two bills that both give a birth date are one patient's only when name and birth date agree: a father
+        and his son of one name on one id are two, fx-837-r1-6); the same service is the same date, code, part and
+        distinct-service modifiers (_visit_line); the newer bill is the one sent later (then the higher claim id), the
+        newest that may carry it. The surgery center's facility claims and the clinicians' claims are never one bill of
+        each other. carriers: other bills that carry a visit ({claim id: (sent, its services as (code, date, charge, units,
+        item, modifiers), tie)}): the weekly exports' never-answered claims (_837_export_carriers; tie 1: they win a tie with
+        an 837 bill sent the same day, as the exports' pass never makes its claim yield to a bill sent the same day) and
+        the bills a payer answered as primary (_837_answered_carriers; tie 0)."""
         from .ema_reports import is_facility_claim
-        newest: dict[tuple, tuple] = {}
+        marks: dict[tuple, list] = defaultdict(list)       # visit key -> [(mark, claim id)]
         keys_of: dict[str, list] = {}
 
         def ids_of(pcn: str) -> list:
@@ -7040,6 +7185,7 @@ class Detector:
             if not ids:
                 continue
             fac = bool(is_facility_claim(pcn))
+            mark = (r[0], 0, pcn)
             ks = []
             for code, dos, chg, units, mods in lines.get(r[7], []):
                 x = (code, dos, chg, units, None, mods)
@@ -7048,12 +7194,10 @@ class Detector:
                 vl = _visit_line(x)
                 for i in ids:
                     vk = (i, fac) + vl
-                    ks.append((vk, vl))
-                    mark = (r[0], 0, pcn)
-                    if vk not in newest or mark > newest[vk]:
-                        newest[vk] = mark
+                    ks.append((vk, vl, mark))
+                    marks[vk].append((mark, pcn))
             keys_of[pcn] = ks
-        for pcn, (sent, xs) in sorted((carriers or {}).items()):
+        for pcn, (sent, xs, tie) in sorted((carriers or {}).items()):
             ids = ids_of(pcn)
             if not ids or not sent:
                 continue
@@ -7063,16 +7207,27 @@ class Detector:
                     continue
                 for i in ids:
                     vk = (i, fac) + _visit_line(x)
-                    mark = (sent, 1, pcn)
-                    if vk in newest and mark > newest[vk]:
-                        newest[vk] = mark        # only a visit an 837 claim here carries matters
+                    if vk in marks:
+                        marks[vk].append(((sent, tie, pcn), pcn))      # only a visit an 837 claim here carries matters
         out: dict[str, dict] = {}
+        refused: dict[str, dict] = {}
         for pcn, ks in keys_of.items():
-            for vk, vl in ks:
-                top = newest[vk][2]
-                if top != pcn and bill_of(top) != bill_of(pcn):
-                    out.setdefault(pcn, {})[vl] = top
-        return out
+            dated = bool((who.get(pcn) or {}).get("persons"))
+            best: dict[tuple, tuple] = {}
+            for vk, vl, mark in ks:
+                for m, x in marks[vk]:
+                    if m <= mark or x == pcn or bill_of(x) == bill_of(pcn):
+                        continue
+                    if vk[0][0] == "n" and dated and (who.get(x) or {}).get("persons"):
+                        continue            # both bills give the birth date: their keyed names and birth dates decide
+                    if may_carry is not None and not may_carry(x, pcn):
+                        refused.setdefault(pcn, {}).setdefault(vl, set()).add(x)
+                        continue
+                    if vl not in best or m > best[vl]:
+                        best[vl] = m
+            if best:
+                out[pcn] = {vl: m[2] for vl, m in best.items()}
+        return out, refused
 
     def _837_export_carriers(self, sends: dict) -> dict[str, dict]:
         """The weekly exports' never-answered claims their pass listed (run_ema_open_claims runs first), as carriers of a
@@ -7091,12 +7246,19 @@ class Detector:
                 continue
             try:
                 ev = json.loads(f.get("evidence") or "{}")
-            except ValueError:
+            except ValueError as exc:
+                from . import runlog
+                runlog.caught(exc, "detect.837_export_carriers")
                 continue
             if ev.get("not_sent") or not ev.get("sent"):
                 continue
-            xs = [(ln[0], ln[1], ln[2], None, None, [ln[4]] if len(ln) > 4 and ln[4] else None)
-                  for ln in ev.get("lines") or [] if isinstance(ln, list) and len(ln) > 2 and ln[0] and ln[1]]
+            # each line with the part it bills and the modifiers that make it a separate service (_emit_open_claim keeps
+            # them in 'line_modifiers', by the line's place in 'lines': fx-837-r2-4)
+            sep = {i: m for i, m in (x for x in ev.get("line_modifiers") or [] if isinstance(x, list) and len(x) == 2)
+                   if isinstance(i, int) and isinstance(m, str)}
+            xs = [(ln[0], ln[1], ln[2], None, None, ([ln[4]] if len(ln) > 4 and ln[4] else []) + [m for m in sep.get(i, "").split(",") if m])
+                  for i, ln in enumerate(ev.get("lines") or []) if isinstance(ln, list) and len(ln) > 2 and ln[0] and ln[1]]
+            xs = [x[:5] + (x[5] or None,) for x in xs]
             if not xs:
                 continue
             r = sends.get(pcn)
@@ -7107,9 +7269,143 @@ class Detector:
         for key, ls in self._lines_837(keys).items():
             pcn = keys[key]
             want = {(x[1], x[0], item_part(x)) for x in out[pcn]["lines"]}
-            out[pcn]["lines"] += [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in ls
-                                  if (dos, code, component_of(mods)) in want]
+            own = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in ls if (dos, code, component_of(mods)) in want]
+            if own:
+                # the 837 is what was sent: its lines, with their modifiers, stand for the services they bill (an exports'
+                # 17110-59 is another lesion's service, never the plain 17110 an older bill carries: fx-837-r2-4)
+                got = {(x[1], x[0], item_part(x)) for x in own}
+                out[pcn]["lines"] = [x for x in out[pcn]["lines"] if (x[1], x[0], item_part(x)) not in got] + own
         return out
+
+    def _837_answered_carriers(self, cand: dict[str, list], lines: dict, who: dict, prim: set) -> dict[str, dict]:
+        """The newer bills of a never-answered claim's visit that a payer answered as primary, as carriers of the visit for
+        the one-visit rule (fx-837-r2-6: the visit's answer is on the newest bill, so an older bill keeps giving way once
+        the newer one is answered, with a denial say, and is not chased beside that answer). The bills in prim (a payer
+        processed one of their claims as primary) whose newest submission the 837s show sent on or after the oldest of
+        these claims' sends, for the same member id or, where the 837 names the patient, the same patient; a bill whose
+        newest send is a void carries nothing. {claim id: {'sent': its newest send, 'row': that send (_load_837's shape),
+        'lines': its services on the dates and codes of these claims' own, as (code, date, charge, units, item,
+        modifiers)}}."""
+        c = self.conn
+        if not cand or not prim or not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims_837'").fetchone():
+            return {}
+        cols = {r[1] for r in c.execute("PRAGMA table_info(claims_837)")}
+        members = sorted({r[8] for r in cand.values() if r[8]})
+        names = sorted({n for p in cand for n in ((who.get(p) or {}).get("names") or ()) if (who.get(p) or {}).get("from") == "837"}
+                       if "patient_key" in cols else ())
+        if not members and not names:
+            return {}
+        since = min(r[0] for r in cand.values())
+        own_bills = {bill_of(p) for p in cand}
+        days = {(dos, code) for r in cand.values() for code, dos, _chg, _units, _mods in lines.get(r[7], [])}
+        c.execute("DROP TABLE IF EXISTS temp.d837_am")
+        c.execute("CREATE TEMP TABLE d837_am (k TEXT PRIMARY KEY)")
+        c.executemany("INSERT OR IGNORE INTO temp.d837_am VALUES (?)", [(m,) for m in members])
+        c.execute("DROP TABLE IF EXISTS temp.d837_an")
+        c.execute("CREATE TEMP TABLE d837_an (k INTEGER PRIMARY KEY)")
+        c.executemany("INSERT OR IGNORE INTO temp.d837_an VALUES (?)", [(n,) for n in names])
+        who_sql = "subscriber_id IN (SELECT k FROM temp.d837_am)" + (" OR patient_key IN (SELECT k FROM temp.d837_an)" if names else "")
+        rows: dict[str, list] = {}          # bill -> [claim id, send row]: its newest submission's newest send
+        voided: dict[str, str] = {}
+        for pcn, bht, freq, pid, pname, chg, key, member in c.execute(
+                f"""SELECT patient_control_number, bht_created, TRIM(COALESCE(frequency_code, '')), payer_id, payer_name,
+                           total_charge_cents, claim_837_key, subscriber_id
+                    FROM claims_837 WHERE patient_control_number IS NOT NULL AND bht_created IS NOT NULL AND ({who_sql})"""):
+            pcn = str(pcn).strip()
+            bht = real_day(bht)
+            b = bill_of(pcn)
+            if not pcn or not bht or b not in prim or b in own_bills:
+                continue
+            if freq == "8":
+                voided[b] = max(voided.get(b, ""), bht)
+                continue
+            got = rows.get(b)
+            if got is None or sub_no(pcn) > sub_no(got[0]) or (sub_no(pcn) == sub_no(got[0]) and pcn > got[0]):
+                rows[b] = [pcn, [bht, bht, freq, False, pid, pname, chg, key, member, 1]]
+            elif pcn == got[0]:
+                r = got[1]
+                r[9] += 1
+                r[1] = min(r[1], bht)
+                if bht > r[0] or (bht == r[0] and (key or "") > (r[7] or "")):
+                    r[0], r[2], r[4], r[5], r[6], r[7], r[8] = bht, freq, pid, pname, chg, key, member
+        c.execute("DROP TABLE IF EXISTS temp.d837_am")
+        c.execute("DROP TABLE IF EXISTS temp.d837_an")
+        keep = {pcn: r for b, (pcn, r) in rows.items() if r[0] >= since and not (voided.get(b) and voided[b] >= r[0])}
+        out: dict[str, dict] = {}
+        got_lines = self._lines_837({r[7]: pcn for pcn, r in keep.items() if r[7]})
+        for pcn, r in keep.items():
+            xs = [(code, dos, chg, units, None, mods) for code, dos, chg, units, mods in got_lines.get(r[7], []) if (dos, code) in days]
+            if xs:
+                out[pcn] = {"sent": r[0], "row": r, "lines": xs}
+        return out
+
+    def _837_answer_lines(self, hits: dict[str, list]) -> dict[str, dict]:
+        """What the answers of the newer bills of a visit that another payer answered only as a later payer paid, service
+        by service (the T-C2 of the older bill they may not carry, fx-837-r1-1): {claim id: {'date': its latest answer,
+        'group': that answer's payer group, 'status': its CLP02, 'lines': [(date, code, part, what still stands of the line's
+        payment in cents)]}} from each claim's answers (rows835's shape: date, group, paid, status, payer id, claim id)."""
+        out: dict[str, dict] = {}
+        if not hits:
+            return out
+        c = self.conn
+        ids = sorted({a[5] for rows in hits.values() for a in rows if a[5]})
+        by_claim: dict[str, list] = defaultdict(list)
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            for pcn, lk, code, ocode, dos, mods in c.execute(
+                    f"""SELECT cl.patient_control_number, l.line_key, l.procedure_code, l.original_procedure_code,
+                               COALESCE(l.service_date, cl.statement_from), l.modifiers
+                        FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
+                        JOIN lines l ON l.claim_key = cl.claim_key
+                        WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IN ({','.join('?' * len(part))})""", part):
+                cents = int(self.standing.get(lk) or 0)
+                for cd_ in {code, ocode} - {None, ""}:
+                    by_claim[pcn].append((dos, cd_, component_of(mods), cents))
+        for x, rows in hits.items():
+            top = max(rows)
+            out[x] = {"date": top[0], "group": top[1], "status": top[3],
+                      "lines": [ln for p in sorted({a[5] for a in rows if a[5]}) for ln in by_claim.get(p, [])]}
+        return out
+
+    def _redate_carrier(self, f: dict, first: tuple) -> None:
+        """An exports' item that carries a visit first sent on an older bill only the 837s know (the one-visit rule): when
+        that send was inside the first-filing limit and the item's own was not, the visit keeps its timely filing
+        (fx-837-r1-2), so the item is dated as _emit_open_claim dates one sent on time, with the basis naming that send."""
+        if not first or not first[0]:
+            return
+        try:
+            ev = json.loads(f.get("evidence") or "{}")
+        except ValueError as exc:
+            from . import runlog
+            runlog.caught(exc, "detect.redate_carrier")
+            return
+        sent, dos = ev.get("sent"), f.get("service_date")
+        if not sent or not dos or first[0] >= sent:
+            return
+        dt = self._open_claim_dates(f.get("payer_group"), f.get("payer_kind"), ev.get("payer_in_ema"), f.get("payer_id"), dos, sent,
+                                    ev.get("answer_due"), ev.get("sent_basis"), f.get("signal") == "REJECTED_PRE_PAYER",
+                                    bool(ev.get("not_sent")), first)
+        if dt["prior"]:
+            f["appeal_deadline"], f["deadline_basis"], f["legal_deadline"] = dt["deadline"], dt["basis"], None
+
+    def _hand_to_answers(self, olds_of: dict[str, list], done: dict) -> None:
+        """An older bill whose visit a newer bill a payer answered as primary carries (fx-837-r2-6) hands its work to that
+        answer's item (save: heir keys): the newer bill's item on a date and code of the visit (a denial, an underpayment),
+        else the newer bill's claim-level item; none when the answer left nothing to work (paid in full)."""
+        if not olds_of:
+            return
+        bills = {bill_of(x) for x in olds_of}
+        idx: dict[str, list] = defaultdict(list)
+        for fid, f in self.findings.items():
+            p = f.get("patient_control_number")
+            if p and bill_of(p) in bills and f.get("signal") not in ("NO_ANSWER", "REJECTED_PRE_PAYER"):
+                idx[bill_of(p)].append((fid, f.get("service_date"), f.get("procedure_code"), bool(f.get("line_key"))))
+        for x, olds in sorted(olds_of.items()):
+            items = sorted(idx.get(bill_of(x)) or [])
+            want = {(dos, code) for code, dos, *_rest in done[x]["lines"]}
+            hit = [i for i in items if (i[1], i[2]) in want] or [i for i in items if not i[3]]
+            if hit:
+                self.__dict__.setdefault("_heirs", {}).setdefault(hit[0][0], []).extend((OPEN_837_ID, o) for o in olds)
 
     def _837_resends(self, prim: set, ema_ids: set, ema_sub: dict) -> dict[str, tuple]:
         """Bills a payer answered as primary (prim) whose newest submission the 837s show sent again after the bill's first
@@ -7219,25 +7515,28 @@ class Detector:
         a bill made again for the same visit), for the service's own part (part_fits, T-C1: the TC paid is no payment of the
         reading, 26). Where the claim's patient is known (cd['who']: the 837's patient loop, its bill's remittances or EMA's
         claim), only a payment whose remittance names that patient counts: a subscriber's member id covers the family, and
-        a sibling's paid visit is no payment of this child's (the verifier's adjacent case). A claim with every service paid
-        so is not listed."""
+        a sibling's paid visit is no payment of this child's (the verifier's adjacent case). The same patient is told by the
+        first name where both sides give one (keyed alone: a payer that writes O'TESTER as OTESTER, or drops an accent, still
+        names the same person; a sibling has another first name, fx-837-r2-5), else by the whole keyed name. A claim with
+        every service paid so is not listed."""
         members = sorted({cd["k"].get("member") for cd in cds if cd["k"].get("member")})
         if not members:
             return cds
         c = self.conn
         from . import ema_reports as er
         er.register_functions(c, create=False)      # rw_name_key with the store's salt (None where it has none)
-        # (member, date, code) -> {part: {(bill, the paid claim's patient keyed names)}}
+        # (member, date, code) -> {part: {(bill, the paid claim's patient keyed names, its keyed first names)}}
         paid: dict[tuple, dict] = defaultdict(lambda: defaultdict(set))
         c.execute("DROP TABLE IF EXISTS temp.d837_p")
         c.execute("CREATE TEMP TABLE d837_p (member TEXT PRIMARY KEY)")
         c.executemany("INSERT OR IGNORE INTO temp.d837_p VALUES (?)", [(m,) for m in members])
-        for mid, iid, pcn, lk, code, ocode, dos, mods, nk, cnk in c.execute(
+        for mid, iid, pcn, lk, code, ocode, dos, mods, nk, cnk, fk, cfk in c.execute(
                 """SELECT cl.patient_id, cl.insured_id, cl.patient_control_number, l.line_key, l.procedure_code, l.original_procedure_code,
                           COALESCE(l.service_date, cl.statement_from), l.modifiers, rw_name_key(cl.patient_last, cl.patient_first),
                           CASE WHEN cl.corrected_patient_last IS NOT NULL OR cl.corrected_patient_first IS NOT NULL
                                THEN rw_name_key(COALESCE(cl.corrected_patient_last, cl.patient_last),
-                                                COALESCE(cl.corrected_patient_first, cl.patient_first)) END
+                                                COALESCE(cl.corrected_patient_first, cl.patient_first)) END,
+                          rw_name_key(NULL, cl.patient_first), rw_name_key(NULL, cl.corrected_patient_first)
                    FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
                    JOIN lines l ON l.claim_key = cl.claim_key
                    WHERE COALESCE(t.superseded,0)=0 AND cl.claim_status_code IN ('1','19')
@@ -7245,23 +7544,32 @@ class Detector:
             if (self.standing.get(lk) or 0) <= 0:
                 continue
             who = frozenset({nk, cnk} - {None})
+            first = frozenset({fk, cfk} - {None})
             for m in {mid, iid} - {None, ""}:
                 for cd_ in {code, ocode} - {None, ""}:
-                    paid[(m, dos, cd_)][component_of(mods)].add((bill_of(pcn), who))
+                    paid[(m, dos, cd_)][component_of(mods)].add((bill_of(pcn), who, first))
         c.execute("DROP TABLE IF EXISTS temp.d837_p")
 
-        def paid_elsewhere(m: str | None, x: tuple, b: str, names: set) -> bool:
+        def same_patient(names: set, firsts: set, pn: frozenset, pf: frozenset) -> bool:
+            if not names or not pn:
+                return True                 # one side names no patient: the member's
+            if firsts and pf:
+                return bool(firsts & pf)    # both give a first name: it decides (one name written two ways)
+            return bool(names & pn)
+
+        def paid_elsewhere(m: str | None, x: tuple, b: str, names: set, firsts: set) -> bool:
             got = paid.get((m, x[1], x[0])) if m and x[1] else None
             if not got:
                 return False
             # a payment under another bill, for this patient where both remittance and claim name one (else the member's)
-            parts = {p for p, hits in got.items() if any(ob != b and (not names or not pn or names & pn) for ob, pn in hits)}
+            parts = {p for p, hits in got.items() if any(ob != b and same_patient(names, firsts, pn, pf) for ob, pn, pf in hits)}
             return part_fits(item_part(x), parts)
         out = []
         for cd in cds:
             m, b = cd["k"].get("member"), cd["b"]
             names = set((cd.get("who") or {}).get("names") or ())
-            items = [x for x in cd["items"] if not paid_elsewhere(m, x, b, names)]
+            firsts = set((cd.get("who") or {}).get("firsts") or ())
+            items = [x for x in cd["items"] if not paid_elsewhere(m, x, b, names, firsts)]
             if not items:
                 self.ema_counts["837_paid_under_another_bill"] += 1
                 continue
@@ -9132,6 +9440,15 @@ class Detector:
             if prev is None and heir is None and via_bill is None and heirs_of.get(fid):
                 via_bill = next((w for w in (existing.get(_fid(*h)) for h in heirs_of[fid])
                                  if w is not None and worked(w) and w["status"] != "resolved"), None)
+            elif (prev is not None and heir is None and via_bill is None and heirs_of.get(fid) and not worked(prev)
+                  and prev["status"] == "open" and not prev.get("status_changed_at")):
+                # an item already listed, that nobody has touched, whose heir keys name an older item a person worked that is
+                # no longer listed (two bills of one visit both listed before the 837s named the patient, then merged): the
+                # person's work comes to the item that is listed, as it would to a new one (fx-837-r1-3). A person's own
+                # status or note on this item stands.
+                via_bill = next((w for w in (existing.get(_fid(*h)) for h in heirs_of[fid])
+                                 if w is not None and w["finding_id"] not in self.findings and worked(w) and w["status"] != "resolved"),
+                                None)
             if prev is None and heir is None and via_bill is None and ema_heirs and f.get("line_key") and f.get("patient_control_number"):
                 from .ema_reports import bill_of_claim
                 b_f = bill_of_claim(f["patient_control_number"])
@@ -9145,7 +9462,8 @@ class Detector:
                 # a new item is a new matter: it starts To do (Started if someone was working the claim), with the notes; never
                 # Sent, Paid or Let go from the earlier item, whose own record stays in its events
                 st0 = "in_progress" if via_bill["status"] in ("in_progress", "appealed") else "open"
-                prev = {"status": st0, "notes": via_bill.get("notes"), "first_seen": self.now, "finding_id": fid}
+                prev = {"status": st0, "notes": via_bill.get("notes"), "first_seen": (prev or {}).get("first_seen") or self.now,
+                        "finding_id": fid}
                 events.append((fid, self.now, "signal_changed", via_bill["status"], st0, f.get("shortfall_cents"), "system",
                                f"was {via_bill['signal']} on claim {via_bill.get('patient_control_number') or 'the same EMA claim'} "
                                f"({via_bill['status']}), now {f['signal']}",
