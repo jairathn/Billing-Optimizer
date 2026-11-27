@@ -725,8 +725,20 @@ def test_anthem_level_frequency_and_length_denials_are_worked_by_the_clinical_ap
         fep = appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM", carc=carc)
         assert dates("2026-03-01", fep) == ("2026-08-28", "2028-03-01"), (carc, fep["label"][:80])
         assert "clinical denial" in fep["label"] and "6 months" in fep["label"], fep["label"][:120]
-    # a level-of-care change on a downcode (186) is Anthem's coding review: the dispute's two years as before
+    # an office visit's level (150 on an E&M code) is Anthem's coding review ('Anthem may review E&M Claims to determine, in
+    # accordance with correct coding requirements and/or reimbursement policy ...'), a Claim Payment Dispute: two years, as
+    # is a level-of-care change on a downcode (186); 150 on another service may be a clinical decision
+    for code in ("99214", "99203", "99499"):
+        r = appeal_rule("Anthem / BCBS", "commercial", "KENTUCKY SAMPLE PPO", carc="150", code=code)
+        assert dates("2026-03-01", r) == ("2028-03-01", "2028-03-01") and "E&M" in r["label"], (code, r["label"][:80])
+    for code in ("11102", "17311", "99199", "99500"):
+        assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "KENTUCKY SAMPLE PPO", carc="150", code=code)) == \
+            ("2026-08-28", "2028-03-01"), code
     assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "KENTUCKY SAMPLE PPO", carc="186")) == ("2028-03-01", "2028-03-01")
+    # the item's own procedure code reaches the rules (rule_facts), so its states and story read the same window
+    item = {"plan": "KENTUCKY SAMPLE PPO", "carc": "150", "procedure_code": "99214"}
+    assert codes.rule_facts(item)["code"] == "99214"
+    assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", **codes.rule_facts(item))) == ("2028-03-01", "2028-03-01")
 
 
 @pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)

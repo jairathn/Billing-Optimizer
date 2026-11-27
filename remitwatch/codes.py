@@ -340,8 +340,9 @@ def pos_class(pos: str | None) -> str:
 # working without them. A rule that needs a fact the item does not carry is passed over: an item that does not say which
 # plan it is gets the shorter window, and the label of that window says so. 'carcs' is every denial reason an item carries
 # beside its top one (a whole claim denied CO-96 on two lines and CO-50 on a third): appeal_rule then dates the item by the
-# shortest of their windows and keeps the longest last day (_together; fx-windows review r2-2).
-PLAN_FACTS = ("plan", "payer_name", "payer_id", "cfi", "state", "carc", "paid", "carcs")
+# shortest of their windows and keeps the longest last day (_together; fx-windows review r2-2). 'code' is the item's
+# procedure code where it has one (an office visit's level is a coding matter for Anthem: ANTHEM_EM_LEVEL).
+PLAN_FACTS = ("plan", "payer_name", "payer_id", "cfi", "state", "carc", "paid", "carcs", "code")
 
 # The VA's community care networks: claims go out under these payer ids, and EMA and the 837s name the network after its
 # administrator ('Optum Unitedhealth Care'), whose name the rules read as UnitedHealthcare's administered plans. Where a
@@ -395,8 +396,8 @@ def plan_state(plan: str | None = None, payer_name: str | None = None) -> str | 
 def rule_facts(item=None, **over) -> dict:
     """The plan facts of an item (a finding), an 835 line or a claim, as appeal_rule's, filing_rule's and corrected_rule's
     keyword arguments: its plan (the contract class), the payer's name and id, the claim filing indicator, the denial's
-    reason (CARC), whether the line was paid (None when not known) and every denial reason it carries where a call site
-    gave them ('carcs'). `over` sets or replaces any of them."""
+    reason (CARC), whether the line was paid (None when not known), and where the item has them its procedure code
+    ('code') and every denial reason it carries ('carcs', from a call site). `over` sets or replaces any of them."""
     get = item.get if item is not None and hasattr(item, "get") else (lambda _k, d=None: d)
     plan = get("plan") or get("contract_class") or ""
     plan = plan.strip() if isinstance(plan, str) else ""
@@ -406,6 +407,8 @@ def rule_facts(item=None, **over) -> dict:
              "paid": None if paid is None else int(paid or 0) > 0}
     if get("carcs"):
         facts["carcs"] = get("carcs")
+    if get("procedure_code"):
+        facts["code"] = get("procedure_code")
     facts.update({k: v for k, v in over.items() if k in PLAN_FACTS})
     return facts
 
@@ -439,7 +442,8 @@ def _fits(r: dict, grp: str, kind: str, f: dict) -> bool:
     pattern on the plan's name, 'plan_state': the state the plan's own name gives (never the payer's: an 835 comes from the
     local plan that processed the claim, whoever's member it is) is one of these, 'state', 'other_state': a state the item
     names that is none of these, 'carcs': the denial's reason is one of these, 'other_carcs': it is known and none of
-    these, 'paid', 'cfi') needs its fact: a fact the item does not carry fails the condition."""
+    these, 'code': a pattern on the procedure code, 'paid', 'cfi') needs its fact: a fact the item does not carry fails the
+    condition."""
     if not re.search(r["match"], grp) or (r.get("kinds") is not None and kind not in r["kinds"]):
         return False
     if "plan" in r and not re.search(r["plan"], str(f.get("plan") or "").upper()):
@@ -454,6 +458,8 @@ def _fits(r: dict, grp: str, kind: str, f: dict) -> bool:
     if "carcs" in r and carc not in r["carcs"]:
         return False
     if "other_carcs" in r and (not carc or carc in r["other_carcs"]):
+        return False
+    if "code" in r and not re.search(r["code"], str(f.get("code") or "").strip().upper()):
         return False
     if "paid" in r and f.get("paid") is not r["paid"]:
         return False
@@ -529,6 +535,12 @@ ANTHEM_CLINICAL_CARCS = frozenset({"50", "55", "56"})
 # findings 216, denied A1). The remittance does not say which made it, so the item is worked by the clinical appeal's
 # window and kept open to the payment dispute's (fx-windows review r2-4)
 MAYBE_CLINICAL_CARCS = frozenset({"150", "151", "152", "167", "B22", "272", "B5", "B12", "58", "216", "A1"})
+# An office visit's level the information does not support (CARC 150 on an evaluation and management code, 99202 to 99499)
+# is Anthem's coding review, not a clinical decision: 'Prior to payment, Anthem may review E&M Claims to determine, in
+# accordance with correct coding requirements and/or reimbursement policy as applicable, whether the E&M code level
+# submitted is higher than the E&M code level supported on the Claim' (its 2026 manuals, Evaluation and Management (E&M)
+# Services), and the Claim Payment Dispute covers 'Claim code editing issues' (fx-windows review r2-4)
+ANTHEM_EM_LEVEL = r"^99(?:20[2-9]|2[1-9]\d|[34]\d\d)$"
 MEDICAL_NECESSITY_CARCS = ANTHEM_CLINICAL_CARCS | MAYBE_CLINICAL_CARCS
 # A BlueCard member's plan, by the 835's plan name (its contract class): BlueCard's own words ('ITS HOST', 'BLUECARD',
 # 'BLUE CARD'), or a name that starts with the two-letter code of a state other than Kentucky and Indiana ('GA ... PPO').
@@ -657,6 +669,14 @@ APPEAL_RULES: list[dict] = [
               "counted from the remittance; a BlueCard member's (another Blue plan's) denial goes to the local Anthem plan as a Claim "
               "Payment Dispute, two years from the EOP, the last day used until the home plan is known",
      "source": ANTHEM_CLINICAL_SOURCE, "process": ANTHEM_EITHER_PROCESS, "channel": ANTHEM_EITHER_CHANNEL},
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": frozenset({"150"}), "code": ANTHEM_EM_LEVEL,
+     "days": 730, "months": 24, "verified": True, "legal": {"years": 2},
+     "label": "Anthem commercial, an office visit's level the information submitted does not support: 'Anthem may review E&M Claims to "
+              "determine, in accordance with correct coding requirements and/or reimbursement policy as applicable, whether the E&M code "
+              "level submitted is higher than the E&M code level supported on the Claim', a coding matter for the Claim Payment Dispute "
+              "('Claim code editing issues'): a Claim Payment Reconsideration within two years of the EOP issue date",
+     "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual (2026, v1 and v2) and Indiana Provider Manual (2026), "
+               "Evaluation and Management (E&M) Services and Claim Payment Disputes"},
     {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": MAYBE_CLINICAL_CARCS,
      "days": 180, "verified": True, "legal": {"years": 2}, "label": ANTHEM_MAYBE_CLINICAL, "source": ANTHEM_CLINICAL_SOURCE,
      "process": ANTHEM_EITHER_PROCESS, "channel": ANTHEM_EITHER_CHANNEL},
