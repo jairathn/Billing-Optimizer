@@ -143,23 +143,34 @@ restored 202 passed, `git status` clean), output `$U/breaks2.out`.
   restored 4 passed).
 
 ## Half done
-- Fix round (2026-11-27 03:15 UTC): every finding fixed or written as a need (above), the hand trace's fix in, 16 breaks
-  done, both measurements done (below), world copies deleted. Left: the full suite once in python3 and once in
-  `$S/fix/venv_sqlite340/bin/python`, the integration tip merged again if it moved, the final push.
+- Nothing of the fix round (2026-11-27 04:20 UTC): every finding fixed or written as a need (above), the hand trace's fix
+  in, 16 breaks done, both measurements and both full suites done (below), the integration tip merged again (da2f255).
+  Running last: `$U/timed_cycle.sh` (F1's functions timed in one detection run of the branch on a world copy it deletes;
+  output `$U/timed_branch.out`), to put a number on run 4's slower branch detection; the result is below if it finished.
 
 ## Next
-- The full suite: `RW_RUNS=$U/runs bash plans/tools/shard.sh $W python3 fxl-py313 4`, then the same with
-  `$S/fix/venv_sqlite340/bin/python` (label fxl-py311); record the failures not caused here (3.11.1: only the store image's
-  `Connection.serialize`). Then `git fetch origin && git merge origin/claude/ecstatic-fermi-orfcgo`, the touched suites
-  again if it moved, `git push origin HEAD:wip/fx-ledger`, remove `$U/tiptree` and `$U/brtree` (git worktree remove) and
-  `$U/p2`.
-- The integrator: route "Needs from others" (each with its failing test) and read the open questions.
+- The integrator: merge wip/fx-ledger; route "Needs from others" (each with its failing test) and read the open questions.
+- If the timed run is missing below: `bash $U/timed_cycle.sh <tree at this branch> timed_branch` (needs 6 GB free), and
+  the same on the integration tip, to compare F1's own seconds.
 
 ## Tests
 - Fix round: tests/test_fx_ledger.py 202 tests, both store kinds (the reviewers' r1 and r2 tests ported, the hand trace's
   split restatement, F1's own edges), all passing; 16 breaks each fail their tests and restore exactly. After merging
-  59f6822: the related suites (ledger, states, story, takebacks, archive rules, decisions) 1443 passed. Full suite: see
-  "Full suite (fix round)" below when it has run.
+  59f6822: the related suites (ledger, states, story, takebacks, archive rules, decisions) 1443 passed.
+- Full suite on 68c2e9f (59f6822 merged; `plans/tools/shard.sh`, 4 shards, logs in `$U/runs/fxl-py313`, `fxl-py311`):
+  - python3 3.13 / SQLite 3.5x: 3,549 passed, 29 skipped, 1 xfailed, 1 failed: test_hook_review.py::
+    test_presses_rebuild_the_provider_tables_when_the_analysis_fills_the_run, not F1's (cloud and activity): its clock is
+    the real one plus a simulated 200 s analysis, so a load average of 16 leaves the run under its 45 s for the provider
+    tables; it passes alone on this branch (53 s).
+  - 3.11.1 / SQLite 3.40.0: 3,367 passed, 13 skipped, 1 xfailed, 152 failed, 47 errors: 198 are the store image's
+    `Connection.serialize`, which
+    that build lacks (the class CLAUDE.md allows there; the merged hook and decisions tests add to round 1's 133). The
+    other one, test_results.py::test_the_server_store_and_the_compact_serverless_store_give_the_same_figures, failed in the
+    shard after test_ema_intake's serialize failures and passes alone and in the same file order on both this branch and
+    the tip (27 failed, the serialize ones, 237 passed on each). None is in the ledger's, the states' or the takebacks'
+    tests.
+- Then the integration tip moved to bf1f17b (a brief only, nothing routed to F1), merged at da2f255; tests/test_fx_ledger.py
+  202 passed again.
 - tests/test_fx_ledger.py (round 1): 126 tests, both store kinds (58 ported from the reviewers and verifiers, the rest F1's own edges
   and the residuals'), all passing. Every fix broken on purpose and restored (`$U/breaks.py`).
 - Full suite before the last merge (commit 741b25e): python3 3.13 / SQLite 3.53: 3016 passed, 29 skipped, 1 xfailed,
