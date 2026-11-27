@@ -351,18 +351,21 @@ def test_a_send_to_a_medicaid_plan_sharing_a_payer_id_is_that_medicaid_plans(tmp
     """(Observed by F8 on the 11-24 copy) Payer id TST99 is a company's: three claims sent under it named SAMPLE HEALTH PLAN
     were answered as primary by its commercial plan (AMBETTER TEST PLAN). Its Indiana Medicaid managed-care plan shares
     the id: claim CB0000P02 went to INDIANA MEDICAID TEST PLAN under TST99 and no payer answered it. The send is the
-    Medicaid plan's (its windows apply), not the id's commercial majority; a send named SAMPLE HEALTH PLAN under the same id
-    (CB0000P03, the control) stays the commercial plan's."""
+    Medicaid plan's (its windows apply), not the id's commercial majority. The controls stay the commercial plan's: a send
+    named SAMPLE HEALTH PLAN under the same id (CB0000P03), and one named COMMUNITY MEDICAID TEST PLAN (CB0000P04), which
+    says Medicaid but no state (measured on the 11-24 copy: such sends were the company's own plan's, which paid them)."""
     s = _store(tmp_path, kind)
     plan = ("SAMPLE HEALTH PLAN", "TST99")
     send(s, tmp_path, [clm837(f"CB0000P1{n}C017", V, payer=plan) for n in range(3)]
-         + [clm837("CB0000P02C017", V, payer=("INDIANA MEDICAID TEST PLAN", "TST99")), clm837("CB0000P03C017", V, payer=plan)],
+         + [clm837("CB0000P02C017", V, payer=("INDIANA MEDICAID TEST PLAN", "TST99")), clm837("CB0000P03C017", V, payer=plan),
+            clm837("CB0000P04C017", V, payer=("COMMUNITY MEDICAID TEST PLAN", "TST99"))],
          "20260915")
     _remits(s, tmp_path, [answer(f"CB0000P1{n}C017") for n in range(3)], "20261110", payer="AMBETTER TEST PLAN", payer_id="TST99")
     _remits(s, tmp_path, _visits(), "20261110")
     found = _chased(s, "t1")
     assert found["CB0000P02C017"]["payer_group"] == "Medicaid IN", found["CB0000P02C017"]["payer_group"]
     assert found["CB0000P03C017"]["payer_group"] == "Ambetter (Centene)", found["CB0000P03C017"]["payer_group"]
+    assert found["CB0000P04C017"]["payer_group"] == "Ambetter (Centene)", found["CB0000P04C017"]["payer_group"]
     s.close()
 
 

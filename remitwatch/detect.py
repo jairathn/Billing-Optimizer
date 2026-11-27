@@ -7316,11 +7316,13 @@ class Detector:
             sv = sub_votes.get((r[4], r[8]))
             if sv:
                 return sv.most_common(1)[0][0]
-            # a send whose payer name says Medicaid is that Medicaid plan's, whatever product most claims sent under the
-            # payer id were answered as: a company's Medicaid managed-care plan can share its commercial or Medicare
-            # Advantage plan's payer id, and the Medicaid plan's own windows apply (observed by the fix wave's F8)
+            # a send whose payer name says Medicaid and names a state is that state's Medicaid plan, whatever product most
+            # claims sent under the payer id were answered as: a company's Medicaid managed-care plan can share its
+            # commercial or Medicare Advantage plan's payer id, and the Medicaid plan's own windows apply (observed by the
+            # fix wave's F8). A name that says Medicaid without a state ('... Community Plan Medicaid') stays with the id's
+            # answers: measured on the 11-24 copy, such sends were the company's own plan's, answered and paid by it
             own = normalize_payer(r[5]) if r[5] else None
-            if own and own[1] == "medicaid":
+            if own and own[1] == "medicaid" and _codes.plan_state(None, r[5]):
                 return own
             v = id_votes.get(r[4])
             if v:
