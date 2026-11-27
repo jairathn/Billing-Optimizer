@@ -623,9 +623,14 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
             hist = list(reg.get("changes") or [])[-19:]
             hist.append({"at": now_of(now), "from": LEVELS[before], "to": LEVELS[level], "why": pressure.get("text")})
             reg["changes"] = hist
-    if prev and prev.get("started") and prev.get("started") != reg.get("last_started") and not prev.get("skipped"):
+    # a run is known by its run id (two runs of a chain can start within one second: by the start alone, the second was
+    # taken for the first and its pressure never counted); a regulation state from before run ids knows the start alone
+    key = str((prev or {}).get("run_id") or (prev or {}).get("started") or "")
+    counted = (key == reg.get("last_run_key")) if reg.get("last_run_key") else \
+        bool(prev) and prev.get("started") == reg.get("last_started")
+    if prev and prev.get("started") and not counted and not prev.get("skipped"):
         step(prev, budgets(mode, budget_s=prev.get("budget_seconds") or budget_s))
-        reg.update(last_started=prev.get("started"),
+        reg.update(last_started=prev.get("started"), last_run_key=key,
                    last_run={k: prev.get(k) for k in ("started", "finished", "seconds", "budget_seconds", "trigger", "more",
                                                       "error", "deferred")})
     seen = list(reg.get("killed_seen") or [])
@@ -1763,6 +1768,12 @@ MONEY_CHECKS = ("money_conservation", "ledger_store", "posted_money")
 # a held run still lists the new items to work it found, up to this many or this share of the items listed before it
 # (more is a flood: held with the run until it is released or a person looks)
 NEW_WORK_FLOOD = (20, 0.10)
+# The checks about the data a run read (the posting ledger, EMA's reports and the store's copy of them), not about what
+# the run decided: when one of them holds a run, the run's new items rest on data that check distrusts (the hook's fault
+# run: 2% of the ledger's rows gone, and 33 new items listed from what was left), so they are held with the run, counted
+# on the banner with their dollars, and listed by the next run that passes. A check of the remittances themselves belongs
+# here too when one is added.
+INPUT_CHECKS = MONEY_CHECKS
 
 
 def _new_keys(r: dict, base: dict[str, dict[str, int]]) -> list[tuple[str, int]]:
@@ -1807,11 +1818,13 @@ def _unpack(parts: list[bytes]) -> list:
 
 
 def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict], before: dict[str, dict],
-              after: dict[str, dict]) -> tuple[list[str], int]:
+              after: dict[str, dict], hold_ids: Iterable[str] | None = None) -> tuple[list[str], list[str], str | None]:
     """The run's new items to work that a held worklist must still show: not on the worklist before, open and listed, no
     status of their own from this run (an item that inherits a person's work or closes at once is the run's to hold), named
     by no failing critical check, and on no line (or claim-level service) an item of the held worklist already covers.
-    Returns (their ids, how many were held back as a flood: more than NEW_WORK_FLOOD allows)."""
+    Returns (the ids it lists, the ids held back with the run, why they are held): 'input' when a check that holds the run
+    is about the data the run read (INPUT_CHECKS: the new items rest on it), 'flood' when they are more than
+    NEW_WORK_FLOOD allows, None when every one is listed."""
     blocked = {str(k) for r in results if r["severity"] == "critical" and r["status"] == "fail" for k, _c in r.get("keys") or []}
     touched = {f for (f,) in conn.execute("SELECT DISTINCT finding_id FROM finding_events WHERE run_id = ?", (run_id,))} \
         if _has_table(conn, "finding_events") else set()
@@ -1830,9 +1843,11 @@ def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict], before
             continue
         out.append(fid)
     listed_before = sum(1 for r in before.values() if _is_listed(r, states_kept))
+    if out and any(c in INPUT_CHECKS for c in (hold_ids or ())):
+        return [], out, "input"     # found on data a failing check distrusts: held with the run until one passes
     if len(out) > NEW_WORK_FLOOD[0] and len(out) > NEW_WORK_FLOOD[1] * listed_before:
-        return [], len(out)     # more new work than one run brings: a held run holds it too (the swing guard's to judge)
-    return out, 0
+        return [], out, "flood"     # more new work than one run brings: a held run holds it too (the swing guard's to judge)
+    return out, [], None
 
 
 def _reapply_person_changes(conn: sqlite3.Connection, since_id: int | None) -> int:
@@ -1871,7 +1886,7 @@ def _reapply_person_changes(conn: sqlite3.Connection, since_id: int | None) -> i
 
 
 def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: list[dict], before: dict[str, dict],
-          after: dict[str, dict]) -> dict:
+          after: dict[str, dict], hold_ids: Iterable[str] | None = None) -> dict:
     """Safe mode: keep the run's items (compressed, selfcheck_held) and events, put the items back as they were before the
     run (temp.sc_before: the last good run's), add the run's new items to work that no failing check names (a hold never
     hides new work), take this run's events out of the item history (they describe changes that were held), put back every
@@ -1890,7 +1905,7 @@ def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: li
     for kind, payload in (("findings", {"cols": cols, "rows": held_rows}), ("events", {"cols": ev_cols, "rows": events})):
         for i, part in enumerate(_pack(payload)):
             conn.execute("INSERT INTO selfcheck_held (run_id, kind, part, data) VALUES (?,?,?,?)", (run_id, kind, i, part))
-    new_ids, flood = _new_work(conn, run_id, results, before, after)
+    new_ids, held_new, why_new = _new_work(conn, run_id, results, before, after, hold_ids)
     for tb in ("sc_new", "sc_new_rows"):
         conn.execute(f"DROP TABLE IF EXISTS temp.{tb}")
     conn.execute("CREATE TEMP TABLE sc_new (finding_id TEXT PRIMARY KEY)")
@@ -1913,9 +1928,11 @@ def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: li
         conn.execute("""INSERT INTO progress_snapshots (run_id, at, category, status, n, cents)
                         SELECT ?, ?, category, status, COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings
                         WHERE COALESCE(stale, 0) = 0 GROUP BY category, status""", (run_id, at))
+    cents = lambda ids: sum(int(after.get(f, {}).get("shortfall_cents") or 0) for f in ids)    # noqa: E731
     return {"held_items": len(held_rows), "held_events": len(events), "held_closures": closures,
             "kept_items": conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0], "new_items": len(new_ids),
-            "new_items_held": flood, "person_changes": person}
+            "new_items_cents": cents(new_ids), "new_items_held": len(held_new), "new_items_held_cents": cents(held_new),
+            "new_items_why": why_new, "person_changes": person}
 
 
 KEPT_HINT = ("Kept by RemitWatch's self-check: the newest analysis no longer lists this item and nothing explains why "
@@ -2013,7 +2030,7 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     held = bool(hold_ids) and can_hold
     track: dict = {}
     if held:
-        held_info = _hold(conn, rid, at, ctx, results, before, after)
+        held_info = _hold(conn, rid, at, ctx, results, before, after, hold_ids)
         _log("safe_mode", counts={"held_items": held_info.get("held_items"), "held_closures": held_info.get("held_closures"),
                                   "new_items": held_info.get("new_items"), "person_changes": held_info.get("person_changes")},
              detail={"checks": hold_ids, "run_id": rid})
@@ -2047,6 +2064,33 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
             "seconds": round(time.time() - ctx.get("t0", time.time()), 1)}
 
 
+def _new_items_sentence(held_info: dict, why: list[dict], *, long: bool) -> str:
+    """What safe mode did with the held run's new items to work, with their dollars, and why (the reason is said either
+    way): held with the run because a failing check distrusts the data they rest on, held as a flood, or listed because
+    the failing checks are about what the run decided (its closures and states), not the data it read. '' when the run
+    found none. long: the Data tab's sentence; else the banner's."""
+    n, cents = int(held_info.get("new_items") or 0), int(held_info.get("new_items_cents") or 0)
+    h, h_cents = int(held_info.get("new_items_held") or 0), int(held_info.get("new_items_held_cents") or 0)
+    reason = held_info.get("new_items_why")
+    out = ""
+    if h and reason == "input":
+        data = "; ".join(_title_in(r["title"]) for r in why if r["id"] in INPUT_CHECKS) or "the data the run read"
+        out += (f"It held the {_n(h, 'new item')} to work ({usd(h_cents)}) the run found as well: they rest on data a failing "
+                f"check distrusts ({data}), so the next run that passes lists them. " if long else
+                f"It holds back the {_n(h, 'new item')} ({usd(h_cents)}) that run found: they rest on data a failing check "
+                "distrusts. ")
+    elif h:
+        out += (f"It held the {_n(h, 'new item')} ({usd(h_cents)}) the run found as well: more than one run usually brings. "
+                if long else f"It holds back the {_n(h, 'new item')} ({usd(h_cents)}) that run found: more than one run "
+                "usually brings. ")
+    if n:
+        out += (f"It still lists the {_n(n, 'new item')} to work ({usd(cents)}) the run found: the failing "
+                f"{'check is' if len(why) == 1 else 'checks are'} about what the run decided, not the data it read. " if long else
+                f"It lists the {_n(n, 'new item')} ({usd(cents)}) that run found: the failing "
+                f"{'check is' if len(why) == 1 else 'checks are'} about what it decided, not the data it read. ")
+    return out
+
+
 def _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_hold) -> dict:
     prev = meta_get(conn, K_SAFE, {}) or {}
     if held:
@@ -2059,12 +2103,11 @@ def _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_ho
                  "text": ("RemitWatch kept the worklist as it was before this run and held the run's automatic closures, "
                           f"because {'this check' if len(why) == 1 else 'these checks'} failed: "
                           f"{'; '.join(_title_in(r['title']) for r in why)}. "
-                          + (f"It still lists the {_n(n_new, 'new item')} to work the run found. " if n_new else "")
-                          + (f"It held the {_n(int(held_info.get('new_items_held') or 0), 'new item')} the run found as well: "
-                             "more than one run usually brings. " if held_info.get("new_items_held") else "")
+                          + _new_items_sentence(held_info, why, long=True)
                           + ("The 1 change a person saved during the run stands. " if n_person == 1 else
                              f"The {n_person:,} changes people saved during the run stand. " if n_person else "")
                           + "Nothing was lost: the new results are kept for diagnosis. The next run that passes releases it."),
+                 "new_line": _new_items_sentence(held_info, why, long=False).strip(),
                  "runs_held": int(prev.get("runs_held") or 0) + 1 if prev.get("on") else 1}
     else:
         state = {"on": False, "at": at, "run_id": rid}
@@ -4590,6 +4633,8 @@ def banner(conn: sqlite3.Connection) -> dict | None:
     parts, level, safe_text = [], None, None
     if safe.get("on"):
         safe_text = "Safe mode: the worklist is the one from before RemitWatch's last run, which it is checking. Nothing was lost."
+        if safe.get("new_line"):        # what became of that run's new items, with their dollars, and why
+            safe_text += " " + str(safe["new_line"])
         parts.append(safe_text)
         level = "safe_mode"
     if blind.get("blind") and blind.get("banner"):

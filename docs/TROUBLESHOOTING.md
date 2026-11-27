@@ -12,6 +12,8 @@ that holds no patient data. Start with the bundle, reproduce on a copy, write a 
   /data/diagnostics. Copy it out with `sudo docker compose cp app:/data/diagnostics/<file>.zip .`. One run only:
   add `--run <run id>`.
 - From a local copy of Vercel's state folder (Dropbox, /RemitWatch-state): `python -m remitwatch.diagnose --state-dir <copy> --days 7`.
+  When the runs stopped over the store image (it is not the one the last run saved, it is missing, or it is cut short),
+  the bundle is still made: its README.md starts with "Read this first" and the reason, and bundle.json has it in `notes`.
 
 The bundle holds finding ids, payer groups, codes, counts, dollars and the code's own file names and line numbers,
 never a patient's name, birth date, member id, record number, claim id or check number. Dates of single items are cut

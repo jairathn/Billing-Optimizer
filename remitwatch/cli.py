@@ -38,10 +38,12 @@ DEFAULT_DB = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
 
 
 def cmd_ingest_835(args: argparse.Namespace) -> int:
+    from .pipeline import owe_analysis
     from .store import Store
     from .x12_835 import iter_835_paths
 
     store = Store(args.db)
+    owe_analysis(store.conn)            # read outside a cycle: the next cycle analyses it, new files or not
     paths = []
     for p in args.paths:
         if os.path.isdir(p):
@@ -65,9 +67,11 @@ def cmd_ingest_ema(args: argparse.Namespace) -> int:
     from . import ema_ledger, ema_reports
     from .dropbox_sync import file_sha256
     from .ema_exports import export_created, is_report_file, iter_export_paths, iter_rows
+    from .pipeline import owe_analysis
     from .store import Store
 
     store = Store(args.db)
+    owe_analysis(store.conn)            # read outside a cycle: the next cycle analyses it, new files or not
     paths = []
     for p in args.paths:
         if os.path.isdir(p):
@@ -254,9 +258,12 @@ def cmd_oauth(args: argparse.Namespace) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     from .dropbox_sync import ingest_new_files, sync
+    from .pipeline import owe_analysis
     from .store import Store
 
     store = Store(args.db)
+    if not args.no_ingest:
+        owe_analysis(store.conn)        # read outside a cycle: the next cycle analyses it, new files or not
     try:
         stats = sync(store, full=args.full)
     except Exception as exc:
@@ -278,9 +285,19 @@ def cmd_cycle(args: argparse.Namespace) -> int:
     from .pipeline import run_cycle
 
     report_dir = args.report_dir or os.path.join(os.path.dirname(os.path.abspath(args.db)), "reports")
-    out = run_cycle(args.db, sync=not args.skip_sync, full=args.full, local=args.local, force_detect=args.force_detect,
-                    report=True if args.report else None, email=not args.no_email, report_dir=report_dir,
-                    log=lambda *a: print(*a, file=sys.stderr))
+    failed = False
+    try:
+        out = run_cycle(args.db, sync=not args.skip_sync, full=args.full, local=args.local, force_detect=args.force_detect,
+                        report=True if args.report else None, email=not args.no_email, report_dir=report_dir,
+                        log=lambda *a: print(*a, file=sys.stderr))
+    except Exception as exc:
+        # the cycle has recorded its failure (its run log, the store's last-cycle summary) and released its lock. Since
+        # an analysis that stopped is owed until one succeeds (hosts-1), a code bug fails every cycle until it is fixed:
+        # the day's copy of the store is still made, the fax run is not (a follow-up must not go out from lists an
+        # analysis could not bring up to date)
+        from . import runlog
+        runlog.caught(exc, "cycle")
+        out, failed = {"error": f"the cycle stopped ({type(exc).__name__}); its run log says where"}, True
     # a copy of the store once a day, kept beside it (REMITWATCH_BACKUP_KEEP of them; 0 turns it off): a mistake or a
     # damaged file is undone from it; the disk's own snapshots (docs/SERVER_RUNBOOK.md) cover losing the disk
     if "skipped" not in out and int(os.environ.get("REMITWATCH_BACKUP_KEEP", "7") or 0) > 0:
@@ -291,7 +308,7 @@ def cmd_cycle(args: argparse.Namespace) -> int:
     # on a server the fax line is looked after with every cycle (on Vercel it has its own daily call): the state of what
     # went out, the busy lines tried again, the payers' faxes read, and the follow-ups that are due (each a week apart)
     from . import fax
-    if fax.configured() and "skipped" not in out:
+    if fax.configured() and "skipped" not in out and not failed:
         try:
             out["fax"] = _fax_run(args.db, budget_s=1500)
         except Exception as exc:
@@ -661,15 +678,26 @@ HASHED_TABLES = ("findings", "finding_events", "payer_fax", "faxes", "note_lesso
                  "progress_snapshots", "line_handling", "line_links")
 
 
-def _cloud_image(st, log=print):
+def _cloud_image(st, log=print, *, check: bool = True):
     """The state folder's store with the journal applied, the alert-mail record and the Practice figures put in: what the
-    Vercel site shows, as one store. Returns (Store, details)."""
+    Vercel site shows, as one store. Returns (Store, details). An image the site's last run did not save (or a missing
+    one) raises cloud.StoreImageProblem; with check=False (a tool that only reads a copy, like compare-cloud) the image is
+    read as it is and details['image_problem'] holds the check's sentence (hosts-3)."""
     from . import cloud
     from .api import ASSUMPTIONS, ASSUMPTIONS_KEY
     log(f"Reading the store from {st.describe()}...")
-    store, existed = cloud.load_raw(st)
+    problem = None
+    try:
+        store, existed = cloud.load_raw(st)
+    except cloud.StoreImageProblem as exc:
+        if check:
+            raise
+        problem = str(exc)
+        store, existed = cloud.load_raw(st, check=False)
     if not existed:
-        return None, {}
+        if store is not None:
+            store.close()
+        return None, ({"image_problem": problem} if problem else {})
     journal = cloud.read_actions(st)
     done, left, _ = cloud.apply_actions(store.conn, journal) if journal else ([], [], False)
     waiting = [(n, a) for n, a in journal if n in set(left)]
@@ -686,7 +714,8 @@ def _cloud_image(st, log=print):
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ASSUMPTIONS_KEY, figures.decode()))
     conn.commit()
     return store, {"journal_applied": len(done), "journal_waiting": len(left), "waiting": [_waiting_line(n, a) for n, a in waiting],
-                   "alerts_marked_mailed": mailed, "last_report": marks.get("last_report"), "practice_figures": bool(figures)}
+                   "alerts_marked_mailed": mailed, "last_report": marks.get("last_report"), "practice_figures": bool(figures),
+                   **({"image_problem": problem} if problem else {})}
 
 
 def _waiting_line(name: str, a: dict) -> str:
@@ -823,7 +852,13 @@ def cmd_import_cloud(args: argparse.Namespace) -> int:
     if st is None:
         print("Set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN (the same values as on Vercel), then run this again.")
         return 1
-    store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True))
+    try:
+        store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True))
+    except cloud.StoreImageProblem as exc:
+        # the image is not the one the site's last run saved (or it is missing, or cut short): nothing is moved, and the
+        # check's own sentence says what to do (hosts-3)
+        print(exc)
+        return 1
     if store is None:
         print("The state folder has no store yet: nothing to move. Start this server with an empty store instead.")
         return 1
@@ -955,7 +990,16 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
     if st is None or not os.path.exists(args.db):
         print("Needs the Dropbox settings and this server's store.")
         return 1
-    store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True))
+    try:
+        # the image as it is, even one the site's last run did not save: the comparison is still worth reading, and the
+        # mismatch is said first (hosts-3)
+        store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True), check=False)
+    except cloud.StoreImageProblem as exc:      # an image that cannot be read at all (cut short)
+        print(exc)
+        return 1
+    problem = details.get("image_problem")
+    if problem:
+        print(f"Not a proof of the move: {problem}")
     if store is None:
         print("The state folder has no store.")
         return 1
@@ -1004,9 +1048,13 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
     print(f"{'table'.ljust(width)}  {'Vercel':>9}  {'server':>9}")
     for t, a, b, verdict in rows:
         print(f"{t.ljust(width)}  {str(a):>9}  {str(b):>9}  {verdict}")
-    print(json.dumps({"different": bad, "vercel": _baseline(theirs), "server": _baseline(mine), "waiting": details.get("waiting") or []}, indent=1))
+    print(json.dumps({"different": bad, "vercel": _baseline(theirs), "server": _baseline(mine), "waiting": details.get("waiting") or [],
+                      **({"image_problem": problem} if problem else {})}, indent=1))
     mine.close()
     store.close()
+    if problem:
+        print(f"Not a proof of the move: {problem}")
+        return 1
     return 0 if not bad else 2
 
 

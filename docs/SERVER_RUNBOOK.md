@@ -150,6 +150,11 @@ now" on the Vercel site, let the run finish, and run the move again. To move wit
 are listed in the answer as `journal_left_behind`, to be done again by hand on the server. `compare-cloud` counts such
 entries as a difference ("journal entries still waiting").
 
+A store image the Vercel site's last run did not save (an older copy put back, so the site's runs stop) is not moved:
+`import-cloud` says so in one sentence and exits 1. `compare-cloud` still compares that image and prints the same
+sentence first and last ("Not a proof of the move"), with exit code 1. Restore the newest version of the image from
+Dropbox's version history, or accept the one in place (`python -m remitwatch.cli accept-store --state-folder`), then move.
+
 Then open `https://<SITE_ADDRESS>/setup` (every required line green) and compare the site with Vercel page by page.
 Until the cutover no site faxes: the server has `REMITWATCH_FAX_SENDER=none`, and the Vercel site sends nothing unless
 it has `REMITWATCH_FAX_SENDER=serverless`. That keeps the record of every fax in one store: the cutover's forced move
@@ -226,7 +231,7 @@ cycle is never held up for hours.
 - A cycle every `REMITWATCH_SYNC_INTERVAL_MINUTES` (at least once a day even when unset), 45 seconds after the app
   starts, whenever Dropbox calls the webhook, when someone presses Sync now or uploads a file, and when someone opens the
   dashboard after 3 hours without one. A cycle is: new Dropbox files (and TriZetto's, if set up, and what was uploaded by
-  hand), ingest, analysis when anything is new,
+  hand), ingest, analysis when anything is new or an analysis that stopped before it finished is still owed,
   alerts and their emails, the weekly report when due (saved in `/data/reports`), then the fax line (the state of faxes
   sent, busy lines tried again, payers' faxes read, follow-ups that are due) and the day's backup. This is what Vercel's
   two daily calls (`/api/cron/cycle` at 10:17 UTC and `/api/cron/faxes` at 15:43 UTC) do there. No cron or outside
@@ -396,7 +401,8 @@ To update at once instead of waiting for the night: `sudo systemctl start remitw
   runs) to `/data/backups/remitwatch-<date>-<time>.sqlite.gz`, owner-only, and keeps the newest 7. These undo a mistake or
   a damaged file. Each copy is written under a `.part` name and renamed only when it is whole; what a copy cut short (a
   deploy, a reboot) left behind is removed by the next one. One copy is made at a time, under a lock the deploy waits
-  for.
+  for. A cycle that stops (an analysis that fails until its fault is fixed) still makes the day's copy; the fax run
+  waits for a cycle that finishes, so no follow-up goes out from lists an analysis could not bring up to date.
 - They sit on the same disk as the store, so the disk itself must be backed up too: snapshot the server's EBS volume
   daily (AWS Data Lifecycle Manager, keep 14; `deploy/aws/remitwatch.yaml` sets this up when the server is made from
   it). The volume's files are at `docker volume inspect remitwatch_remitwatch-data` (Mountpoint) on the host.

@@ -45,6 +45,53 @@ CHILD_TIMEOUT_SECONDS = 170 * 60        # a cycle the scheduler started is stopp
 LOCK_STALE_MINUTES = 180                # a lock with no heartbeat for this long was left behind by a crash; longer than the child timeout
 STOP_WAIT_SECONDS = 3                   # when the server stops, the time its running cycle gets to end before it is killed
 BOOT_MARGIN_SECONDS = 120               # a lock last refreshed this long before the machine started was left by the restart
+# An analysis is owed: input may have been read that no saved analysis has seen. The serverless cycle keeps the same mark
+# (remitwatch.cloud) and the archive waits while it is set (archive.META_DETECT_PENDING); one key, one meaning, on both
+# hosts, so a store moved from the Vercel site with its analysis still owed is analysed by the server's first cycle.
+DETECT_PENDING = "cloud:detect_pending"
+
+
+def analysis_owed(conn) -> bool:
+    """Whether the store says an analysis is owed (DETECT_PENDING): a cycle read, or may have read, input and stopped
+    before an analysis saved after it."""
+    try:
+        return conn.execute("SELECT 1 FROM meta WHERE key=?", (DETECT_PENDING,)).fetchone() is not None
+    except sqlite3.Error:       # no meta table yet: a new store, which the first cycle analyses anyway
+        return False
+
+
+def owe_analysis(conn) -> None:
+    """Say an analysis is owed, committed at once: written before a reader may commit anything, so no input can be in the
+    store without it (hosts-1: a cycle whose analysis stopped left its remittances unanalysed until another file came)."""
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, '1')", (DETECT_PENDING,))
+    conn.commit()
+
+
+def analysis_paid(conn) -> None:
+    """The owed analysis is done (one saved after everything read), or this cycle read nothing that needs one."""
+    conn.execute("DELETE FROM meta WHERE key=?", (DETECT_PENDING,))
+    conn.commit()
+
+
+# What the store has read: the facts each reader adds (remittances, claim files, EMA's export rows, EMA's reports applied),
+# never the bookkeeping of a file tried again and not read. A reader whose counts are lost (one that read files and then
+# failed before it returned them, as a TriZetto pull can) still moves this, so the cycle still owes the analysis.
+_INPUT_SQL = ("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM transactions",
+              "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM claims_837",
+              "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM ema_rows",
+              "SELECT COUNT(*), MAX(applied_at) FROM ema_report_files WHERE applied_at IS NOT NULL")
+
+
+def input_position(conn) -> list:
+    """Where each reader has got to (_INPUT_SQL); None for a table the store does not have yet."""
+    out = []
+    for sql in _INPUT_SQL:
+        try:
+            out.append(list(conn.execute(sql).fetchone()))
+        except sqlite3.Error:       # a store without the table: nothing of that kind read
+            out.append(None)
+    return out
 
 
 def _now() -> str:
@@ -278,6 +325,124 @@ def _meta_json_or_none(conn, key: str):
         return None
 
 
+# (F3a's need) The 837 files whose claims were read before the 837 reader's current version (x12_837.READ_VERSION) are
+# read again once on each host, so those claims get what the reader takes in now: the patient, the payer's place on the
+# claim, the other payer and what it answered. A file whose bytes this host cannot find is listed here (with the reader's
+# version and the host), counted in the cycle's summary and not looked for again until a release changes the reader.
+REREAD_837_META = "x837:reread"
+
+
+def reread_memory(conn, host: str) -> set[str]:
+    """The 837 files (by sha256) this host looked for to read again and could not find, for the reader's version."""
+    from . import x12_837
+    raw = _meta_json_or_none(conn, REREAD_837_META)
+    if not isinstance(raw, dict) or raw.get("version") != x12_837.READ_VERSION or raw.get("host") != host:
+        return set()
+    return {str(s) for s in raw.get("missing") or []}
+
+
+def remember_reread(conn, host: str, missing: set[str]) -> None:
+    """Keep (or clear) the list of the 837 files this host could not find to read again; committed."""
+    from . import x12_837
+    if missing:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (REREAD_837_META, json.dumps(
+            {"version": x12_837.READ_VERSION, "host": host, "missing": sorted(missing)})))
+    else:
+        conn.execute("DELETE FROM meta WHERE key=?", (REREAD_837_META,))
+    conn.commit()
+
+
+def reread_stuck(conn, read: set[str]) -> set[str]:
+    """Of the 837 files just read again, those whose claims still show an older reading: they are not the claims the file
+    makes now (their keys changed), so reading it again changes nothing. One look at the table for all of them."""
+    from . import x12_837
+    return set(read) & set(x12_837.files_to_reread(conn)) if read else set()
+
+
+def _same_bytes(path: str | None, sha: str) -> bool:
+    from .dropbox_sync import file_sha256
+    try:
+        return bool(path) and os.path.isfile(path) and file_sha256(path) == sha
+    except OSError:
+        return False
+
+
+def reread_837(store, *, data_dir: str | None = None, deadline: float | None = None, log=print) -> dict:
+    """(F3a's need) Read again, once, each 837 file whose claims were read before x12_837.READ_VERSION, from the copy this
+    server read it from (the path its files row names) or, when that copy has moved, from a file of the same name and the
+    same bytes under the Dropbox mirror (REMITWATCH_DATA_DIR) or the kept uploads (uploads.upload_dir). Only bytes whose
+    SHA-256 is the file's are read; a file not found is counted ('missing') and kept as it was read, never guessed at.
+    Returns {'listed', 'read', 'claims' (claims updated), 'missing', 'remaining' (left for the next cycle by the
+    deadline)}; {} with nothing to do."""
+    from . import x12_837
+    conn = store.conn
+    todo = x12_837.files_to_reread(conn)
+    if not todo:
+        if _meta_get(conn, REREAD_837_META) is not None:
+            remember_reread(conn, "server", set())
+        return {}
+    known = reread_memory(conn, "server")
+    listed = set(todo)
+    missing = {s for s in known if s in listed}
+    todo = [s for s in todo if s not in missing]
+    out = {"listed": len(listed), "read": 0, "claims": 0, "missing": len(missing), "remaining": 0}
+    if not todo:
+        return out
+    roots = [data_dir or os.environ.get("REMITWATCH_DATA_DIR", "data/dropbox")]
+    if getattr(store, "db_path", None) and store.db_path != ":memory:":
+        from .uploads import upload_dir
+        roots.append(upload_dir(store.db_path))
+    rows: dict[str, tuple] = {}
+    for i in range(0, len(todo), 500):
+        part = todo[i:i + 500]
+        for sha, path, name, size in conn.execute(f"SELECT sha256, source_path, source_name, size FROM files WHERE sha256 IN "
+                                                  f"({','.join('?' * len(part))})", part):
+            rows[sha] = (path, name or (os.path.basename(path) if path else None), size)
+    by_name: dict[str, list[str]] | None = None      # the data folder's files by name, listed once, when a copy moved
+    read: set[str] = set()
+    for n, sha in enumerate(todo):
+        if deadline is not None and time.time() > deadline:
+            out["remaining"] = len(todo) - n
+            break
+        path, name, size = rows.get(sha, (None, None, None))
+        found = path if _same_bytes(path, sha) else None
+        if found is None and name:
+            if by_name is None:
+                by_name = {}
+                for root in roots:
+                    for dp, _dirs, files in os.walk(root):
+                        for f in files:
+                            by_name.setdefault(f.lower(), []).append(os.path.join(dp, f))
+            for p in by_name.get(name.lower(), []):
+                try:
+                    if size is not None and os.path.getsize(p) != size:
+                        continue
+                except OSError:
+                    continue
+                if _same_bytes(p, sha):
+                    found = p
+                    break
+        if found is None:
+            missing.add(sha)
+            continue
+        with open(found, "rb") as fh:
+            data = fh.read()
+        r = x12_837.reread_837_bytes(conn, data)
+        read.add(sha)
+        out["read"] += 1
+        out["claims"] += int(r.get("updated") or 0)
+        if out["read"] % 250 == 0:
+            log(f"  837 files read again: {out['read']} of {len(todo)}")     # (the cycle's log also proves it is alive)
+    missing |= reread_stuck(conn, read)
+    out["missing"] = len(missing)
+    remember_reread(conn, "server", missing)
+    if out["read"] or missing - known:
+        log(f"  837 files read again with the current reader: {out['read']} ({out['claims']} claims updated)"
+            + (f"; {len(missing)} not found on this server, kept as they were read" if missing else "")
+            + (f"; {out['remaining']} left for the next cycle" if out["remaining"] else ""))
+    return out
+
+
 def reread_waiting(store, *, ledger=None, data_dir: str | None = None, log=print) -> dict:
     """Read again what the report catalog keeps waiting (the switch did not read it, Production waited for the ledger, a
     misread export was queued by the clean-up) and the held files a person chose to apply, from their kept copy on this
@@ -483,6 +648,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
     # (H) the run's manifest and event log, the self-repair registry; each progress line is an event (scrubbed), and the
     # console still sees it
     rl = runlog.start_run("cycle", trigger=out["trigger"], db_path=db_path, conn=store.conn, host="server")
+    out["run_id"] = rl.run_id           # the self-regulation knows each cycle by it (selfcheck.plan_next)
     reg = repair.registry_for(rl, conn=store.conn)
     if rl.manifest["sections"].get("killed_runs"):
         repair.note_killed_runs(reg, rl.manifest["sections"]["killed_runs"])
@@ -513,6 +679,15 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             lg_box.append(ema_ledger.open_for_store(db_path))
         return lg_box[0]
     try:
+        # (hosts-1) an analysis is owed from before this cycle may read anything until one is saved after it, or until the
+        # cycle has seen that nothing it read needs one: a cycle stopped in between (a code bug, the memory limit, the
+        # container stopped by a deploy) leaves the mark, and the next cycle analyses what was read, new files or not
+        owed = analysis_owed(store.conn)
+        if owed:
+            out["analysis_owed"] = True
+        else:
+            owe_analysis(store.conn)
+        read_from = input_position(store.conn)
         # uploads cut off part-way (their pieces and records, after a day) go at every cycle, not only when someone opens
         # the Upload page: a cut-off report can hold patient data and up to the upload cap
         swept = _ema_step(out, "uploads_sweep", sweep_uploads, db_path)
@@ -612,10 +787,20 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         rr = _ema_step(out, "ema_waiting", reread_waiting, store, ledger=ledger, log=beat_log) or {}
         if rr.get("read") or rr.get("gone"):
             out["ema_waiting"] = rr
+        # (F3a's need) the 837 files read before the reader's current version, read again once (after the new files,
+        # which the current reader reads): a claim that changed is analysed in this cycle
+        heartbeat(store.conn, token)
+        r837 = _ema_step(out, "reread_837", reread_837, store, deadline=time.time() + 1200, log=beat_log) or {}
+        if r837:
+            out["reread_837"] = r837
         out["ingest"] = ingested
         sc.mark(out, "ingest", t_cycle)
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
-        changed = changed or bool(up_in.get("changed")) or bool(rr.get("applied"))
+        changed = changed or bool(up_in.get("changed")) or bool(rr.get("applied")) or bool(r837.get("claims"))
+        if not changed and input_position(store.conn) != read_from:
+            # a reader stored input and its counts were lost (it failed after reading): the store says it read something
+            changed = True
+            out["read_unreported"] = True
         # a release that changed which copies of a remittance stand decides them again once, new files or not, and the
         # analysis follows
         if store.recheck_supersession():
@@ -672,8 +857,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             people = people_changed_since_detection(store.conn)
             if people:
                 out["people_changed"] = True
+        analyse = changed or force_detect or not has_run or rules_changed or people or owed
+        if not analyse:
+            analysis_paid(store.conn)   # nothing this cycle read needs an analysis, and no earlier one was owed
         store.close()
-        if changed or force_detect or not has_run or rules_changed or people:
+        if analyse:
             t_det = time.time()
             with rl.step("detect"):     # the detection run and the run log share one id
                 summary = run_detection(db_path, run_id=rl.run_id, skip_activity="activity" in plan["skip"])
@@ -681,6 +869,8 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             sc.mark(out, "detect", t_det)
         store = Store(db_path)
         reg.conn = store.conn           # the registry writes to the store as it is now (the first connection is closed)
+        if analyse:
+            analysis_paid(store.conn)   # the analysis saved after everything this cycle and the stopped ones read
         heartbeat(store.conn, token)
         if "detect" in out and store.conn.execute("SELECT 1 FROM meta WHERE key=?", (ema_ledger.META_KEEP_DIRTY,)).fetchone() \
                 and (lg_box or os.path.exists(ema_ledger.ledger_path(db_path))):

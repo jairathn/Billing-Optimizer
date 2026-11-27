@@ -325,10 +325,12 @@ Code: the runs in this bundle ran commit {commit} (rules {rules}). Check it out:
 # --------------------------------------------------------------------------------------------------------- the bundle
 def build_bundle(*, conn: sqlite3.Connection | None = None, db_path: str | None = None, state: Any = None, logs: Any = None,
                  days: int = 7, run_id: str | None = None, now: datetime | None = None, out_path: str | None = None,
-                 known: list[str] | None = None) -> dict:
+                 known: list[str] | None = None, notes: list[str] | None = None) -> dict:
     """Make the bundle. Sources: conn (a store or the dashboard's copy) or db_path (opened read-only), and the logs
     (state: a state folder; logs: a logs folder or a sink; by default the store's logs folder). Returns {"path" or
-    "bytes", "parts", "runs", "scan"}. known: words that must not appear anywhere in the bundle (tests plant them)."""
+    "bytes", "parts", "runs", "scan"}. known: words that must not appear anywhere in the bundle (tests plant them).
+    notes: the tool's own sentences to read first (an image the last run did not save, hosts-3): RemitWatch's own words,
+    never a value read from a file; they head README.md and are in bundle.json."""
     t = now or runlog.utcnow()
     own_conn = None
     if conn is None and db_path:
@@ -391,7 +393,11 @@ def build_bundle(*, conn: sqlite3.Connection | None = None, db_path: str | None 
                 "runs": [{"run_id": m.get("run_id"), "outcome": m.get("outcome"), "started_at": m.get("started_at")} for m in manifests],
                 "versions": {"bundle_built_with": here, "last_run": latest.get("versions")}, "code": code,
                 "parts": sorted(parts) + ["README.md", "REPRODUCE.md", "bundle.json"]}
-        texts = {"README.md": README.format(built=info["built"], source=info["source"], kept=ERRORS_KEPT),
+        if notes:
+            info["notes"] = list(notes)
+        first = ("## Read this first\n\n" + "".join(f"- {n}\n" for n in notes) + "\n") if notes else ""
+        texts = {"README.md": README.format(built=info["built"], source=info["source"], kept=ERRORS_KEPT).replace(
+                     "\n\nRead it in this order:", "\n\n" + first + "Read it in this order:", 1),
                  "REPRODUCE.md": REPRODUCE.format(commit=code.get("commit") or "<the commit on /api/health>",
                                                   rules=code.get("rules_version") or "unknown")}
         # the second pass: anything a part still holds that the scrubber would mask is masked now, and counted (nothing
@@ -506,21 +512,36 @@ def main(argv: list[str] | None = None) -> int:
     state = None
     db_path = None
     conn = None
+    notes: list[str] = []
     if a.state_dir:
         from . import cloud
         from .state import LocalState
         state = LocalState(a.state_dir)
         if state.meta(cloud.RAW):
-            store, _existed = cloud.load_raw(state)
-            conn = store.conn
+            try:
+                store, _existed = cloud.load_raw(state)
+            except cloud.StoreImageProblem as exc:
+                # the runs stopped over this image: the bundle is needed most now, so it is made from the image as it is,
+                # and says first that it is not the one the last run saved (hosts-3)
+                notes.append(str(exc))
+                try:
+                    store, _existed = cloud.load_raw(state, check=False)
+                except cloud.StoreImageProblem as exc2:        # cut short: the bundle is made from the logs alone
+                    notes.append(str(exc2))
+                    store = None
+            conn = store.conn if store is not None else None
+        elif cloud._saved_before(state):
+            notes.append(cloud.IMAGE_MISSING)
     elif os.path.exists(a.db):
         db_path = a.db
     else:
         print(f"No store at {a.db}: give --db or --state-dir.", file=sys.stderr)
         return 2
     out_path = a.out or default_out(db_path, a.state_dir)
-    res = build_bundle(conn=conn, db_path=db_path, state=state, logs=a.logs, days=a.days, run_id=a.run, out_path=out_path)
-    print(json.dumps({"bundle": res.get("path"), "runs": len(res["runs"]), "size": res["size"], "scan": res["scan"]}, indent=1))
+    res = build_bundle(conn=conn, db_path=db_path, state=state, logs=a.logs, days=a.days, run_id=a.run, out_path=out_path,
+                       notes=notes)
+    print(json.dumps({"bundle": res.get("path"), "runs": len(res["runs"]), "size": res["size"], "scan": res["scan"],
+                      **({"notes": notes} if notes else {})}, indent=1))
     return 0
 
 

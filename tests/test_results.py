@@ -887,16 +887,15 @@ def _scenario(s):
 
 def _strip(d):
     d = json.loads(json.dumps(d))
-    for k in ("at", "seconds", "rev", "detect_run"):
+    for k in ("seconds", "rev", "detect_run"):
         d.pop(k, None)
-    # each weekly snapshot carries the second it was taken: two runs a second apart are the same figures
-    for snap in d.get("snapshots") or []:
-        if isinstance(snap, dict):
-            snap.pop("at", None)
     return d
 
 
-def test_the_server_store_and_the_compact_serverless_store_give_the_same_figures(tmp_path):
+def test_the_server_store_and_the_compact_serverless_store_give_the_same_figures(tmp_path, monkeypatch):
+    # every moment the figures stamp (the run's `at`, the current week's point, a frozen week's frozen_at) is the same
+    # moment on both stores: the runs a second apart under load gave two stamps, and the comparison failed now and then
+    monkeypatch.setattr(results, "_now", lambda: "2026-04-30T12:00:00+00:00")
     a = new_store(str(tmp_path / "a.sqlite"))
     actions.ensure_fax_tables(a.conn)
     a = _scenario(a)

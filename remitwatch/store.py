@@ -339,6 +339,10 @@ def accept_store(db_path: str) -> str:
 # changes the rule decides every store again once (Store.recheck_supersession), whether or not a new file arrives.
 SUPERSEDE_RULE = "2"            # 2: only versions of one remittance compete; a complete, balanced one always stands
 SUPERSEDE_META = "supersede:rule"
+# The remittances the last decision saw ([count, newest rowid] of transactions, written with its flags): a remittance read
+# after it was never decided (a run stopped between reading it and deciding, hosts-2), so the next recheck decides again.
+# Transactions are never deleted or replaced (INSERT OR IGNORE; the archive keeps them), so any new one moves this.
+SUPERSEDE_SEEN = "supersede:seen"
 # versions of one remittance that differ (both counted), and broken copies holding claims no standing version holds (not
 # counted, kind "lost"): shown on the Data tab's checks
 DIFFER_META = "supersede:differ"
@@ -707,6 +711,7 @@ class Store:
         does a hidden broken copy that holds claims no standing version holds (_lost_entry). Returns how many
         transactions are hidden."""
         c = self.conn
+        seen = self._supersede_position()       # before the read below: what this decision covers
         rows = c.execute("""
             SELECT t.transaction_key, COALESCE(t.trace_payer_id, t.payer_id, t.payer_name) AS pid, t.trace_number, t.payment_date,
                    t.isa_date, t.isa_time, f.mtime, t.content_fingerprint, t.balanced, t.payment_amount_cents, t.payer_name
@@ -741,6 +746,7 @@ class Store:
         c.execute("UPDATE transactions SET superseded=0")
         c.executemany("UPDATE transactions SET superseded=1 WHERE transaction_key=?", [(k,) for k in sorted(hidden)])
         c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (SUPERSEDE_META, SUPERSEDE_RULE))
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (SUPERSEDE_SEEN, json.dumps(seen)))
         if differ:
             c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (DIFFER_META, json.dumps(differ[:50], default=str)))
         else:
@@ -748,11 +754,22 @@ class Store:
         c.commit()
         return len(hidden)
 
+    def _supersede_position(self) -> list:
+        """[count, newest rowid] of the transactions: what a supersession decision covers (SUPERSEDE_SEEN)."""
+        n, top = self.conn.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM transactions").fetchone()
+        return [int(n), int(top)]
+
     def recheck_supersession(self) -> bool:
-        """Decide again which copies of a remittance stand when the rule that decided them has changed since (a release), new
-        files or not: the next run after a deploy puts right what the old rule hid. True when a transaction's flag changed."""
+        """Decide again which copies of a remittance stand when the rule that decided them has changed since (a release), or
+        when a remittance was read after the last decision (a run stopped between reading it and deciding, hosts-2: both
+        versions of one remittance would be counted until the next file came), new files or not. True when a
+        transaction's flag changed."""
         r = self.conn.execute("SELECT value FROM meta WHERE key=?", (SUPERSEDE_META,)).fetchone()
-        if r and r[0] == SUPERSEDE_RULE:
+        try:
+            seen = json.loads((self.conn.execute("SELECT value FROM meta WHERE key=?", (SUPERSEDE_SEEN,)).fetchone() or ["null"])[0])
+        except (TypeError, ValueError):     # a record that does not read: decide again
+            seen = None
+        if r and r[0] == SUPERSEDE_RULE and seen == self._supersede_position():
             return False
         flags = "SELECT transaction_key FROM transactions WHERE COALESCE(superseded, 0) = 1"
         before = {k for (k,) in self.conn.execute(flags)}
