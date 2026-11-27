@@ -1606,12 +1606,17 @@ def zero_answer_sql(y: str = "y") -> str:
     line that day. A bare $0 row (a batch check that lists a claim it does not pay: no reason, no allowed amount, no
     adjustment, nothing put on the patient) answers nothing: the claim may be paid weeks later on another check, or never.
     EMA posts a payment's reasons and adjustments as rows of their own, without the check number, on the same day, and
-    repeats the line's allowed amount on each of its rows: an allowed amount says the payer adjudicated the line. A store
-    whose summary keeps the routine reasons (CO-45, the patient's share) of only some lines reads a $0 answer whose only
-    proof is one of those as bare until it holds it: the claim stays listed, never dropped."""
+    repeats the line's allowed amount on each of its rows: an allowed amount says the payer adjudicated the line. A $0 row
+    on a check of the payer that paid another line of the same EMA claim (the same check number and payer) is its answer
+    too: the payer adjudicated the claim on that check and paid nothing on this line (a second payer that pays the
+    procedures' coinsurance and not the visit's copay; review fx-ema-r1-4). A store whose summary keeps the routine
+    reasons (CO-45, the patient's share) of only some lines reads a $0 answer whose only proof is one of those as bare
+    until it holds it: the claim stays listed, never dropped."""
     return (f"(COALESCE({y}.check_no, '') <> '' AND COALESCE({y}.ins_paid, 0) = 0 AND (COALESCE({y}.allowed, 0) <> 0 "
             f"OR EXISTS (SELECT 1 FROM ema_line_reasons zr WHERE zr.link = {y}.link AND zr.svc = {y}.svc AND zr.cpt = {y}.cpt "
-            f"AND {_REASON_SQL} AND (zr.first_posted = {y}.posted OR zr.last_posted = {y}.posted))))")
+            f"AND {_REASON_SQL} AND (zr.first_posted = {y}.posted OR zr.last_posted = {y}.posted)) "
+            f"OR EXISTS (SELECT 1 FROM ema_line_payments zck WHERE zck.link = {y}.link AND zck.check_no = {y}.check_no "
+            f"AND zck.payer = {y}.payer AND COALESCE(zck.ins_paid, 0) > 0)))")
 
 
 def answer_row_sql(y: str = "y") -> str:
