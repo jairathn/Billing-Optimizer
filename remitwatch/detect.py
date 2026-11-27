@@ -5598,7 +5598,8 @@ class Detector:
             return {payer_company(normalize_payer(payer)[0]), payer_company(self._ema_group(payer))} - {""}
         return ({payer_company(grp)} - {""}) if grp else set()
 
-    def _patient_keys(self, cds: list[dict], answers: dict, member_names: bool = True, persons: dict | None = None) -> dict[str, set]:
+    def _patient_keys(self, cds: list[dict], answers: dict, member_names: bool = True, persons: dict | None = None,
+                      ema_names: dict | None = None) -> dict[str, set]:
         """EMA's keyed names for each claim's patient ({claim id: {name keys}}), from everything that names the patient: the
         patient's names on the remittances for the claim's own bill (any payer's answer to it); the member ids the bill's
         837s name, when the remittances give a member id one name only (a subscriber's id also covers the family); the EMA
@@ -5606,7 +5607,8 @@ class Detector:
         patient (cd['ema_patients']) that a claim id pair or the bill map ties to an EMA claim. member_names False leaves
         the member ids' names out (only the claim's own evidence names its patient: a dependent's 837 carries the
         subscriber's id). persons, when given, is filled with {claim id: {keyed name and birth date}} from the same EMA
-        claims (ema_lines.person)."""
+        claims (ema_lines.person); ema_names, when given, with {claim id: {keyed names}} from those EMA claims alone (EMA's
+        own spelling of the patient's name: a remittance may spell it otherwise, with a middle name or without)."""
         c = self.conn
         out: dict[str, set] = defaultdict(set)
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -5708,6 +5710,10 @@ class Detector:
                     mine |= link_of_claim.get(x) or set()
             for lk2 in mine:
                 got |= keys_of_link.get(lk2) or set()
+            if ema_names is not None:
+                en = {nk for lk2 in mine for nk in keys_of_link.get(lk2) or ()}
+                if en:
+                    ema_names[cd["pcn"]] = en
             if persons is not None:
                 ps = {p for lk2 in mine for p in person_of_link.get(lk2) or ()}
                 if ps:
@@ -7341,23 +7347,30 @@ class Detector:
             if (bill and bill not in mine) or (claim and bill_of(claim) not in mine) or (paired.get(lk, set()) - mine):
                 continue                    # the link map or the A/R ties it to another bill
             out[cid].append(lk)
-        named = self._twins_by_name(out, info, answers) if out else set()
+        named = self._twins_by_name(out, info, answers, groups) if out else set()
         return {k: (sorted(v), info[k]["_first"], info[k]["_rows"], k in named) for k, v in out.items()}
 
-    def _twins_by_name(self, out: dict, info: dict, answers: dict) -> set[str]:
+    def _twins_by_name(self, out: dict, info: dict, answers: dict, groups: dict | None = None) -> set[str]:
         """The patient's name and the send-day twins (the residual of fix7b; fx-exports-r1-3, r1-5): out {claim id: [EMA
         claim numbers]} is narrowed in place, and the claims whose twin the name chose are returned (named: their twin is
-        their EMA claim whatever else went out that day). Who the claim's patient is (_who):
-        - named by the claim's own evidence (its bill's remittances, the EMA claim a bridge found, EMA's patient): a twin
-          whose EMA claim names someone else is not the claim's; of several twins, the one that names the patient is the
-          claim's (named), one to one: two claims that name the same twin both fall back to the twins rule, and a twin a
-          name gave one claim is no other claim's;
-        - named only by the one name the remittances give its member id (a subscriber's id covers the family, and a
-          dependent never remitted takes that name): the name never chooses a twin, but when every twin names someone else
-          none of them is the claim's, unless such a twin's patient is billed under the claim's member id elsewhere (their
-          bills' 837s carry it: a dependent);
-        - named by nothing: the twins rule alone (_ema_claims_found)."""
+        their EMA claim whatever else went out that day). Who the claim's patient is (_who), and whose each twin is:
+        - the claim's: its EMA claim names the patient the claim's own evidence names (its bill's remittances, the EMA
+          claim a bridge found, EMA's patient), or its patient's other bills on file are the claim's (_twin_kin: one of
+          them is the claim's own bill, their 837s carry the claim's member id, or their remittances name the claim's
+          patient, own or by its member id's one remitted name: remittances compared with remittances);
+        - another patient's: EMA's own name for the claim's patient (EMA's patient, a bridged EMA claim) names someone else,
+          or its patient's other bills on file carry member ids and remitted names, none of them the claim's;
+        - otherwise not known. A remittance and EMA can spell one person's name otherwise (a middle name, a nickname), so
+          a twin whose EMA name differs from a remitted name is set aside only when another EMA claim of the claim's
+          content that no bill holds may be the claim's own (_spare_ema_claims); else it is the only place the claim's EMA
+          claim can be (on the real data: six claims EMA shows paid were listed when such twins were set aside).
+        A twin of another patient is never the claim's. Of several twins, the one the claim's own evidence names is the
+        claim's (named), one to one: two claims that name the same twin both fall back to the twins rule, and a twin a
+        name gave one claim is no other claim's. A member id's one remitted name never chooses (a subscriber's id covers
+        the family, and a dependent never remitted takes that name): it only keeps a twin. Named by nothing: the twins
+        rule alone (_ema_claims_found)."""
         c = self.conn
+        groups = groups or {}
         who = self._who([info[cid] for cid in sorted(out)], answers)
         lks = sorted({lk for v in out.values() for lk in v})
         nk_of: dict[int, set] = defaultdict(set)
@@ -7366,27 +7379,45 @@ class Detector:
             for lk, nk in c.execute(f"""SELECT DISTINCT link, name_key FROM ema_lines WHERE link IN ({','.join('?' * len(part))})
                                         AND name_key IS NOT NULL""", part):
                 nk_of[lk].add(nk)
+        kin = self._twin_kin(lks) if any((who.get(cid) or {}).get("names") or (who.get(cid) or {}).get("weak") for cid in out) else {}
         named: set[str] = set()
         before: dict[str, list] = {}
-        weak: dict[str, set] = {}            # claim id -> its member ids, for the twins only a member's name rejects
+        loose: dict[str, tuple] = {}          # claim id -> (its twins, those set aside when another EMA claim may be its own)
         for cid in sorted(out):
             w = who.get(cid) or {}
-            own = w.get("names") or set()
-            if own:
-                keep = [lk for lk in out[cid] if not nk_of.get(lk) or nk_of[lk] & own]
-                mine = [lk for lk in keep if nk_of.get(lk, set()) & own]
-                if len(out[cid]) > 1 and len(mine) == 1:
-                    before[cid] = keep
-                    keep = mine
-                    named.add(cid)
-                out[cid] = keep
-            elif w.get("weak") and all(nk_of.get(lk) and not (nk_of[lk] & w["weak"]) for lk in out[cid]):
-                weak[cid] = set(w.get("members") or ())
-        if weak:
-            kin = self._billed_under(sorted({lk for cid in weak for lk in out[cid]}), nk_of)
-            for cid, members in weak.items():
-                if not any(kin.get(lk, set()) & members for lk in out[cid]):
-                    out[cid] = []           # every twin is another person's: none is this claim's
+            own, own_ema, weak = w.get("names") or set(), w.get("names_ema") or set(), w.get("weak") or set()
+            if not (own or weak):
+                continue                    # nothing names the patient: the twins rule alone
+            b = info[cid].get("b") or bill_of(cid)
+            members = w.get("members") or set()
+            twins, keep, differs = list(out[cid]), [], []
+            for lk in twins:
+                nks, k = nk_of.get(lk) or set(), kin.get(lk) or {}
+                if own_ema and nks and not nks & own_ema:
+                    continue                # EMA's own name for the patient is another chart's: another patient's
+                if nks & own or b in k.get("bills", ()) or k.get("members", set()) & members or k.get("names", set()) & (own | weak):
+                    keep.append(lk)         # the claim's patient's
+                elif k.get("members") or k.get("names"):
+                    continue                # its patient's bills on file carry other member ids and names: another patient's
+                else:
+                    keep.append(lk)
+                    if nks and not nks & (own | weak):
+                        differs.append(lk)  # a name of its own, nothing else known
+            mine = [lk for lk in keep if (nk_of.get(lk) or set()) & own]
+            if len(twins) > 1 and len(mine) == 1:
+                before[cid] = keep
+                keep = mine
+                named.add(cid)
+            elif differs:
+                loose[cid] = (twins, differs)
+            out[cid] = keep
+        if loose:
+            taken = {a["link"] for a in answers.values() if a.get("link") is not None}
+            spare = self._spare_ema_claims({cid: (info[cid]["_rows"], groups.get(cid) or set(), set(t)) for cid, (t, _d) in loose.items()},
+                                           taken)
+            for cid, (_t, differs) in loose.items():
+                if spare.get(cid):
+                    out[cid] = [lk for lk in out[cid] if lk not in differs]
         # one to one: a twin two claims' names chose is neither's; a twin a name gave one claim is no other's
         uses = Counter(out[cid][0] for cid in named)
         for cid in sorted(named):
@@ -7401,27 +7432,46 @@ class Detector:
                 del out[cid]
         return named
 
-    def _billed_under(self, links: list[int], nk_of: dict) -> dict[int, set]:
-        """The member ids the patients of these EMA claims are billed under elsewhere: their other EMA claims (by keyed name)
-        that the A/R or the bill map ties to a bill, and the subscriber ids those bills' 837s carry. {EMA claim number:
-        {member ids}}."""
+    def _twin_kin(self, links: list[int]) -> dict[int, dict]:
+        """What the bills on file say of the patients of these EMA claims: each one's other EMA claims (by EMA's patient,
+        its name and birth date, else its keyed name) that a bill holds (EMA's lines, the bill map, the A/R's pairs), and
+        those bills' member ids (their 837s' subscriber ids) and patient names (their remittances' keyed names).
+        {EMA claim number: {'bills', 'members', 'names'}}."""
+        from . import ema_reports as er
         c = self.conn
-        out: dict[int, set] = defaultdict(set)
+        er.register_functions(c, create=False)          # the keyed name (rw_name_key) the remittances' names are read with
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        names = sorted({nk for lk in links for nk in nk_of.get(lk) or ()})
-        if not names or "claims_837" not in tables:
-            return out
-        others: dict[int, set] = defaultdict(set)       # an EMA claim of one of these names -> the names
-        for i in range(0, len(names), 500):
-            part = names[i:i + 500]
-            for lk, nk in c.execute(f"""SELECT DISTINCT link, name_key FROM ema_lines WHERE name_key IN ({','.join('?' * len(part))})""",
-                                    part):
-                others[lk].add(nk)
+        who_of: dict[int, tuple] = {}                    # EMA claim -> ('p', persons) or ('n', name keys)
+        for i in range(0, len(links), 500):
+            part = links[i:i + 500]
+            got: dict[int, list] = defaultdict(lambda: [set(), set()])
+            for lk, person, nk in c.execute(f"""SELECT DISTINCT link, person, name_key FROM ema_lines
+                                                WHERE link IN ({','.join('?' * len(part))})""", part):
+                if person is not None:
+                    got[lk][0].add(person)
+                if nk is not None:
+                    got[lk][1].add(nk)
+            for lk, (ps, nks) in got.items():
+                if ps or nks:
+                    who_of[lk] = ("p", ps) if ps else ("n", nks)
+        others: dict[int, set] = defaultdict(set)        # EMA claim -> the patient's other EMA claims
+        for col, kind in (("person", "p"), ("name_key", "n")):
+            keys = sorted({k for t, ks in who_of.values() if t == kind for k in ks})
+            by_key: dict[int, set] = defaultdict(set)
+            for i in range(0, len(keys), 500):
+                part = keys[i:i + 500]
+                for lk, k in c.execute(f"SELECT DISTINCT link, {col} FROM ema_lines WHERE {col} IN ({','.join('?' * len(part))})", part):
+                    by_key[k].add(lk)
+            for lk, (t, ks) in who_of.items():
+                if t == kind:
+                    others[lk] |= {o for k in ks for o in by_key.get(k) or ()} - {lk}
+        olks = sorted({o for v in others.values() for o in v})
         bills_of: dict[int, set] = defaultdict(set)
-        olks = sorted(others)
         for i in range(0, len(olks), 500):
             part = olks[i:i + 500]
             q = ",".join("?" * len(part))
+            for lk, b in c.execute(f"SELECT DISTINCT link, bill FROM ema_lines WHERE link IN ({q}) AND bill IS NOT NULL", part):
+                bills_of[lk].add(b)
             for lk, cid in c.execute(f"SELECT link, claim_id FROM ema_claim_links WHERE link IN ({q}) AND claim_id IS NOT NULL", part):
                 bills_of[lk].add(bill_of(cid))
             if "ema_link_map" in tables:
@@ -7429,36 +7479,88 @@ class Detector:
                     bills_of[lk].add(b)
         bills = sorted({b for bs in bills_of.values() for b in bs if b})
         member_of: dict[str, set] = defaultdict(set)
+        names_of: dict[str, set] = defaultdict(set)
+        name_sql = """rw_name_key(cl.patient_last, cl.patient_first),
+                      CASE WHEN cl.corrected_patient_last IS NOT NULL OR cl.corrected_patient_first IS NOT NULL
+                           THEN rw_name_key(COALESCE(cl.corrected_patient_last, cl.patient_last),
+                                            COALESCE(cl.corrected_patient_first, cl.patient_first)) END"""
         for i in range(0, len(bills), 500):
-            c.execute("DROP TABLE IF EXISTS temp.d837_bu")
-            c.execute("CREATE TEMP TABLE d837_bu (bill TEXT PRIMARY KEY, hi TEXT)")
-            c.executemany("INSERT OR IGNORE INTO temp.d837_bu VALUES (?, ?)", [(b, b + "~") for b in bills[i:i + 500]])
-            for b, pcn, member in c.execute("""SELECT x.bill, c8.patient_control_number, c8.subscriber_id FROM temp.d837_bu x
-                                               JOIN claims_837 c8 ON c8.patient_control_number >= x.bill AND c8.patient_control_number < x.hi
-                                               WHERE c8.subscriber_id IS NOT NULL AND c8.subscriber_id <> ''"""):
+            c.execute("DROP TABLE IF EXISTS temp.d837_tk")
+            c.execute("CREATE TEMP TABLE d837_tk (bill TEXT PRIMARY KEY, hi TEXT)")
+            c.executemany("INSERT OR IGNORE INTO temp.d837_tk VALUES (?, ?)", [(b, b + "~") for b in bills[i:i + 500]])
+            if "claims_837" in tables:
+                for b, pcn, member in c.execute("""SELECT x.bill, c8.patient_control_number, c8.subscriber_id FROM temp.d837_tk x
+                                                   JOIN claims_837 c8 ON c8.patient_control_number >= x.bill AND c8.patient_control_number < x.hi
+                                                   WHERE c8.subscriber_id IS NOT NULL AND c8.subscriber_id <> ''"""):
+                    if bill_of(pcn) == b:
+                        member_of[b].add(member)
+            for b, pcn, nk, cnk in c.execute(f"""SELECT x.bill, cl.patient_control_number, {name_sql} FROM temp.d837_tk x
+                                                JOIN claims cl ON cl.patient_control_number >= x.bill AND cl.patient_control_number < x.hi"""):
                 if bill_of(pcn) == b:
-                    member_of[b].add(member)
-        c.execute("DROP TABLE IF EXISTS temp.d837_bu")
-        by_name: dict[int, set] = defaultdict(set)       # name key -> member ids
-        for lk, nks in others.items():
-            for b in bills_of.get(lk) or ():
-                for nk in nks:
-                    by_name[nk] |= member_of.get(b) or set()
+                    names_of[b] |= {nk, cnk} - {None}
+        c.execute("DROP TABLE IF EXISTS temp.d837_tk")
+        out: dict[int, dict] = {}
         for lk in links:
-            for nk in nk_of.get(lk) or ():
-                out[lk] |= by_name.get(nk) or set()
+            bs = {b for o in others.get(lk) or () for b in bills_of.get(o) or () if b}
+            out[lk] = {"bills": bs, "members": {m for b in bs for m in member_of.get(b) or ()},
+                       "names": {n for b in bs for n in names_of.get(b) or ()}}
         return out
+
+    def _spare_ema_claims(self, want: dict, taken: set) -> dict[str, int]:
+        """How many EMA claims, besides a claim's send-day twins, may be the claim's own: each holds exactly the claim's
+        charged lines (every line's day, code and charge, and no other charged line), under a payer group of the claim's,
+        and no bill holds it (EMA's lines, the bill map, the A/R's pairs) nor did a bridge give it to another claim. want
+        {claim id: (lines ((date, code, charge cents), ...), groups, twins)}. {claim id: number}."""
+        from . import ema_checks as ec
+        c = self.conn
+        rows, n_rows = [], {}
+        for cid, (lines, _g, _t) in want.items():
+            n_rows[cid] = len(lines)
+            rows += [(cid, svc, cpt, chg) for svc, cpt, chg in lines]
+        if not rows:
+            return {}
+        c.execute("DROP TABLE IF EXISTS temp.d837_sp")
+        c.execute("CREATE TEMP TABLE d837_sp (cid TEXT, svc TEXT, cpt TEXT, charge INTEGER)")
+        c.executemany("INSERT INTO temp.d837_sp VALUES (?, ?, ?, ?)", rows)
+        hits = c.execute("""SELECT x.cid, l.link, COUNT(*), MAX(l.payer_group), MAX(l.bill) FROM temp.d837_sp x
+                            JOIN ema_lines l ON l.svc = x.svc AND l.cpt = x.cpt AND l.charges = x.charge
+                            WHERE COALESCE(l.facility, 0) = 0 AND (COALESCE(l.flags, 0) & 17) = 0
+                            GROUP BY x.cid, l.link""").fetchall()
+        c.execute("DROP TABLE IF EXISTS temp.d837_sp")
+        hits = [h for h in hits if h[2] == n_rows[h[0]] and h[1] not in taken and h[1] not in want[h[0]][2] and not h[4]]
+        links = sorted({h[1] for h in hits})
+        per_link: dict[int, int] = {}
+        tied: set[int] = set()
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for i in range(0, len(links), 500):
+            part = links[i:i + 500]
+            q = ",".join("?" * len(part))
+            for lk, n in c.execute(f"SELECT link, COUNT(*) FROM ema_lines WHERE link IN ({q}) AND COALESCE(charges, 0) > 0 GROUP BY link", part):
+                per_link[lk] = n
+            tied |= {lk for (lk,) in c.execute(f"SELECT link FROM ema_claim_links WHERE link IN ({q}) AND claim_id IS NOT NULL", part)}
+            if "ema_link_map" in tables:
+                tied |= {lk for (lk,) in c.execute(f"SELECT link FROM ema_link_map WHERE link IN ({q}) AND COALESCE(conflict, 0) = 0", part)}
+        out: dict[str, int] = defaultdict(int)
+        for cid, lk, _n, grp, _bill in hits:
+            if per_link.get(lk) != n_rows[cid] or lk in tied:
+                continue
+            if grp and want[cid][1] and not any(ec._same_payer(grp, g) for g in want[cid][1]):
+                continue
+            out[cid] += 1
+        return dict(out)
 
     def _who(self, cds: list[dict], answers: dict) -> dict[str, dict]:
         """Who each claim's patient is, for this pass's rules that tell people apart (the send-day twins, the before-send
-        bridge, the one-visit rules): {claim id: {'names': keyed names from the claim's own evidence, 'persons': keyed name
-        and birth date, 'members': the member ids its 837s (or cd['k']['member']) name, 'weak': the one name the
-        remittances give such a member id}}. Own evidence (_patient_keys without the member ids' names): the remittances of
+        bridge, the one-visit rules): {claim id: {'names': keyed names from the claim's own evidence, 'names_ema': those of
+        them EMA itself gives (its patient, a bridged EMA claim: EMA's spelling), 'persons': keyed name and birth date,
+        'members': the member ids its 837s (or cd['k']['member']) name, 'weak': the one name the remittances give such a
+        member id}}. Own evidence (_patient_keys without the member ids' names): the remittances of
         its own bill, the EMA claim a bridge found for it, and EMA's patient (a claim of the weekly exports: the patient's
         EMA claims the A/R or the bill map ties). A member id's one remitted name is never own evidence: a subscriber's id
         covers the family, and a dependent never remitted takes the subscriber's (or a sibling's) name there."""
         persons: dict[str, set] = {}
-        own = self._patient_keys(cds, answers, member_names=False, persons=persons) or {}
+        ema_names: dict[str, set] = {}
+        own = self._patient_keys(cds, answers, member_names=False, persons=persons, ema_names=ema_names) or {}
         every = self._patient_keys(cds, answers) or {}
         c = self.conn
         members: dict[str, set] = defaultdict(set)
@@ -7479,7 +7581,8 @@ class Detector:
             b = cd.get("b") or bill_of(cd["pcn"])
             ms = set(members.get(b) or ()) | ({cd["k"]["member"]} if (cd.get("k") or {}).get("member") else set())
             mine = set(own.get(cd["pcn"]) or ())
-            out[cd["pcn"]] = {"names": mine, "persons": set(persons.get(cd["pcn"]) or ()), "members": ms,
+            out[cd["pcn"]] = {"names": mine, "names_ema": set(ema_names.get(cd["pcn"]) or ()),
+                              "persons": set(persons.get(cd["pcn"]) or ()), "members": ms,
                               "weak": set(every.get(cd["pcn"]) or ()) - mine}
         return out
 

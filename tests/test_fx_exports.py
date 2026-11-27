@@ -1049,19 +1049,28 @@ def test_a_lone_send_day_twin_of_another_named_patient_does_not_answer_the_claim
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_lone_send_day_twin_of_another_patient_never_answers_a_claim_emas_reports_name(tmp_path, kind, ema_env):
+@pytest.mark.parametrize("other", ["untied", "held"])
+def test_a_lone_send_day_twin_of_another_patient_never_answers_a_claim_emas_reports_name(tmp_path, kind, ema_env, other):
     """(fx-exports-r1-3, own evidence) Annie's claim F.claim_id(61) is in EMA's weekly exports (submitted March 20) under
     EMA's patient EMA061, whom EMA's reports name (another claim of hers, paired by the A/R). Her own EMA claim is not in
     Production's dates. Bert's EMA claim 62 of the same content, charged March 20 and paid April 10, is the claim's only
-    send-day twin: it names Bert, not Annie, so it is not her claim's. Her claim stays listed."""
+    send-day twin: EMA itself names him, not Annie, so it is not her claim's. Her claim stays listed. other: the third
+    EMA claim of the content (which keeps a content bridge from finding hers) is Carl's, held by no bill, or Dora's, held by
+    her own bill (then EMA's name alone tells Bert's claim from Annie's)."""
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, pay
     from tests.test_workable import ema
     s, lg = _ema_store(tmp_path, kind)
     rows = [charge(F.link_no(62), cpt="99214", amount=200, patient="Twintest, Bert", posted=D(2026, 3, 20)),
-            pay(F.link_no(62), "PAPER-62", 110, cpt="99214", patient="Twintest, Bert", posted=D(2026, 4, 10)),
-            charge(F.link_no(63), cpt="99214", amount=200, patient="Othertest, Carl", posted=D(2026, 3, 3))]
+            pay(F.link_no(62), "PAPER-62", 110, cpt="99214", patient="Twintest, Bert", posted=D(2026, 4, 10))]
     tie_rows, tie_ar = _tie(161, "Twintest, Annie")
+    if other == "untied":
+        rows.append(charge(F.link_no(63), cpt="99214", amount=200, patient="Othertest, Carl", posted=D(2026, 3, 3)))
+    else:
+        rows += [charge(F.link_no(64), cpt="99214", amount=200, patient="Othertest, Dora", posted=D(2026, 3, 3)),
+                 pay(F.link_no(64), "PAPER-64", 110, cpt="99214", patient="Othertest, Dora", posted=D(2026, 3, 25))]
+        tie_ar = tie_ar + [F.ar_row(claim=F.claim_id(164), link=F.link_no(64), status="Payment Pending", current=0,
+                                    svc=D(2026, 3, 2), patient="Othertest, Dora", cpt="99214")]
     denial_world(s, lg, tmp_path, rows + tie_rows, ar_rows=tie_ar)
     _volume(s)
     _tie_claim(s, 161, "EMA061")
@@ -1089,6 +1098,102 @@ def test_a_lone_send_day_twin_of_a_patient_billed_under_the_claims_member_id_sti
     from tests import ema_fixtures as F
     got, counts = _lone_twin_world(tmp_path, kind, ben_tied=True)
     assert F.claim_id(61) not in got, f"listed though its own EMA claim (a dependent's) was paid: {got} ({counts})"
+
+
+def _spelled_twin_world(tmp_path, kind, *, twin="Twintest, Annie Marie", decoy=False, bert_elsewhere=False, kin=False,
+                        own_remit=False):
+    """(the measurement of the fix round: a remittance and EMA spell one patient's name otherwise) Annie's claim
+    F.claim_id(61) (a 99214 at $200, visit March 2) went to Blue Cross on March 20; only the 837s know it, and her member's
+    earlier remittance names her TWINTEST, ANNIE (MEMBER000061). EMA charged one claim of that content on March 20 (EMA claim
+    62, its patient `twin`), and Blue Cross paid it April 10. Dora's visit of the same content (EMA claim 64, charged March 3,
+    paid) is held by her own bill (the A/R pairs it with F.claim_id(164)), so no content bridge finds Annie's claim: only
+    the send-day twin rule does.
+    decoy: Carl's visit of the same content, charged March 3 (EMA claim 63), that no bill holds: another EMA claim that may
+    be Annie's own. bert_elsewhere: the twin's patient (Bert) has another visit whose bill (F.claim_id(65), paired by the A/R
+    with his EMA claim 65) went out under another member id (MEMBER000099). kin: the twin's patient has another visit (EMA
+    claim 66, paired with F.claim_id(66)) that Blue Cross answered naming TWINTEST, ANNIE under MEMBER000061. own_remit: the
+    claim's own bill has a remittance naming the patient TWINTEST, ANNIE (a second payer's answer)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
+    s, lg = _ema_store(tmp_path, kind)
+    rows = [charge(F.link_no(62), cpt="99214", amount=200, patient=twin, posted=D(2026, 3, 20)),
+            pay(F.link_no(62), "PAPER-62", 110, cpt="99214", patient=twin, posted=D(2026, 4, 10)),
+            charge(F.link_no(64), cpt="99214", amount=200, patient="Othertest, Dora", posted=D(2026, 3, 3)),
+            pay(F.link_no(64), "PAPER-64", 110, cpt="99214", patient="Othertest, Dora", posted=D(2026, 3, 25))]
+    ar = [F.ar_row(claim=F.claim_id(164), link=F.link_no(64), status="Payment Pending", current=0, svc=D(2026, 3, 2),
+                   patient="Othertest, Dora", cpt="99214")]
+    if decoy:
+        rows.append(charge(F.link_no(63), cpt="99214", amount=200, patient="Othertest, Carl", posted=D(2026, 3, 3)))
+    if bert_elsewhere:
+        r, a_ = _tie(65, twin)
+        rows, ar = rows + r, ar + a_
+    if kin:
+        r, a_ = _tie(66, twin)
+        rows, ar = rows + r, ar + a_
+    denial_world(s, lg, tmp_path, rows, ar_rows=ar)
+    _volume(s)
+    raw_remit(s, trace="BCM61", paid_on="2026-02-20", payer="BLUE CROSS TEST",
+              claims=[{"pcn": F.claim_id(221), "status": "1", "member": "MEMBER000061", "last": "TWINTEST", "first": "ANNIE",
+                       "lines": [("2026-02-01", "99213", 150, 80, [("CO", "45", 70)])]}])
+    if kin:
+        raw_remit(s, trace="BCM66", paid_on="2026-02-20", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(66), "status": "1", "member": "MEMBER000061", "last": "TWINTEST", "first": "ANNIE",
+                           "lines": [("2026-02-02", "99212", 100, 60, [("CO", "45", 40)])]}])
+    if own_remit:
+        raw_remit(s, trace="SUP61", paid_on="2026-04-20", payer="SUPPLEMENT TEST",
+                  claims=[{"pcn": F.claim_id(61), "status": "2", "member": "SUPP0061", "last": "TWINTEST", "first": "ANNIE",
+                           "lines": [("2026-03-02", "99214", 200, 0, [("OA", "23", 200)])]}])
+    if bert_elsewhere:
+        send(s, tmp_path, [clm837(F.claim_id(65), [("99212", "100.00", "20260202")], payer=BC, member="MEMBER000099")], "20260203")
+    send(s, tmp_path, [clm837(F.claim_id(61), [("99214", "200.00", "20260302")], payer=BC, member="MEMBER000061")], "20260320")
+    det = Detector(s, run_id="r1", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = {r["patient_control_number"] or f"link:{r['ema_link']}": r["ema_link"] for r in s.query(
+        "SELECT patient_control_number, ema_link FROM findings WHERE signal='NO_ANSWER' AND COALESCE(stale,0)=0 "
+        "AND (patient_control_number=? OR ema_link=?)", (F.claim_id(61), F.link_no(62)))}
+    counts = {k: v for k, v in det.ema_counts.items() if k.startswith("837")}
+    s.close()
+    return got, counts
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_lone_twin_whose_ema_name_differs_from_the_remitted_name_is_the_claims_when_no_other_ema_claim_can_be(
+        tmp_path, kind, ema_env):
+    """(the fix round's measurement: six claims EMA shows paid were listed) A remittance and EMA can spell one person's name
+    otherwise (here EMA keeps her middle name), and a dependent's claim carries the subscriber's member id: a name that
+    differs proves nothing. EMA claim 62 is the only EMA claim of the claim's content that no bill holds (Dora's is her own
+    bill's), so if EMA holds Annie's claim at all, it is this one: it answers her claim, and the paid claim is not listed
+    (before: set aside for its name, the claim was listed as never answered)."""
+    from tests import ema_fixtures as F
+    got, counts = _spelled_twin_world(tmp_path, kind)
+    assert F.claim_id(61) not in got, f"listed though its only possible EMA claim was paid: {got} ({counts})"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_lone_twin_of_a_patient_whose_bills_are_another_members_never_answers_the_claim(tmp_path, kind, ema_env):
+    """(fx-exports-r1-3 on the bills on file) EMA claim 62 is Bert's, and Bert's other visit went out under another member
+    id than Annie's claim: he is another patient, whatever else EMA holds. His payment does not answer her claim, which
+    stays listed without his EMA claim."""
+    from tests import ema_fixtures as F
+    got, counts = _spelled_twin_world(tmp_path, kind, twin="Twintest, Bert", bert_elsewhere=True)
+    assert F.claim_id(61) in got, f"Annie's claim was answered by another patient's EMA claim ({counts})"
+    assert got[F.claim_id(61)] != F.link_no(62), got
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("own_remit", [False, True])
+def test_a_twin_whose_patients_remittances_name_the_claims_patient_answers_it_though_ema_spells_the_name_otherwise(
+        tmp_path, kind, ema_env, own_remit):
+    """(the fix round's measurement: a Medicare claim whose secondary's remittance named the patient, listed though EMA
+    showed it paid) EMA spells the twin's patient Annie Marie, the remittances Annie. Her other visit's remittance (its EMA
+    claim paired with its bill) names TWINTEST, ANNIE under the claim's member id: remittances compared with remittances,
+    the twin's patient is the claim's. Carl's EMA claim of the same content that no bill holds changes nothing: the twin
+    answers the claim, which is not listed (before: EMA's spelling set the twin aside)."""
+    from tests import ema_fixtures as F
+    got, counts = _spelled_twin_world(tmp_path, kind, decoy=True, kin=True, own_remit=own_remit)
+    assert F.claim_id(61) not in got, f"listed though its EMA claim (the same patient's) was paid: {got} ({counts})"
 
 
 @pytest.mark.parametrize("kind", KINDS)
