@@ -309,3 +309,115 @@ def test_the_self_audit_reads_a_second_payer_by_its_own_group_and_clock(tmp_path
     rule = codes.filing_rule(sgrp, skind, payer_name=P["commercial"])
     safe, last, _how = codes.second_claim_window(rule, S, "2026-04-03", first_payer="Anthem / BCBS")
     assert gaps[0]["deadline"] == (last or safe), (gaps, safe, last, sgrp, skind)
+
+
+# ============================================ 5. inside-the-window counts: the plan facts, and the item's own last day
+def test_written_off_money_is_inside_the_window_the_payers_plan_gives():
+    """C7 and C9 count written-off dollars still inside a window that can recover them. Anthem's Medicaid plans have one
+    window in Kentucky (120 days for a denial since KRS 205.534, April 14, 2026) and another where the remittance does not
+    say the state (60 days): EMA's payer name names the state, so the count reads the plan the product reads (before: no
+    facts, so the shorter window, and the money counted as lost). A line an item covers is counted by the item's own date."""
+    today = "2026-11-27"
+    first, svc = "2026-08-19", "2026-08-01"
+    name = "ANTHEM BLUE CROSS KENTUCKY MEDICAID"
+    assert ec._still_recoverable("Anthem", "medicaid", first, svc, {}, today, payer=name) is True
+    plain = codes.appeal_rule("Anthem", "medicaid")
+    assert (ec._add(ec._add(first, -ec.DEFAULT_LAG_P95), plain["days"]) or "") < today      # what the count used to read
+    assert ec._still_recoverable("Anthem", "medicaid", "2026-01-05", svc, {}, today, payer=name) is False
+    assert ec._still_recoverable("Anthem", "medicaid", "2026-01-05", svc, {}, today, payer=name, own_deadline="2026-12-31") is True
+
+
+# =============================================================== 6. rule 4.2: a code a payer almost never pays, per service
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_code_the_payer_pays_in_the_end_is_not_measured_as_rarely_paid(tmp_path, kind):
+    """Kentucky Medicaid denied 22 services of 11102 on its remittances (CO-16, one answer each) and then paid 20 of them
+    on paper: EMA shows its insurance money on each, no 835 carries it. Rule 4.2's measure counts services by their final
+    outcome, EMA's postings included: 20 paid of 22 (before: 0 of 22 answers, so a payable code looked like one the payer
+    never pays, and the research's 'Medicaid (other)' rule reached its denials). One service denied and then paid on a
+    second remittance is one paid service, never one paid and one unpaid answer."""
+    s, lg = _world(tmp_path, kind)
+    rows, ar = [], []
+    for i in range(22):
+        n = 500 + i
+        last, first = _last_first(n)
+        svc = (D(2026, 2, 2) + dt.timedelta(days=i)).isoformat()
+        remit(s, trace=f"84000{n}", paid_on="2026-04-01", payer="KENTUCKY MEDICAID",
+              claims=[{"pcn": F.claim_id(n), "last": last, "first": first, "lines": [(svc, "11102", 150, 0, [("CO", "16", 150)])]}])
+        rows.append(charge(F.link_no(n), cpt="11102", amount=150, patient=_name(n), svc=D.fromisoformat(svc), posted=D.fromisoformat(svc)))
+        if i < 20:
+            rows.append(pay(F.link_no(n), f"PAPER{n}", 60, cpt="11102", patient=_name(n), svc=D.fromisoformat(svc), posted=D(2026, 5, 1),
+                            payer="MEDICAID OF KENTUCKY", primary="MEDICAID OF KENTUCKY"))
+        ar.append(F.ar_row(claim=F.claim_id(n), link=F.link_no(n), status="Payment Pending", current=0, svc=D.fromisoformat(svc),
+                           patient=_name(n), cpt="11102"))
+    # one more service: denied on one remittance, paid on the next
+    last, first = _last_first(530)
+    remit(s, trace="840000530", paid_on="2026-03-01", payer="KENTUCKY MEDICAID",
+          claims=[{"pcn": F.claim_id(530), "last": last, "first": first, "lines": [("2026-02-25", "11102", 150, 0, [("CO", "16", 150)])]}])
+    remit(s, trace="840000531", paid_on="2026-03-20", payer="KENTUCKY MEDICAID",
+          claims=[{"pcn": F.claim_id(530), "last": last, "first": first, "lines": [("2026-02-25", "11102", 150, 60, [("CO", "45", 90)])]}])
+    denial_world(s, lg, tmp_path, rows, ar_rows=ar)
+    lg.close()
+    det = _run(s)        # the run measures the pair for its denials (fold_payer_policy), on the lines it read
+    assert det._paid_share("Medicaid KY", "11102") == (21, 23), det.__dict__.get("_share")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_payer_policy_rows_count_is_the_items_listed(tmp_path, kind):
+    """The owner's table counts each code a payer almost never pays by the items the Worklist lists for it after every rule
+    of the run (before: the count taken at the fold, 26 where 9 items were listed)."""
+    from remitwatch import api_ema, rarely_paid as rp
+    from remitwatch.detect import ensure_schema
+    s, lg = _world(tmp_path, kind)
+    lg.close()
+    ensure_schema(s.conn)
+    grp, code = "Medicare KY (CGS J15)", "J3490"
+    key = rp.pattern_key(grp, code, "2026-03-02")
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:payer_policy', ?)",
+                   (json.dumps({"at": "2026-05-03T10:00:00", "patterns": {key: {"group": grp, "code": code, "paid": 0, "answered": 30,
+                                                                                "n": 26, "cents": 260000, "decision": "pursue",
+                                                                                "default": True}}}),))
+    for i in range(26):
+        listed = i < 9
+        s.conn.execute("""INSERT INTO findings (finding_id, signal, category, payer_group, procedure_code, service_date, paid_cents,
+                          line_key, shortfall_cents, status, work_state, stale, evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (f"pp{i:02d}", "DENIED_NONCOVERED", "denial", grp, code, "2026-03-02", 0, f"L{i}", 10000,
+                        "open" if listed else "resolved", "work_now" if listed else "done", 0, "{}"))
+    s.conn.commit()
+    row = next(p for p in api_ema.policy_table(s.conn)["patterns"] if p["pattern"] == key)
+    assert (row["items"], row["cents"]) == (9, 90000), row
+
+
+# ========================================================================= 7. C6 counts the patient's copay
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_later_payment_with_the_patients_copay_pays_the_item(tmp_path, kind):
+    """Blue Cross denied claim 81's 99212 (CO-16, its usual rate $55.50). EMA then shows the payer's $15.50 on a paper check
+    (no 835 carries it) and the patient's $40 copay on the line: the service brought $55.50, so C6 closes the item as
+    paid (before: $15.50 was under half of $55.50 and the item stayed in Work now as 'partly paid'). With no copay on the
+    line the same payment is a partial payment."""
+    s, lg = _world(tmp_path, kind)
+    for n in (81, 82):
+        last, first = _last_first(n)
+        remit(s, trace=f"91000{n}", paid_on="2026-03-28",
+              claims=[{"pcn": F.claim_id(n), "last": last, "first": first, "lines": [(S, "99212", 90, 0, [("CO", "16", 90)])]}])
+    rows, ar = [], []
+    for n in (81, 82):
+        rows += [charge(F.link_no(n), cpt="99212", amount=90, patient=_name(n)),
+                 pay(F.link_no(n), f"91000{n}", 0, cpt="99212", patient=_name(n), posted=D(2026, 3, 31)),
+                 adj(F.link_no(n), "CO-16", 90, cpt="99212", patient=_name(n), posted=D(2026, 3, 31)),
+                 pay(F.link_no(n), f"PAPER{n}", 15.50, cpt="99212", patient=_name(n), posted=D(2026, 4, 20))]
+        ar.append(F.ar_row(claim=F.claim_id(n), link=F.link_no(n), status="Payment Pending", current=0, svc=SVC, patient=_name(n),
+                           cpt="99212"))
+    rows.append(F.production_row(link=F.link_no(81), cpt="99212", pat_paid=40, patient=_name(81), svc=SVC, posted=SVC, payer="Patient"))
+    denial_world(s, lg, tmp_path, rows, ar_rows=ar)
+    lg.close()
+    findings = [{"finding_id": "c6-81", "signal": "DENIED_MISSING_INFO", "category": "denial", "payer_group": "Anthem / BCBS",
+                 "payer_name": "BLUE CROSS TEST", "patient_control_number": F.claim_id(81), "service_date": S, "procedure_code": "99212",
+                 "line_key": "LK81", "expected_cents": 5550, "shortfall_cents": 5550, "paid_cents": 0, "payment_date": "2026-03-28"},
+                {"finding_id": "c6-82", "signal": "DENIED_MISSING_INFO", "category": "denial", "payer_group": "Anthem / BCBS",
+                 "payer_name": "BLUE CROSS TEST", "patient_control_number": F.claim_id(82), "service_date": S, "procedure_code": "99212",
+                 "line_key": "LK82", "expected_cents": 5550, "shortfall_cents": 5550, "paid_cents": 0, "payment_date": "2026-03-28"}]
+    outcomes = ec.line_outcomes(s.conn, findings, code_once=lambda f: True, today=TODAY)
+    got = ec.paid_in_ema(s.conn, findings, outcomes)
+    assert outcomes["c6-81"]["outcome"] == "paid_after" and got["c6-81"]["action"] == "close", (outcomes["c6-81"], got.get("c6-81"))
+    assert got["c6-81"]["paid_cents"] == 1550
+    assert got["c6-82"]["action"] == "hint_partial", got.get("c6-82")

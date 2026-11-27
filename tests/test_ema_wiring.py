@@ -750,7 +750,8 @@ def test_a_second_payer_whose_only_answer_is_in_ema_was_billed(store, ledger, tm
     kw8, kw9 = dict(patient=2, secondary=P["commercial"]), dict(patient=1, secondary=P["commercial"])
     rows = [charge(F.link_no(8), **kw8), pay(F.link_no(8), "777000222", 90, posted=D(2026, 4, 3), **kw8),
             adj(F.link_no(8), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw8),
-            pay(F.link_no(8), "PAPER-81", 0, posted=D(2026, 4, 17), payer=P["commercial"], **kw8),
+            # its $0 answer carries its proof, the allowed amount (a bare $0 row is no answer: tests/test_fx_ema.py)
+            pay(F.link_no(8), "PAPER-81", 0, posted=D(2026, 4, 17), payer=P["commercial"], allowed=30, **kw8),
             charge(F.link_no(9), **kw9), pay(F.link_no(9), "777000223", 90, posted=D(2026, 4, 3), **kw9),
             adj(F.link_no(9), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw9),
             adj(F.link_no(9), "CO-27", 30, posted=D(2026, 4, 18), payer=P["commercial"], **kw9)]

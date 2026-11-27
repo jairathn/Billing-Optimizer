@@ -7277,21 +7277,38 @@ class Detector:
         return self._ratios.get((payer_group, code))
 
     def _paid_share(self, payer_group: str | None, code: str | None) -> tuple[int, int] | None:
-        """(lines paid, lines answered) for a payer group and code on the 835s of services since 2025, answered as the
-        primary payer (a payment still standing counts as paid), or None when fewer than 20 are on file. EMA's vocabulary names some groups apart
-        ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group of the same family and kind counts."""
+        """(services paid, services answered) for a payer group and code, services since 2025 answered as the primary
+        payer, or None when fewer than 20 are on file. A service is the patient (the 835's name key, else the bill), the
+        date, the code and the part (26, TC or the whole), counted once by its final outcome however often it was
+        answered: paid when a payment of it still stands on any answer, or EMA's postings show the payer's insurance money
+        on it (a payment no 835 carries). Rule 4.2 asks whether the payer pays the code, so a service denied several
+        times and then paid is one paid service, never several unpaid answers (Kentucky and Indiana Medicaid). EMA's
+        vocabulary names some groups apart ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group
+        of the same family and kind counts."""
         if self.__dict__.get("_share") is None:
             from . import ema_checks as ec
-            share: dict[tuple, list] = defaultdict(lambda: [0, 0])
+            from .codes import component_of
+            names = self._share_patients()
+            ema_paid = self._share_ema_paid()
+            services: dict[tuple, list] = {}
             for l in self.lines:
                 # its answers as the primary payer (paid, or denied as primary): a second payer's payments of the cost share
                 # say nothing of whether the payer pays the code itself
                 if (l.get("service_date") or "") < ec.POLICY_SINCE or not l.get("procedure_code") \
                         or l.get("claim_status_code") not in ("1", "4", "19"):
                     continue
-                a = share[(l["payer_group"], l["procedure_code"])]
+                who = names.get(l["claim_key"]) or ("bill", bill_of(l["patient_control_number"]))
+                key = (l["payer_group"], l["procedure_code"], who, l["service_date"], component_of(l.get("modifiers_list")))
+                s = services.setdefault(key, [False, names.get(l["claim_key"])])
+                if (self.standing.get(l["line_key"]) or 0) > 0:
+                    s[0] = True
+            share: dict[tuple, list] = defaultdict(lambda: [0, 0])
+            for (grp, code, _who, svc, _part), (paid, nk) in services.items():
+                if not paid and nk is not None:
+                    paid = any(ec._same_payer(g, grp) for g in ema_paid.get((nk, svc, code), ()))
+                a = share[(grp, code)]
                 a[1] += 1
-                a[0] += 1 if (self.standing.get(l["line_key"]) or 0) > 0 else 0
+                a[0] += 1 if paid else 0
             self._share = dict(share)
         got = self._share.get((payer_group, code))
         if not got:
@@ -7301,6 +7318,44 @@ class Detector:
             hits = [v for (g, c), v in self._share.items() if c == code and ec._family(g) == fam and kinds(g) == kinds(payer_group)]
             got = [sum(v[0] for v in hits), sum(v[1] for v in hits)] if hits else None
         return tuple(got) if got and got[1] >= 20 else None
+
+    def _share_patients(self) -> dict:
+        """{claim key: the 835 patient's name key} for _paid_share (the corrected name where the payer gave one), {} when
+        the store cannot key names (no salt)."""
+        out: dict = {}
+        try:
+            from . import ema_checks as ec
+            ec._prepare(self.conn)
+            for ck, nk in self.conn.execute(
+                    """SELECT claim_key, COALESCE(rw_name_key(COALESCE(corrected_patient_last, patient_last),
+                                                              COALESCE(corrected_patient_first, patient_first)),
+                                                  rw_name_key(patient_last, patient_first)) FROM claims"""):
+                if nk is not None:
+                    out[ck] = nk
+        except sqlite3.Error as exc:
+            from .runlog import caught
+            caught(exc, "paid_share.patients")      # the bill stands for the patient then
+        return out
+
+    def _share_ema_paid(self) -> dict:
+        """{(name key, date, code): the payer groups whose insurance money EMA posted on the patient's service} (any of its
+        EMA claims, never the surgery center's), for _paid_share: a payment no 835 carries still says the payer paid."""
+        out: dict = defaultdict(set)
+        if not self.ema_on:
+            return out
+        try:
+            from . import ema_checks as ec
+            for nk, svc, cpt, grp in self.conn.execute(
+                    """SELECT l.name_key, l.svc, l.cpt, y.payer_group FROM ema_line_payments y
+                       JOIN ema_lines l ON l.link = y.link AND l.svc = y.svc AND l.cpt = y.cpt
+                       WHERE COALESCE(y.ins_paid, 0) > 0 AND l.name_key IS NOT NULL AND COALESCE(l.facility, 0) = 0 AND l.svc >= ?
+                       GROUP BY 1, 2, 3, 4 HAVING SUM(y.ins_paid) > 0""", (ec.POLICY_SINCE,)):
+                if grp:
+                    out[(nk, svc, cpt)].add(grp)
+        except sqlite3.Error as exc:
+            from .runlog import caught
+            caught(exc, "paid_share.ema")
+        return out
 
     def fold_payer_policy(self) -> None:
         """Denials from the remittances of a code the payer pays on 5% or less of at least 20 lines it answered as primary

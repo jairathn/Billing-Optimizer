@@ -1464,7 +1464,9 @@ def test_blind_dollars_leave_out_claims_ema_shows_answered(ledger_world):
     b = sc.blindness(c, today=TODAY)
     src = next(x for x in b["sources"] if x["source"] == "835")
     assert src["cents"] == 0 and not src["about"], (src["cents"], src["text"])
-    c.execute("UPDATE ema_lines SET ins_answer_rows = 0 WHERE cpt = '99214'")                       # one with no answer
+    # one with no answer: no answer row, and no money, adjustment or allowed amount from a payer (ema_checks.line_answered_sql)
+    c.execute("""UPDATE ema_lines SET ins_answer_rows = 0, zero_pay_rows = 0, ins_paid = 0, contractual = 0, noncontractual = 0,
+                 allowed = NULL WHERE cpt = '99214'""")
     c.commit()
     src = next(x for x in sc.blindness(c, today=TODAY)["sources"] if x["source"] == "835")
     assert src["cents"] == 20000

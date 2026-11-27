@@ -3354,13 +3354,6 @@ def _appeal_end(group: str | None, kind: str | None, answered: str | None, svc: 
         return _add(answered, 180)
 
 
-def _own_deadline(idx: dict, key: tuple) -> str | None:
-    """The latest last day of the items RemitWatch holds for a line (the item's own deadline, or the payer's own limit
-    where later), or None when no item dates it: the audit counts a line by the date the product gave its item."""
-    got = [e[5] for e in idx["service"].get(key) or () if len(e) > 5 and e[5]]
-    return max(got) if got else None
-
-
 def _item_index(conn: sqlite3.Connection) -> dict:
     """Which services RemitWatch lists, and how: {(bill, svc, code): [(finding_id, work_state, status, signal, automatic)]}
     (automatic: closed by RemitWatch itself, with its note), with the finding's EMA claim number too, so a line can be
@@ -3369,17 +3362,15 @@ def _item_index(conn: sqlite3.Connection) -> dict:
     ws = "work_state" if "work_state" in cols else "NULL"
     link = "ema_link" if "ema_link" in cols else "NULL"
     auto = "auto_note IS NOT NULL" if "auto_note" in cols else "0"
-    last = ("MAX(COALESCE(appeal_deadline, ''), COALESCE(legal_deadline, ''))" if {"appeal_deadline", "legal_deadline"} <= cols
-            else "appeal_deadline" if "appeal_deadline" in cols else "NULL")
     by_service: dict[tuple, list] = defaultdict(list)
     by_link: dict[tuple, list] = defaultdict(list)
     by_bill: dict[str, list] = defaultdict(list)
-    for fid, pcn, svc, pc, opc, bc, wk, st, lk, sig, is_auto, dl in conn.execute(
+    for fid, pcn, svc, pc, opc, bc, wk, st, lk, sig, is_auto in conn.execute(
             f"""SELECT finding_id, patient_control_number, service_date, procedure_code, original_procedure_code,
-                       {'billed_code' if 'billed_code' in cols else 'NULL'}, {ws}, status, {link}, signal, {auto}, {last} FROM findings
+                       {'billed_code' if 'billed_code' in cols else 'NULL'}, {ws}, status, {link}, signal, {auto} FROM findings
                 WHERE COALESCE(stale, 0) = 0"""):
         b = bill_of(pcn)
-        entry = (fid, wk, st, sig, bool(is_auto), str(dl)[:10] if dl else None)
+        entry = (fid, wk, st, sig, bool(is_auto))
         for code in {pc, opc, bc} - {None}:
             by_service[(b, str(svc or "")[:10], code)].append(entry)
             if lk is not None:
@@ -3392,7 +3383,7 @@ def _item_index(conn: sqlite3.Connection) -> dict:
 def _decided(entry: tuple) -> bool:
     """A person's or the owner's decision holds the line: let go or lost, a pattern the owner's policy accepts, or marked
     paid by a person (resolved with no automatic note)."""
-    _f, wk, st, _sig, is_auto = entry[:5]
+    _f, wk, st, _sig, is_auto = entry
     return st in ("dismissed", "lost") or wk == "accepted" or (st == "resolved" and not is_auto)
 
 
@@ -3734,7 +3725,7 @@ def _cov_denials(facts: _Facts, idx: dict) -> list[dict]:
         got = max(r835, int(e.get("ins_paid") or 0))
         if got >= SETTLED_SHARE * exp or moved >= 0.8 * exp or "paid" in (e.get("status") or set()):
             continue
-        deadline = _own_deadline(idx, key) or _appeal_end(grp, kind, paid_on, key[1], payer_name=payer, cfi=cfi, carc=carc,
+        deadline = _appeal_end(grp, kind, paid_on, key[1], payer_name=payer, cfi=cfi, carc=carc,
                                                           paid=False)
         if not deadline or deadline < facts.today:
             continue
@@ -3767,7 +3758,7 @@ def _cov_auto_writeoffs(facts: _Facts, idx: dict) -> list[dict]:
         if e["ins_paid"] >= SETTLED_SHARE * exp or (e["last_paid"] and e["last_paid"] > e["den_first"]):
             continue
         top = sorted(c for c, _cls in facts.reasons.get(key, set()))
-        deadline = _own_deadline(idx, key) or _appeal_end(grp, kind, e["den_first"], key[1], payer_name=e.get("payer"),
+        deadline = _appeal_end(grp, kind, e["den_first"], key[1], payer_name=e.get("payer"),
                                                           carc=top[0] if len(top) == 1 else None, paid=e["ins_paid"] > 0)
         if not deadline or deadline < facts.today:
             continue
@@ -3798,7 +3789,7 @@ def _cov_unanswered(facts: _Facts, idx: dict) -> list[dict]:
         if (_days(e["first_charge"], facts.today) or 0) < wait:
             continue
         appeal_days, filing_days = _windows(e["group"], e["kind"], payer_name=e.get("payer"))
-        deadline = _own_deadline(idx, key) or _add(key[1], filing_days + appeal_days)
+        deadline = _add(key[1], filing_days + appeal_days)
         if not deadline or deadline < facts.today:
             continue
         cents = min(int(e["balance"]), int(e["charges"])) if e["charges"] > 0 else int(e["balance"])
@@ -3882,7 +3873,7 @@ def _cov_secondary(facts: _Facts, idx: dict) -> list[dict]:
             continue
         # the second payer's own first-filing rule, as it counts a claim it gets second (codes.second_claim_window, as the
         # product dates the item), from the group its name gives: never its name read as a group
-        deadline = _own_deadline(idx, key) or _second_end(conn, second, key[1], e["last_paid"], own_group)
+        deadline = _second_end(conn, second, key[1], e["last_paid"], own_group)
         if not deadline or deadline < facts.today:
             continue
         out.append({"key": "|".join(key), "category": "open_balance_in_window" if crossed else "secondary_not_billed",
@@ -3951,7 +3942,7 @@ def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
         if any(abs(ratio - r) <= 0.02 for r in (0.85, 0.5, 0.75, 0.25)) and (code in mppr or abs(ratio - 0.85) <= 0.02):
             continue
         key = (bill_of(pcn), str(svc)[:10], code)
-        deadline = _own_deadline(idx, key) or _appeal_end(grp, kind, paid_on, str(svc)[:10], payer_name=name, cfi=cfi, paid=True)
+        deadline = _appeal_end(grp, kind, paid_on, str(svc)[:10], payer_name=name, cfi=cfi, paid=True)
         if not deadline or deadline < facts.today:
             continue
         out.append({"key": "|".join(key), "category": "short_vs_payer_rate", "reason": "below_own_rate", "payer_group": grp,
