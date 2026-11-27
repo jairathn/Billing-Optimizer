@@ -1024,8 +1024,8 @@ def test_trace_the_items_own_payer_paying_as_second_payer_after_its_denial_is_wh
 
 def test_trace_the_items_own_payer_paying_more_as_second_payer_after_its_short_answer_is_what_came_back(tmp_path, kind):
     """Pine pays a 99213 $50.00, $30.00 short of its own rate. It then reverses that and processes the claim as second
-    payer, paying $80.00. The item recovered $30.00: a payer's own payment as second payer is no share of its own answer
-    (taken as one, the $80.00 was held at the answer and the recovery was $0)."""
+    payer, paying $80.00. The item recovered $30.00, what the payer's money rose by (the closure of a payment reversed and
+    paid again; the hand trace's own-payer case, kept as a control)."""
     w = World(tmp_path, kind)
     w.remit(clean_visits(1, 25, "99213", "100.00", "80.00"), "20260301", **PINE)
     short = sv("99213", "100.00", "50.00", 1, "CAS*CO*45*50.00~", allowed="50.00")
