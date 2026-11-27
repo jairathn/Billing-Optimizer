@@ -290,23 +290,24 @@ def test_the_self_audit_dates_a_kentucky_medicaid_denial_by_its_corrected_claim_
 def test_the_self_audit_reads_a_second_payer_by_its_own_group_and_clock(tmp_path, kind):
     """A second payer never billed (answer key R5): its window is the second payer's own first-filing rule as it counts a
     claim it gets second (codes.second_claim_window, the product's), from the payer group its name gives. Before: the name
-    was taken for the group and 'supplement' for the kind, so the window was a default the product never uses."""
+    was taken for the group and 'supplement' for the kind, so the window was a year's default the product never uses."""
     s, lg = _world(tmp_path, kind)
+    SECOND = "AETNA"            # Aetna's own limit counts 90 days from the service: never a 'supplement' default of a year
     remit(s, trace="777000333", paid_on="2026-04-01",
           claims=[{"pcn": F.claim_id(71), "last": "SAMPLE", "first": "DELTA",
                    "lines": [(S, "99213", 150, 90, [("CO", "45", 30), ("PR", "2", 30)], {"allowed_cents": 12000})]}])
-    rows = [charge(F.link_no(71), patient=2, secondary=P["commercial"]),
-            pay(F.link_no(71), "777000333", 90, patient=2, posted=D(2026, 4, 3), secondary=P["commercial"], status="Payment Pending"),
-            adj(F.link_no(71), "CO-45", 30, patient=2, posted=D(2026, 4, 3), contractual=True, secondary=P["commercial"],
+    rows = [charge(F.link_no(71), patient=2, secondary=SECOND),
+            pay(F.link_no(71), "777000333", 90, patient=2, posted=D(2026, 4, 3), secondary=SECOND, status="Payment Pending"),
+            adj(F.link_no(71), "CO-45", 30, patient=2, posted=D(2026, 4, 3), contractual=True, secondary=SECOND,
                 status="Payment Pending")]
     ar = [F.ar_row(claim=F.claim_id(71), link=F.link_no(71), status="Payment Pending", current=30, aging=D(2026, 4, 3), svc=SVC,
-                   patient=2, secondary=P["commercial"])]
+                   patient=2, secondary=SECOND)]
     denial_world(s, lg, tmp_path, rows, ar_rows=ar)
     lg.close()
     gaps = [g for g in _audit_gaps(s, "2026-05-20") if g["category"] in ("secondary_not_billed", "open_balance_in_window")]
     assert len(gaps) == 1, gaps
-    sgrp, skind = er.payer_group_of(s.conn, P["commercial"])
-    rule = codes.filing_rule(sgrp, skind, payer_name=P["commercial"])
+    sgrp, skind = er.payer_group_of(s.conn, SECOND)
+    rule = codes.filing_rule(sgrp, skind, payer_name=SECOND)
     safe, last, _how = codes.second_claim_window(rule, S, "2026-04-03", first_payer="Anthem / BCBS")
     assert gaps[0]["deadline"] == (last or safe), (gaps, safe, last, sgrp, skind)
 
