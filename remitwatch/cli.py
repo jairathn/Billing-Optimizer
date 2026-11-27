@@ -38,10 +38,12 @@ DEFAULT_DB = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
 
 
 def cmd_ingest_835(args: argparse.Namespace) -> int:
+    from .pipeline import owe_analysis
     from .store import Store
     from .x12_835 import iter_835_paths
 
     store = Store(args.db)
+    owe_analysis(store.conn)            # read outside a cycle: the next cycle analyses it, new files or not
     paths = []
     for p in args.paths:
         if os.path.isdir(p):
@@ -65,9 +67,11 @@ def cmd_ingest_ema(args: argparse.Namespace) -> int:
     from . import ema_ledger, ema_reports
     from .dropbox_sync import file_sha256
     from .ema_exports import export_created, is_report_file, iter_export_paths, iter_rows
+    from .pipeline import owe_analysis
     from .store import Store
 
     store = Store(args.db)
+    owe_analysis(store.conn)            # read outside a cycle: the next cycle analyses it, new files or not
     paths = []
     for p in args.paths:
         if os.path.isdir(p):
@@ -254,9 +258,12 @@ def cmd_oauth(args: argparse.Namespace) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     from .dropbox_sync import ingest_new_files, sync
+    from .pipeline import owe_analysis
     from .store import Store
 
     store = Store(args.db)
+    if not args.no_ingest:
+        owe_analysis(store.conn)        # read outside a cycle: the next cycle analyses it, new files or not
     try:
         stats = sync(store, full=args.full)
     except Exception as exc:

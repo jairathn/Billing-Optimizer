@@ -74,6 +74,26 @@ def analysis_paid(conn) -> None:
     conn.commit()
 
 
+# What the store has read: the facts each reader adds (remittances, claim files, EMA's export rows, EMA's reports applied),
+# never the bookkeeping of a file tried again and not read. A reader whose counts are lost (one that read files and then
+# failed before it returned them, as a TriZetto pull can) still moves this, so the cycle still owes the analysis.
+_INPUT_SQL = ("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM transactions",
+              "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM claims_837",
+              "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM ema_rows",
+              "SELECT COUNT(*), MAX(applied_at) FROM ema_report_files WHERE applied_at IS NOT NULL")
+
+
+def input_position(conn) -> list:
+    """Where each reader has got to (_INPUT_SQL); None for a table the store does not have yet."""
+    out = []
+    for sql in _INPUT_SQL:
+        try:
+            out.append(list(conn.execute(sql).fetchone()))
+        except sqlite3.Error:       # a store without the table: nothing of that kind read
+            out.append(None)
+    return out
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -549,6 +569,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             out["analysis_owed"] = True
         else:
             owe_analysis(store.conn)
+        read_from = input_position(store.conn)
         # uploads cut off part-way (their pieces and records, after a day) go at every cycle, not only when someone opens
         # the Upload page: a cut-off report can hold patient data and up to the upload cap
         swept = _ema_step(out, "uploads_sweep", sweep_uploads, db_path)
@@ -652,6 +673,10 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         sc.mark(out, "ingest", t_cycle)
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
         changed = changed or bool(up_in.get("changed")) or bool(rr.get("applied"))
+        if not changed and input_position(store.conn) != read_from:
+            # a reader stored input and its counts were lost (it failed after reading): the store says it read something
+            changed = True
+            out["read_unreported"] = True
         # a release that changed which copies of a remittance stand decides them again once, new files or not, and the
         # analysis follows
         if store.recheck_supersession():

@@ -229,6 +229,36 @@ def test_server_a_cycle_stopped_after_reading_and_before_its_analysis_leaves_the
     assert _open(db, PAID_CLAIM) == []
 
 
+def test_server_a_feed_that_read_a_file_and_then_failed_still_has_that_file_analysed(tmp_path, monkeypatch):
+    """TriZetto's pull reads b.RMT (the store commits it), then fails before it returns its counts: the cycle records the
+    feed's error and its counts are lost. What the store now holds still decides that an analysis is owed (the input
+    read: remittances, files, EMA's reports), so the cycle analyses b.RMT instead of leaving it for the next file."""
+    from remitwatch import trizetto
+    db = _world(tmp_path, monkeypatch)
+    data = (lambda p: open(p, "rb").read())(os.path.join(_second(tmp_path), "b.RMT"))
+
+    def pull(conn, handle, deadline=None, settings=None, log=print):
+        handle([("b.RMT", data, 1_790_100_000)])
+        raise ValueError("the listing stopped part-way")
+    monkeypatch.setattr(trizetto, "configured", lambda: True)
+    monkeypatch.setattr(trizetto, "pull", pull)
+    out = _server_cycle(db)
+    assert (out.get("trizetto") or {}).get("error") and _paid_cents(db, PAID_CLAIM) == 10000, out.get("trizetto")
+    assert "detect" in out, sorted(out)
+    assert _open(db, PAID_CLAIM) == []
+
+
+def test_cli_ingest_leaves_an_analysis_owed_for_the_next_cycle(tmp_path, monkeypatch):
+    """A remittance read by hand on the server (python -m remitwatch.cli ingest-835) outside a cycle: the next cycle,
+    with nothing new of its own, analyses it."""
+    from remitwatch.cli import main
+    db = _world(tmp_path, monkeypatch)
+    assert main(["--db", db, "ingest-835", os.path.join(_second(tmp_path), "b.RMT")]) == 0
+    out = _server_cycle(db)
+    assert "detect" in out and out.get("analysis_owed"), sorted(out)
+    assert _open(db, PAID_CLAIM) == []
+
+
 def test_server_quiet_cycles_do_not_analyse_again_and_leave_no_analysis_owed(tmp_path, monkeypatch):
     """The mark costs nothing on a quiet day: a cycle that reads nothing new analyses nothing and leaves no analysis owed,
     and a cycle that reads a file analyses it once."""
@@ -540,7 +570,11 @@ def test_compare_cloud_reads_a_state_folder_whose_run_stopped_over_its_image(tmp
     monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
     rc = main(["--db", db, "compare-cloud"])
     assert rc in (0, 1)
-    assert "not the one the last run saved" in capsys.readouterr().out
+    said = capsys.readouterr().out
+    assert "not the one the last run saved" in said
+    # it compared all the same: the table of the move's proof is there, the image's rows against the server's
+    rows = [ln for ln in said.splitlines() if ln.split() and ln.split()[0] in ("transactions", "findings", "claims")]
+    assert "Vercel" in said and len(rows) == 3 and "Traceback" not in said, said[-600:]
 
 
 def test_import_cloud_refuses_an_image_the_last_run_did_not_save_with_its_sentence(tmp_path, monkeypatch, capsys):
