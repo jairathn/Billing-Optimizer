@@ -8303,7 +8303,10 @@ class Detector:
         on the line). Not listed:
         - a service another payment still pays: most recoupments recover a double payment (two claims paid one service);
         - a service answered again since the payment: by the same payer (its new answer, a denial or the patient's share, is
-          the item to work), or as primary by another payer (the right payer was billed);
+          the item to work), or as primary by another payer (the right payer was billed). The payer restating the payment it
+          took back (a duplicate denial, B13 or CO-18, on or before the takeback) is no such answer, and neither is another
+          payer's answer processed after this one's (CARC 22 or 23, whatever its claim status: a supplement's share)
+          (fx-ledger-r1-1, r1-3);
         - a service of the same patient billed again on another claim since the payment (a claim voided and billed again:
           a global billed again as its two parts): the new claim's answer is the work;
         - a claim whose recoupment took a payment only in part (a payer's repricing): the recoupment's own listing stands
@@ -8314,11 +8317,15 @@ class Detector:
         service, never the primary's: the primary's payment does not pay the coinsurance the second payer took back, so the
         share is listed (bill the patient, or dispute the takeback) unless that payer pays it again or another second payer
         answered the service since (money-2).
+        Where the payer's own denial of the service, which the payment had answered, is listed, the service is one item, that
+        denial, with the takeback named on it and worked until the payer's window to dispute the takeback closes when that
+        is later than the denial's own (_carry_takeback_window; ledger_taken.listed 2 for the payment's other items).
+        A primary's payment is covered only by another primary payment or a secondary one of half the expected amount; a
+        supplement's share (status 1 with CARC 22 or 23) is a secondary's (fx-ledger-r1-3).
         A service listed before and paid since (after the takeback) is closed by that payment, which is its recovery.
-        Returns {(remittance, reference, cents) of a WO entry naming a claim this judged: the cents of it the ledger did not
-        apply}: 0 when every payment the claim's recoupments took is gone and the ledger applied their whole net amount
-        (run_aggregate_rules lists those no more as a recoupment of their own); else the entry keeps its own listing, sized
-        at what was not applied (money-6)."""
+        Returns {(remittance, reference, cents) of a WO entry naming a claim on file: the cents its own listing carries}
+        (_wo_listing_sizes: what the ledger could not apply of the claim's netted recoupments; all it set out to take for a
+        claim taken from only in part; nothing where they net to nothing: money-6, fx-ledger-r2-1)."""
         took = getattr(self, "plb_took", None) or []
         self.wo_partial_keys: set[tuple] = set()
         if not took:
@@ -8415,7 +8422,8 @@ class Detector:
             # is not the takeback's work: the takeback is, inside its own window (fx-ledger-r1-1)
             again = [x for x in answers.get((bill, code, dos), []) if x["line_key"] not in taken_lines
                      and (when(x) > paid_on or (when(x) == paid_on and x["patient_control_number"] != p["patient_control_number"]))
-                     and (ours(x) or x.get("claim_status_code") in ("1", "19", "4") or (second and x.get("claim_status_code") in ("2", "3")))
+                     and (ours(x) or (x.get("claim_status_code") in ("1", "19", "4") and not self._after_other_payer(x))
+                          or (second and x.get("claim_status_code") in ("2", "3")))
                      and not (ours(x) and when(x) <= day and self._restates(x))]
             me = who.get(p["claim_key"])
             rebilled = [x for x in same_svc.get((me, code, dos), []) if me and bill_of(x["patient_control_number"]) != bill and when(x) > paid_on]

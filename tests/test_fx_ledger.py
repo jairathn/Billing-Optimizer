@@ -966,6 +966,27 @@ def test_a_payment_medicare_withheld_by_j1_is_on_a_work_item_not_closed_on_the_s
     w.store.close()
 
 
+@pytest.mark.parametrize("supplement_status", ["1", "2"])
+def test_a_primarys_payment_taken_back_is_not_covered_by_the_supplements_share(tmp_path, kind, supplement_status):
+    """(r1-3, _taken_back_items' cover) Medicare pays C017's 99214 $117.60; the supplement pays the $29.40 coinsurance (with
+    claim status 1 and OA-23, or status 2); in August Medicare withholds its $117.60 naming C017 (WO). The supplement's
+    share never pays the primary's part: Medicare's takeback is a TAKEBACK item, whatever status the supplement reported."""
+    w = World(tmp_path, kind)
+    pcn = f"{BILL}C017"
+    w.remit(clean_visits(1, 25, "99214", "223.65", "147.00"), "20260301", **KY)
+    w.remit([clm(pcn, "1", "223.65", "117.60", sv("99214", "223.65", "117.60", 1, "CAS*CO*45*76.65~CAS*PR*2*29.40~", allowed="147.00"),
+                 payer_ctl="MC1")], "20260415", **KY)
+    w.remit([clm(pcn, supplement_status, "223.65", "29.40", sv("99214", "223.65", "29.40", 1, "CAS*CO*45*76.65~CAS*OA*23*117.60~",
+                                                               allowed="147.00"), payer_ctl="GP1")], "20260425", **GAP)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="PC900", paid="200.00")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:87654321 {pcn}*117.60~", **KY)
+    w.run("r1", today="2026-09-20")
+    tb = [r for r in w.rows(f"patient_control_number LIKE '{BILL}%' AND COALESCE(stale, 0) = 0") if r["signal"] == "TAKEBACK"]
+    print(supplement_status, brief(tb))
+    assert [(r["payer_name"], r["shortfall_cents"], r["work_state"]) for r in tb] == [("KY MEDICARE", 11760, "work_now")], brief(tb)
+    w.store.close()
+
+
 def test_a_supplements_status_1_answer_after_medicare_is_no_other_plans_primary_payment(tmp_path, kind):
     """(r1-3, paid_proof alone) Medicare paid C017's 99214, the supplement paid the coinsurance with claim status 1 and OA-23,
     then Medicare reversed its payment and denied the service (bundled). paid_proof never reads the supplement's $29.40 as
