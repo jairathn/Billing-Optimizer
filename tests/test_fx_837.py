@@ -998,6 +998,25 @@ def test_a_visit_billed_on_time_keeps_its_timely_filing_when_a_late_newer_bill_c
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_first_sent_on_time_and_sent_again_late_keeps_its_timely_filing(tmp_path, kind):
+    """(fx-837-r1-2, the same claim id.) One patient's 99214 of March 2, 2026 went to Anthem as claim CB0000K21C017 on March
+    5, inside Anthem's 90-day first-filing limit (May 31); Anthem never answered, and the practice sent the same claim
+    again September 25, past that limit; no answer either. The March send is proof of timely filing, as an older bill's
+    is: the item is dated by Anthem's appeal window past the limit, and its basis names the March send. (On the world copy
+    3 items, $787.24, were shown as lost to deadlines this way.)"""
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000K21C017", V_MARCH)], "20260305")
+    send(s, tmp_path, [clm837("CB0000K21C017", V_MARCH)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    f = found["CB0000K21C017"]
+    print(f["appeal_deadline"], "|", f["deadline_basis"])
+    assert f["appeal_deadline"] > "2026-11-10" and f["work_state"] != "expired", (f["appeal_deadline"], f["deadline_basis"])
+    assert "2026-03-05" in f["deadline_basis"] and "sent again 2026-09-25" in f["deadline_basis"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("status", ["Submitted", "Rejected"])
 def test_an_exports_bill_carrying_a_visit_first_billed_on_time_keeps_its_timely_filing(tmp_path, kind, status):
     """(fx-837-r1-2 with the exports' carrier.) The same visit (99214 of March 2) went to Anthem on bill CB0000K11 on March

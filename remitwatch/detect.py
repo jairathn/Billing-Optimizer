@@ -6508,8 +6508,14 @@ class Detector:
         if cd.get("through") and cd["through"] != newest:
             ev["answers_through"] = cd["through"]       # EMA's postings show this payer's answers through this day
         label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
+        # the visit's first send: on an older bill a newer one carries (cd visit_first), or this claim's own first send when
+        # it went out again since (the 837s show every send of a claim id): sent on time there, the visit keeps its timely
+        # filing (fx-837-r1-2). A claim rejected before it reached the payer may have been rejected on that first send too,
+        # so only an older bill's send counts for it
+        own_first = (r8[1], pcn) if r8 is not None and r8[1] and sent and r8[1] < sent and not rejected else None
+        visit_first = min((x for x in (cd.get("visit_first"), own_first) if x), default=None)
         dt = self._open_claim_dates(grp, kind, ema_payer, payer_id, days[0], sent, due, cd["basis"], rejected, unsent,
-                                    cd.get("visit_first"))
+                                    visit_first, pcn)
         timely, deadline, dbasis, file_legal = dt["timely"], dt["deadline"], dt["basis"], dt["legal"]
         soon = bool(dt["first"]) and dt["first"] <= _add_days(newest, 30)
         if rejected or unsent:
@@ -6618,15 +6624,17 @@ class Detector:
         return True
 
     def _open_claim_dates(self, grp: str | None, kind: str | None, ema_payer: str | None, payer_id: str | None, dos: str, sent: str,
-                          due: str | None, basis: str, rejected: bool, unsent: bool, visit_first: tuple | None = None) -> dict:
+                          due: str | None, basis: str, rejected: bool, unsent: bool, visit_first: tuple | None = None,
+                          pcn: str | None = None) -> dict:
         """The date a never-answered claim's item is due by, and why ({'timely', 'deadline', 'basis', 'legal', 'first'}):
         sent on time, past the first-filing date the payer still owes a claim it has, and most take proof of timely filing
         for one they have no record of (Medicare's year from the date of service is firm). Its date runs the payer's appeal
         window past the first-filing limit, so it never expires on that limit, whatever day the page is opened. The date of
         service says nothing of when a claim went out, so a claim EMA gives no date for is dated by the limit; where the
         payer's limit is not known, only a claim sent within the shortest common limit was surely on time. visit_first:
-        (day, claim id) of the visit's first send on an older bill a newer bill now carries (the one-visit rule): sent on
-        time there, the visit keeps its timely filing, and the basis names that send (fx-837-r1-2)."""
+        (day, claim id) of the visit's first send on an older bill a newer bill now carries (the one-visit rule), or of this
+        claim's (pcn) own first send before it went out again: sent on time there, the visit keeps its timely filing, and
+        the basis names that send (fx-837-r1-2)."""
         rule = filing_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
         file_by = window_end(dos, rule)
         file_legal = legal_deadline(dos, rule)      # the payer's own last day where later (Medicare's next workday)
@@ -6642,8 +6650,9 @@ class Detector:
             deadline = window_end(max(file_by, due or file_by), ap)
             by = f"by {early_by} where you can, and by {file_by} at the latest" if early_by else f"by {file_by}"
             if prior:
-                dbasis = (f"First sent on time ({prior[0]}, as claim {prior[1]}, which no payer answered); the bill was made again "
-                          f"and went out {sent}, past the first-filing limit ({limit}). Most payers take proof of timely filing: "
+                again = (f"it was sent again {sent}" if pcn and prior[1] == pcn else f"the bill was made again and went out {sent}")
+                dbasis = (f"First sent on time ({prior[0]}, as claim {prior[1]}, which no payer answered); {again}, past the "
+                          f"first-filing limit ({limit}). Most payers take proof of timely filing: "
                           f"the clearinghouse's acceptance report for the {prior[0]} send, or EMA's submission date. The date shown "
                           f"runs the payer's appeal window past that limit ({ap['label']}), not confirmed for a claim the payer "
                           "never answered")
