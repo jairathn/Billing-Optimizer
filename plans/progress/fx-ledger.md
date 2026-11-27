@@ -9,6 +9,59 @@ Owned (the brief's table): detect.py `_build_ledger` (its take-back entry builde
 `_count_not_on_file`, `_taken_back_items`, `_emit_taken_back`, the WO/recoupment listing inside `run_aggregate_rules`;
 states.py `paid_proof` and its helpers, `paid_first_elsewhere` (and the branches of `_decide` that decide a paid item is done).
 
+## Fix round (2026-11-27, the two reviews' findings: fx-ledger-r1-1..4, r2-1..10)
+Reviewers' tests: `$S/tk/review/fx-ledger-r1-tests/test_review_fx_ledger_r1.py`, `$S/tk/review/fx-ledger-r2-tests/`. Ported into
+`tests/test_fx_ledger.py` (section "the fix round's review"), with F1's own edges; the three that are not F1's are in
+`plans/progress/fx-ledger_needs/` (below). The integration tip has not moved since 9f58506 (already merged at 316b9d8): the
+round and its measurement are on 9f58506 + this branch (fix7d, fix7c and deadlines merged; decisions, hook, a17 not yet).
+
+Outcome per finding (all confirmed on invented data first: each ported test failed on 316b9d8 for the reviewer's reason):
+- r1-3 (high) FIXED. states.paid_proof: paid_before_other_payer never counts an answer carrying CARC 22/23 (processed after
+  another payer, a supplement answering with status 1) as another plan's primary payment (`_after_other_payer`).
+  detect._taken_back_items: a primary's taken-back payment is covered by such an answer only as a secondary (half the
+  expected amount), and such an answer is not "another payer answering as primary" in `again` (`Detector._after_other_payer`;
+  paid_cover, F2's, is filtered here, not changed). The J1 case of the review: one item, Medicare's TAKEBACK, work now.
+  Found beside it, not F1's: archive_rules.other_payer_paid_first reads the same status-1 supplement as primary and closes
+  Medicare's denial on it (need 4 below).
+- r1-4 (high) FIXED. paid_proof's EMA branches (C07 and paid_before) net out what the ledger's unlisted recoupments took of
+  the 835 payment EMA posted (`_ema_pay_taken`: matched by EMA's trace_key or the check, the code and the date; a reversed
+  835 payment counts as taken; an EMA-only payment counts as taken when the 835s name a recoupment of the claim after it),
+  less the takebacks EMA posted itself; a listed takeback is named in the proof. The duplicate branch's "has not taken the
+  payment back" no longer shows beside a listed takeback.
+- r1-1 (medium) FIXED. _taken_back_items: a duplicate denial (CARC 18/B13, $0) by the same payer on or before the takeback day
+  restates the payment and is neither 'again' nor 'mine': the TAKEBACK is listed (its own window), the restatement is done
+  with the takeback named. The other way too: the payer's own denial that carries a takeback ('mine') gets the takeback's
+  window when later (`_carry_takeback_window`: the window a TAKEBACK item would have; appeal_deadline, legal_deadline and
+  deadline_basis say so), and the payment's other items name where it is worked (ledger_taken.listed = 2; `_taken_note`).
+  Test changed: `test_a_takeback_no_item_carries_leaves_the_payment_unmarked` now uses a CO-50 denial (a later answer that is
+  the work) instead of a duplicate denial (which r1-1 makes no longer the work).
+- r1-2 (medium) NEED (F5 and _decide's shared FEES branch): need_second_payer_share_step.py (with r2-10's test).
+- r2-1 (medium) FIXED. A $500+ WO naming a claim on file is listed at what the claim's netted recoupments withheld
+  (`_wo_listing_sizes` from `plb_claimed`, `plb_unapplied`): nothing when they net to nothing (a carried balance recovered,
+  a WO its own CS cancels) or the same remittance's reversal took the claim; the whole net (not the face) for a claim taken
+  from in part ("net of the payer's adjustments naming the claim"). Not done (open question): a TAKEBACK for a service whose
+  own reversal took the payment and that nothing answers since (the reviewer's "list the service's TAKEBACK when nothing
+  answers it"); see the measurement for how many removed listings had no other item.
+- r2-2 (medium) FIXED. _voided_services counts a void only of the paid claim: its claim id, a send whose original reference
+  is the claim's payer claim number, or a send to the same payer group; later sends count the same way (a send to another
+  payer after the void does not undo it).
+- r2-3 (medium) FIXED. paid_first_elsewhere: with no expected amount, a first payment under half the item's EMA charges never
+  closes the Medicaid denial (the half floor is `need`, never _threshold's one cent).
+- r2-4 (low) NEED (F6, cloud.SERVING_TABLES): need_serving_copy_ledger_taken.py.
+- r2-5 (low) FIXED. A second payer's share taken back is covered by any second payer's standing share of the service
+  (status 2/3, or status 1 after another payer), whichever paid first.
+- r2-6 (low) FIXED. paid_proof's whole-claim rule leaves the claim's $0.00-billed services out of those that must be paid
+  (`_zero_billed`: a known charge of nothing in the [code, date, charge, ...] lines; unknown charges count).
+- r2-7 (low) FIXED. `_recouped_not_on_file`: entries whose reference holds exactly one claim id not on file, netted by claim id
+  and payer (WO/FB/J1 with CS/72), are counted in REVERSALS_NOT_ON_FILE_META (older when nothing of the bill is on file).
+- r2-8 (low) FIXED. The deferred budget: one remainder per remittance, shared by its reversed claims in (remittance, claim id)
+  order.
+- r2-9 (low) FIXED. states._r835 reads a PLB entry as naming a claim of the bill by its claim id in any letter case (the longest
+  that fits) or by a word that is the payer claim number of exactly one claim of the bill (the ledger's _plb_names reading).
+- r2-10 (low) NEED (F5 and _decide's FEES branch): need_second_payer_share_step.py.
+Every fix broken on purpose and restored: `$U/breaks2.py` (15 breaks, each fails its tests; restored 198 passed), output
+`$U/breaks2.out`.
+
 ## Done
 - about 22:14 UTC: ported the reviewers' and verifiers' tests into `tests/test_fx_ledger.py` (58 tests, both store kinds).
   On the tip (993f440): 36 fail (every finding: money-1, 2, 5, 6, 8, 9, hosts-4, answers-5's paid_proof part), 22 pass
@@ -81,12 +134,15 @@ states.py `paid_proof` and its helpers, `paid_first_elsewhere` (and the branches
   restored 4 passed).
 
 ## Half done
-- (nothing)
+- Fix round (2026-11-27 01:40 UTC): every finding fixed or written as a need (above), tests green, breaks done. Running: the
+  measurement on a private world copy, tip 9f58506 (`$U/tiptree`) against the branch at 341af0d (`$U/brtree`), driver
+  `$U/measure_both.sh` (outputs `$U/measure_tip3.out`, `measure_branch3.out`, `compare3.out`, moved items `$U/moves3.json`).
 
 ## Next
-- Nothing left for F1 in the brief. The integrator: route "Needs from others" (each with its failing test) and read the
-  open questions. The measurement below was taken before fix7c and deadlines reached the integration branch: a
-  re-measure on the merged tip would show the same F1 moves unless those units changed the same items.
+- If the measurement stopped: `bash $U/measure_both.sh` (deletes its world copy itself), then hand-trace the moved items from
+  the raw rows (`$U/scripts/trace_moves.py`, adapted), merge the integration tip again, the full suite in python3 and
+  `$S/fix/venv_sqlite340/bin/python` (`$U/run_shards.sh`), final push, report.
+- The integrator: route "Needs from others" (each with its failing test) and read the open questions.
 
 ## Tests
 - tests/test_fx_ledger.py: 126 tests, both store kinds (58 ported from the reviewers and verifiers, the rest F1's own edges
@@ -157,6 +213,23 @@ into tests/ to run it; each fails on this branch for the reason given).
    states._decide's shared branches). A denial of a claim the practice voided afterwards (837 frequency 8, nothing sent
    after) is listed as work. F1 reads the voids only for takebacks (detect._voided_services, which the rule can call).
    Real copy: 3 claim denials ($226.33, check first) and 2 bundling denials ($81.92, EMA voided), A17: already done.
+
+4. `need_second_payer_share_step.py` (fx-ledger-r1-2 and r2-10; states._decide's shared FEES branch and story's route 'fees'
+   next step, with F5's bill-the-patient steps). A second payer's share taken back (TAKEBACK with evidence second_payer) says
+   "bill the patient, or dispute the takeback" in its title only: its basis says "find out why, then dispute or bill the right
+   payer" and its next step "Match the takeback to the payer's overpayment letter ...". The change: when
+   _ev(f)['second_payer'], the basis says the coinsurance is the patient's again (bill the patient, or dispute the takeback)
+   and the route/next step offers the bill-the-patient action. Real copy (reviewers): 11 such items ($369.63) on Work now.
+5. `need_serving_copy_ledger_taken.py` (fx-ledger-r2-4; F6, cloud.py). The dashboard's copy does not carry ledger_taken, so the
+   drawer's live proof on Vercel counts a payment a recoupment took in part at its whole amount ($117.60 where the server
+   says $87.60). The change: SERVING_TABLES carries ledger_taken (filtered to the copy's lines, as lines is), SERVING_BUILD
+   bumped. (Or story._state_of shows the stored basis and proof on the copy.)
+6. `need_status_1_supplement_not_primary.py` (found fixing r1-3; archive_rules.other_payer_paid_first, in no fixer's row: F2,
+   whose residual is "a supplement that answers with claim status 1 is counted as a primary payment", or the integrator). The
+   rule reads a supplement's status-1 payment carrying OA-23 as another payer paying as primary, and closes Medicare's
+   denial on it, proven ("Paid by <supplement> as primary ...: this denial is another payer's answer"). The change: leave out
+   of its `prim` a payment whose line or claim carries CARC 22 or 23 by the payer (as states._after_other_payer and
+   Detector._after_other_payer read it). Real copy (reviewers): 820 paid supplement answers report status 1, 342 with OA-22/23.
 
 ## Open questions
 - A claim-level REJECTED_PRE_PAYER item and a line-level denial of the same service can both be listed (real copy: a drug
