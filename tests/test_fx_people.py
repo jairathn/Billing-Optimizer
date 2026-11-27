@@ -894,3 +894,115 @@ def test_d2f_a_later_answer_with_other_adjustments_beside_the_contractual_one_do
     st = _state(sstore)
     assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient_denial"), st["state_basis"]
     assert story.next_step(sstore.conn, "F1", today=TODAY2)["steps"][0].startswith("Before billing: Medicaid KY answered after it")
+
+
+# =========================================================================================== routed from F1's fix round
+# A second payer's share taken back in full (F1's money-2: a TAKEBACK item of the second payer's line, evidence
+# second_payer). F5 owns, for this change only, the TAKEBACK branch of states._decide those items reach and story's next
+# step for them (plans/briefs/2026-11-26_fixwave.md, F5; findings fx-ledger-r1-2 and r2-10). Ported from
+# plans/progress/fx-ledger_needs/need_second_payer_share_step.py; invented data, both store kinds.
+from tests.review3.r3helpers import clm, sv, visit_paid  # noqa: E402
+from tests.test_features import clean_visits  # noqa: E402
+from tests.test_fx_ledger import GAP, KY, OTHER, World  # noqa: E402
+from tests.test_fx_ledger import kind as ledger_kind  # noqa: E402,F401  (the both-store-kinds fixture)
+
+
+def _share_taken_back(w, pcn: str, gap=GAP) -> None:
+    """Medicare pays $64.00 of a 99214 and leaves $16.00 of coinsurance (PR-2); the supplement pays the $16.00 as second
+    payer (claim status 2), then withholds it on a later check (PLB WO naming the claim)."""
+    w.remit(clean_visits(1, 25, "99214", "223.65", "80.00"), "20260301", **KY)
+    w.remit([clm(pcn, "1", "223.65", "64.00", sv("99214", "223.65", "64.00", 1, "CAS*CO*45*143.65~CAS*PR*2*16.00~", allowed="80.00"),
+                 payer_ctl="MC1")], "20260415", **KY)
+    w.remit([clm(pcn, "2", "223.65", "16.00", sv("99214", "223.65", "16.00", 1, "CAS*OA*23*207.65~"), payer_ctl="GP1")], "20260425", **gap)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="GP9", paid="16.00")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:5550001 {pcn}*16.00~", **gap)
+
+
+def _taken_back_item(tmp_path, kind, gap=GAP, today="2026-09-20"):
+    w = World(tmp_path, kind)
+    _share_taken_back(w, "CB0000300C017", gap)
+    w.run("r1", today=today)
+    tb = w.rows("signal='TAKEBACK' AND COALESCE(stale, 0) = 0")
+    assert len(tb) == 1, "the supplement's $16.00 taken back is one TAKEBACK item"
+    return w, tb[0]
+
+
+@pytest.fixture(params=["file", "compact"])
+def tbkind(request):
+    return request.param
+
+
+def test_f1need_a_second_payers_share_taken_back_tells_the_biller_to_bill_the_patient(tmp_path, tbkind):
+    """(r1-2) The item's state and the drawer's next step say to bill the patient the $16.00, or dispute the takeback, with
+    the bill-the-patient action, never only "match the overpayment letter and post it"."""
+    from remitwatch import story
+    w, r = _taken_back_item(tmp_path, tbkind)
+    out = story.explain(w.store.conn, r["finding_id"], today="2026-09-20")
+    nxt, st = out["next_step"] or {}, out["state"] or {}
+    assert (st["work_state"], st["rule"]) == ("work_now", "bill_patient"), st["state_basis"]
+    assert nxt["route"] == "bill_patient" and nxt["action"].startswith("Bill the patient $16.00, or dispute the takeback:"), nxt["action"]
+    assert "mark_billed" in nxt["buttons"] and "mark_sent" in nxt["buttons"], nxt["buttons"]
+    assert nxt["expected_cents"] == 1600, nxt["expected_cents"]
+    assert any("put $16.00 on the patient's next statement" in x for x in nxt["steps"]), nxt["steps"]
+    assert any(x.startswith("If it was not owed, dispute it") for x in nxt["steps"]), nxt["steps"]
+    w.store.close()
+
+
+def test_f1need_a_second_payers_share_taken_back_says_bill_the_patient_or_dispute_everywhere(tmp_path, tbkind):
+    """(r2-10) The title, the basis (the worklist's reason) and the stored state say "bill the patient, or dispute the
+    takeback", never the primary's "bill the right payer"."""
+    w, r = _taken_back_item(tmp_path, tbkind)
+    assert "bill the patient" in r["title"]
+    assert "bill the right payer" not in (r["state_basis"] or ""), r["state_basis"]
+    assert "bill the patient, or dispute the takeback" in (r["state_basis"] or ""), r["state_basis"]
+    assert r["state_rule"] == "bill_patient", r["state_rule"]
+    w.store.close()
+
+
+def test_f1need_a_primarys_takeback_keeps_its_own_words(tmp_path, tbkind):
+    """Control: Medicare's own $80.00 taken back in full (PLB WO naming the claim) is still "find out why, then dispute or
+    bill the right payer": the item's work is with the payer, not the patient."""
+    w = World(tmp_path, tbkind)
+    pcn = "CB0000301C017"
+    w.remit(clean_visits(1, 25, "99214", "223.65", "80.00"), "20260301", **KY)
+    w.remit([clm(pcn, "1", "223.65", "80.00", sv("99214", "223.65", "80.00", 1, "CAS*CO*45*143.65~", allowed="80.00"),
+                 payer_ctl="MC1")], "20260415", **KY)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="MC9", paid="80.00")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:5550001 {pcn}*80.00~", **KY)
+    w.run("r1", today="2026-09-20")
+    tb = w.rows("signal='TAKEBACK' AND COALESCE(stale, 0) = 0")
+    assert len(tb) == 1, tb
+    assert tb[0]["state_rule"] == "fees", tb[0]["state_basis"]
+    assert tb[0]["state_basis"].endswith("find out why, then dispute or bill the right payer"), tb[0]["state_basis"]
+    w.store.close()
+
+
+def test_f1need_a_medicaid_plans_share_taken_back_is_never_billed_to_its_member(tmp_path, tbkind):
+    """The same takeback by the member's Medicaid plan as second payer: Medicaid's payment is payment in full, so the
+    share is not the member's. Inside the plan's window the item stays the takeback's own work (find out why, dispute it,
+    or find the plan that covered the day); past it, nothing can be recovered (expired). Neither says bill the patient."""
+    from remitwatch import story
+    w, r = _taken_back_item(tmp_path, tbkind, gap={"payer": "KENTUCKY MEDICAID", "payer_id": "TMCD1"}, today="2026-08-10")
+    assert r["payer_kind"] == "medicaid", r["payer_kind"]
+    assert (r["work_state"], r["state_rule"]) == ("work_now", "fees"), r["state_basis"]
+    assert "a Medicaid member is not billed for it" in r["state_basis"] and "bill the patient" not in r["state_basis"], r["state_basis"]
+    nxt = story.explain(w.store.conn, r["finding_id"], today="2026-08-10")["next_step"]
+    assert nxt["route"] == "fees" and "Bill the patient" not in nxt["action"], nxt["action"]
+    w.run("r2", today="2026-09-20")
+    (late,) = w.rows("signal='TAKEBACK' AND COALESCE(stale, 0) = 0")
+    assert late["work_state"] == "expired" and "bill the patient" not in (late["state_basis"] or ""), late["state_basis"]
+    w.store.close()
+
+
+def test_f1need_past_the_dispute_window_the_share_is_still_billed_to_the_patient(tmp_path, tbkind):
+    """No payer's window closes a patient's share (as decision 2's patient-group denials): long after the supplement's
+    window to dispute its takeback closed, the item still says bill the patient the $16.00, and no longer offers the
+    dispute."""
+    from remitwatch import story
+    w, r = _taken_back_item(tmp_path, tbkind, today="2028-06-01")
+    assert (r["work_state"], r["state_rule"]) == ("work_now", "bill_patient"), r["state_basis"]
+    assert "bill the patient (the window to dispute the takeback closed on" in r["state_basis"], r["state_basis"]
+    nxt = story.explain(w.store.conn, r["finding_id"], today="2028-06-01")["next_step"]
+    assert nxt["action"].startswith("Bill the patient $16.00: ") and "dispute" not in nxt["action"], nxt["action"]
+    assert "mark_billed" in nxt["buttons"] and "mark_sent" not in nxt["buttons"], nxt["buttons"]
+    w.store.close()

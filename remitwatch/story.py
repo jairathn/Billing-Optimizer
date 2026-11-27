@@ -2043,7 +2043,8 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
     elif route == "bill_patient":
         action, steps, who, owed, extra = _bill_patient_step(f, fx, st, tot)
         buttons += extra
-        expected, expected_basis = owed, ("the patient's share on the 835" if owed else
+        expected, expected_basis = owed, ("the patient's share the second payer paid and took back" if S._ev(f).get("second_payer") else
+                                          "the patient's share on the 835" if owed else
                                           "a Medicaid member is not billed beyond the plan's copay")
         deadline, basis = None, "the next statement cycle"
     elif route == "bill_secondary":
@@ -2418,6 +2419,9 @@ def _bill_patient_step(f: dict, fx: dict, st: dict, tot: dict):
     that still holds the contractual reduction (post the payer's answer first); a Medicaid member is never billed beyond
     the plan's copay."""
     grp = f.get("payer_group") or "the payer"
+    tb = S._ev(f).get("taken_back") if f.get("signal") == "TAKEBACK" else None
+    if isinstance(tb, dict) and S._ev(f).get("second_payer"):
+        return _second_share_taken_back_step(f, st, tb)
     proof = st.get("proof") or {}
     pr = int(proof.get("patient_cents") or 0)
     ema_open = tot["balance"] if tot["n"] else None
@@ -2436,6 +2440,27 @@ def _bill_patient_step(f: dict, fx: dict, st: dict, tot: dict):
         extra = ["mark_posted"] + extra
     steps.append(f"Put {usd(owed)} on the patient's next statement; the payer owes nothing more on this line.")
     return f"Bill the patient {usd(owed)}: {proof.get('text') or st.get('state_basis')}.", steps, "Patient accounts", owed, extra
+
+
+def _second_share_taken_back_step(f: dict, st: dict, tb: dict):
+    """A second payer's share taken back in full (F1's money-2, routed to F5; states._decide gives it the rule bill_patient,
+    never for a Medicaid plan, whose share is not its member's): the coinsurance it had paid is the patient's again unless
+    the takeback is disputed. Bill the patient, or dispute it while its window is open; either way the takeback is posted
+    in EMA so its balance is right."""
+    grp = f.get("payer_group") or "the second payer"
+    owed = int(tb.get("cents") or f.get("shortfall_cents") or 0)
+    when = day(tb.get("date"))
+    open_ = "window to dispute the takeback closed" not in str(st.get("state_basis") or "")
+    post = "Either way post the takeback in EMA on the claim its reference names, so EMA's balance is right."
+    why = (f"Find out why {grp} took it back (its remittance of {when} names the claim): a coverage that had ended, or another plan "
+           "that pays first, puts the share back on the patient.")
+    lead = f"Bill the patient {usd(owed)}, or dispute the takeback" if open_ else f"Bill the patient {usd(owed)}"
+    action = f"{lead}: {grp} paid the patient's share as second payer, then took it back on {when}."
+    steps = [why, f"If the takeback was owed, put {usd(owed)} on the patient's next statement and press Mark billed."]
+    if open_:
+        steps.append(f"If it was not owed, dispute it with {grp} (send the remittance that paid it) and press Mark sent.")
+    steps.append(post)
+    return action, steps, "Patient accounts", owed, ["mark_billed", "mark_sent", "copy_instructions"] if open_ else ["mark_billed", "copy_instructions"]
 
 
 PATIENT_DENIAL_WORDS = {"288": "no referral on file", "27": "the coverage had ended", "26": "the coverage had not started",

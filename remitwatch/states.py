@@ -3023,6 +3023,21 @@ def _decide(fx: dict, today: str) -> dict:
                 text = (f"Paid again after the takeback: EMA shows {usd(sum(p['cents'] for p in again))} from {p0['payer'] or 'insurance'} "
                         f"posted {day(p0['posted'])} (check ending {p0['check_tail'] or '?'}, no 835)")
                 return put("done", "repaid_after_takeback", text, [{"source": "production", "kind": "proof", "date": p0["posted"], "text": text}])
+            if _ev(f).get("second_payer"):
+                # a second payer's share taken back in full (F1's money-2; routed to F5): the coinsurance it had paid is the
+                # patient's again unless the takeback is disputed, and no payer's window closes a patient's share (as decision
+                # 2's patient-group denials, below): bill the patient, or dispute the takeback while its window is open. A
+                # Medicaid plan's share is never its member's (payment in full): the work stays the takeback's own
+                paid = (f"{grp or 'The second payer'} paid the patient's share as second payer ({usd(int(tb.get('cents') or 0))}), then took "
+                        f"it back on {day(tb['date'])}")
+                if f.get("payer_kind") != "medicaid":
+                    res["appeal_block"] = "bill"
+                    return put("work_now", "bill_patient", paid + (f": bill the patient (the window to dispute the takeback closed on "
+                                                                     f"{day(lastw)})" if past_all else ": bill the patient, or dispute the takeback"))
+                if not past_all:
+                    res["appeal_block"] = "fees"
+                    return put("work_now", "fees", paid + ": a Medicaid member is not billed for it; find out why, then dispute the takeback "
+                               "or find the plan that covered the day")
         if past_all:
             return expired()
         res["appeal_block"] = "fees"
