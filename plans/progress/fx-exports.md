@@ -16,9 +16,14 @@ Functions this fixer owns (detect.py): `run_ema_open_claims`, `_ema_check_open_c
 the feed date as the unseen meta's newest_835 (build round); `_patient_keys` takes two keyword arguments with defaults,
 `member_names=True` and `persons=None` (fix round; every other caller keeps its behaviour).
 
-## State (updated 2026-11-27 02:00 UTC): the fix round
+## State (updated 2026-11-27 04:10 UTC): the fix round
 
-FIX_ROUND_STATE
+Done. Every finding of the two reviews is addressed (table): r1-2 and r2-5 are kept on
+this branch (both items listed, pointing to each other) and get the full hand-over at the merge with wip/fx-837 (Needs).
+The round's measurement found one more fault of this round's own making, now fixed (c41f286): the r1-3/r1-5 name rules,
+as first written, set aside a send-day twin whose EMA name differed from a remitted name, and listed 12 claims EMA had
+answered through it (A17: six paid). Branch head before this file's last edit: c41f286 (+ the plans-only merge 944dec5).
+tests/test_fx_exports.py: 107 cases (both store kinds) green in python3 and in 3.11.1/SQLite 3.40.
 
 ## The fix round: each review finding and its outcome
 
@@ -36,8 +41,9 @@ FIX_ROUND_STATE
 | r2-2 medium: the kept resend is listed twice once F3a chases resends, and includes a service already paid | fixed: the kept resend is sized at the services no remittance of the bill answered; `_exports_yield_to_newer_bills` makes it yield to the 837 pass's item of the same bill when one is listed (F3a's `_837_resends`); the answers-5 test's two bills have different patients | test_a_bill_sent_again_after_its_primary_answer_is_chased_once (the reviewer's; also passes on a scratch merge with origin/wip/fx-837), test_an_export_resend_yields_to_the_837_passs_item_for_the_same_bill, test_an_export_claim_whose_bill_went_out_again_stays_listed_when_nothing_else_chases_it |
 | (found at the 8c59195 merge) the hook's vanished self-check keeps a yielded item listed | fixed: `_fold_into` records where a claim's chase went in the carrying item's evidence ('folded'), for the yield and the exports' one-visit rule | test_an_unworked_export_item_yields_when_the_patients_name_arrives_later, test_an_export_claim_listed_before_gives_its_visit_to_a_newer_bill_and_is_not_kept_by_the_self_check |
 | (F3a's need) an exports' claim not due yet is not on the waiting view | done: `run_ema_open_claims` calls `_note_waiting` where it exists (wip/fx-837); checked on a scratch merge | test_an_exports_claim_not_due_yet_is_noted_for_the_waiting_view |
+| (found by this round's measurement) the name rules of r1-3 listed 12 claims EMA answered through their send-day twin: all 837 claims whose twin's EMA name differed from the member id's one remitted name (11) or the bill's own remittance (1); A17 calls six paid, three never answered, three undecided | fixed: a name that differs proves nothing alone (a remittance and EMA spell one person otherwise, a dependent carries the subscriber's id). `_twins_by_name` reads what the bills on file say of each twin's patient (`_twin_kin`: the patient's other EMA claims a bill holds, their 837 member ids and remitted names, remittances compared with remittances): the claim's patient when they meet the claim's bill, member id or names; another patient's when EMA's own name for the claim's patient (`_patient_keys`' new `ema_names`) is another chart's, or the patient's bills carry only other member ids and names. A twin of a name of its own, nothing else known, is set aside only when another EMA claim of the claim's content that no bill holds may be the claim's own (`_spare_ema_claims`, the reviewer's r1-3 world). A member id's one remitted name still never chooses (r1-5) | test_a_lone_twin_whose_ema_name_differs_from_the_remitted_name_is_the_claims_when_no_other_ema_claim_can_be, test_a_lone_twin_of_a_patient_whose_bills_are_another_members_never_answers_the_claim, test_a_twin_whose_patients_remittances_name_the_claims_patient_answers_it_though_ema_spells_the_name_otherwise (with and without the bill's own remittance), test_a_lone_send_day_twin_of_another_patient_never_answers_a_claim_emas_reports_name (also with the third EMA claim held by its bill) |
 
-Every fix broken on purpose and restored exactly (sha256 equal, `breakfix2.py`): the print batch's after day, its wait,
+Every fix broken on purpose and restored exactly (sha256 equal, `breakfix2.py`; the measurement's fix: the kin's 'another patient', the spare rule, the remitted names' tie, the held-claim exclusion, EMA's own name each made their tests fail): the print batch's after day, its wait,
 the duplicate rule and its standing check; the own-evidence veto, the one-to-one rule, the member-name veto and its
 dependent exception, member names choosing twins; the bridge's name requirement and its answered-claim guard; the
 joins by name alone, by a member id's name, by person keys; the keep-for-work branch; the resend carrier and sizing;
@@ -53,8 +59,14 @@ asserts does not happen (its own message: "the test no longer reaches the rule")
 - One principle for who a claim's patient is: a name from the claim's own evidence (its bill's remittances, the EMA
   claim a bridge found, EMA's patient for an export claim) can join two claims (with the same member id, or with the
   same birth date) and choose a twin; a member id's one remitted name never joins and never chooses (a subscriber's id
-  covers the family: r1-5, r2-3), but it may keep a claim from taking another person's EMA claim (r1-3; with the
-  dependent exception) and may confirm a lone candidate of the before-send bridge (as answers-7's review proposed).
+  covers the family: r1-5, r2-3), and may confirm a lone candidate of the before-send bridge (as answers-7's review
+  proposed).
+- A name that differs proves nothing alone (the measurement: a remittance and EMA spell one person otherwise, a middle
+  name in one of them; a dependent's claim carries the subscriber's id). A send-day twin is another patient's only on
+  evidence: EMA's own name for the claim's patient (same spelling source) names another chart, or the twin's patient's
+  other bills on file carry other member ids and other remitted names (as A17 rule 5 calls a twin 'other'). With nothing
+  else known, a twin named otherwise is set aside only when another EMA claim of the content, held by no bill, may be
+  the claim's own (r1-3's world); else it is the only place the claim's EMA claim can be, and answers it.
 - The 837's own patient (F3a's claims_837.patient_key and person_key, READ_VERSION 2) is not read here. It is the
   natural own evidence for 837-only claims; adding it to `_who` is a few lines at the merge, but the test builders'
   placeholder names (clm837 names every subscriber 'SAMPLE PAT') then contradict the remittances' and EMA's invented
@@ -95,6 +107,8 @@ asserts does not happen (its own message: "the test no longer reaches the rule")
   evidence, rules exports_yield_to_newer_bill and exports_one_visit); runlog's decision log names every fold
   `archive_rules:fold_into` (it could read the entry's own 'rule'). After the F3a merge, check that the 837 pass's own
   one-visit yields are not kept by the vanished self-check (they record no fold).
+- F3a / integrator, at the merge with wip/fx-837 (found on a scratch merge, 2026-11-27 03:20 UTC): fx-837's 837 one-visit yield records no fold, so the hook's vanished self-check (merged at 8c59195; wip/fx-837 lacks it) keeps the older bill's item listed: 10 cases of tests/test_fx_837.py's work tests fail on 072a920 merged with 8c59195 alone (and the same on 072a920 + this branch), e.g. test_the_work_on_the_older_bill_passes_to_the_bill_made_again. The yield needs the same record as this branch's `_fold_into(carrier, gone, rule, note)` (evidence 'folded' on the newer bill's item).
+- Self-check / save owner (the hook's keeper): an item kept by the vanished self-check is re-listed from detection's stale row, which on the world copy had lost the service's part and was priced as the whole service: the two $0-billed export claims of one 88305 visit (TC $16.17 and 26 $42.76; this branch's answers-3 rule no longer lists them, A17: nothing billed) came back at $98.00 each.
 - F4 (ema_checks.claim_answers' content bridge): an export claim whose own EMA claim is outside Production's dates can be
   bridged by content to another patient's EMA claim when it is the only one of that content (seen in a test world while
   writing r2-4's tests; the world was given each bill's own EMA claim). Not changed here; no real-data count.
@@ -103,19 +117,76 @@ asserts does not happen (its own message: "the test no longer reaches the rule")
 
 ## Merges
 
-MERGES_SECTION
+- e641d38 merged the integration tip 8c59195 (hook, decisions and a17 merged) before the measurement; 944dec5 merged
+  59f6822 (plans only: the handoff and the final-stage brief). The measured code is c41f286, which equals this branch on
+  59f6822. At the final push the tip was still 59f6822 (fetched 2026-11-27 04:00 UTC): no further merge.
+- Scratch merges (not pushed), with origin/wip/fx-837 at 072a920: tests/test_fx_exports.py, test_837_sends.py and
+  test_ema_wiring.py pass; tests/test_fx_837.py has 10 failing cases (its work tests), which fail the same on 072a920 merged
+  with 8c59195 alone: the hook's vanished self-check keeps the older bill's item, as wip/fx-837 lacks the hook merge and
+  its yields record no fold (Needs). With the save() narrowing applied there, plans/progress/fx-exports_needs_save.py
+  passes and test_work_on_an_export_item_stays_on_a_listed_item_when_the_patients_name_arrives_later fails, as expected
+  (to be restated at that merge, see Needs).
 
 ## Suites
 
-SUITES_SECTION
+On c41f286 with this file's edits (the integration tip 59f6822 merged), three shards each (plans/tools/shard.sh):
+- python3 3.13.18 with SQLite 3.53.1: 3,454 passed, 29 skipped, 1 xfailed, 1 failed:
+  tests/test_feed_and_day.py::test_the_pages_say_how_far_the_remittances_reach[serverless] (the banner was not drawn yet:
+  the flaky banner test the fix-wave brief names, routed to F6; passes alone, both cases).
+- Python 3.11.1 with SQLite 3.40.0: 3,273 passed, 13 skipped, 151 failed and 47 errors, every one of them the serialize
+  class (Connection.serialize is missing in that build; re-run with one line each, every line names serialize), none
+  in this fixer's files (test_fx_exports, test_837_sends, test_ema_wiring, test_desk, test_ema_checks, test_insights,
+  test_workable, test_answer_needs_proof, test_selfcheck, test_listed_once).
+- This fixer's files beside the suites: tests/test_fx_exports.py 107 passed in python3 and in 3.11.1; with
+  test_837_sends.py and test_ema_wiring.py 213 passed; the touched set (with test_desk, test_ema_checks, test_insights,
+  test_workable, test_answer_needs_proof, test_selfcheck, test_listed_once, test_hooks) 619 passed before c41f286.
+- static/ is unchanged: no node check needed.
 
 ## Measurements (fix round)
 
-MEASURE_SECTION
+One server cycle per side on a private world copy (the store of 11-24 with EMA's reports; cycle_run dated
+2026-11-24), then A17 (the integration tip's claim_audit_a17.py) on the same copy. Sides: tip = 8c59195; build round =
+a2120cd merged with 8c59195 (scratch); fix round before the measurement's fix = 4989011; final = c41f286. No EMA step error
+on any side; detection's peak 1.1 GB on each (251 s for the tip alone; 325 to 450 s on the branch runs, which shared the
+machine with test runs). Aggregates only.
+
+| Tip 8c59195 against the final branch c41f286 | items | dollars |
+|---|---|---|
+| vanish: NO_ANSWER (Anthem/BCBS 2, Cigna 3, UHC Medicare Advantage 11), REJECTED_PRE_PAYER (Humana MA 1) | 17 | $1,654.68 |
+| appear: NO_ANSWER (Anthem/BCBS 10, Anthem/BCBS Medicare Advantage 19, UHC Medicare Advantage 8) | 37 | $6,122.82 |
+| change size: NO_ANSWER (Anthem/BCBS 4, Optum 1) | 5 | -$16.55 |
+| open in both, evidence changed (a rejected claim's 837 item found its EMA claim; a token line left an item's lines) | 2 | - |
+
+- Split: the build round made the 17 vanishings and the 5 size changes; this fix round made the 37 appearances. At
+  4989011 the round listed 12 claims (all set aside by the first name rule); c41f286 answers 4 of them again and lists 29
+  others (two claims of one member id competing for one proven twin, or twins whose patient's bills are another member's).
+- A17, every open item, tip to final: ALREADY_DONE 2,821 to 2,810 (-11, -$1,074.27), CORRECT 4,969 to 4,997 (+28,
+  +$5,307.80), UNDECIDED 1,283 to 1,285 (+2), WRONG_AMOUNT 2,063 to 2,064 (+1). In scope (services since 2026-01-01):
+  ALREADY_DONE 1,364 to 1,361, UNDECIDED 115 to 118. Money left on the table and closed wrongly: unchanged.
+- The round alone (4989011 against c41f286): ALREADY_DONE -2, CORRECT +27, and the 12 claims the first rule listed: 4
+  answered again (A17: 3 paid, 1 not payable and paid), 8 still listed (A17: 2 paid, 2 owed, 1 owed at another amount, 3
+  undecided).
+- Counters, tip to final: 837_answered_in_ema 4,891 to 4,888, 837_no_answer 777 to 798, 837_waits_unfound 1,690 to 1,672,
+  export_answered_in_ema 403 to 402, export_billed_nothing 10 (new), NO_ANSWER items 822 to 840.
 
 ## Hand trace (fix round)
 
-TRACE_SECTION
+All 61 moved items (tip against the final branch) traced from the raw rows (`ht.py`, `dbg_why.py` on an instrumented
+run of the same cycle, `probe_kin.py`, `probe_unique.py`; private folder, `hand_trace_fix_round.md`):
+- 17 vanished, right: 15 claims whose content with their token line ($0.01 to $0.90) matches exactly one EMA claim charged
+  on the send day, which the payer answered after the send (A17: done); 1 rejected claim now carried by its 837 item (one
+  claim, one item); 1 Cigna claim EMA shows answered with $0 and no balance (A17 says never answered: the calibration point
+  the final-stage brief lists).
+- 5 changed: 2 right (sized at the billed charge, not a rate above it); 2 right to leave the lists (two $0-billed parts of
+  one 88305 visit, answers-3) but kept by the vanished self-check at $98.00 each (Needs); 1 unclear (J3490 now priced
+  from its history, F2's residual).
+- 37 appeared: 29 right (A17 finds them never answered: the send-day twins are another patient's, or two claims of one
+  member id compete for one twin); 1 right to list at another amount (F3a's estimate); 3 unclear (A17 undecided, the
+  twin's patient unproven either way); 4 wrong, wasted checks (A17: paid): 3 had their twins narrowed to one each, which
+  the twins rule's day count then refuses because the day's other claims keep the others; 1 had every twin set aside.
+  A one-to-one elimination per send day would answer such claims, but on the same send days A17 calls 28 listed claims
+  never answered: left as is (the error that costs a check, not money).
+- 2 evidence changes, right.
 
 ## Build round (kept for the record)
 
