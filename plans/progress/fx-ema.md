@@ -81,6 +81,18 @@ per-service shares and counts, the C7/C9 inside-the-window cents; their tests ar
   test_ema_ledger, test_answer_needs_proof, test_ema_reports): 478 passed after the two fixture updates (5 failed before
   them, all from the bare $0 rule and the audit's own dates, both resolved). Full suites: see the final report.
 
+## Full suites (branch 793307f code, the C6 guards of b3c06a0 run on 3.11.1)
+- python3 3.13: 3,369 passed, 4 failed, 29 skipped, 1 xfailed. The 4 were this branch's rule 4.2 change: 3 counted an
+  accepted pattern by the items listed (0) where the run had set them aside: fixed (a pattern the run set aside on the
+  owner's Accept keeps the run's count; a pursued one counts the Worklist's items). The 4th,
+  tests/test_ema_wiring.py::test_remittance_denials_of_a_code_the_payer_never_pays_as_primary_are_its_policy, is OPEN:
+  its 22 invented patients were named RAD0..RAD21, which the name key reads as one patient (digits are dropped), so the
+  per-service measure saw one service; the fixture now names them RADA..RADV and the measure is right (22 answered, 0
+  paid), but after the owner's Accept one G6001 item stays open (some rule after the fold makes an item for one of the 22
+  services). First next step: find that item's signal, decide whether the fold must also take it, and make the test pass.
+- 3.11.1 (SQLite 3.40.0): 155 failed, 47 errors; 198 of the 202 are `Connection.serialize` missing (allowed); the other 4
+  are the same rule 4.2 tests as python3.
+
 ## Next command
 Measure: `KEEP_WORLD=1 bash $S/tk/units/fx-ema/measure.sh $S/tk/units/fx-ema/brtree br1` (tip: `... tiptree tip0`, done),
 then `python3 -I -B $S/tk/units/fx-ema/compare.py snap_tip0.sqlite snap_br1.sqlite moves1.json`.

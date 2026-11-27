@@ -844,11 +844,14 @@ def _payer_policies(c: sqlite3.Connection, stored: dict) -> dict:
         if isinstance(row, dict) and row.get("kind") == "payer_policy" and row.get("pattern") and row["pattern"] not in out:
             out[row["pattern"]] = {"n": row.get("items"), "cents": row.get("cents"), "paid": row.get("paid"), "answered": row.get("answered"),
                                    "decision": row.get("decision"), "default": row.get("default")}
-    if out and _table(c, "findings") and c.execute("SELECT 1 FROM findings LIMIT 1").fetchone():
-        live = _listed_policy_items(c, out)
-        for key, p in out.items():
+    # a pattern the run pursued is counted by the items the Worklist lists now (after every rule of the run); one it set
+    # aside on the owner's Accept keeps what the run set aside (those items are off the Worklist and stay counted here)
+    pursued = {k for k, p in out.items() if (p.get("decision") or "pursue") == "pursue"}
+    if pursued and _table(c, "findings") and c.execute("SELECT 1 FROM findings LIMIT 1").fetchone():
+        live = _listed_policy_items(c, pursued)
+        for key in pursued:
             n, cents = live.get(key) or (0, 0)
-            p.update(n=n, cents=cents)
+            out[key].update(n=n, cents=cents)
     return out
 
 
