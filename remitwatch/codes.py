@@ -505,6 +505,20 @@ MEDICAL_NECESSITY_CARCS = frozenset({"50", "55", "56", "150", "151", "152"})
 # information submitted does not support') stay with the Claim Payment Dispute: Anthem reviews an E&M level 'in accordance
 # with correct coding requirements and/or reimbursement policy', and the dispute covers 'Claim code editing issues' (fx-windows)
 ANTHEM_CLINICAL_CARCS = frozenset({"50", "55", "56"})
+# A BlueCard member's plan, by the 835's plan name (its contract class): BlueCard's own words ('ITS HOST', 'BLUECARD',
+# 'BLUE CARD'), or a name that starts with the two-letter code of a state other than Kentucky and Indiana ('GA ... PPO').
+# A plan that spells out another state's name is found by its state (the rows' other_state).
+ANTHEM_HOME_PLAN = (r"\bITS\b|\bHOST\b|\bBLUE ?CARD\b|^\s*(?:"
+                    + "|".join(sorted(set(US_STATES.values()) - {"KY", "IN"})) + r")\b")
+ANTHEM_CLINICAL_SOURCE = ("Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual (2026, v1 effective September 1, 2026 and "
+                          "v2 effective March 1, 2027) and Indiana Provider Manual (2026, v1 effective August 1, 2026), Clinical Appeals, "
+                          "Claim Payment Disputes and BlueCard Members")
+ANTHEM_BLUECARD_CLINICAL = (
+    "Anthem commercial, a BlueCard member's clinical denial (not medically necessary or experimental/investigational; the plan is "
+    "another Blue plan's): such appeals 'are the responsibility of the Blue Plan ... (the Member's Home Plan)', and 'if the appeal "
+    "relates to a Claim denial, and the Provider or Facility did not receive this information from the Member's Home Plan', 'a "
+    "Claim Payment Dispute should be submitted ... to the local Anthem Plan', two years from the EOP: the last day. The clinical "
+    "appeal's 180 days from the remittance are the date shown, since the Home Plan's own directions can be that short")
 GEHA_MATCH = r"(?i)^(geha\b|government employees (health|hospital) association)"
 FEP_PLAN = r"FEDERAL EMPLOYEE"
 # the Federal Employee Program reaches the practice through Anthem (the 835's contract class names it); Anthem's provider
@@ -544,18 +558,34 @@ APPEAL_RULES: list[dict] = [
               "not confirmed",
      "source": "Anthem Blue Cross and Blue Shield Kentucky Provider Manual (2026 v2), Claim Payment Disputes; 5 CFR 890.105(b)(1) "
                "(eCFR as of 2026-11-24)"},
-    # A clinical decision (not medically necessary, experimental or investigational) is appealed as a clinical appeal, not by
-    # the Claim Payment Dispute below, which 'does not apply to appeals regarding a clinical decision denial'. The manuals
-    # count the 180 days from receipt of the notice: the remittance's date is the safe date, and receipt presumed 5 days
-    # after it (as for KRS 205.534 above) the last day (fx-windows)
-    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": ANTHEM_CLINICAL_CARCS, "days": 180,
-     "verified": True, "legal": {"days": 185},
+    # A clinical decision (not medically necessary, experimental or investigational) of Anthem's own member is appealed as a
+    # clinical appeal, not by the Claim Payment Dispute below, which 'does not apply to appeals regarding a clinical decision
+    # denial'. The manuals count the 180 days from receipt of the notice: the remittance's date is the safe date, and receipt
+    # presumed 5 days after it (as for KRS 205.534 above) the last day. A BlueCard member (another Blue plan's, the Home
+    # Plan's) is not Anthem's: the Home Plan decides a clinical appeal, and a claim denial the provider appeals without the
+    # Home Plan's directions goes to the local plan as a Claim Payment Dispute (the manuals, BlueCard Members), two years from
+    # the EOP. The 835's plan tells them apart (ANTHEM_HOME_PLAN, or a plan or payer of a state other than Kentucky and
+    # Indiana); their denial and one whose plan is not known (EMA's) keep the clinical appeal's 180 days as the date shown
+    # (the Home Plan's directions can be that short) and the dispute's two years as the last day: a guess never makes an
+    # item expire early (fx-windows)
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": ANTHEM_CLINICAL_CARCS, "plan": ANTHEM_HOME_PLAN,
+     "days": 180, "verified": True, "legal": {"years": 2}, "label": ANTHEM_BLUECARD_CLINICAL, "source": ANTHEM_CLINICAL_SOURCE},
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": ANTHEM_CLINICAL_CARCS, "other_state": ("KY", "IN"),
+     "days": 180, "verified": True, "legal": {"years": 2}, "label": ANTHEM_BLUECARD_CLINICAL, "source": ANTHEM_CLINICAL_SOURCE},
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": ANTHEM_CLINICAL_CARCS, "plan": r"\S",
+     "days": 180, "verified": True, "legal": {"days": 185},
      "label": "Anthem commercial, a clinical appeal (a claim 'denied as not medically necessary or experimental/investigational'): "
               "'Providers and Facilities have one hundred eighty (180) calendar days to file a clinical appeal from the date they receive "
               "notice of Anthem's initial decision'. The Claim Payment Dispute's two years 'does not apply to appeals regarding a clinical "
               "decision denial'. Counted here from the remittance; the last day presumes the notice was received 5 days after it",
-     "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual (2026, v1 effective September 1, 2026 and v2 effective "
-               "March 1, 2027) and Indiana Provider Manual (2026, v1 effective August 1, 2026), Clinical Appeals and Claim Payment Disputes"},
+     "source": ANTHEM_CLINICAL_SOURCE},
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": ANTHEM_CLINICAL_CARCS,
+     "days": 180, "verified": True, "legal": {"years": 2},
+     "label": "Anthem commercial, a clinical denial (not medically necessary or experimental/investigational) whose plan is not known: "
+              "Anthem's own member has 180 calendar days from the notice to file a clinical appeal, the date shown here, counted from the "
+              "remittance; a BlueCard member's (another Blue plan's) denial goes to the local Anthem plan as a Claim Payment Dispute, "
+              "two years from the EOP, the last day used until the plan is known",
+     "source": ANTHEM_CLINICAL_SOURCE},
     {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "months": 24, "verified": True, "legal": {"years": 2},
      "label": "Anthem commercial: Claim Payment Reconsideration within two years of the EOP issue date; "
               "Claim Payment Appeal within 90 days of the reconsideration decision",

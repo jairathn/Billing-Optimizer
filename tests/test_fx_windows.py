@@ -79,26 +79,58 @@ def test_an_anthem_commercial_clinical_denial_is_appealed_within_180_days_of_the
     eighty (180) calendar days to file a clinical appeal from the date they receive notice of Anthem's initial decision'; a
     clinical appeal is 'a situation in which an authorization or Claim for a service was denied as not medically necessary
     or experimental/investigational', and the Claim Payment Dispute 'does not apply to appeals regarding a clinical
-    decision denial'. A denial on a March 1, 2026 remittance: 180 days, August 28, 2026, is the date shown; receipt is
-    presumed 5 days after the remittance (as for KRS 205.534), so September 2 is the last day. It was the two-year dispute,
-    March 1, 2028, called confirmed."""
+    decision denial'. A denial on a March 1, 2026 remittance for one of Anthem's own plans: 180 days, August 28, 2026, is
+    the date shown; receipt is presumed 5 days after the remittance (as for KRS 205.534), so September 2 is the last day. It
+    was the two-year dispute, March 1, 2028, called confirmed."""
     for kind in ("commercial", "supplement", "other"):
         for carc in CLINICAL:
-            r = appeal_rule("Anthem / BCBS", kind, carc=carc)
-            assert dates("2026-03-01", r) == ("2026-08-28", "2026-09-02"), (kind, carc, r["label"])
-            assert r["verified"] and "one hundred eighty (180) calendar days" in r["label"], r["label"]
-            assert "Clinical Appeals" in r["source"], r["source"]
+            for plan in ("SAMPLE PPO", "KENTUCKY SAMPLE HSA", "IN SAMPLE HRA PPO", "INDIANA SAMPLE PPO"):
+                r = appeal_rule("Anthem / BCBS", kind, plan, carc=carc)
+                assert dates("2026-03-01", r) == ("2026-08-28", "2026-09-02"), (kind, carc, plan, r["label"])
+                assert r["verified"] and "one hundred eighty (180) calendar days" in r["label"], r["label"]
+                assert "Clinical Appeals" in r["source"], r["source"]
     # a payment dispute keeps the two years; a reason that is not known keeps them too (an underpayment has none); so do the
     # level-of-service, frequency and length denials (150, 151, 152): Anthem reviews an E&M level 'in accordance with correct
     # coding requirements and/or reimbursement policy', a 'Claim code editing' matter for the Claim Payment Dispute
     for carc in ("45", "97", "29", "16", "150", "151", "152", None):
-        assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", carc=carc)) == ("2028-03-01", "2028-03-01"), carc
+        for plan in (None, "SAMPLE PPO"):
+            assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", plan, carc=carc)) == ("2028-03-01", "2028-03-01"), \
+                (carc, plan)
     # the Federal Employee Program keeps its own clinical row: the member's 6 months
     assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "FEDERAL EMPLOYEE PROGRAM", carc="50")) == \
         ("2026-08-28", "2026-09-01")
     # Anthem's Medicare Advantage and Medicaid plans keep theirs
     assert appeal_rule("Anthem / BCBS Medicare Advantage", "medicare_advantage", carc="50")["days"] == 120
     assert appeal_rule("Anthem / BCBS Medicaid", "medicaid", "INDIANA SAMPLE PLAN", carc="50")["days"] == 60
+
+
+def test_a_bluecard_members_clinical_denial_keeps_the_claim_payment_disputes_last_day():
+    """The same manuals, BlueCard Members: a clinical decision for a member of another Blue plan (the home plan) is the
+    home plan's, and 'if the appeal relates to a Claim denial, and the Provider or Facility did not receive this
+    information from the Member's Home Plan ... a Claim Payment Dispute should be submitted ... to the local Anthem Plan':
+    two years from the EOP. The 835's plan says which members those are: BlueCard's own words (ITS HOST, BLUECARD, BLUE
+    CARD) or a plan of a state other than Kentucky and Indiana, by its name or its two-letter code. Their denial is worked
+    by the clinical appeal's 180 days (the home plan's directions can be that short) and stays open to the dispute's last
+    day, March 1, 2028: had it expired on the clinical appeal's last day, a denial still open to a dispute would have left
+    the list. A denial whose plan is not known (EMA names none) is dated the same way, since the item cannot say it is
+    Anthem's own member's."""
+    for plan in ("ITS HOST PPO SAMPLE", "SAMPLE BLUECARD PPO", "SAMPLE BLUE CARD PREFERRED", "GA SAMPLE HSA PPO",
+                 "OHIO SAMPLE HSA", "VA SAMPLE HSA PPO", "  CT SAMPLE PPO", None):
+        for carc in CLINICAL:
+            r = appeal_rule("Anthem / BCBS", "commercial", plan, carc=carc)
+            assert dates("2026-03-01", r) == ("2026-08-28", "2028-03-01"), (plan, carc, r["label"])
+            assert r["verified"] and "Claim Payment Dispute" in r["label"] and "180" in r["label"], r["label"]
+            assert "BlueCard Members" in r["source"], r["source"]
+            if plan:
+                assert "Home Plan" in r["label"], r["label"]
+            else:
+                assert "not known" in r["label"], r["label"]
+    # the payer's name gives the state where the plan names none (a remittance from another state's Anthem plan)
+    r = appeal_rule("Anthem / BCBS", "commercial", "SAMPLE PPO", carc="50", payer_name="ANTHEM BLUE CROSS OF GEORGIA")
+    assert dates("2026-03-01", r) == ("2026-08-28", "2028-03-01"), r["label"]
+    # a payment dispute of a BlueCard member keeps the dispute's two years as its date too
+    assert dates("2026-03-01", appeal_rule("Anthem / BCBS", "commercial", "ITS HOST PPO SAMPLE", carc="45")) == \
+        ("2028-03-01", "2028-03-01")
 
 
 @pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
@@ -112,6 +144,19 @@ def test_detection_dates_an_anthem_commercial_clinical_denial_by_its_180_days(tm
     assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-11-28", "2026-12-03"), (f["appeal_deadline"], f["legal_deadline"],
                                                                                       f["deadline_basis"])
     assert "clinical appeal" in f["deadline_basis"], f["deadline_basis"]
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_detection_keeps_a_bluecard_members_clinical_denial_open_to_the_dispute(tmp_path, compact):
+    """The same denial for a BlueCard member (the 835's plan says ITS HOST): due November 28, 2026 all the same, and open
+    to the Claim Payment Dispute's last day, June 1, 2028, so it does not leave the list on the clinical appeal's."""
+    got = _run(tmp_path, compact, _book("12", "ITS HOST PPO SAMPLE", "20260520", [NECESSITY]), "20260601", "ANTHEM", "ANTHM",
+               today="2026-07-15")
+    got.pop("_store").close()
+    f = got["DENIED_MEDICAL_NECESSITY"]
+    assert (f["appeal_deadline"], f["legal_deadline"]) == ("2026-11-28", "2028-06-01"), (f["appeal_deadline"], f["legal_deadline"],
+                                                                                      f["deadline_basis"])
+    assert "Home Plan" in f["deadline_basis"], f["deadline_basis"]
 
 
 @pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
@@ -142,10 +187,8 @@ def test_a_clinical_denial_only_ema_saw_is_dated_by_anthems_180_days(tmp_path, e
         st.close()
 
 
-@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
-def test_an_ema_clinical_denial_item_shows_the_last_day_of_its_own_window(tmp_path, ema_env, compact):
-    """Detection lists EMA's CO-50 denial from an Anthem commercial plan with the clinical appeal's own last day (5 days of
-    receipt after the date shown), worked out from the same rule the check dated it by (detect._emit_proto)."""
+def _ema_clinical_item(tmp_path, compact: bool) -> dict:
+    """Detection's item for EMA's CO-50 denial from an Anthem commercial plan, with no 835 on file (detect._emit_proto)."""
     from remitwatch import ema_checks as ec, ema_ledger as el
     from remitwatch.detect import Detector
     from tests import ema_fixtures as F, test_ema_checks as TC
@@ -161,10 +204,38 @@ def test_an_ema_clinical_denial_item_shows_the_last_day_of_its_own_window(tmp_pa
         det._emit_proto(proto[0])
         f = [x for x in det.findings.values() if x["signal"] == "EMA_DENIED"]
         assert len(f) == 1, f
-        assert f[0]["legal_deadline"] == _add(f[0]["appeal_deadline"], 5), (f[0]["appeal_deadline"], f[0]["legal_deadline"])
+        return dict(f[0], evidence=proto[0]["evidence"])
     finally:
         lg.close()
         st.close()
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_an_ema_clinical_denial_item_is_worked_by_the_clinical_appeal_and_stays_open_to_the_dispute(tmp_path, ema_env, compact):
+    """EMA names no plan, so its Anthem clinical denial may be a BlueCard member's, whose denial goes to the local plan's
+    Claim Payment Dispute: the item is due by the clinical appeal's 180 days from the remittance (EMA's posting less its
+    usual delay) and stays listed to the dispute's two years, its last day."""
+    f = _ema_clinical_item(tmp_path, compact)
+    ev = f["evidence"]
+    start = _add(ev["first_denial_posted"], -int(ev["posting_lag_days"]))
+    assert f["appeal_deadline"] == _add(start, 180), (f["appeal_deadline"], start)
+    assert f["legal_deadline"] == window_end(start, {"months": 24}), (f["legal_deadline"], start)
+
+
+@pytest.mark.parametrize("compact", KINDS, ids=KIND_IDS)
+def test_an_ema_denial_items_last_day_comes_from_the_window_its_reason_picks(tmp_path, ema_env, compact, monkeypatch):
+    """Detection works out an EMA denial's last day from the same window the check dated it by: the one its reason picks
+    (detect._emit_proto passes the reason to appeal_rule, as ema_checks.ema_denials does). Shown with an invented window for
+    CO-50 of 100 days and a last day 111 days from the remittance, so the reason's window is told from the payer's
+    general one (two years)."""
+    invented = {"match": r"^Anthem / BCBS$", "kinds": {"commercial"}, "carcs": frozenset({"50"}), "days": 100, "verified": True,
+                "legal": {"days": 111}, "label": "An invented window for this test", "source": "invented"}
+    monkeypatch.setattr(codes, "APPEAL_RULES", [invented] + codes.APPEAL_RULES)
+    f = _ema_clinical_item(tmp_path, compact)
+    ev = f["evidence"]
+    start = _add(ev["first_denial_posted"], -int(ev["posting_lag_days"]))
+    assert f["appeal_deadline"] == _add(start, 100), (f["appeal_deadline"], start)
+    assert f["legal_deadline"] == _add(start, 111), (f["legal_deadline"], start)
 
 
 # ============================================================ 2. the state's own Medicaid program, by EMA's names
