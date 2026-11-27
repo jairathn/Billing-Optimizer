@@ -516,6 +516,11 @@ def test_an_export_claim_whose_bill_went_out_again_stays_listed_when_nothing_els
         got = [r for r in _open(s, bill + "%") if r["signal"] == "NO_ANSWER"]
         assert any("17110" in [ln[0] for ln in json.loads(r["evidence"])["lines"]] for r in got), (
             f"{bill}: the 17110 sent in the replacement was never answered, and no item chases it: {got}")
+    l02 = [r["patient_control_number"] for r in _open(s, "CB0000L02%") if r["signal"] == "NO_ANSWER"]
+    assert len(l02) == 1, f"one bill's one resend is chased {len(l02)} times: {l02}"
+    if l02 == ["CB0000L02C031"]:
+        s.close()       # the 837 pass chases the bill's newest resend itself (the fix wave's F3a): the exports' item yields
+        return
     # L02's item is due from the newer send (the payer's answer to the bill is due from September 20, not September 1) and
     # names the submission the 837s show, so the biller asks the payer about it
     f = dict(s.query("SELECT title, hint, evidence FROM findings WHERE patient_control_number='CB0000L02C024'")[0])
@@ -1200,24 +1205,26 @@ def _father_and_son(s, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_father_and_son_named_only_by_their_members_remittances_stay_two_patients(tmp_path, kind):
-    """(fx-exports-r2-4; the reviewer's tests) The father's bill CB0000J91 and the son's CB0000J92, both in EMA's weekly
-    exports (sent September 15 and 25, charts EMA091S and EMA091J), and the father's CB0000J93 (exports) beside the son's
-    CB0000J94 (only the 837s). Neither answered. Both pairs stay two items."""
+@pytest.mark.parametrize("cross_pass", [False, True])
+def test_a_father_and_son_named_only_by_their_members_remittances_stay_two_patients(tmp_path, kind, cross_pass):
+    """(fx-exports-r2-4; the reviewer's tests) The father's bill CB0000J91 (EMA's exports, chart EMA091S, sent September 15)
+    and the son's CB0000J92, sent September 25: in EMA's exports too (chart EMA091J), or (cross_pass) only in the 837s.
+    Neither answered. Two men: both stay chased."""
     from tests.test_workable import ema
     s = _store(tmp_path, kind)
     _father_and_son(s, tmp_path)
     v26 = [("88305", "90.00", "20260914", "26")]
-    for bill, pid, sent, member in (("CB0000J91", "EMA091S", "2026-09-15", "WSRJR00001"), ("CB0000J92", "EMA091J", "2026-09-25", "WSRJR00002"),
-                                    ("CB0000J93", "EMA093S", "2026-09-15", "WSRJR00001")):
+    bills = [("CB0000J91", "EMA091S", "2026-09-15", "WSRJR00001")] + ([] if cross_pass else [("CB0000J92", "EMA091J", "2026-09-25", "WSRJR00002")])
+    for bill, pid, sent, member in bills:
         ema(s.conn, bill + "C017", cpt="88305", modifiers='["26"]', charges_cents=9000, patient_id=pid)
         ema(s.conn, bill + "C017", family="claim_status", claim_status="Submitted", claim_submission_date=sent, patient_id=pid)
         s.conn.commit()
         send(s, tmp_path, [clm837(bill + "C017", v26, member=member)], sent.replace("-", ""))
-    send(s, tmp_path, [clm837("CB0000J94C017", v26, member="WSRJR00002")], "20260925")
+    if cross_pass:
+        send(s, tmp_path, [clm837("CB0000J92C017", v26, member="WSRJR00002")], "20260925")
     found = _chased(s, "t1")
-    assert {"CB0000J91C017", "CB0000J92C017", "CB0000J93C017", "CB0000J94C017"} <= set(found), (
-        f"listed {sorted(k for k in found if k.startswith('CB0000J9'))}: a father's visit was handed to his son's bill")
+    assert {"CB0000J91C017", "CB0000J92C017"} <= set(found), (
+        f"listed {sorted(k for k in found if k.startswith('CB0000J9'))}: the father's visit was handed to his son's bill")
     s.close()
 
 
@@ -1385,3 +1392,25 @@ def test_a_claim_never_sent_is_listed_to_be_sent_whatever_stray_remittance_is_ne
     s.close()
     assert got == [("REJECTED_PRE_PAYER", True)], (
         f"the claim never sent is listed as {got}; it waits as an answer no source can check: {json.loads(unseen[0]) if unseen else None}")
+
+
+# ----------------------------------------------------------------------------------------------- the waiting view (F3a's need)
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_exports_claim_not_due_yet_is_noted_for_the_waiting_view(tmp_path, kind, monkeypatch):
+    """(fx-837's need for F3b) Bill CB0000B92, which EMA's weekly exports list as Submitted November 1, is not due before
+    Anthem's answer days run out, so no list chases it yet. It is noted for the waiting view the 837 pass keeps
+    (Detector._note_waiting, the fix wave's F3a; stood in for here, where that view is not built), with its group, send
+    day, due day and billed dollars, as the 837 pass notes its own claims."""
+    from remitwatch import detect as Dm
+    from tests.test_workable import ema
+    noted = []
+    monkeypatch.setattr(Dm.Detector, "_note_waiting", lambda self, *a: noted.append(a), raising=False)
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    ema(s.conn, "CB0000B92C017", service_date="2026-10-30", bill_created="2026-11-01")
+    ema(s.conn, "CB0000B92C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-11-01",
+        service_date="2026-10-30")
+    s.conn.commit()
+    Detector(s, run_id="t1").run()
+    s.close()
+    assert [(a[0], a[2], a[4]) for a in noted] == [("CB0000B92C017", "2026-11-01", 22365)] and noted[0][3] > "2026-11-10", noted

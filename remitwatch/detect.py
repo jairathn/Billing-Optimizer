@@ -6360,8 +6360,13 @@ class Detector:
                 if not due or due > export_day:
                     continue
             elif not rejected and not cob.get(b) and (not due or due > (through or newest)):
-                continue                    # not due yet, or the answers on file do not reach the day it was due (a payer
-                                            # that answered as secondary after a coordination denial applied the primary's)
+                # not due yet, or the answers on file do not reach the day it was due (a payer that answered as secondary
+                # after a coordination denial applied the primary's): on the waiting view with its due day, where the 837
+                # pass keeps one (_note_waiting, the fix wave's F3a; blindness is loud)
+                note = getattr(self, "_note_waiting", None)
+                if note is not None:
+                    note(pcn, grp, sent, due, sum(x[2] or 0 for x in items))
+                continue
             # Its own payer's answers must reach that day too (misuse check CH-8): its remittances, or EMA's postings for it when
             # they reach past the feed (through). When they stop before it while the feed goes on, nothing on file says whether
             # that payer answered. The claim is counted under its payer for the Data tab, not listed. A payer with no remittance
