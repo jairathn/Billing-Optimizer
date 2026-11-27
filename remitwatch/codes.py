@@ -249,8 +249,16 @@ PAYER_RULES: list[tuple[str, str, str]] = [
     # 'Medcaid'. WellCare's Medicaid plan keeps WellCare's group (the one its 835s get from CLP06 MC), so its own windows
     # apply, never the Wellcare Medicare Advantage plan's (deadlines review r2-1)
     (r"WELLCARE.*\bMEDI?CAID\b|\bMEDI?CAID\b.*WELLCARE", "WellCare / Ambetter (Centene) Medicaid", "medicaid"),
-    (r"KY MEDI?CAID|KENTUCKY MEDI?CAID", "Medicaid KY", "medicaid"),
-    (r"IN MEDI?CAID|INDIANA MEDI?CAID", "Medicaid IN", "medicaid"),
+    # Anthem's Medicaid plans under the names EMA and the 837s give them ('Anthem Indiana Medicaid Hoosier Healthwise',
+    # 'Anthem Pathways Indiana Medicaid'): Anthem's Medicaid group, the one its 835s get from CLP06 MC, so the windows of
+    # Anthem's plan in the state the name gives apply, never the state program's (fx-windows)
+    (r"^ANTHEM\b.*\bMEDI?CAID\b", "Anthem / BCBS Medicaid", "medicaid"),
+    # the state's own fee-for-service program: a name that starts with the state (the 835s' 'KY MEDICAID', 'IN MEDICAID') or
+    # with the word Medicaid and then the state (EMA's and the 837s' 'Medicaid of Kentucky', 'Medicaid of Indiana'). A managed
+    # care plan's name starts with the plan's own ('<plan> Medicaid of Kentucky', '<plan> Indiana Medicaid'): it is never the
+    # state's program, whose rules (Kentucky's no appeal, Indiana's 180 days) are not the plan's (fx-windows)
+    (r"^(?:KY|KENTUCKY)\b.*\bMEDI?CAID\b|^MEDI?CAID\b(?:\W+OF)?\W+(?:KY|KENTUCKY)\b", "Medicaid KY", "medicaid"),
+    (r"^(?:IN|INDIANA)\b.*\bMEDI?CAID\b|^MEDI?CAID\b(?:\W+OF)?\W+(?:IN|INDIANA)\b", "Medicaid IN", "medicaid"),
     (r"MEDI?CAID", "Medicaid (other)", "medicaid"),
     (r"HUMANA CARE PLAN|HUMANA.*(MEDICARE|ADVANTAGE|GOLD)", "Humana Medicare Advantage", "medicare_advantage"),
     (r"^HUMANA", "Humana", "commercial"),
@@ -332,6 +340,21 @@ def pos_class(pos: str | None) -> str:
 # working without them. A rule that needs a fact the item does not carry is passed over: an item that does not say which
 # plan it is gets the shorter window, and the label of that window says so.
 PLAN_FACTS = ("plan", "payer_name", "payer_id", "cfi", "state", "carc", "paid")
+
+# The VA's community care networks: claims go out under these payer ids, and EMA and the 837s name the network after its
+# administrator ('Optum Unitedhealth Care'), whose name the rules read as UnitedHealthcare's administered plans. Where a
+# claim carries one of these ids, the VA's windows apply whatever group its name gave (A17 review a17-r1-3, fx-windows).
+# detect.VA_PAYER_IDS and ema_reports.VA_PAYER_IDS hold the same ids (tests/test_fx_windows.py checks they agree).
+VA_PAYER_IDS = frozenset({"VACCN", "TWVACCN"})
+VA_GROUP = ("VA Community Care", "va")
+
+
+def _by_payer_id(grp: str, kind: str, f: dict) -> tuple[str, str]:
+    """The group and kind a window is looked up by: the VA's network where the claim carries its payer id, else the ones
+    given."""
+    if str(f.get("payer_id") or "").strip().upper() in VA_PAYER_IDS:
+        return VA_GROUP
+    return grp, kind
 
 
 US_STATES = {
@@ -516,6 +539,18 @@ APPEAL_RULES: list[dict] = [
               "not confirmed",
      "source": "Anthem Blue Cross and Blue Shield Kentucky Provider Manual (2026 v2), Claim Payment Disputes; 5 CFR 890.105(b)(1) "
                "(eCFR as of 2026-11-24)"},
+    # A clinical decision (not medically necessary, experimental or investigational) is appealed as a clinical appeal, not by
+    # the Claim Payment Dispute below, which 'does not apply to appeals regarding a clinical decision denial'. The manuals
+    # count the 180 days from receipt of the notice: the remittance's date is the safe date, and receipt presumed 5 days
+    # after it (as for KRS 205.534 above) the last day (fx-windows)
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "carcs": MEDICAL_NECESSITY_CARCS, "days": 180,
+     "verified": True, "legal": {"days": 185},
+     "label": "Anthem commercial, a clinical appeal (a claim 'denied as not medically necessary or experimental/investigational'): "
+              "'Providers and Facilities have one hundred eighty (180) calendar days to file a clinical appeal from the date they receive "
+              "notice of Anthem's initial decision'. The Claim Payment Dispute's two years 'does not apply to appeals regarding a clinical "
+              "decision denial'. Counted here from the remittance; the last day presumes the notice was received 5 days after it",
+     "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual (2026, v1 effective September 1, 2026 and v2 effective "
+               "March 1, 2027) and Indiana Provider Manual (2026, v1 effective August 1, 2026), Clinical Appeals and Claim Payment Disputes"},
     {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "months": 24, "verified": True, "legal": {"years": 2},
      "label": "Anthem commercial: Claim Payment Reconsideration within two years of the EOP issue date; "
               "Claim Payment Appeal within 90 days of the reconsideration decision",
@@ -552,6 +587,15 @@ APPEAL_RULES: list[dict] = [
     {"match": r"^(UMR|Optum|Surest|UHC Integrated)", "kinds": None, "days": 365, "months": 12, "verified": False, "legal": {"months": 12},
      "label": "UnitedHealthcare-administered plan: 12 months from the original EOB or PRA, as for UnitedHealthcare",
      "source": "UnitedHealthcare Administrative Guide 2026 (the plan's own rules not checked)"},
+    # an Indiana Medicaid managed care plan no row of its own covers (Anthem's has its own above): the plan's dispute window
+    # is not checked; 60 days, the shortest known (Anthem's Indiana plan, the program's own administrative review), is used,
+    # which is also the window an Indiana plan's name was given while it was read as the program itself (fx-windows)
+    {"match": r"^(?!Medicaid (?:IN|KY)$)", "kinds": {"medicaid"}, "state": "IN", "days": 60, "verified": False,
+     "label": "Indiana Medicaid managed care plan: the plan's own dispute window is not checked; 60 days from the remittance is used, the "
+              "window Anthem's Indiana plan gives ('within 60 calendar days from the date on the EOB') and the program gives for its own "
+              "administrative review",
+     "source": "Anthem (Indiana Medicaid), IHCP Works 2026: Top denials and quick tips; IHCP Provider Reference Module, Claim "
+               "Administrative Review and Appeals (the plan's own manual not checked)"},
     {"match": r"^Humana", "kinds": {"medicaid"}, "days": 120, "verified": False,
      "label": "Humana Medicaid: 120 days used. Humana Healthy Horizons in Kentucky takes an appeal of a denial or reduction within 120 days "
               "(KRS 205.534) and a contracted-rate dispute within 24 months; the Indiana plan allows 60 days. The remittance does not say which plan",
@@ -675,10 +719,14 @@ CORRECTED_RULES: list[dict] = [
      "label": "Medicare Part B: information or records the claim lacked go in a redetermination within 120 days of receipt of the remittance "
               "(42 CFR 405.942; presumed received 5 days after its date, so 125 days after it); a reopening takes no documents",
      "source": "42 CFR 405.942; CGS reopening and redetermination job aid, December 2025 (documentation is not reviewed in a reopening)"},
-    {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "months": 12, "clock": "dos", "verified": True,
-     "label": "Humana Medicare Advantage: corrected claim within 1 year. Humana's tip sheet counts the year from the original determination, "
-              "but its manual limits claims to 1 year from the date of service, so the earlier date is shown",
-     "source": "Humana, Claim Disputes and Corrected Claims tip sheet, August 2026; Humana Provider Manual 2026, claims submission"},
+    # The 'Claim Disputes and Corrected Claims' tip sheet this rule cited could not be found (the A17 research, A17 product
+    # finding 19, and this unit: Humana's how-to page no longer carries it): the manual's claim limit dates the corrected
+    # claim, not confirmed for one (fx-windows)
+    {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "months": 12, "clock": "dos", "verified": False,
+     "label": "Humana Medicare Advantage: a corrected claim within the manual's limit for a claim, 'Medicare lines of business: 1 year from "
+              "date of service' (unless the agreement says otherwise). The manual sets no corrected-claim window of its own, and the "
+              "tip sheet earlier cited for one was not found",
+     "source": "Humana 2026 Provider Manual for physicians, hospitals and healthcare providers (773902ALL0725-A), claims submission"},
     {"match": r"^Humana", "kinds": {"medicaid"}, "days": 365, "clock": "dos", "verified": False,
      "label": "Humana Medicaid: corrected claim within 365 days of the date of service, the Kentucky plan's rule; the remittance does not say "
               "whether the member is in the Kentucky or the Indiana plan, and the Indiana plan's limit is not checked",
@@ -765,6 +813,7 @@ def corrected_rule(payer_group: str | None, payer_kind: str | None, rarcs: str |
     was paid is adjusted within 60 days of the remittance, a denied one is a new claim within 180 days of the service."""
     grp, kind = payer_group or "", payer_kind or "other"
     f = _facts(facts)
+    grp, kind = _by_payer_id(grp, kind, f)
     carc = carc_code or f.get("carc")
     if carc and not f.get("carc"):
         f["carc"] = carc
@@ -785,6 +834,7 @@ def appeal_rule(payer_group: str | None, payer_kind: str | None, plan: str | Non
     and `facts` (rule_facts: the payer's name, the denial's reason...) tell one plan of the group from another."""
     grp, kind = payer_group or "", payer_kind or "other"
     f = _facts(facts)
+    grp, kind = _by_payer_id(grp, kind, f)
     if plan and not f.get("plan"):
         f["plan"] = plan
         if not facts.get("state"):
@@ -937,27 +987,41 @@ FILING_RULES: list[dict] = [
               "non-participating one (its Kentucky and Indiana 2026 manuals); the date shown is 90 days, the participating limit 180. As "
               "the second payer: 180 (90) days 'from the date of Explanation of Payment from the primary payers'",
      "source": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026; Ambetter (Indiana) Provider and Billing Manual 2026, Timely Filing"},
-    {"match": r"^Anthem", "kinds": {"medicaid"}, "state": "KY", "days": 365, "verified": True,
+    # Anthem's Medicaid plans count a claim they get as the second payer from the other payer's answer: Kentucky's 'time frames
+    # for filing a claim will begin on the date of the third party's resolution of the claim', Indiana's 90 days run 'between
+    # the other payer's remittance advice (RA) date and the Anthem receipt date' (second_claim_window; fx-windows)
+    {"match": r"^Anthem", "kinds": {"medicaid"}, "state": "KY", "days": 365, "verified": True, "cob": "remit",
      "label": "Anthem Kentucky Medicaid: claims 'must be received within 365 calendar days of the date of discharge for inpatient services "
-              "and date of service for outpatient services'",
+              "and date of service for outpatient services'; as the second payer, 'the time frames for filing a claim will begin on the "
+              "date of the third party's resolution of the claim'",
      "source": "Anthem Blue Cross and Blue Shield Kentucky Medicaid Provider Manual, 11.7 Timely Filing"},
-    {"match": r"^Anthem", "kinds": {"medicaid"}, "state": "IN", "days": 90, "verified": True,
-     "label": "Anthem Indiana Medicaid: 'Participating providers have 90 calendar days from the date of service' (nonparticipating ones too; "
-              "as the second payer, 90 days from the other payer's RA)",
+    {"match": r"^Anthem", "kinds": {"medicaid"}, "state": "IN", "days": 90, "verified": True, "cob": "remit",
+     "label": "Anthem Indiana Medicaid: 'Participating providers have 90 calendar days from the date of service' (nonparticipating ones too); "
+              "as the second payer, '90 calendar days between the other payer's remittance advice (RA) date and the Anthem receipt date'",
      "source": "Anthem Blue Cross and Blue Shield (Indiana Medicaid), IHCP Works 2026: Top denials and quick tips, October 2026"},
     {"match": r"^Anthem", "kinds": {"medicaid"}, "other_state": ("KY", "IN"), "days": 90, "verified": False,
      "label": "Anthem Medicaid: the remittance names a plan of another state than Kentucky or Indiana; that plan's limit is not checked, "
               "so Indiana's shorter one is used: 90 calendar days from the date of service",
      "source": "Anthem (Indiana Medicaid), IHCP Works 2026: Top denials and quick tips (the other state's plan not checked)"},
-    {"match": r"^Anthem", "kinds": {"medicaid"}, "days": 90, "verified": True,
+    {"match": r"^Anthem", "kinds": {"medicaid"}, "days": 90, "verified": True, "cob": "remit",
      "label": "Anthem Medicaid: the remittance does not say whether this is Anthem's Kentucky or its Indiana Medicaid plan, so the shorter "
-              "limit is used: Indiana's 90 calendar days from the date of service (Kentucky's: 365 days)",
+              "limit is used: Indiana's 90 calendar days from the date of service (Kentucky's: 365 days); as the second payer, both count "
+              "from the other payer's answer",
      "source": "Anthem (Indiana Medicaid), IHCP Works 2026: Top denials and quick tips; Anthem Kentucky Medicaid Provider Manual"},
-    {"match": r"^WellCare", "kinds": {"medicaid"}, "state": "KY", "days": 365, "months": 12, "verified": True,
+    # the second payer's alternative is the later of the two dates (second_claim_window's 'later'; fx-windows)
+    {"match": r"^WellCare", "kinds": {"medicaid"}, "state": "KY", "days": 365, "months": 12, "verified": True, "cob": {"later": {"months": 6}},
      "label": "WellCare of Kentucky Medicaid: 'Providers must submit claims (initialed, corrected and voided) within 12 months (or six months "
-              "from the Medicaid or primary insurance payment date, whichever is later) from the date of service'; the six months after "
-              "a primary payer's payment are not counted here",
+              "from the Medicaid or primary insurance payment date, whichever is later) from the date of service'",
      "source": "WellCare of Kentucky 2025-2026 Kentucky Medicaid Provider Manual, Timely Claims Submission"},
+    # Indiana Medicaid's managed care plans (Anthem's has its rows above): the program's bulletin sets a plan's limit for a
+    # provider in its network, and for one out of it; whether the practice is in each plan's network is not on file, so the
+    # in-network 90 days is the date shown and the out-of-network 180 the last day (fx-windows)
+    {"match": r"^(?!Medicaid (?:IN|KY)$)", "kinds": {"medicaid"}, "state": "IN", "days": 90, "verified": True, "legal": {"days": 180},
+     "label": "Indiana Medicaid managed care plan: 'the timely filing limit on claims for services rendered to members enrolled in managed "
+              "care by in-network providers' is 90 days, and 'The managed care claim timely filing limit for out-of-network providers also "
+              "remains at 180 calendar days'. The date shown is 90 days from the date of service; the last day, 180, is for a provider "
+              "outside the plan's network",
+     "source": "IHCP bulletin BT202072 (June 11, 2020), Managed care claim timely filing returns to 90 days"},
     {"match": r"^Medicaid IN$", "kinds": {"medicaid"}, "days": 180, "verified": True,
      "label": "Indiana Medicaid (fee-for-service): claims 'must be originally filed within 180 days of the date of service'; a crossover "
               "claim Medicare or a Medicare Advantage plan paid is not held to it, and a primary payer's late notice moves it to 180 "
@@ -973,6 +1037,11 @@ FILING_RULES: list[dict] = [
      "label": "Workers' compensation (Kentucky): bills are due within 45 days of the treatment (KRS 342.020; 803 KAR 25:096); an Indiana "
               "claim's limit is not checked, so Kentucky's is used",
      "source": "803 KAR 25:096 Section 6 and KRS 342.020"},
+    # the VA's community care networks, by their group or (filing_rule's _by_payer_id) by the payer id a claim carries
+    {"match": r"^VA Community Care$", "kinds": {"va"}, "days": 180, "verified": True,
+     "label": "VA Community Care Network (38 U.S.C. 1703D(b)): a provider 'shall submit to the Secretary a claim for payment for furnishing the hospital care, "
+              "medical service, or extended care service not later than 180 days after the date on which the entity or provider furnished' it",
+     "source": "38 U.S.C. 1703D(b), Prompt payment standard (VA community care)"},
     {"match": r"(?i)^gallagher bassett", "kinds": None, "days": 45, "verified": True,
      "label": "Workers' compensation (Kentucky): bills are due within 45 days of the treatment (KRS 342.020; 803 KAR 25:096); an Indiana "
               "claim's limit is not checked, so Kentucky's is used",
@@ -1012,6 +1081,7 @@ def filing_rule(payer_group: str | None, payer_kind: str | None, **facts) -> dic
     payer's name, the claim filing indicator) tell one plan of the group from another."""
     grp, kind = payer_group or "", payer_kind or "other"
     f = _facts(facts)
+    grp, kind = _by_payer_id(grp, kind, f)
     for r in FILING_RULES:
         if _fits(r, grp, kind, f):
             return _public(r, earliest=r.get("earliest"))
@@ -1071,15 +1141,28 @@ def second_claim_window(rule: dict | None, service_date: str | None, first_answe
     """A second payer's limit for a share the first payer left, from the second payer's first-filing rule (filing_rule):
     (the safe date, the payer's own last day where later, how they are counted, in words). The rule's 'cob' says how the
     payer counts a claim it gets as the second payer: 'dos' from the date of service (Medicare, CHAMPVA, TRICARE, GEHA's
-    brochure), 'remit' from the first payer's remittance (Ambetter's coordination of benefits, Anthem's FEP). Where its
-    source does not say, the safe date runs from the date of service and the last day from the first payer's remittance,
-    so a guess never makes the share a loss early (deadlines review r1-2)."""
+    brochure), 'remit' from the first payer's remittance (Ambetter's coordination of benefits, Anthem's FEP and Medicaid
+    plans), {'later': window} the later of its own window from the date of service and that window from the first payer's
+    payment (WellCare of Kentucky's Medicaid plan: 12 months, 'or six months from the Medicaid or primary insurance payment
+    date, whichever is later'). Where its source does not say, the safe date runs from the date of service and the last day
+    from the first payer's remittance, so a guess never makes the share a loss early (deadlines review r1-2)."""
     if not rule:
         return None, None, ""
     cob = rule.get("cob")
     svc = service_date or first_answer
     rem = first_answer or service_date
     whose = f"{first_payer}'s remittance" if first_payer else "the first payer's remittance"
+    if isinstance(cob, dict) and cob.get("later"):
+        # both dates are the payer's own limit, whichever is later: no later last day (fx-windows)
+        own = window_end(svc, rule)
+        alt = window_end(first_answer, cob["later"]) if first_answer else None
+        safe = max((d for d in (own, alt) if d), default=None)
+        n = cob["later"].get("months")
+        span = f"{n} months" if n else f"{cob['later'].get('days')} days"
+        payer = f"{first_payer}'s" if first_payer else "the first payer's"
+        how = (f"the later of the payer's own window from the date of service ({svc}) and {span} from {payer} payment ({first_answer})"
+               if first_answer else f"counted from the date of service ({svc}): the first payer's payment date is not known")
+        return safe, None, how
     if cob == "remit":
         safe, last = window_end(rem, rule), legal_deadline(rem, rule)
         how = f"counted from {whose} ({rem})"

@@ -3254,7 +3254,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         grp, kind = it["group"], it["kind"]
         lag = _lag(lags, grp, "p95")
         start = _add(it["first"], -lag) if it["first"] else None
-        rule = appeal_rule(grp, kind)
+        rule = appeal_rule(grp, kind, carc=carc)     # the reason picks the plan's window (Anthem's clinical appeal; fx-windows)
         used = rule_at(start, rule) or rule         # the rule the date is counted by: the one before an effective date if earlier
         deadline = _add(start, used["days"]) if start else None
         unconfirmed = "" if used["verified"] else " (not confirmed against the payer's current manual)"

@@ -7549,7 +7549,8 @@ class Detector:
         f["appeal_deadline"], f["deadline_basis"] = p.get("appeal_deadline"), p.get("deadline_basis")
         legal_p = p.get("legal_deadline")           # the payer's own limit a check worked out beside its safe date
         f["legal_deadline"] = legal_p if (legal_p and f["appeal_deadline"] and legal_p > f["appeal_deadline"]) else None
-        rule = appeal_rule(claim.get("payer_group"), claim.get("payer_kind")) if p["signal"] == "EMA_DENIED" else None
+        # the same window the check dated it by: the denial's reason picks the plan's (Anthem's clinical appeal; fx-windows)
+        rule = appeal_rule(claim.get("payer_group"), claim.get("payer_kind"), carc=p.get("carc")) if p["signal"] == "EMA_DENIED" else None
         if rule and f["appeal_deadline"] and not rule.get("no_appeal"):     # a no-appeal payer's item is dated by its new claim's limit
             legal = legal_deadline(_add_days(f["appeal_deadline"], -rule["days"]), rule)
             f["legal_deadline"] = legal if legal and legal != f["appeal_deadline"] else None
