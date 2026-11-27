@@ -1003,7 +1003,8 @@ def test_a_claim_first_sent_on_time_and_sent_again_late_keeps_its_timely_filing(
     5, inside Anthem's 90-day first-filing limit (May 31); Anthem never answered, and the practice sent the same claim
     again September 25, past that limit; no answer either. The March send is proof of timely filing, as an older bill's
     is: the item is dated by Anthem's appeal window past the limit, and its basis names the March send. (On the world copy
-    3 items, $787.24, were shown as lost to deadlines this way.)"""
+    one item, $573.30, moved this way from lost to deadlines to Work now; two others first sent after the shortest
+    common limit of a payer whose own limit is not known stay dated by it.)"""
     s = _store(tmp_path, kind)
     send(s, tmp_path, [clm837("CB0000K21C017", V_MARCH)], "20260305")
     send(s, tmp_path, [clm837("CB0000K21C017", V_MARCH)], "20260925")
@@ -1039,6 +1040,77 @@ def test_an_exports_bill_carrying_a_visit_first_billed_on_time_keeps_its_timely_
     f = found["CB0000K12C017"]
     print(f["signal"], f["appeal_deadline"], "|", f["deadline_basis"])
     assert f["appeal_deadline"] > "2026-11-10" and "CB0000K11C017" in f["deadline_basis"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_first_sent_to_another_payer_has_no_timely_filing_with_the_payer_it_reached_late(tmp_path, kind):
+    """(fx-837-r1-2, the payer of the first send.) One patient's 99214 of March 2, 2026 went to Humana as claim CB0000K31C017
+    on March 5; Humana never answered. The practice sent the same claim id to Anthem September 25, past Anthem's 90-day
+    first-filing limit (May 31); no answer either. A claim id may go to more than one payer (the primary, then the
+    secondary or the right payer, under one claim id: 471 claim ids on the world copy), and the March send reached Humana:
+    it is no proof of timely filing with Anthem. The item is dated by Anthem's first-filing limit, and its basis names no
+    March send. (Control: the same claim id sent to Anthem both times keeps its timely filing, the test above.)"""
+    s = _store(tmp_path, kind)
+    send(s, tmp_path, [clm837("CB0000K31C017", V_MARCH, payer=HUMANA)], "20260305")
+    send(s, tmp_path, [clm837("CB0000K31C017", V_MARCH)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    f = found["CB0000K31C017"]
+    print(f["payer_group"], f["appeal_deadline"], "|", f["deadline_basis"])
+    assert f["payer_group"] == "Anthem / BCBS"
+    assert f["appeal_deadline"] <= "2026-06-01" and f["work_state"] == "expired", (f["appeal_deadline"], f["deadline_basis"])
+    assert "2026-03-05" not in (f["deadline_basis"] or "")
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_older_bill_sent_to_another_payer_is_no_proof_of_timely_filing_for_the_newer_bill(tmp_path, kind):
+    """(fx-837-r1-2, the payer of the older bill.) One patient's 99214 of March 2, 2026 went to Humana on bill CB0000K41 on
+    March 5; Humana never answered. The practice made the bill again as CB0000K42 and sent it to Anthem September 25, past
+    Anthem's 90-day first-filing limit; no answer either. One visit, one item (K42's), and the March send reached Humana,
+    not Anthem: K42 is dated by Anthem's limit, and its hint still names K41 and the payer it went to."""
+    s = _store(tmp_path, kind)
+    who = ("SAMPLE", "PAT", "19600101")
+    send(s, tmp_path, [clm837("CB0000K41C017", V_MARCH, payer=HUMANA, member="WHUMA00041", subscriber=who)], "20260305")
+    send(s, tmp_path, [clm837("CB0000K42C017", V_MARCH, member="WANTH00042", subscriber=who)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    _remits(s, tmp_path, _visits(start=60), "20261110", payer="HUMANA", payer_id="61101")
+    found = _chased(s, "t1")
+    _show(found)
+    visit = {k: v for k, v in found.items() if k in ("CB0000K41C017", "CB0000K42C017")}
+    assert set(visit) == {"CB0000K42C017"}
+    f = visit["CB0000K42C017"]
+    print(f["appeal_deadline"], "|", f["deadline_basis"], "|", f["hint"])
+    assert f["appeal_deadline"] <= "2026-06-01" and f["work_state"] == "expired", (f["appeal_deadline"], f["deadline_basis"])
+    assert "CB0000K41C017" not in (f["deadline_basis"] or "")
+    assert "CB0000K41C017 (sent 2026-03-05 to Humana)" in (f["hint"] or "")
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_exports_bill_carrying_a_visit_first_billed_to_another_payer_keeps_its_own_dates(tmp_path, kind):
+    """(fx-837-r1-2 with the exports' carrier, the payer of the older bill.) The visit (99214 of March 2) went to Humana on
+    bill CB0000K51 on March 5 (only the 837s know it) and was never answered. The practice made the bill again as
+    CB0000K52, which EMA's weekly exports list as Submitted September 25 (its 837 to Anthem too), never answered. The
+    exports' item carries the visit; the March send reached Humana, so the item keeps Anthem's first-filing date."""
+    s = _store(tmp_path, kind)
+    who = ("SAMPLE", "PAT", "19600101")
+    send(s, tmp_path, [clm837("CB0000K51C017", V_MARCH, payer=HUMANA, member="WHUMA00051", subscriber=who)], "20260305")
+    from tests.test_workable import ema
+    ema(s.conn, "CB0000K52C017", service_date="2026-03-02", bill_created="2026-09-25")
+    ema(s.conn, "CB0000K52C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-25",
+        service_date="2026-03-02")
+    s.conn.commit()
+    send(s, tmp_path, [clm837("CB0000K52C017", V_MARCH, member="WANTH00052", subscriber=who)], "20260925")
+    _remits(s, tmp_path, _visits(), "20261110")
+    found = _chased(s, "t1")
+    _show(found)
+    assert set(k for k in found if k.startswith("CB0000K5")) == {"CB0000K52C017"}
+    f = found["CB0000K52C017"]
+    print(f["signal"], f["appeal_deadline"], "|", f["deadline_basis"])
+    assert f["appeal_deadline"] <= "2026-06-01" and "CB0000K51C017" not in (f["deadline_basis"] or ""), (
+        f["appeal_deadline"], f["deadline_basis"])
     s.close()
 
 

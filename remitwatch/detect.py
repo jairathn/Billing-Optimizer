@@ -927,6 +927,17 @@ def payer_company(group: str | None) -> str:
     return _COMPANY_ALIASES.get(first, first)
 
 
+def _one_payer(a_id: str | None, a_name: str | None, b_id: str | None, b_name: str | None) -> bool:
+    """Whether two 837 sends went to one payer: the same payer id, else the same company by the payer's name (payer_company:
+    an id the clearinghouse changed, a send with no id). A send that names no payer, or only an unknown one, matches none."""
+    ia, ib = str(a_id or "").strip(), str(b_id or "").strip()
+    if ia and ia == ib:
+        return True
+    ca = payer_company(normalize_payer(a_name)[0]) if a_name else ""
+    cb = payer_company(normalize_payer(b_name)[0]) if b_name else ""
+    return bool(ca) and ca != "unknown" and ca == cb
+
+
 def week_of(day: str | None) -> str | None:
     """The Monday of a date's week (ISO), or None for a date no calendar has."""
     try:
@@ -5443,6 +5454,37 @@ class Detector:
         out.update(sends=sends, bills=bills, ema_ids=ema_ids, prim_bills=prim)
         return out
 
+    def _837_claim_sends(self) -> dict[str, list]:
+        """Every send (voids left out) of each claim id the 837s show sent more than once, read once a run: {claim id: [(day,
+        payer id, payer name)]}. One claim id may go to more than one payer (the primary, then the secondary or the right
+        payer, under the same claim id), and _load_837 keeps only the newest send's payer."""
+        got = self.__dict__.get("_s837_all")
+        if got is not None:
+            return got
+        out: dict[str, list] = {}
+        self._s837_all = out
+        if not self._load_837().get("on"):
+            return out
+        for pcn, bht, pid, pname in self.conn.execute(
+                """SELECT TRIM(patient_control_number), bht_created, payer_id, payer_name FROM claims_837
+                   WHERE TRIM(patient_control_number) IN (SELECT TRIM(patient_control_number) FROM claims_837
+                                                          WHERE patient_control_number IS NOT NULL AND bht_created IS NOT NULL
+                                                          GROUP BY 1 HAVING COUNT(*) > 1)
+                     AND bht_created IS NOT NULL AND TRIM(COALESCE(frequency_code, '')) <> '8'"""):
+            day = real_day(bht)
+            if pcn and day:
+                out.setdefault(pcn, []).append((day, pid, pname))
+        return out
+
+    def _first_send_to(self, pcn: str, row: list | None, pid: str | None, pname: str | None) -> str | None:
+        """The first day the 837s show claim id pcn sent to this payer (_one_payer), its send row as _load_837 keeps it
+        standing for a claim sent once; None when none of its sends went to that payer. Only a send to the payer that has the
+        claim now is proof of timely filing with it (fx-837-r1-2)."""
+        sends = self._837_claim_sends().get(pcn)
+        if sends is None:
+            return row[1] if row is not None and row[1] and _one_payer(row[4], row[5], pid, pname) else None
+        return min((d for d, i, n in sends if _one_payer(i, n, pid, pname)), default=None)
+
     def _cob_only(self) -> dict[str, dict]:
         """Bills whose every remittance is one payer's: it denied the claim as the primary payer saying another payer covers
         it first (a reason of OTHER_PAYER_CARCS or a remark of COB_RARCS, nothing paid), then processed it as secondary
@@ -6510,9 +6552,13 @@ class Detector:
         label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
         # the visit's first send: on an older bill a newer one carries (cd visit_first), or this claim's own first send when
         # it went out again since (the 837s show every send of a claim id): sent on time there, the visit keeps its timely
-        # filing (fx-837-r1-2). A claim rejected before it reached the payer may have been rejected on that first send too,
-        # so only an older bill's send counts for it
-        own_first = (r8[1], pcn) if r8 is not None and r8[1] and sent and r8[1] < sent and not rejected else None
+        # filing (fx-837-r1-2). Only a send to the payer its newest send went to counts (one claim id may go to two payers).
+        # A claim rejected before it reached the payer may have been rejected on that first send too, so only an older
+        # bill's send counts for it
+        own_first = None
+        if r8 is not None and r8[1] and sent and r8[1] < sent and not rejected:
+            d = self._first_send_to(pcn, r8, r8[4], r8[5])
+            own_first = (d, pcn) if d and d < sent else None
         visit_first = min((x for x in (cd.get("visit_first"), own_first) if x), default=None)
         dt = self._open_claim_dates(grp, kind, ema_payer, payer_id, days[0], sent, due, cd["basis"], rejected, unsent,
                                     visit_first, pcn)
@@ -6601,7 +6647,7 @@ class Detector:
             hints.append(f"{grp} answered {what}" + (f", paying ${oe[2]/100:,.2f} (taken off this item)" if oe[2] > 0 else ", paying nothing")
                          + f"; nothing answered the claim sent {sent}: look it up on the payer's portal")
         if cd.get("older_bills"):
-            older = ", ".join(f"{p} (sent {d})" for d, p in sorted(cd["older_bills"]))
+            older = ", ".join(f"{p} (sent {d}{' to ' + g if g else ''})" for d, p, g in sorted(cd["older_bills"], key=lambda t: (t[0], t[1])))
             hints.append(f"This visit was billed before on claim {older}, which no payer answered as primary: the practice made the "
                          "bill again, so only this newer bill is chased")
         sa = ev.get("sent_as")
@@ -6632,9 +6678,9 @@ class Detector:
         window past the first-filing limit, so it never expires on that limit, whatever day the page is opened. The date of
         service says nothing of when a claim went out, so a claim EMA gives no date for is dated by the limit; where the
         payer's limit is not known, only a claim sent within the shortest common limit was surely on time. visit_first:
-        (day, claim id) of the visit's first send on an older bill a newer bill now carries (the one-visit rule), or of this
-        claim's (pcn) own first send before it went out again: sent on time there, the visit keeps its timely filing, and
-        the basis names that send (fx-837-r1-2)."""
+        (day, claim id) of the visit's first send to this payer on an older bill a newer bill now carries (the one-visit
+        rule), or of this claim's (pcn) own first send to it before it went out again: sent on time there, the visit keeps
+        its timely filing, and the basis names that send (fx-837-r1-2; a send to another payer proves nothing to this one)."""
         rule = filing_rule(grp, kind, payer_name=ema_payer, payer_id=payer_id)
         file_by = window_end(dos, rule)
         file_legal = legal_deadline(dos, rule)      # the payer's own last day where later (Medicare's next workday)
@@ -6883,10 +6929,23 @@ class Detector:
         carriers.update({p: (v["sent"], v["lines"], 0) for p, v in done.items() if p not in carriers})
         carrier, refused = self._837_one_visit(cand, lines, who, carriers, may_carry)
         heirs: dict[str, list] = defaultdict(list)
-        older_of: dict[str, list] = defaultdict(list)       # newer claim id -> [(first send, older claim id)] it carries
+        # newer claim id -> [(first send, older claim id, its first send to the newer bill's payer, or None and the payer it
+        # went to)] it carries: only a send to the payer that has the visit now is proof of timely filing with it
+        # (fx-837-r1-2); a bill first sent to another payer is named in the hint with that payer
+        older_of: dict[str, list] = defaultdict(list)
+
+        def payer_of(x: str) -> tuple:
+            """The payer a carrier bill went to: its newest 837 send's (id, name), else the payer EMA gives the exports' item."""
+            rx = cand.get(x) or (ext.get(x) or done.get(x) or {}).get("row")
+            if rx is not None and (rx[4] or rx[5]):
+                return rx[4], rx[5]
+            fx = self.findings.get(ext[x]["fid"]) if x in ext else None
+            return None, (fx or {}).get("payer_group")
+
         for pcn, items in own_items.items():
             for nb in {carrier.get(pcn, {}).get(_visit_line(x)) for x in items} - {None}:
-                older_of[nb].append((cand[pcn][1], pcn))
+                same = self._first_send_to(pcn, cand[pcn], *payer_of(nb))
+                older_of[nb].append((cand[pcn][1], pcn, same, None if same else group_of(cand[pcn])[0]))
         # the answers of the newer bills that may not carry a visit: another payer answered them only as a later payer
         sec_lines = self._837_answer_lines({x: answered_rows[x] for ref in refused.values() for xs in ref.values() for x in xs
                                             if x in answered_rows})
@@ -6975,7 +7034,7 @@ class Detector:
                     sec_bills.add(x)
             k = {"payer_ids": Counter({r[4]: 1}) if r[4] else Counter(), "pat_paid": 0, "ins": {}, "providers": Counter(),
                  "status_at": ("", "", -1), "amb_paid": 0, "days": set(days), "member": r[8]}
-            firsts = sorted(older_of.get(pcn) or ())
+            firsts = sorted(older_of.get(pcn) or (), key=lambda t: (t[0], t[1]))
             cds.append({"pcn": pcn, "k": k, "b": b, "items": items, "sent": sent, "basis": SENT_837, "due": due, "again_after": False,
                         "rejected": False, "unsent": False, "gave_up": False, "status": None, "ema_payer": r[5] or grp,
                         "group": (grp, kind), "grp": grp, "kind": kind, "through": through, "payer_last": last, "secondary": sec,
@@ -6984,8 +7043,10 @@ class Detector:
                         "source": "837", "no_era": pid if pid in no_era_ids else None, "cob": cb, "who": who.get(pcn),
                         # EMA's claims are found under the group EMA gives the 837's payer (_ema_group)
                         "match_group": self._ema_group(r[5]),
-                        # the older bills of the visit this one carries, and the visit's first send on them (fx-837-r1-2)
-                        "older_bills": firsts, "visit_first": firsts[0] if firsts and firsts[0][0] < sent else None,
+                        # the older bills of the visit this one carries (each with the payer it went to when not this
+                        # claim's), and the visit's first send on them to this claim's payer (fx-837-r1-2)
+                        "older_bills": [(d, p, g) for d, p, _s, g in firsts],
+                        "visit_first": min(((x, p) for _d, p, x, _g in firsts if x and x < sent), default=None),
                         "sec_bills": sec_bills,
                         # its own payer's answers to an older submission (its latest, and what they paid in all)
                         "own_earlier": ((max(own_pay)[0], max(own_pay)[5], sum(a[2] for a in own_pay), max(own_pay)[3])
@@ -7020,7 +7081,7 @@ class Detector:
                 note = (f"This visit was billed before on claim {', '.join(olds)}, which no payer answered either: the practice made "
                         "the bill again, so only this newer bill is chased")
                 f["hint"] = f"{f['hint']}. {note}" if f.get("hint") else note
-                self._redate_carrier(f, min(older_of.get(e) or [("", "")]))
+                self._redate_carrier(f, min(((x, p) for _d, p, x, _g in older_of.get(e) or () if x), default=("", "")))
         # an older bill whose visit a newer bill a payer answered as primary carries: that answer's item takes its work
         # (fx-837-r2-6)
         self._hand_to_answers({e: sorted(set(heirs[e])) for e in set(heirs) & set(done)}, done)
@@ -7377,8 +7438,8 @@ class Detector:
         return out
 
     def _redate_carrier(self, f: dict, first: tuple) -> None:
-        """An exports' item that carries a visit first sent on an older bill only the 837s know (the one-visit rule): when
-        that send was inside the first-filing limit and the item's own was not, the visit keeps its timely filing
+        """An exports' item that carries a visit first sent to its payer on an older bill only the 837s know (the one-visit
+        rule): when that send was inside the first-filing limit and the item's own was not, the visit keeps its timely filing
         (fx-837-r1-2), so the item is dated as _emit_open_claim dates one sent on time, with the basis naming that send."""
         if not first or not first[0]:
             return
