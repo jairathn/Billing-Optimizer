@@ -189,6 +189,16 @@ def test_people4_the_send_marks_the_heir_sent_on_both_hosts(tmp_path, monkeypatc
     assert st == "appealed", f"{host}: the appeal went out, but its item's heir is {st!r}"
 
 
+def test_people4_a_status_recorded_for_an_old_id_is_journaled_for_its_heir(tmp_path, monkeypatch):
+    """_record_status on a serverless host whose copy shows the heir: the status is journaled for the heir (actions.heir_of),
+    with the status the heir shows as what it was changed from, never dropped as an id the copy does not hold."""
+    x = _renumbered_while_sending(tmp_path, monkeypatch, serverless=True)
+    api, old = x["api"], x["old"]
+    assert api._record_status([old], "appealed", "Faxed (invented)", None, "biller") == 1
+    got = [a for a in _journal(x["state"]) if a.get("kind") == "status"]
+    assert len(got) == 1 and got[0]["finding_id"] != old and got[0]["seen"] == "open", got
+
+
 def test_people4_a_sent_that_reaches_no_item_is_an_error_and_logged(tmp_path, monkeypatch, capsys):
     """A Sent for an id neither the dashboard's copy nor its heirs know is no silent 0: _record_status says so in the
     server's log (the finding id only), and _sent_once_faxed tells the caller its status could not be recorded."""
@@ -449,6 +459,51 @@ def test_people3_a_line_the_run_found_paid_before_it_was_listed_closes_as_paid_w
     r = s.c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "recovered_cents": 0, "seen_status": "open",
                                                       "notes": "The payer paid"}, headers=s.h)
     assert r.status_code == 200, r.json()
+
+
+def _started_denial(db: str, paid_on: str):
+    """A denial a person marked Started (Anthem, 99213, $150.00 charge, denied March 28), and the same payer's payment of
+    the same line ($90.00, line control number 1) on `paid_on`: before the denial or after it. The run stored the person's
+    state: no route block."""
+    from tests import ema_fixtures as F
+    from tests.test_states import denied, event, item, ln, new_store, remit
+    s = new_store(db)
+    tk = denied(s)
+    remit(s, trace=F.check_no(2), paid_on=paid_on, claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+                                                             "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    item(s, line_key=f"{tk}-0-0", claim_key=f"{tk}-0", transaction_key=tk, status="in_progress", work_state="work_now",
+         state_rule="person_started", appeal_block=None)
+    event(s, "F1", "manual", at="2026-04-02T15:00:00+00:00", frm="open", to="in_progress", note="Working it (invented)")
+    s.close()
+
+
+def test_people3_a_line_paid_after_it_was_listed_takes_the_amount_paid_never_lost_or_let_go(tmp_path, monkeypatch):
+    """A person Started a denial; the payer then paid the line ($90.00 on April 20). A Paid with $0 is refused, and the
+    answer names the payment to type, never "mark it Lost or Let go" (the line is paid); the amount itself is taken."""
+    from tests.test_hotfix2d import _site
+    _states_env(monkeypatch)
+    db = str(tmp_path / "store.sqlite")
+    _started_denial(db, "2026-04-20")
+    client, _line, _api = _site(tmp_path, monkeypatch, db)
+    r = client.post("/api/findings/F1/status", json={"status": "resolved", "recovered_cents": 0, "seen_status": "in_progress"}, headers=XHR)
+    assert r.status_code == 400 and "$90.00" in r.json()["detail"] and "Lost" not in r.json()["detail"], r.json()
+    r = client.post("/api/findings/F1/status", json={"status": "resolved", "recovered_cents": 9000, "seen_status": "in_progress"}, headers=XHR)
+    assert r.status_code == 200, r.json()
+
+
+def test_people3_a_line_paid_before_it_was_listed_closes_as_paid_with_nothing_recovered(tmp_path, monkeypatch):
+    """The same payer had paid the line ($90.00 on March 20) before this denial of another copy of the claim: nothing new
+    can come, so a person's Paid with $0.00 is taken."""
+    from tests.test_hotfix2d import _site
+    _states_env(monkeypatch)
+    db = str(tmp_path / "store.sqlite")
+    _started_denial(db, "2026-03-20")
+    client, _line, _api = _site(tmp_path, monkeypatch, db)
+    r = client.post("/api/findings/F1/status", json={"status": "resolved", "recovered_cents": 0, "seen_status": "in_progress"}, headers=XHR)
+    assert r.status_code == 200, r.json()
+    c = sqlite3.connect(db)
+    assert tuple(c.execute("SELECT status, recovered_cents FROM findings WHERE finding_id='F1'").fetchone()) == ("resolved", 0)
+    c.close()
 
 
 # =========================================================================================== people-1 (H4, H1): the page logic

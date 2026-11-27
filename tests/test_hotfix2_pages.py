@@ -2,8 +2,11 @@
 H1 the item panel acts on the item it shows, once; H3 every status change carries what the page showed; H4 the Paid amount
 is read as typed; H6 the note check waits for a person's tick; H7 hiding shows its size and needs the reason, the count
 and the owner's password; H8 the header says how far the remittances reach; H10 Find a claim on a partial copy says so;
-H11 the address bar takes only RemitWatch's own names. On both hosts: the server's store file, and the serverless site
-serving its dashboard copy and journalling what people do. Skipped where node or Playwright is missing. Invented data only."""
+H11 the address bar takes only RemitWatch's own names; and push 2's next-step panel (its explain answer let through), where
+billers log what happened: the Paid amount read as typed from an empty prompt, Save acting once (fix wave F5, review
+people-1). On both hosts: the server's store file, and the serverless site serving its dashboard copy and journalling what
+people do; at a desk's width (1400 px) and a phone's (390 px). Skipped where node or Playwright is missing. Invented data
+only."""
 from __future__ import annotations
 
 import json
@@ -78,9 +81,14 @@ def _serverless(tmp_path, monkeypatch) -> dict:
     return {"REMITWATCH_MODE": "serverless", "REMITWATCH_STATE_DIR": str(root / "RemitWatch-state"), "REMITWATCH_TMP": str(tmp_path / "scratch")}
 
 
+PAID_EMPTY = "Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is."
+PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead."
+
+
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+@pytest.mark.parametrize("width", ["1400", "390"])
 @pytest.mark.parametrize("host", ["server", "serverless"])
-def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path, monkeypatch, host):
+def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path, monkeypatch, host, width):
     if subprocess.run(["node", "-e", "require('playwright')"], capture_output=True).returncode:
         pytest.skip("needs Playwright for node")
     site = (_store if host == "server" else _serverless)(tmp_path, monkeypatch)
@@ -90,7 +98,7 @@ def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path
             ["REMITWATCH_MODE", "REMITWATCH_SHOW_PHI", "REMITWATCH_SYNC_INTERVAL_MINUTES", "REPORT_TO", "ALERT_WEBHOOK_URL", "REMITWATCH_DB",
              "REMITWATCH_STATE_DIR", "VERCEL", "VERCEL_ENV"]:
         env.pop(k, None)
-    env.update(site, REMITWATCH_PASSWORD=PW, REMITWATCH_USER="oda", REMITWATCH_OWNER_PASSWORD=OWNER, PYTHONDONTWRITEBYTECODE="1")
+    env.update(site, REMITWATCH_PASSWORD=PW, REMITWATCH_USER="oda", REMITWATCH_OWNER_PASSWORD=OWNER, PYTHONDONTWRITEBYTECODE="1", VW=width)
     srv = subprocess.Popen([sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port", str(port),
                             "--log-level", "warning"], cwd=REPO, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
@@ -100,7 +108,8 @@ def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path
                 break
             except OSError:
                 time.sleep(0.1)
-        run = subprocess.run(["node", os.path.join(HERE, "hotfix2_page.js"), str(port), "oda", PW, OWNER], capture_output=True, text=True, timeout=300)
+        run = subprocess.run(["node", os.path.join(HERE, "hotfix2_page.js"), str(port), "oda", PW, OWNER], capture_output=True, text=True, timeout=420,
+                             env=dict(os.environ, VW=width))
         assert run.returncode == 0, run.stderr[-3000:]
         out = json.loads(run.stdout.strip().splitlines()[-1])
     finally:
@@ -145,6 +154,17 @@ def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path
                     zero, zero], whys
     assert p[1]["sent"]["recovered_cents"] == 125000 and p[2]["sent"]["recovered_cents"] == 125050 and p[3]["sent"]["recovered_cents"] == 9500
     assert p[4]["sent"] is None and "ten times the charge" in p[4]["asked"][1]["message"]
+    # push 2's panel (review people-1): Log what happened is the main button of an item a person marked Sent; the Paid prompt
+    # starts empty with the disputed amount as a hint; 1,250.00 and $1,250.00 are $1,250.00; OK on the empty prompt and 0
+    # are asked again, and backing out sends nothing; a double click on Save is one change and one line in the history
+    pa = out["panel"]
+    assert {pa[k]["main"] for k in "ABCD"} == {"log_outcome"}, pa
+    assert pa["A"]["asked"][0]["value"] == "" and "The amount in dispute is" in pa["A"]["asked"][0]["message"], pa["A"]
+    assert [b.get("recovered_cents") for b in pa["A"]["sent"]] == [125000] and pa["A"]["sent"][0]["seen_status"] == "appealed", pa["A"]
+    assert [b.get("recovered_cents") for b in pa["D"]["sent"]] == [125000], pa["D"]
+    assert pa["B"]["sent"] == [] and [a["message"].split("\n\n")[0] for a in pa["B"]["asked"][1:]] == [PAID_EMPTY, PAID_ZERO], pa["B"]
+    assert pa["C"]["posts"] == 1 and pa["C"]["lines"] == 1, pa["C"]
+    assert pa["overflow"] <= 0, pa["overflow"]                      # nothing wider than the screen, at either width
     # H3: a bulk change carries the status each row showed
     assert len(out["bulk"]) == 1 and set(out["bulk"][0]["seen"].values()) == {"open"} and len(out["bulk"][0]["seen"]) == 2
     # H7: the size first, no reason written for the person, the count typed, the owner's password asked and sent
