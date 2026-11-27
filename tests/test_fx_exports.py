@@ -666,3 +666,169 @@ def test_one_person_under_two_ema_patient_ids_is_one_patient_for_the_one_visit_r
     found = _chased(s, "t1")
     assert {k for k in found if k.startswith("CB0000V7")} == {"CB0000V72C017", "CB0000V73C017", "CB0000V74C017"}, sorted(found)
     s.close()
+
+
+# =============================================================================================== the reviews' round (r1, r2)
+# The two reviews of this branch (fx-exports-r1 and r2) found these; each test is the reviewer's, ported with invented data.
+
+# ----------------------------------------------------------------------------------------------- the print batch (r1-1, r2-1, r2-7)
+def _print_batch_rebill(tmp_path, kind, *, earlier: str):
+    """Carla's visit of March 2 (a 99214 at $200) was billed on EMA claim 70 and answered by Blue Cross on its 835 of March
+    28. On April 20 the practice made the bill again (claim F.claim_id(71), EMA claim 71) and EMA left it in its print batch:
+    it never went out. EMA's weekly exports reach May 24 (another patient's claim made that day), so it has waited 34 days.
+    earlier: 'denied' (the 835 pays $0 with CO-16, EMA posts the $0 answer with its reason), 'reversed' (Blue Cross paid
+    $110 and took it back, status 22, before the rebill; EMA shows the payment and its takeback), or 'paid' (paid $110 and
+    it stands). Returns the never-answered items of the visit and the run's counts."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import adj, charge, denial_world, pay, remit as raw_remit
+    from tests.test_workable import ema
+    s, lg = _ema_store(tmp_path, kind)
+    who = "Dupe, Carla"
+    paid = 0 if earlier == "denied" else 110
+    raw_remit(s, trace=F.check_no(70), paid_on="2026-03-28",
+              claims=[{"pcn": F.claim_id(70), "last": "DUPE", "first": "CARLA", "member": "MEMBERCARLA1",
+                       "lines": [("2026-03-02", "99214", 200, paid, [("CO", "16", 200)] if earlier == "denied" else [("CO", "45", 90)])]}])
+    if earlier == "reversed":
+        raw_remit(s, trace=F.check_no(170), paid_on="2026-04-10", status="22",
+                  claims=[{"pcn": F.claim_id(70), "last": "DUPE", "first": "CARLA", "member": "MEMBERCARLA1", "status": "22",
+                           "lines": [("2026-03-02", "99214", -200, -110, [("CO", "45", -90)])]}])
+    rows = [charge(F.link_no(70), cpt="99214", amount=200, patient=who, posted=D(2026, 3, 3)),
+            pay(F.link_no(70), F.check_no(70), paid, cpt="99214", patient=who, posted=D(2026, 3, 31)),
+            charge(F.link_no(71), cpt="99214", amount=200, patient=who, posted=D(2026, 4, 20), status="Batched for Printing")]
+    if earlier == "denied":
+        rows.append(adj(F.link_no(70), "CO-16", 200, cpt="99214", patient=who, posted=D(2026, 3, 31)))
+    if earlier == "reversed":
+        rows.append(pay(F.link_no(70), F.check_no(170), -110, cpt="99214", patient=who, posted=D(2026, 4, 12)))
+    denial_world(s, lg, tmp_path, rows)
+    ema(s.conn, F.claim_id(71), service_date="2026-03-02", bill_created="2026-04-20", charges_cents=20000,
+        payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA071")
+    ema(s.conn, F.claim_id(71), family="claim_status", claim_status="Batched for Printing", service_date="2026-03-02",
+        payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA071")
+    ema(s.conn, F.claim_id(75), service_date="2026-05-22", bill_created="2026-05-24", payer=F.PAYERS["bcbs"], payer_id="BCT01",
+        patient_id="EMA075")
+    s.conn.commit()
+    det = Detector(s, run_id="r1", today="2026-05-25")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [(r["signal"], r["patient_control_number"] or f"link:{r['ema_link']}") for r in s.query(
+        "SELECT signal, patient_control_number, ema_link FROM findings WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') "
+        "AND COALESCE(stale,0)=0 AND (patient_control_number=? OR ema_link IN (?, ?))", (F.claim_id(71), F.link_no(70), F.link_no(71)))]
+    counts = {k: v for k, v in det.ema_counts.items() if k.startswith("export")}
+    s.close()
+    return got, counts
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("earlier", ["denied", "reversed"])
+def test_a_print_batch_rebill_of_a_visit_the_payer_denied_is_still_listed_to_be_sent(tmp_path, kind, ema_env, earlier):
+    """(fx-exports-r1-1, high) The visit was never paid: the earlier bill was denied (or its payment was taken back). The
+    corrected bill is money owed that only goes out if someone prints and mails it: it stays listed (REJECTED_PRE_PAYER,
+    'In EMA's print batch, never sent'). Before the fix, a claim still in the print batch had no 'after' day, so the
+    earlier denial on another bill (a primary answer) answered it, and nothing listed it."""
+    from tests import ema_fixtures as F
+    got, counts = _print_batch_rebill(tmp_path, kind, earlier=earlier)
+    assert ("REJECTED_PRE_PAYER", F.claim_id(71)) in got, (
+        f"the corrected bill of a visit never paid, still in EMA's print batch, is not listed: {got} (counts {counts})")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_print_batch_rebill_of_a_visit_paid_on_its_835_is_a_duplicate(tmp_path, kind, ema_env):
+    """(the residual of fix7b, kept) The same, with Blue Cross's payment of $110 standing on the earlier bill: the bill made
+    again is a duplicate of a paid visit and is not listed."""
+    got, counts = _print_batch_rebill(tmp_path, kind, earlier="paid")
+    assert got == [], f"the duplicate of a paid visit is listed: {got} (counts {counts})"
+    assert counts.get("export_print_batch_paid") == 1, counts
+
+
+def _corrected_in_print_batch(tmp_path, kind, *, denial_on_other_bill: bool):
+    """(fx-exports-r2-1) Dana's visit of March 2 (a 99214 at $200, EMA claim 70) was billed to Blue Cross and sent March 5.
+    - denial_on_other_bill False: claim C001 of bill 70 was denied by Blue Cross March 28 (835: CO-16; EMA posted the $0
+      answer with its reason the same day). The biller corrected the claim; EMA made it as submission C002 of the same bill
+      and left it in its print batch. Never sent.
+    - denial_on_other_bill True: the denied claim was bill 69's; the corrected bill 70 C001 waits in the print batch.
+    Today May 25; EMA's weekly exports reach May 24."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import adj, charge, denial_world, pay, remit as raw_remit
+    from tests.test_workable import ema
+    s, lg = _ema_store(tmp_path, kind)
+    who = "Fixit, Dana"
+    rows = [charge(F.link_no(70), cpt="99214", amount=200, patient=who, posted=D(2026, 3, 3), status="Denied"),
+            pay(F.link_no(70), "PAPER-70", 0, cpt="99214", patient=who, posted=D(2026, 3, 28), status="Denied"),
+            adj(F.link_no(70), "CO-16", 200, cpt="99214", patient=who, posted=D(2026, 3, 28), status="Denied")]
+    denial_world(s, lg, tmp_path, rows)
+    denied = F.claim_id(69) if denial_on_other_bill else F.claim_id(70)
+    raw_remit(s, trace="BCDEN0070", paid_on="2026-03-28", payer="BLUE CROSS TEST",
+              claims=[{"pcn": denied, "status": "4", "member": "MEMBER000070", "last": "FIXIT", "first": "DANA",
+                       "lines": [("2026-03-02", "99214", 200, 0, [("CO", "16", 200)])]}])
+    bc = dict(payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA070")
+    ema(s.conn, denied, service_date="2026-03-02", bill_created="2026-03-03", charges_cents=20000, **bc)
+    ema(s.conn, denied, family="claim_status", claim_status="Denied", claim_submission_date="2026-03-05", service_date="2026-03-02", **bc)
+    corrected = F.claim_id(70) if denial_on_other_bill else F.claim_id(70, 2)
+    ema(s.conn, corrected, service_date="2026-03-02", bill_created="2026-04-02" if denial_on_other_bill else "2026-03-03",
+        charges_cents=20000, **bc)
+    ema(s.conn, corrected, family="claim_status", claim_status="Batched for Printing", service_date="2026-03-02", **bc)
+    ema(s.conn, F.claim_id(75), service_date="2026-05-22", bill_created="2026-05-24", payer=F.PAYERS["bcbs"], payer_id="BCT01",
+        patient_id="EMA075")
+    s.conn.commit()
+    det = Detector(s, run_id="r1", today="2026-05-25")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [(r["signal"], r["patient_control_number"] or f"link:{r['ema_link']}") for r in s.query(
+        "SELECT signal, patient_control_number, ema_link FROM findings WHERE COALESCE(stale,0)=0 "
+        "AND signal IN ('NO_ANSWER','REJECTED_PRE_PAYER','NOT_SENT') AND (patient_control_number=? OR ema_link=?)",
+        (corrected, F.link_no(70)))]
+    counts = dict(det.ema_counts)
+    s.close()
+    return got, counts, corrected
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("other_bill", [False, True])
+def test_a_corrected_claim_left_in_the_print_batch_after_its_denial_is_still_listed(tmp_path, kind, ema_env, other_bill):
+    """(fx-exports-r2-1) The corrected claim never went out: the denial of March 28 answered the earlier submission (or
+    another bill), not this one, and no payment stands on the visit. It stays listed, to be sent."""
+    got, counts, corrected = _corrected_in_print_batch(tmp_path, kind, denial_on_other_bill=other_bill)
+    assert got, f"the corrected claim {corrected}, never sent, is on no list (export_answered_in_ema={counts.get('export_answered_in_ema')})"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_never_sent_is_listed_to_be_sent_whatever_stray_remittance_is_newer(tmp_path, kind, ema_env):
+    """(fx-exports-r2-7) Blue Cross's and Humana's remittances reach April 30 (the feed date); one small payer's single file
+    is dated May 22. EMA made bill CB0000P01 on April 20 and left it in its print batch: never sent. EMA's weekly exports
+    reach May 24, so it has waited 34 days to be sent (due May 20). Nothing in EMA's reports has its lines. It is the
+    practice's own work: listed, never held back as an answer no source can show."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import denial_world, remit as raw_remit
+    from tests.test_workable import ema
+    s, lg = _ema_store(tmp_path, kind)
+    denial_world(s, lg, tmp_path, [])
+    for n in range(30):
+        raw_remit(s, trace=f"BC{n:05d}", paid_on="2026-04-30", payer="BLUE CROSS TEST",
+                  claims=[{"pcn": F.claim_id(200 + n), "status": "1", "member": f"MB{n:08d}", "last": "VOLUME", "first": f"B{n}",
+                           "lines": [("2026-04-01", "99212", 100, 60, [("CO", "45", 40)])]}])
+        raw_remit(s, trace=f"HU{n:05d}", paid_on="2026-04-30", payer="HUMANA",
+                  claims=[{"pcn": F.claim_id(300 + n), "status": "1", "member": f"MH{n:08d}", "last": "VOLUME", "first": f"H{n}",
+                           "lines": [("2026-04-01", "99212", 100, 60, [("CO", "45", 40)])]}])
+    raw_remit(s, trace="UH00001", paid_on="2026-05-22", payer="UNITEDHEALTHCARE",
+              claims=[{"pcn": F.claim_id(400), "status": "1", "member": "MU00000001", "last": "STRAY", "first": "U",
+                       "lines": [("2026-05-01", "99212", 100, 60, [("CO", "45", 40)])]}])
+    from remitwatch.detect import feed_date
+    assert feed_date(s.conn) == "2026-04-30"
+    bc = dict(payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMAP01")
+    ema(s.conn, "CB0000P01C017", service_date="2026-04-17", bill_created="2026-04-20", charges_cents=22365, **bc)
+    ema(s.conn, "CB0000P01C017", family="claim_status", claim_status="Batched for Printing", service_date="2026-04-17", **bc)
+    ema(s.conn, F.claim_id(75), service_date="2026-05-22", bill_created="2026-05-24", payer=F.PAYERS["bcbs"], payer_id="BCT01",
+        patient_id="EMA075")
+    s.conn.commit()
+    det = Detector(s, run_id="r1", today="2026-05-25")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = [(r["signal"], json.loads(r["evidence"]).get("not_sent")) for r in s.query(
+        "SELECT signal, evidence FROM findings WHERE patient_control_number='CB0000P01C017' AND COALESCE(stale,0)=0")]
+    unseen = s.conn.execute("SELECT value FROM meta WHERE key='ema:unanswered_unseen'").fetchone()
+    s.close()
+    assert got == [("REJECTED_PRE_PAYER", True)], (
+        f"the claim never sent is listed as {got}; it waits as an answer no source can check: {json.loads(unseen[0]) if unseen else None}")

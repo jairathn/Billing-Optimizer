@@ -5537,12 +5537,15 @@ class Detector:
             return {payer_company(normalize_payer(payer)[0]), payer_company(self._ema_group(payer))} - {""}
         return ({payer_company(grp)} - {""}) if grp else set()
 
-    def _patient_keys(self, cds: list[dict], answers: dict) -> dict[str, set]:
+    def _patient_keys(self, cds: list[dict], answers: dict, member_names: bool = True, persons: dict | None = None) -> dict[str, set]:
         """EMA's keyed names for each claim's patient ({claim id: {name keys}}), from everything that names the patient: the
         patient's names on the remittances for the claim's own bill (any payer's answer to it); the member ids the bill's
         837s name, when the remittances give a member id one name only (a subscriber's id also covers the family); the EMA
         claim a bridge found for it (answers); and, for a claim of EMA's weekly exports, EMA's claims for the same EMA
-        patient (cd['ema_patients']) that a claim id pair or the bill map ties to an EMA claim."""
+        patient (cd['ema_patients']) that a claim id pair or the bill map ties to an EMA claim. member_names False leaves
+        the member ids' names out (only the claim's own evidence names its patient: a dependent's 837 carries the
+        subscriber's id). persons, when given, is filled with {claim id: {keyed name and birth date}} from the same EMA
+        claims (ema_lines.person)."""
         c = self.conn
         out: dict[str, set] = defaultdict(set)
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -5561,7 +5564,7 @@ class Detector:
                                                  JOIN claims cl ON cl.patient_control_number >= x.bill AND cl.patient_control_number < x.hi"""):
                 if bill_of(pcn) == b:
                     bill_names[b] |= {nk, cnk} - {None}
-            if "claims_837" in tables:
+            if member_names and "claims_837" in tables:
                 for b, pcn, member in c.execute("""SELECT x.bill, c8.patient_control_number, c8.subscriber_id FROM temp.d837_pb x
                                                    JOIN claims_837 c8 ON c8.patient_control_number >= x.bill AND c8.patient_control_number < x.hi
                                                    WHERE c8.subscriber_id IS NOT NULL AND c8.subscriber_id <> ''"""):
@@ -5569,7 +5572,7 @@ class Detector:
                         bill_members[b].add(member)
         c.execute("DROP TABLE IF EXISTS temp.d837_pb")
         members = sorted({m for ms in bill_members.values() for m in ms}
-                         | {cd["k"]["member"] for cd in cds if (cd.get("k") or {}).get("member")})
+                         | {cd["k"]["member"] for cd in cds if (cd.get("k") or {}).get("member")}) if member_names else []
         names_of: dict[str, set] = defaultdict(set)
         for i in range(0, len(members), 500):
             part = set(members[i:i + 500])
@@ -5611,26 +5614,43 @@ class Detector:
                     link_of_claim[x].add(lk)
         links |= {lk for ls in link_of_claim.values() for lk in ls}
         keys_of_link: dict[int, set] = defaultdict(set)
+        person_of_link: dict[int, set] = defaultdict(set)
         lks = sorted(links)
         for i in range(0, len(lks), 500):
             part = lks[i:i + 500]
-            for lk, nk in c.execute(f"""SELECT DISTINCT link, name_key FROM ema_lines WHERE link IN ({','.join('?' * len(part))})
-                                        AND name_key IS NOT NULL""", part):
-                keys_of_link[lk].add(nk)
+            if persons is None:
+                for lk, nk in c.execute(f"""SELECT DISTINCT link, name_key FROM ema_lines WHERE link IN ({','.join('?' * len(part))})
+                                            AND name_key IS NOT NULL""", part):
+                    keys_of_link[lk].add(nk)
+                continue
+            for lk, nk, person in c.execute(f"""SELECT DISTINCT link, name_key, person FROM ema_lines
+                                                WHERE link IN ({','.join('?' * len(part))})
+                                                  AND (name_key IS NOT NULL OR person IS NOT NULL)""", part):
+                if nk is not None:
+                    keys_of_link[lk].add(nk)
+                if person is not None:
+                    person_of_link[lk].add(person)
         for cd in cds:
             b = cd.get("b")
             got = set(bill_names.get(b) or ())
-            ms = set(bill_members.get(b) or ()) | ({cd["k"]["member"]} if (cd.get("k") or {}).get("member") else set())
+            ms = (set(bill_members.get(b) or ()) | ({cd["k"]["member"]} if (cd.get("k") or {}).get("member") else set())
+                  if member_names else set())
             for m in ms:
                 if len(names_of.get(m) or ()) == 1:
                     got |= names_of[m]
+            mine = set()
             lk = (answers.get(cd["pcn"]) or {}).get("link")
             if lk is not None:
-                got |= keys_of_link.get(lk) or set()
+                mine.add(lk)
             for p in cd.get("ema_patients") or ():
                 for x in claims_of.get(p) or ():
-                    for lk2 in link_of_claim.get(x) or ():
-                        got |= keys_of_link.get(lk2) or set()
+                    mine |= link_of_claim.get(x) or set()
+            for lk2 in mine:
+                got |= keys_of_link.get(lk2) or set()
+            if persons is not None:
+                ps = {p for lk2 in mine for p in person_of_link.get(lk2) or ()}
+                if ps:
+                    persons[cd["pcn"]] = ps
             if got:
                 out[cd["pcn"]] = got
         return out
@@ -7643,9 +7663,11 @@ class Detector:
         never sent: ema_checks.not_sent lists it), and the one answered rule every never-answered claim meets
         (_answered_rule: EMA's postings on its own EMA claim after its send, found by its claim id, its bill, its content
         under the group EMA gives its payer's name, or its send day; the patient's other EMA claims and remittances, by its
-        own payer). A claim rejected before reaching its payer is answered only by a posting after its send; one still in
-        EMA's print batch, never sent, by a payment that still stands on its visit whatever its day (a duplicate of a paid
-        visit); a status alone never answers one."""
+        own payer). A claim that never reached its payer (rejected, or still in EMA's print batch) is answered only by a
+        posting after its send or its bill's making: an earlier answer, a denial above all, answered an earlier send, and the
+        bill made again is the correction that answer asked for (fx-exports-r1-1, r2-1). One still in the print batch is
+        also left out when a payment that still stands is on its visit, whatever its day (_print_batch_paid: a duplicate of
+        a paid visit, the residual of fix7b). A status alone never answers one."""
         from . import ema_checks as ec
         pcns = [cd["pcn"] for cd, _items in final]
         statuses = self._ema_step("claim_statuses", ec.claim_statuses, self.conn, claim_ids=pcns) or {}
@@ -7656,13 +7678,20 @@ class Detector:
             # the day EMA made the bill (its charges are posted then); none from the date of service alone
             first = ((cd.get("s837") or [None, None])[1] or str(k.get("sent") or "")[:10] or str(k.get("created") or "")[:10]
                      or None)
-            # a claim that reached its payer and came back rejected is answered only after that send (an earlier payment
-            # answered an earlier send); one still in EMA's print batch never went out, so a payment that still stands on
-            # its visit, whatever its day, is that visit's: the claim is a duplicate of a paid visit (the residual of fix7b)
-            cds.append(dict(cd, items=items, first_sent=first, after=cd["sent"] if cd["rejected"] else None,
+            cds.append(dict(cd, items=items, first_sent=first, after=cd["sent"] if (cd["rejected"] or cd.get("unsent")) else None,
                             ema_patients=set(k.get("patients") or ())))
         answers = self._ema_claims_found("claim_answers", cds)
         rule = self._answered_rule("answered_export", cds, answers)
+        # a claim still in the print batch whose visit a payment that still stands answers, whatever its day: a duplicate
+        batch = [dict(cd, items=rule.get(cd["pcn"], cd["items"])) for cd in cds if cd.get("unsent") and rule.get(cd["pcn"], cd["items"])]
+        paid_dup = (self._ema_step("export_print_batch_paid", self._print_batch_paid, batch, answers) or {}) if batch else {}
+        for cd in batch:
+            done = paid_dup.get(cd["pcn"]) or set()
+            if done:
+                left = [x for x in cd["items"] if (x[1], x[0], item_part(x)) not in done]
+                if not left:
+                    self.ema_counts["export_print_batch_paid"] += 1
+                rule[cd["pcn"]] = left
         # the day the remittances on file reach, as run_ema_open_claims dated the claims (feed_date): one stray newer file, or
         # one dated in the future, says nothing of whether this claim's payer answered it (answers-2)
         newest = newest or feed_date(self.conn) or self.conn.execute(
@@ -7672,9 +7701,12 @@ class Detector:
             a = answers.get(cd["pcn"]) or {}
             items = rule.get(cd["pcn"], cd["items"])
             if not items:
-                self.ema_counts["export_answered_in_ema"] += 1
+                if not (cd.get("unsent") and paid_dup.get(cd["pcn"])):
+                    self.ema_counts["export_answered_in_ema"] += 1
                 continue
-            if not cd["rejected"] and (cd.get("due") or "") > newest and a.get("link") is None:
+            # (a claim still in the print batch never went out: its due day is the practice's own, dated against the day
+            # EMA's exports reach (run_ema_open_claims), and no payer's answer can be waited for: fx-exports-r2-7)
+            if not cd["rejected"] and not cd.get("unsent") and (cd.get("due") or "") > newest and a.get("link") is None:
                 # due only by EMA's postings, and EMA's own claim for it was not found: its answer cannot be seen, so the
                 # claim waits until the remittances reach its due day. Never a silent drop: counted with its billed dollars
                 # and due day (meta ema:unanswered_unseen), which the Data tab and Today show as money no source can check
@@ -7717,6 +7749,107 @@ class Detector:
             # EMA claims that are this claim or another listed one (send-day twins): the Production check leaves them
             self._export_links.update(a.get("twins") or ())
             out.append((cd, items))
+        return out
+
+    def _print_batch_paid(self, cds: list[dict], answers: dict) -> dict[str, set]:
+        """The services of claims still in EMA's print batch (never sent) whose visit a payment that still stands answers,
+        whatever its day: the bill made again is then a duplicate of a paid visit (the residual of fix7b). Only a payment
+        counts, net of what was taken back, by the claim's own payer company (payer_company), for the service's own part
+        (part_fits): EMA's postings on the claim's own EMA claim or on another EMA claim of the patient (insurance
+        payments summing above $0, never under the surgery center's separate-payee checks), or a remittance's line on
+        another bill of the patient that still stands (the ledger, takebacks and reversals applied). The patient is the
+        claim's by its own evidence only (_patient_keys without the member ids' names: a subscriber's id covers the
+        family). A denial, a $0 answer or a payment taken back never makes such a claim a duplicate: the bill made again
+        is the correction they asked for (fx-exports-r1-1, r2-1). {claim id: {(date, code, part)}}."""
+        from . import ema_checks as ec
+        c = self.conn
+        out: dict[str, set] = defaultdict(set)
+        keys_of = self._patient_keys(cds, answers, member_names=False) or {}
+        info = {cd["pcn"]: cd for cd in cds}
+        own = {cd["pcn"]: (answers.get(cd["pcn"]) or {}).get("link") for cd in cds}
+        want: dict[tuple, set] = defaultdict(set)         # ('l', link | 'n', name key, date, code) -> claim ids
+        parts_of: dict[tuple, set] = defaultdict(set)     # (claim id, date, code) -> the parts its items bill
+        for cd in cds:
+            for x in cd["items"]:
+                if not (x[0] and x[1]):
+                    continue
+                parts_of[(cd["pcn"], x[1], x[0])].add(item_part(x))
+                if own[cd["pcn"]] is not None:
+                    want[("l", own[cd["pcn"]], x[1], x[0])].add(cd["pcn"])
+                for nk in keys_of.get(cd["pcn"]) or ():
+                    want[("n", nk, x[1], x[0])].add(cd["pcn"])
+        if not want:
+            return out
+        comps = {cd["pcn"]: self._claim_companies(cd) for cd in cds}
+        got: dict[tuple, set] = defaultdict(set)          # (claim id, date, code) -> the parts a standing payment answers
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "ema_line_payments" in tables:
+            sep = ("AND NOT EXISTS (SELECT 1 FROM ema_checks s WHERE s.check_no = y.check_no AND s.payer = y.payer "
+                   "AND s.cause = 'separate_payee')" if "ema_checks" in tables else "")
+            hits = []
+            for kind, col in (("l", "link"), ("n", "name_key")):
+                keys = sorted({(k[1], k[2], k[3]) for k in want if k[0] == kind})
+                for i in range(0, len(keys), 500):
+                    c.execute("DROP TABLE IF EXISTS temp.d837_pb2")
+                    c.execute("CREATE TEMP TABLE d837_pb2 (k INTEGER, svc TEXT, cpt TEXT)")
+                    c.executemany("INSERT INTO temp.d837_pb2 VALUES (?, ?, ?)", keys[i:i + 500])
+                    for k, svc, cpt, lk, payer, grp, net in c.execute(
+                            f"""SELECT y.{col}, y.svc, y.cpt, y.link, y.payer, MAX(y.payer_group), SUM(COALESCE(y.ins_paid, 0))
+                                FROM temp.d837_pb2 x JOIN ema_line_payments y ON y.{col} = x.k AND y.svc = x.svc AND y.cpt = x.cpt
+                                WHERE COALESCE(y.ins_paid, 0) <> 0 {sep}
+                                GROUP BY y.{col}, y.svc, y.cpt, y.link, y.payer"""):
+                        if (net or 0) > 0:
+                            hits.append(((kind, k, svc, cpt), lk, payer, grp))
+            c.execute("DROP TABLE IF EXISTS temp.d837_pb2")
+            hit_keys = {(h[1], h[0][2], h[0][3]) for h in hits if h[1] is not None}
+            lparts = self._line_parts(hit_keys)
+            lcharge = ec.line_charges(c, hit_keys) if any(k[2] in (self._split_codes or ()) for k in hit_keys) else {}
+            for key, lk, payer, grp in hits:
+                for cid in want.get(key, ()):
+                    if not self._posting_companies(payer, grp) & comps[cid]:
+                        continue            # another payer's payment: this payer's share may still be owed
+                    if lk is not None and lk == own.get(cid):
+                        got[(cid, key[2], key[3])].add(_OWN)
+                        continue
+                    ch = lcharge.get((lk, key[2], key[3]))
+                    alike = None
+                    if ch:
+                        alike = next((p for p in parts_of.get((cid, key[2], key[3])) or () if any(
+                            int(x[2] or 0) == ch for x in info[cid]["items"] if x[1] == key[2] and x[0] == key[3]
+                            and item_part(x) == p)), None)
+                    got[(cid, key[2], key[3])] |= ec.other_parts(lparts.get((lk, key[2], key[3])), alike)
+        # a remittance's line on another bill of the patient, paid and still standing (the ledger)
+        if any(k[0] == "n" for k in want):
+            from . import ema_reports as er
+            er.register_functions(c, create=False)
+            days = sorted({k[2] for k in want if k[0] == "n"})
+            c.execute("DROP TABLE IF EXISTS temp.d837_pb3")
+            c.execute("CREATE TEMP TABLE d837_pb3 (svc TEXT PRIMARY KEY)")
+            c.executemany("INSERT OR IGNORE INTO temp.d837_pb3 VALUES (?)", [(d,) for d in days])
+            rows = c.execute("""SELECT l.line_key, rw_name_key(cl.patient_last, cl.patient_first),
+                                       CASE WHEN cl.corrected_patient_last IS NOT NULL OR cl.corrected_patient_first IS NOT NULL
+                                            THEN rw_name_key(COALESCE(cl.corrected_patient_last, cl.patient_last),
+                                                             COALESCE(cl.corrected_patient_first, cl.patient_first)) END,
+                                       l.service_date, l.procedure_code, l.original_procedure_code, cl.patient_control_number,
+                                       t.payer_name, cl.claim_filing_indicator, l.modifiers
+                                FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
+                                JOIN transactions t ON t.transaction_key = l.transaction_key
+                                WHERE COALESCE(t.superseded,0)=0 AND l.service_date IN (SELECT svc FROM temp.d837_pb3)""").fetchall()
+            c.execute("DROP TABLE IF EXISTS temp.d837_pb3")
+            for line_key, nk, cnk, svc, code, ocode, pcn, pname, cfi, mods in rows:
+                if (self.standing.get(line_key) or 0) <= 0:
+                    continue                # nothing of it stands: a denial, a $0 answer, or a payment taken back
+                grp = payer_group_kind(pname, cfi)[0]
+                for n in {nk, cnk} - {None}:
+                    for cd_ in {code, ocode} - {None}:
+                        for cid in want.get(("n", n, svc, cd_), ()):
+                            if bill_of(pcn) == info[cid].get("b") or payer_company(grp) not in comps[cid]:
+                                continue
+                            got[(cid, svc, cd_)].add(component_of(mods))
+        for (cid, svc, cpt), parts in got.items():
+            for p in parts_of.get((cid, svc, cpt)) or ():
+                if _OWN in parts or part_fits(p, parts):
+                    out[cid].add((svc, cpt, p))
         return out
 
     def _g8_one_service(self, protos: list[dict]) -> list[dict]:
