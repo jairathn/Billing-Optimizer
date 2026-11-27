@@ -599,8 +599,11 @@ def test_one_answered_rule_for_the_claims_emas_exports_and_reports_chase(tmp_pat
       EMA claim 86 has the same day, code and charge. EMA's patient on the export also has claim 87, which the A/R pairs
       with EMA claim 87: that names the patient, whose claim 85 was paid. Answered, not listed (before: listed to be sent).
     - claim 88, in the print batch, nothing posted anywhere: truly unsent, listed.
-    - claim 89, in the print batch since March 3 for a January 5 visit that EMA shows paid February 1 on another EMA claim
-      of the patient (named through claim 97): paid before this bill was made, never an answer to it. Listed.
+    - claim 89, in the print batch since March 3 for a January 5 visit that EMA shows paid February 1 by Blue Cross on
+      another EMA claim of the patient (named through claim 97): a bill made again for a visit already paid, never sent.
+      Its visit's payment still stands, so nothing is owed on it and it is not listed (fix wave F3b, the fix7b residual
+      'a print-batch duplicate made after the visit was paid stays listed'; before, it was listed to be printed and mailed,
+      which would send the payer a duplicate claim).
     - claim 91, sent March 4 to Blue Cross; the patient's same visit and code were paid on another EMA claim by Testcare
       Health, another company: not Blue Cross's answer. Listed.
     - claim 92, sent March 4 to Blue Cross: the visit was billed again on EMA claim 76 at a corrected charge, and Blue
@@ -701,8 +704,8 @@ def test_one_answered_rule_for_the_claims_emas_exports_and_reports_chase(tmp_pat
         "SELECT finding_id, patient_control_number, ema_link, signal, source, hint FROM findings "
         "WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') AND COALESCE(stale,0)=0")}
     print(sorted((k, v["signal"]) for k, v in got.items()), dict(det.ema_counts))
-    assert {F.claim_id(n) for n in (84, 85, 88, 89, 91, 92)} & set(got) == {F.claim_id(n) for n in (88, 89, 91, 92)}, (
-        f"listed {sorted(got)}: claims 84 and 85 are answered in EMA; 88 never went out, 89's payment came before its bill, "
+    assert {F.claim_id(n) for n in (84, 85, 88, 89, 91, 92)} & set(got) == {F.claim_id(n) for n in (88, 91, 92)}, (
+        f"listed {sorted(got)}: claims 84 and 85 are answered in EMA; 88 never went out, 89 duplicates a visit already paid, "
         f"another company paid 91's visit, and 92's rebill was answered with $0")
     assert got[F.claim_id(88)]["signal"] == "REJECTED_PRE_PAYER" and got[F.claim_id(91)]["signal"] == "NO_ANSWER"
     links = {v["ema_link"] for v in got.values() if not v["patient_control_number"]}
