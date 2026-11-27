@@ -285,9 +285,19 @@ def cmd_cycle(args: argparse.Namespace) -> int:
     from .pipeline import run_cycle
 
     report_dir = args.report_dir or os.path.join(os.path.dirname(os.path.abspath(args.db)), "reports")
-    out = run_cycle(args.db, sync=not args.skip_sync, full=args.full, local=args.local, force_detect=args.force_detect,
-                    report=True if args.report else None, email=not args.no_email, report_dir=report_dir,
-                    log=lambda *a: print(*a, file=sys.stderr))
+    failed = False
+    try:
+        out = run_cycle(args.db, sync=not args.skip_sync, full=args.full, local=args.local, force_detect=args.force_detect,
+                        report=True if args.report else None, email=not args.no_email, report_dir=report_dir,
+                        log=lambda *a: print(*a, file=sys.stderr))
+    except Exception as exc:
+        # the cycle has recorded its failure (its run log, the store's last-cycle summary) and released its lock. Since
+        # an analysis that stopped is owed until one succeeds (hosts-1), a code bug fails every cycle until it is fixed:
+        # the day's copy of the store is still made, the fax run is not (a follow-up must not go out from lists an
+        # analysis could not bring up to date)
+        from . import runlog
+        runlog.caught(exc, "cycle")
+        out, failed = {"error": f"the cycle stopped ({type(exc).__name__}); its run log says where"}, True
     # a copy of the store once a day, kept beside it (REMITWATCH_BACKUP_KEEP of them; 0 turns it off): a mistake or a
     # damaged file is undone from it; the disk's own snapshots (docs/SERVER_RUNBOOK.md) cover losing the disk
     if "skipped" not in out and int(os.environ.get("REMITWATCH_BACKUP_KEEP", "7") or 0) > 0:
@@ -298,7 +308,7 @@ def cmd_cycle(args: argparse.Namespace) -> int:
     # on a server the fax line is looked after with every cycle (on Vercel it has its own daily call): the state of what
     # went out, the busy lines tried again, the payers' faxes read, and the follow-ups that are due (each a week apart)
     from . import fax
-    if fax.configured() and "skipped" not in out:
+    if fax.configured() and "skipped" not in out and not failed:
         try:
             out["fax"] = _fax_run(args.db, budget_s=1500)
         except Exception as exc:

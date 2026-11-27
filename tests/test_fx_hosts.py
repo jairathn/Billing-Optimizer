@@ -434,6 +434,32 @@ def test_parity_serverless_recovers_by_itself(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------- hosts-2: supersession decided after a stop
 
+def test_the_cycle_command_still_makes_the_days_copy_when_the_analysis_keeps_failing_and_sends_no_follow_up(tmp_path, monkeypatch, capsys):
+    """Since a stopped analysis is owed until one succeeds, a code bug in the analysis fails every cycle until it is fixed.
+    The cycle command still makes the day's copy of the store (the readers committed what they read), does not run the
+    fax line's follow-ups from lists the analysis could not bring up to date, says the cycle stopped and exits 1."""
+    from remitwatch import cli, fax
+    db, files = _server_world(tmp_path, monkeypatch)
+    _server_cycle(db, local=files)                  # the store exists and has been analysed once
+    monkeypatch.setenv("REMITWATCH_BACKUP_KEEP", "2")
+
+    def broken(self, *a, **k):
+        raise RuntimeError("a code bug in the rules")
+    monkeypatch.setattr(detect.Detector, "run", broken)
+    sent: list = []
+    monkeypatch.setattr(fax, "configured", lambda: True)
+    monkeypatch.setattr(cli, "_fax_run", lambda path, budget_s=0: sent.append(path) or {"sent": 0})
+    rc = cli.main(["--db", db, "cycle", "--skip-sync", "--force-detect", "--no-email"])
+    out = capsys.readouterr().out
+    assert rc == 1 and "the cycle stopped (RuntimeError)" in out and "a code bug" not in out, out
+    assert '"backup"' in out and os.listdir(os.path.join(os.path.dirname(db), "backups")), out
+    assert not sent, "no follow-up goes out from lists the analysis could not bring up to date"
+    from remitwatch import pipeline
+    s = Store(db)
+    assert pipeline.analysis_owed(s.conn), "the analysis is still owed: the next cycle tries again"
+    s.close()
+
+
 def test_server_supersession_is_decided_after_a_cycle_stopped_between_reading_and_deciding(tmp_path, monkeypatch):
     """(reviewer) Cycle 1 reads a.RMT. Cycle 2 reads b.RMT, a later complete version of the same remittance (same trace,
     payer and date, one claim added), and stops before supersession is decided (dropbox_sync.ingest_new_files commits the
