@@ -859,7 +859,8 @@ def test_the_self_audit_route_while_a_cycle_holds_the_lock_answers_in_words(tmp_
         pipeline.release_lock(s.conn, token)
         s.close()
     assert held.status_code == 409 and "A cycle is running" in held.json()["detail"], held.text[:200]
-    assert busy.status_code in (409, 503) and "A cycle is running" in busy.json()["detail"] and seconds < 10, (busy.status_code, seconds)
+    # the store busy under the cycle's save: the same sentence, no server error (the reviewer's test: below 500)
+    assert busy.status_code == 409 and "A cycle is running" in busy.json()["detail"] and seconds < 10, (busy.status_code, seconds)
     ran = tc.post("/api/ops/selfcheck/audit", headers=dict(auth, **XHR))      # with no cycle going, it runs
     assert ran.status_code == 200 and ran.json()["ran"] is True, ran.text[:200]
 

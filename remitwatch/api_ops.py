@@ -216,13 +216,16 @@ def ops_audit_now(request: Request, user: str = Depends(_user)):
     conn = _api().db()
     try:
         # under the cycle's lock, as the command line runs it: a cycle that is writing the store is never waited on for
-        # SQLite's 30 seconds and then answered with a 500; the person is told to try again when it has finished
+        # SQLite's 30 seconds and then answered with a server error; the person is told to try again when it has
+        # finished (409, as when the cycle's lock row is held: the store is busy, nothing is wrong with the server)
         conn.execute("PRAGMA busy_timeout = 2000")
         try:
             token = acquire_lock(conn)
         except sqlite3.OperationalError as exc:
             runlog.caught(exc, "ops:audit_lock", level="warning")
-            raise HTTPException(503, AUDIT_BUSY) from exc
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            raise HTTPException(409, AUDIT_BUSY) from exc
         if not token:
             raise HTTPException(409, AUDIT_BUSY)
         try:
