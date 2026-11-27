@@ -427,6 +427,13 @@ def test_a_later_payment_with_the_patients_copay_pays_the_item(tmp_path, kind):
                  "payer_name": "BLUE CROSS TEST", "patient_control_number": F.claim_id(82), "service_date": S, "procedure_code": "99212",
                  "line_key": "LK82", "expected_cents": 5550, "shortfall_cents": 5550, "paid_cents": 0, "payment_date": "2026-03-28"}]
     findings += [dict(findings[1], finding_id=f"c6-{n}", patient_control_number=F.claim_id(n), line_key=f"LK{n}") for n in (83, 84)]
+    # a second payer's EMA-only denial valued at the balance the first payer left: the patient's money on the line is the
+    # first payer's share (a deductible), never this payer's copay beside its payment
+    findings.append({"finding_id": "c6-sec", "signal": "EMA_DENIED", "category": "denial", "payer_group": "Anthem / BCBS",
+                     "payer_name": "BLUE CROSS TEST", "patient_control_number": F.claim_id(81), "service_date": S, "procedure_code": "99212",
+                     "expected_cents": 5550, "shortfall_cents": 5550, "payment_date": "2026-03-31", "ema_link": F.link_no(81),
+                     "evidence": json.dumps({"ema_link": F.link_no(81), "lines": [["99212", S, 9000]], "first_denial_posted": "2026-03-31",
+                                             "expected_basis": ["the balance left when this payer denied it, after the first payer's payment"]})})
     outcomes = ec.line_outcomes(s.conn, findings, code_once=lambda f: True, today=TODAY)
     got = ec.paid_in_ema(s.conn, findings, outcomes)
     assert outcomes["c6-81"]["outcome"] == "paid_after" and got["c6-81"]["action"] == "close", (outcomes["c6-81"], got.get("c6-81"))
@@ -434,4 +441,5 @@ def test_a_later_payment_with_the_patients_copay_pays_the_item(tmp_path, kind):
     assert got["c6-82"]["action"] == "hint_partial", got.get("c6-82")
     # no check (a payment moved from another line), or another payer's payment: the copay does not make it paid
     assert outcomes["c6-83"]["outcome"] != "paid_after" and (got.get("c6-83") or {}).get("action") != "close", got.get("c6-83")
+    assert (got.get("c6-sec") or {}).get("action") != "close", (outcomes.get("c6-sec"), got.get("c6-sec"))
     assert outcomes["c6-84"]["outcome"] != "paid_after" and (got.get("c6-84") or {}).get("action") not in ("close", "hint_other_payer"), got.get("c6-84")
