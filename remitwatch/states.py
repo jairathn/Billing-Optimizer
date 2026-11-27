@@ -1852,15 +1852,27 @@ def paid_proof(fx: dict) -> dict | None:
     tot = _ema_line_totals(fx)
     oc = o.get("outcome")
     fp = o.get("first_paid_after") or {}
-    if oc == "paid_after":
-        return {"rule": "paid_later_ema", "cents": o.get("paid_after_same") or 0, "date": fp.get("date"), "payer": fp.get("payer"),
+    # the later EMA payments this branch and the next count, less what the payer took back of each since on the 835s (EMA
+    # posts the payment and seldom the recoupment: a payment recouped since pays nothing, m1-fx-ledger-5)
+    later_gone, later_rows = 0, []
+    if oc in ("paid_after", "paid_after_other"):
+        for p in fx["ema"]["pays"]:
+            if (p["posted"] or "") > mine and (p["cents"] or 0) > 0:
+                t = _ema_pay_taken(fx, p)
+                later_gone += t["gone"]
+                later_rows += t["rows"]
+    if oc == "paid_after" and (o.get("paid_after_same") or 0) - later_gone >= max(1, thr):
+        net = (o.get("paid_after_same") or 0) - later_gone
+        return {"rule": "paid_later_ema", "cents": net, "date": fp.get("date"), "payer": fp.get("payer"),
                 "check_tail": fp.get("check_tail"), "source": "production",
-                "text": f"Paid later: {usd(o.get('paid_after_same'))} by {fp.get('payer') or 'the payer'} on a check with no 835 "
-                        f"({day(fp.get('date'))}" + (f", check ending {fp['check_tail']})" if fp.get("check_tail") else ")")}
+                "text": f"Paid later: {usd(net)} by {fp.get('payer') or 'the payer'} on a check with no 835 "
+                        f"({day(fp.get('date'))}" + (f", check ending {fp['check_tail']})" if fp.get("check_tail") else ")")
+                        + _taken_note(later_rows)}
     # another payer's later payment settles the line only when it paid as a payer that pays first (rebilled to the right
     # one); the second payer on file paying its share (the coinsurance) leaves the primary's denial standing
     later_roles = {p.get("role") for p in fx["ema"]["pays"] if (p["cents"] or 0) > 0 and (p["posted"] or "") > mine}
-    if oc == "paid_after_other" and tot["n"] and tot["balance"] <= 0 and later_roles != {"secondary"}:
+    if (oc == "paid_after_other" and tot["n"] and tot["balance"] <= 0 and later_roles != {"secondary"}
+            and (o.get("paid_after_other") or 0) - later_gone >= max(1, thr)):
         return {"rule": "rebilled_paid", "cents": o.get("paid_after_other") or 0, "date": fp.get("date"), "payer": fp.get("payer"),
                 "check_tail": fp.get("check_tail"), "source": "production",
                 "text": f"Rebilled to {fp.get('payer') or 'another payer'}, paid: {usd(o.get('paid_after_other'))} on {day(fp.get('date'))} "

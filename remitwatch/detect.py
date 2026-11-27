@@ -959,9 +959,17 @@ def _one_payer(a_id: str | None, a_name: str | None, b_id: str | None, b_name: s
     ia, ib = str(a_id or "").strip(), str(b_id or "").strip()
     if ia and ia == ib:
         return True
-    ca = payer_company(normalize_payer(a_name)[0]) if a_name else ""
-    cb = payer_company(normalize_payer(b_name)[0]) if b_name else ""
-    return bool(ca) and ca != "unknown" and ca == cb
+    if not a_name or not b_name:
+        return False
+    (ga, ka), (gb, kb) = normalize_payer(a_name), normalize_payer(b_name)
+    if not ga or ga == "Unknown" or (ga, ka) != (gb, kb):
+        return False
+    if ga in MANY_PAYER_GROUPS or ka == "other":
+        # a group of many payers (supplement carriers, TPAs) or a payer the name rules do not know: only the payer's own
+        # name joins two sends, as save()'s payer_family does (m1-fx-837-2)
+        own = lambda n: " ".join(re.findall(r"[A-Z0-9]+", str(n).upper()))     # noqa: E731
+        return bool(own(a_name)) and own(a_name) == own(b_name)
+    return True
 
 
 def week_of(day: str | None) -> str | None:
@@ -2429,6 +2437,9 @@ class Detector:
         # what the PLB entries took from each payment: (the payment's line, the day, cents, the entry: its reference, reasons,
         # payer name), for the services a takeback left unpaid (_taken_back_items)
         self.plb_took: list[tuple] = []
+        # what each line reversal took (payment line, day, cents, entry): judged by _taken_back_items as the recoupments are,
+        # so a reversal no new answer, payment or denial followed is on an item (m1-fx-ledger-1)
+        self.rev_took: list[tuple] = []
         # the payments whose takeback is on an item of its own (a TAKEBACK item of the line, or the recoupment's own listing),
         # and those whose takeback the payer's own denial of the service carries (_taken_back_items), marked in ledger_taken
         # once the items are made (_mark_taken_listed)
@@ -2528,6 +2539,10 @@ class Detector:
                 for p in cands:
                     take = min(left[p["line_key"]], need)
                     take_from(p, take, when(r))
+                    if take > 0:
+                        self.rev_took.append((p, when(r) or "", take, {
+                            "claim": r["patient_control_number"], "reasons": ["reversal"], "payer": r.get("payer_name") or p.get("payer_name"),
+                            "cents": take, "day": when(r) or "", "reference": None, "reversal": True}))
                     need -= take
                     if need <= 0:
                         break
@@ -6120,6 +6135,16 @@ class Detector:
                 out.setdefault(pcn, []).append((day, pid, pname))
         return out
 
+    def _837_bill_subs(self) -> dict[str, list]:
+        """{bill: the claim ids of its submissions the 837s show sent}, from _load_837's sends, built once a run."""
+        got = self.__dict__.get("_s837_subs")
+        if got is None:
+            got = defaultdict(list)
+            for p in (self._load_837().get("sends") or {}):
+                got[bill_of(p)].append(p)
+            self._s837_subs = got
+        return got
+
     def _first_send_to(self, pcn: str, row: list | None, pid: str | None, pname: str | None) -> str | None:
         """The first day the 837s show claim id pcn sent to this payer (_one_payer), its send row as _load_837 keeps it
         standing for a claim sent once; None when none of its sends went to that payer. Only a send to the payer that has the
@@ -7423,9 +7448,16 @@ class Detector:
         # A claim rejected before it reached the payer may have been rejected on that first send too, so only an older
         # bill's send counts for it
         own_first = None
-        if r8 is not None and r8[1] and sent and r8[1] < sent and not rejected:
-            d = self._first_send_to(pcn, r8, r8[4], r8[5])
-            own_first = (d, pcn) if d and d < sent else None
+        if r8 is not None and r8[1] and sent and not rejected:
+            # this claim id's own first send to that payer, or an earlier submission of the same bill sent to it on time (a
+            # late replacement keeps the visit's timely filing: m1-fx-837-3); the basis names the claim id that went first
+            sends837 = self._load_837().get("sends") or {}
+            for p in self._837_bill_subs().get(bill_of(pcn), ()):
+                if p != pcn and sub_no(p) > sub_no(pcn):
+                    continue
+                d = self._first_send_to(p, sends837.get(p) if p != pcn else r8, r8[4], r8[5])
+                if d and d < sent and (own_first is None or (d, p) < own_first):
+                    own_first = (d, p)
         visit_first = min((x for x in (cd.get("visit_first"), own_first) if x), default=None)
         dt = self._open_claim_dates(grp, kind, ema_payer, payer_id, days[0], sent, due, cd["basis"], rejected, unsent,
                                     visit_first, pcn)
@@ -8266,7 +8298,7 @@ class Detector:
         c.executemany("INSERT OR IGNORE INTO temp.d837_an VALUES (?)", [(n,) for n in names])
         who_sql = "subscriber_id IN (SELECT k FROM temp.d837_am)" + (" OR patient_key IN (SELECT k FROM temp.d837_an)" if names else "")
         rows: dict[str, list] = {}          # bill -> [claim id, send row]: its newest submission's newest send
-        voided: dict[str, str] = {}
+        voided: dict[str, str] = {}         # claim id -> the day of its newest void
         for pcn, bht, freq, pid, pname, chg, key, member in c.execute(
                 f"""SELECT patient_control_number, bht_created, TRIM(COALESCE(frequency_code, '')), payer_id, payer_name,
                            total_charge_cents, claim_837_key, subscriber_id
@@ -8277,7 +8309,7 @@ class Detector:
             if not pcn or not bht or b not in prim or b in own_bills:
                 continue
             if freq == "8":
-                voided[b] = max(voided.get(b, ""), bht)
+                voided[pcn] = max(voided.get(pcn, ""), bht)        # by claim id: which submission the void withdrew
                 continue
             got = rows.get(b)
             if got is None or sub_no(pcn) > sub_no(got[0]) or (sub_no(pcn) == sub_no(got[0]) and pcn > got[0]):
@@ -8290,7 +8322,9 @@ class Detector:
                     r[0], r[2], r[4], r[5], r[6], r[7], r[8] = bht, freq, pid, pname, chg, key, member
         c.execute("DROP TABLE IF EXISTS temp.d837_am")
         c.execute("DROP TABLE IF EXISTS temp.d837_an")
-        keep = {pcn: r for b, (pcn, r) in rows.items() if r[0] >= since and not (voided.get(b) and voided[b] >= r[0])}
+        # a void ends a bill only when it withdrew the newest submission after its newest live send (_load_837's rule): a void
+        # of an older submission on the day its replacement went out never removes the carrier (m1-fx-837-5)
+        keep = {pcn: r for b, (pcn, r) in rows.items() if r[0] >= since and not (voided.get(pcn) and voided[pcn] > r[0])}
         out: dict[str, dict] = {}
         got_lines = self._lines_837({r[7]: pcn for pcn, r in keep.items() if r[7]})
         for pcn, r in keep.items():
@@ -8516,20 +8550,24 @@ class Detector:
         c.execute("DROP TABLE IF EXISTS temp.d837_p")
         c.execute("CREATE TEMP TABLE d837_p (member TEXT PRIMARY KEY)")
         c.executemany("INSERT OR IGNORE INTO temp.d837_p VALUES (?)", [(m,) for m in members])
-        for mid, iid, pcn, lk, code, ocode, dos, mods, nk, cnk, fk, cfk in c.execute(
+        for mid, iid, pcn, lk, code, ocode, dos, mods, nk, cnk, fk, cfk, jk, dk in c.execute(
                 """SELECT cl.patient_id, cl.insured_id, cl.patient_control_number, l.line_key, l.procedure_code, l.original_procedure_code,
                           COALESCE(l.service_date, cl.statement_from), l.modifiers, rw_name_key(cl.patient_last, cl.patient_first),
                           CASE WHEN cl.corrected_patient_last IS NOT NULL OR cl.corrected_patient_first IS NOT NULL
                                THEN rw_name_key(COALESCE(cl.corrected_patient_last, cl.patient_last),
                                                 COALESCE(cl.corrected_patient_first, cl.patient_first)) END,
-                          rw_name_key(NULL, cl.patient_first), rw_name_key(NULL, cl.corrected_patient_first)
+                          rw_name_key(NULL, cl.patient_first), rw_name_key(NULL, cl.corrected_patient_first),
+                          rw_name_key(REPLACE(REPLACE(REPLACE(cl.patient_last, char(39), ''), '-', ''), ' ', ''), cl.patient_first),
+                          CASE WHEN LENGTH(cl.patient_last) > 3 THEN rw_name_key(SUBSTR(cl.patient_last, 2), cl.patient_first) END
                    FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
                    JOIN lines l ON l.claim_key = cl.claim_key
                    WHERE COALESCE(t.superseded,0)=0 AND cl.claim_status_code IN ('1','19')
                      AND (cl.patient_id IN (SELECT member FROM temp.d837_p) OR cl.insured_id IN (SELECT member FROM temp.d837_p))"""):
             if (self.standing.get(lk) or 0) <= 0:
                 continue
-            who = frozenset({nk, cnk} - {None})
+            # the whole name as written, and as a payer or the 837 may write it otherwise: the last name's words joined
+            # (O'TESTER as OTESTER), or a one-letter prefix the 837 wrote apart (OTESTER for O'TESTER, whose O no key keeps)
+            who = frozenset({nk, cnk, jk, dk} - {None})
             first = frozenset({fk, cfk} - {None})
             for m in {mid, iid} - {None, ""}:
                 for cd_ in {code, ocode} - {None, ""}:
@@ -8539,8 +8577,10 @@ class Detector:
         def same_patient(names: set, firsts: set, pn: frozenset, pf: frozenset) -> bool:
             if not names or not pn:
                 return True                 # one side names no patient: the member's
-            if firsts and pf:
-                return bool(firsts & pf)    # both give a first name: it decides (one name written two ways)
+            if firsts and pf and not (firsts & pf):
+                return False                # another first name: a sibling (fx-837-r2-5)
+            # the same first name is not enough: a mother and her daughter can share it (m1-fx-837-4); the whole name, in
+            # any of the ways it is written, decides
             return bool(names & pn)
 
         def paid_elsewhere(m: str | None, x: tuple, b: str, names: set, firsts: set) -> bool:
@@ -8614,9 +8654,16 @@ class Detector:
                               {(f[1], f[2], frozenset(groups.get(cid) or ())) for cid, f in found.items()})
         if sent is None:
             return answers                  # the count failed (recorded): no twin serves
+        # the one-to-one gate is judged on the twins before the patient narrowed them: two people's claims sent the same day
+        # with the same lines share those twins, and each patient's own twin then answers that patient's claim. Judged on
+        # the narrowed list, the day's two claims outnumber the one twin left and neither is answered (m1-fx-exports-1)
+        pre_of = lambda f: f[4] if len(f) > 4 and f[4] else f[0]       # noqa: E731
+        shared_pre = Counter(tuple(pre_of(f)) for f in found.values())
         twins = {cid: f[0] for cid, f in found.items()
                  if (len(f) > 3 and f[3])           # the patient's name chose it among several twins
-                 or (shared[tuple(f[0])] <= len(f[0]) and sent.get((f[1], f[2], frozenset(groups.get(cid) or ())), 0) <= len(f[0]))}
+                 or (shared[tuple(f[0])] <= len(f[0])         # one to one on the twins the patient left
+                     and shared_pre[tuple(pre_of(f))] <= len(pre_of(f))
+                     and sent.get((f[1], f[2], frozenset(groups.get(cid) or ())), 0) <= len(pre_of(f)))}
         if twins:
             sent_of = {cd["pcn"]: cd["sent"] for cd in cds}
             done = self._ema_step(step + "_twins_answered", self._links_answered,
@@ -8896,8 +8943,9 @@ class Detector:
             if (bill and bill not in mine) or (claim and bill_of(claim) not in mine) or (paired.get(lk, set()) - mine):
                 continue                    # the link map or the A/R ties it to another bill
             out[cid].append(lk)
+        pre = {k: sorted(v) for k, v in out.items()}     # the twins before the patient narrowed them (m1-fx-exports-1)
         named = self._twins_by_name(out, info, answers, groups) if out else set()
-        return {k: (sorted(v), info[k]["_first"], info[k]["_rows"], k in named) for k, v in out.items()}
+        return {k: (sorted(v), info[k]["_first"], info[k]["_rows"], k in named, pre.get(k) or sorted(v)) for k, v in out.items()}
 
     def _twins_by_name(self, out: dict, info: dict, answers: dict, groups: dict | None = None) -> set[str]:
         """The patient's name and the send-day twins (the residual of fix7b; fx-exports-r1-3, r1-5): out {claim id: [EMA
@@ -8968,8 +9016,8 @@ class Detector:
             out[cid] = keep
         if loose:
             taken = {a["link"] for a in answers.values() if a.get("link") is not None}
-            spare = self._spare_ema_claims({cid: (info[cid]["_rows"], groups.get(cid) or set(), set(t)) for cid, (t, _d) in loose.items()},
-                                           taken)
+            spare = self._spare_ema_claims({cid: (info[cid]["_rows"], groups.get(cid) or set(), set(t), info[cid].get("_first"))
+                                            for cid, (t, _d) in loose.items()}, taken)
             for cid, (_t, differs) in loose.items():
                 if spare.get(cid):
                     out[cid] = [lk for lk in out[cid] if lk not in differs]
@@ -9064,22 +9112,25 @@ class Detector:
     def _spare_ema_claims(self, want: dict, taken: set) -> dict[str, int]:
         """How many EMA claims, besides a claim's send-day twins, may be the claim's own: each holds exactly the claim's
         charged lines (every line's day, code and charge, and no other charged line), under a payer group of the claim's,
-        and no bill holds it (EMA's lines, the bill map, the A/R's pairs) nor did a bridge give it to another claim. want
-        {claim id: (lines ((date, code, charge cents), ...), groups, twins)}. {claim id: number}."""
+        and no bill holds it (EMA's lines, the bill map, the A/R's pairs) nor did a bridge give it to another claim, and its
+        charges were first posted on or before the claim's first send (a charge EMA posted after the claim went out is no
+        claim it could be: m1-fx-exports-6). want {claim id: (lines ((date, code, charge cents), ...), groups, twins, first
+        send day)}. {claim id: number}."""
         from . import ema_checks as ec
         c = self.conn
         rows, n_rows = [], {}
-        for cid, (lines, _g, _t) in want.items():
+        for cid, (lines, _g, _t, hi) in want.items():
             n_rows[cid] = len(lines)
-            rows += [(cid, svc, cpt, chg) for svc, cpt, chg in lines]
+            rows += [(cid, svc, cpt, chg, hi or "9999-12-31") for svc, cpt, chg in lines]
         if not rows:
             return {}
         c.execute("DROP TABLE IF EXISTS temp.d837_sp")
-        c.execute("CREATE TEMP TABLE d837_sp (cid TEXT, svc TEXT, cpt TEXT, charge INTEGER)")
-        c.executemany("INSERT INTO temp.d837_sp VALUES (?, ?, ?, ?)", rows)
+        c.execute("CREATE TEMP TABLE d837_sp (cid TEXT, svc TEXT, cpt TEXT, charge INTEGER, hi TEXT)")
+        c.executemany("INSERT INTO temp.d837_sp VALUES (?, ?, ?, ?, ?)", rows)
         hits = c.execute("""SELECT x.cid, l.link, COUNT(*), MAX(l.payer_group), MAX(l.bill) FROM temp.d837_sp x
                             JOIN ema_lines l ON l.svc = x.svc AND l.cpt = x.cpt AND l.charges = x.charge
                             WHERE COALESCE(l.facility, 0) = 0 AND (COALESCE(l.flags, 0) & 17) = 0
+                              AND SUBSTR(l.first_charge_posted, 1, 10) <= x.hi
                             GROUP BY x.cid, l.link""").fetchall()
         c.execute("DROP TABLE IF EXISTS temp.d837_sp")
         hits = [h for h in hits if h[2] == n_rows[h[0]] and h[1] not in taken and h[1] not in want[h[0]][2] and not h[4]]
@@ -9749,7 +9800,18 @@ class Detector:
             cds.append(dict(cd, items=items, first_sent=first, after=cd["sent"] if (cd["rejected"] or cd.get("unsent")) else None,
                             ema_patients=set(k.get("patients") or ())))
         answers = self._ema_claims_found("claim_answers", cds)
+        # a claim still in EMA's print batch never reached a payer: no denial or $0 answer EMA shows is its own (EMA posts an
+        # earlier submission's denial days after the 835, past the day this one's 'after' counts from). Only a payment can
+        # answer it (a duplicate of a paid visit, judged below); the correction the denial asked for stays listed
+        # (m1-fx-exports-3)
+        for cd in cds:
+            a = answers.get(cd["pcn"])
+            if cd.get("unsent") and a and a.get("answered") and not (a.get("paid_cents") or 0) > 0:
+                answers[cd["pcn"]] = dict(a, answered=False, how=None, unsent_not_answered=a.get("how"))
         rule = self._answered_rule("answered_export", cds, answers)
+        for cd in cds:
+            if cd.get("unsent") and len(rule.get(cd["pcn"], cd["items"])) < len(cd["items"]):
+                rule[cd["pcn"]] = cd["items"]       # its lines too: only a standing payment (just below) takes one
         # a claim still in the print batch whose visit a payment that still stands answers, whatever its day: a duplicate
         batch = [dict(cd, items=rule.get(cd["pcn"], cd["items"])) for cd in cds if cd.get("unsent") and rule.get(cd["pcn"], cd["items"])]
         paid_dup = (self._ema_step("export_print_batch_paid", self._print_batch_paid, batch, answers) or {}) if batch else {}
@@ -9832,9 +9894,12 @@ class Detector:
         from . import ema_checks as ec
         c = self.conn
         out: dict[str, set] = defaultdict(set)
-        keys_of = self._patient_keys(cds, answers, member_names=False) or {}
+        persons_of: dict[str, set] = {}
+        pairs_of: dict[str, dict] = {}
+        keys_of = self._patient_keys(cds, answers, member_names=False, persons=persons_of, pairs=pairs_of) or {}
         info = {cd["pcn"]: cd for cd in cds}
         own = {cd["pcn"]: (answers.get(cd["pcn"]) or {}).get("link") for cd in cds}
+        member_of = {cd["pcn"]: ((cd.get("k") or {}).get("member") or "").strip() for cd in cds}
         want: dict[tuple, set] = defaultdict(set)         # ('l', link | 'n', name key, date, code) -> claim ids
         parts_of: dict[tuple, set] = defaultdict(set)     # (claim id, date, code) -> the parts its items bill
         for cd in cds:
@@ -9869,15 +9934,45 @@ class Detector:
                         if (net or 0) > 0:
                             hits.append(((kind, k, svc, cpt), lk, payer, grp))
             c.execute("DROP TABLE IF EXISTS temp.d837_pb2")
+            # a payment found by the patient's keyed name alone is the claim's patient's only by _one_patient's standard: the
+            # keyed name with the birth date (EMA's person on the paid claim). A father and his son of one name differ
+            # there (m1-fx-exports-5)
+            n_links = sorted({h[1] for h in hits if h[0][0] == "n" and h[1] is not None})
+            person_of_link: dict[int, set] = defaultdict(set)
+            for i in range(0, len(n_links), 500):
+                part = n_links[i:i + 500]
+                for lk_, per in c.execute(f"SELECT link, person FROM ema_lines WHERE link IN ({','.join('?' * len(part))}) "
+                                          "AND person IS NOT NULL", part):
+                    person_of_link[lk_].add(per)
             hit_keys = {(h[1], h[0][2], h[0][3]) for h in hits if h[1] is not None}
             lparts = self._line_parts(hit_keys)
+            # the parts the bill's own 835 lines (with their modifiers) answer and still pay, by (bill, date, code): EMA's
+            # lines carry no modifiers, so a payment on the claim's own EMA claim pays only the parts the 835 shows paid
+            # (a reading's 26 payment never answers a TC rebill: m1-fx-exports-4)
+            bills = {info[cid].get("b") or bill_of(cid) for cid in info}
+            answered835: dict[tuple, set] = {}
+            for l in self.lines:
+                if l.get("claim_status_code") == "22" or bill_of(l["patient_control_number"]) not in bills:
+                    continue
+                k3 = (bill_of(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code"))
+                parts = answered835.setdefault(k3, set())
+                if (self.standing.get(l["line_key"]) or 0) > 0:
+                    parts.add(component_of(l.get("modifiers_list")))
             lcharge = ec.line_charges(c, hit_keys) if any(k[2] in (self._split_codes or ()) for k in hit_keys) else {}
             for key, lk, payer, grp in hits:
                 for cid in want.get(key, ()):
                     if not self._posting_companies(payer, grp) & comps[cid]:
                         continue            # another payer's payment: this payer's share may still be owed
+                    if key[0] == "n" and lk != own.get(cid):
+                        mine_p = (pairs_of.get(cid) or {}).get(key[1]) or set()
+                        if not (mine_p and person_of_link.get(lk, set()) & mine_p):
+                            continue        # the name alone, no birth date that matches: maybe another person
                     if lk is not None and lk == own.get(cid):
-                        got[(cid, key[2], key[3])].add(_OWN)
+                        k3 = (info[cid].get("b") or bill_of(cid), key[2], key[3])
+                        if k3 in answered835:
+                            got[(cid, key[2], key[3])] |= answered835[k3]      # the parts the 835s show it paid
+                            continue
+                        got[(cid, key[2], key[3])].add(_OWN)                   # no 835 on file: EMA's posting decides
                         continue
                     ch = lcharge.get((lk, key[2], key[3]))
                     alike = None
@@ -9899,20 +9994,23 @@ class Detector:
                                             THEN rw_name_key(COALESCE(cl.corrected_patient_last, cl.patient_last),
                                                              COALESCE(cl.corrected_patient_first, cl.patient_first)) END,
                                        l.service_date, l.procedure_code, l.original_procedure_code, cl.patient_control_number,
-                                       t.payer_name, cl.claim_filing_indicator, l.modifiers
+                                       t.payer_name, cl.claim_filing_indicator, l.modifiers, cl.patient_id, cl.insured_id
                                 FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
                                 JOIN transactions t ON t.transaction_key = l.transaction_key
                                 WHERE COALESCE(t.superseded,0)=0 AND l.service_date IN (SELECT svc FROM temp.d837_pb3)""").fetchall()
             c.execute("DROP TABLE IF EXISTS temp.d837_pb3")
-            for line_key, nk, cnk, svc, code, ocode, pcn, pname, cfi, mods in rows:
+            for line_key, nk, cnk, svc, code, ocode, pcn, pname, cfi, mods, pid_, iid_ in rows:
                 if (self.standing.get(line_key) or 0) <= 0:
                     continue                # nothing of it stands: a denial, a $0 answer, or a payment taken back
+                ids_ = {str(x).strip() for x in (pid_, iid_) if x}
                 grp = payer_group_kind(pname, cfi)[0]
                 for n in {nk, cnk} - {None}:
                     for cd_ in {code, ocode} - {None}:
                         for cid in want.get(("n", n, svc, cd_), ()):
                             if bill_of(pcn) == info[cid].get("b") or payer_company(grp) not in comps[cid]:
                                 continue
+                            if not (member_of.get(cid) and member_of[cid] in ids_):
+                                continue    # the keyed name under another (or no) member id: maybe another person
                             got[(cid, svc, cd_)].add(component_of(mods))
         for (cid, svc, cpt), parts in got.items():
             for p in parts_of.get((cid, svc, cpt)) or ():
@@ -10126,31 +10224,37 @@ class Detector:
                 if cd.get("bill_resent_837"):
                     self._note_resent_bill(cd)
             else:
-                self.findings.pop(fid, None)
+                gone_item = self.findings.pop(fid, None)
                 heirs.setdefault(to_fid, []).append((cd.get("id_signal") or "EMA_OPEN_CLAIM", e))
                 self._fold_into(to_fid, fid, "exports_yield_to_newer_bill",
-                                f"The exports' claim {e} of the same visit yields to this newer bill")
+                                f"The exports' claim {e} of the same visit yields to this newer bill", gone_item=gone_item)
             note = (f"This bill went out before as claim {e} (sent {cd.get('sent')}), which EMA's exports list and no payer "
                     f"answered: only this newer submission is chased" if whole else
                     f"This visit was billed before on claim {e} (sent {cd.get('sent')}), which no payer answered either: the "
                     f"practice made the bill again, so only this newer bill is chased")
             f["hint"] = f"{f['hint']}. {note}" if f.get("hint") else note
 
-    def _fold_into(self, into: str, gone: str, rule: str, note: str) -> None:
+    def _fold_into(self, into: str, gone: str, rule: str, note: str, signal: str = "NO_ANSWER",
+                   gone_item: dict | None = None) -> None:
         """Record on the item that carries a claim's chase now (`into`) the item that no longer lists it (`gone`), in its
         evidence's 'folded' list, as archive_rules' folds do: the self-check that keeps an item no rule explains reads
-        it (selfcheck.check_vanished), and so do the decision log and Results."""
+        it (selfcheck.check_vanished), and so do the decision log and Results. The gone item's own folds come along (a
+        chain A to B to C leaves C listing both A and B: m1-fx-exports-7)."""
         f = self.findings.get(into)
         if f is None:
             return
         try:
             ev = json.loads(f.get("evidence") or "{}")
+            g = gone_item if gone_item is not None else {}
+            carried = (json.loads(g.get("evidence") or "{}") or {}).get("folded") or []
         except ValueError as exc:
             from . import runlog
             runlog.caught(exc, "exports_fold_into", level="warning")
             return
+        have = {x.get("finding_id") for x in ev.get("folded") or [] if isinstance(x, dict)}
         folded = [x for x in ev.get("folded") or [] if not (isinstance(x, dict) and x.get("finding_id") == gone)]
-        folded.append({"finding_id": gone, "rule": rule, "signal": "NO_ANSWER", "note": note})
+        folded += [x for x in carried if isinstance(x, dict) and x.get("finding_id") not in have and x.get("finding_id") not in (gone, into)]
+        folded.append({"finding_id": gone, "rule": rule, "signal": signal, "note": note})
         ev["folded"] = folded
         f["evidence"] = json.dumps(ev, default=str)
 
@@ -11073,7 +11177,7 @@ class Detector:
         Returns {(remittance, reference, cents) of a WO entry naming a claim on file: the cents its own listing carries}
         (_wo_listing_sizes: what the ledger could not apply of the claim's netted recoupments; all it set out to take for a
         claim taken from only in part; nothing where they net to nothing: money-6, fx-ledger-r2-1)."""
-        took = getattr(self, "plb_took", None) or []
+        took = (getattr(self, "plb_took", None) or []) + (getattr(self, "rev_took", None) or [])
         self.wo_partial_keys: set[tuple] = set()
         if not took:
             return self._wo_listing_sizes(set())
@@ -11083,7 +11187,7 @@ class Detector:
         partial: set[str] = set()           # the claims a recoupment took only part of a payment of
         for p, day, cents, entry in took:
             by_line[p["line_key"]].append((p, day, cents, entry))
-            if self.standing.get(p["line_key"], 0) > 0:
+            if self.standing.get(p["line_key"], 0) > 0 and not entry.get("reversal"):
                 partial.add(entry.get("claim"))
         prev = {r[0] for r in self.conn.execute("SELECT finding_id FROM findings WHERE signal='TAKEBACK' AND line_key IS NOT NULL")}
         bills = {bill_of(p["patient_control_number"]) for p, *_x in took}
@@ -11139,6 +11243,13 @@ class Detector:
                 # payer's is a second payer's too (fx-ledger-r1-3)
                 cover = [e for e in self.paid_events.get((bill, code, dos), []) if e[8] != lk
                          and (e[3] in ("2", "3") or (e[3] in ("1", "19") and e[8] in line_of and self._after_other_payer(line_of[e[8]])))]
+                # they pay the share again only by money, as paid_cover counts a secondary: at least half the share taken back.
+                # A few cents from another supplement leave the rest of the coinsurance open (m1-fx-ledger-3)
+                share, got = abs(p.get("paid_cents") or 0), sum(max(e[2] or 0, 0) for e in cover)
+                if share and got < 0.5 * share:
+                    cover, cents = [], cents - min(got, cents)
+                    if cents <= 0:
+                        continue
             else:
                 # a primary's payment taken back: a payment processed after another payer's (CARC 22 or 23, a supplement
                 # answering with claim status 1) is a second payer's share, which covers it only as paid_cover counts a
@@ -11193,6 +11304,19 @@ class Detector:
                                  f"on {day}: this denial stands")
                     self._carry_takeback_window(f, p, day)
                 self.taken_on_denial.add(lk)
+                # nothing of the payment stands: an underpayment or downcode measured on it is no work of its own beside the
+                # denial that now carries the service and its takeback (m1-fx-ledger-2); it folds into that denial
+                into = mine[0]["finding_id"]
+                short = [fid for fid, g in self.findings.items()
+                         if g.get("line_key") == lk and g.get("category") in ("underpayment", "downcoding") and fid != into]
+                worked = self._prior_work(set(short)) if short else {}
+                for fid in short:
+                    if (worked.get(fid) or {}).get("worked"):
+                        continue        # a person's work on it stands: it stays listed, never folded by a rule
+                    g = self.findings.pop(fid)
+                    self._fold_into(into, fid, "taken_back_on_denial",
+                                    f"The payment this {g.get('category')} measured was taken back in full on {day}: the "
+                                    f"denial carries the service and the takeback", signal=g.get("signal") or "", gone_item=g)
                 continue
             self._emit_taken_back(p, day, cents, entry)
         self.wo_partial_keys = {key for key, (name, _by) in (getattr(self, "plb_wo_by", None) or {}).items() if name in partial}
@@ -11268,7 +11392,8 @@ class Detector:
     def _voided_services(self, svcs: set[tuple]) -> set[tuple]:
         """The taken-back payments (bill, code, date, the payment's day, its claim id, its claim, its payer group) whose claim
         the practice voided after the payment, as (bill, code, date, claim id): the newest 837 send since the payment of that
-        claim (its claim id, a send whose original reference is its payer claim number, or a send to the same payer) is a void
+        claim (its claim id, a send whose original reference is its payer claim number, or a send to the same payer that lists the
+        service's code and date) is a void
         (frequency 8) with no other send of it that day or later (a void and a new claim the same day is a replacement); or
         EMA's lines of the service show its charge voided (every line's status a void and the charges netting to nothing: a
         posted void of the charge, not a status alone). A void of another payer's claim of the bill (the wrong second payer
@@ -11289,15 +11414,25 @@ class Detector:
                     f"SELECT claim_key, payer_claim_control_number FROM claims WHERE claim_key IN ({','.join('?' * len(part))})", part) if n)
             sends: dict[str, list] = defaultdict(list)
             for b in bills:
-                for pcn, bht, freq, ref, pname in c.execute(
+                for pcn, bht, freq, ref, pname, k837 in c.execute(
                         """SELECT patient_control_number, bht_created, TRIM(COALESCE(frequency_code, '')), TRIM(COALESCE(original_reference_number, '')),
-                                  payer_name FROM claims_837 WHERE patient_control_number >= ? AND patient_control_number < ?""", (b, b + "~")):
+                                  payer_name, claim_837_key FROM claims_837 WHERE patient_control_number >= ? AND patient_control_number < ?""", (b, b + "~")):
                     if bill_of(pcn) == b and bht:
                         grp = normalize_payer(pname)[0] if pname else ""
-                        sends[b].append((real_day(bht) or "", freq, pcn, ref, "" if grp == "Unknown" else grp))
+                        sends[b].append((real_day(bht) or "", freq, pcn, ref, "" if grp == "Unknown" else grp, k837))
+            svc_of: dict[str, set] = {}
+
+            def bills_service(k837: str, code: str, dos: str) -> bool:
+                """The send lists the taken-back service (its code and date): a void of another claim id to the same payer
+                withdraws this payment only then (m1-fx-ledger-4)."""
+                if k837 not in svc_of:
+                    svc_of[k837] = {(pc, (sd or "")[:10]) for pc, sd in c.execute(
+                        "SELECT procedure_code, service_date FROM lines_837 WHERE claim_837_key = ?", (k837,))}
+                return (code, (dos or "")[:10]) in svc_of[k837]
             for b, code, dos, paid_on, pcn, ck, grp in svcs:
                 n = pccn.get(ck)
-                mine = [(d, f) for d, f, x, ref, g in sends.get(b, []) if x == pcn or (n and ref == n) or (grp and g == grp)]
+                mine = [(d, f) for d, f, x, ref, g, k in sends.get(b, []) if x == pcn or (n and ref == n)
+                        or (grp and g == grp and bills_service(k, code, dos))]
                 voids = [d for d, f in mine if f == "8" and d and d >= (paid_on or "")]
                 if voids and not any(f != "8" and d >= max(voids) for d, f in mine):
                     out.add((b, code, dos, pcn))
@@ -11770,6 +11905,13 @@ class Detector:
                 via_bill = next((w for w in (existing.get(_fid(*h)) for h in heirs_of[fid])
                                  if w is not None and w["finding_id"] not in self.findings and worked(w) and w["status"] != "resolved"),
                                 None)
+                # once: an item the older item's work came to before (its signal_changed event naming that claim) keeps what it
+                # has; work that leaves it 'untouched' (a fax, a Let go, an override) is never handed on again every run
+                # (m1-fx-837-1)
+                if via_bill is not None and c.execute(
+                        "SELECT 1 FROM finding_events WHERE finding_id = ? AND kind = 'signal_changed' AND note LIKE ? LIMIT 1",
+                        (fid, f"%claim {via_bill.get('patient_control_number') or 'the same EMA claim'} (%")).fetchone():
+                    via_bill = None
             if prev is None and heir is None and via_bill is None and ema_heirs and f.get("line_key") and f.get("patient_control_number"):
                 from .ema_reports import bill_of_claim
                 b_f = bill_of_claim(f["patient_control_number"])
