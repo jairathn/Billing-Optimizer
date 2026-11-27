@@ -2446,6 +2446,30 @@ def second_share_back(f: dict) -> bool:
     return (f.get("signal") or "") == "TAKEBACK" and bool(_ev(f).get("second_payer")) and f.get("payer_kind") != "medicaid"
 
 
+def first_payer_answer(fx: dict) -> dict | None:
+    """The first payer's standing answer of a second payer's line (its code and date): the newest standing answer by
+    another payer on or before the second payer's own payment, with what it put on the patient. {'row', 'group', 'pr',
+    'pr_codes', 'co_codes', 'paid'}, or None when no such answer is on file (the first payer's 835 never reached the
+    store). What a second payer took back is the patient's to pay only as far as the first payer left it on the patient."""
+    f = fx["item"]
+    rows = fx["r835"]["rows"]
+    me = next((x for x in rows if x.get("line_key") and x["line_key"] == f.get("line_key")), None)
+    if me is None:
+        return None
+    mine, svc, code = str(me.get("date") or "")[:10], str(me.get("svc") or "")[:10], me.get("code")
+    who = str(me.get("payer") or "").strip().upper()
+    prior = [x for x in standing_rows(rows) if x.get("line_key") and x["line_key"] != me["line_key"]
+             and str(x.get("payer") or "").strip().upper() != who and x.get("code") == code
+             and str(x.get("svc") or "")[:10] == svc and str(x.get("date") or "")[:10] <= mine]
+    if not prior:
+        return None
+    x = max(prior, key=lambda r: (str(r.get("date") or ""), r.get("line_key") or ""))
+    pr = [(c, a) for g, c, a in x.get("adj") or [] if g == "PR" and a]
+    co = [(c, a) for g, c, a in x.get("adj") or [] if g == "CO" and a > 0]
+    return {"row": x, "group": _grp_kind(x.get("payer"))[0], "pr": sum(a for _c, a in pr), "pr_codes": sorted({f"PR-{c}" for c, _a in pr}),
+            "co_codes": sorted({f"CO-{c}" for c, _a in co}), "paid": int(x.get("paid") or 0)}
+
+
 def patient_share(fx: dict) -> dict:
     """What a patient-group denial asks of the patient: every PR amount the payer set on the item's own line, never more
     than the charge less what any payer paid for the service (the standing payments of its other answers). {'cents', 'pr':
@@ -3040,13 +3064,28 @@ def _decide(fx: dict, today: str) -> dict:
                 # a second payer's share taken back in full (F1's money-2; routed to F5): the coinsurance it had paid is the
                 # patient's again unless the takeback is disputed, and no payer's window closes a patient's share (as decision
                 # 2's patient-group denials, below): bill the patient, or dispute the takeback while its window is open. A
-                # Medicaid plan's share is never its member's (payment in full): the work stays the takeback's own
-                paid = (f"{grp or 'The second payer'} paid the patient's share as second payer ({usd(int(tb.get('cents') or 0))}), then took "
+                # Medicaid plan's share is never its member's (payment in full): the work stays the takeback's own. Only as
+                # far as the first payer's standing answer left it on the patient: a first payer that denied the service
+                # (a contractual reason) or whose answer is not on file leaves the takeback's own work, never a bill on a guess
+                owed = int(tb.get("cents") or 0)
+                paid = (f"{grp or 'The second payer'} paid the patient's share as second payer ({usd(owed)}), then took "
                         f"it back on {day(tb['date'])}")
                 if f.get("payer_kind") != "medicaid":
-                    res["appeal_block"] = "bill"
-                    return put("work_now", "bill_patient", paid + (f": bill the patient (the window to dispute the takeback closed on "
-                                                                     f"{day(lastw)})" if past_all else ": bill the patient, or dispute the takeback"))
+                    first = first_payer_answer(fx)
+                    if first is not None and first["pr"] >= owed > 0:
+                        res["appeal_block"] = "bill"
+                        return put("work_now", "bill_patient", paid + (f": bill the patient (the window to dispute the takeback closed on "
+                                                                         f"{day(lastw)})" if past_all else ": bill the patient, or dispute the takeback"))
+                    lead = f"{grp or 'The second payer'} paid {usd(owed)} as second payer, then took it back on {day(tb['date'])}"
+                    if first is None:
+                        why = "; the first payer's answer is not on file, so whether the patient owes it cannot be checked"
+                    else:
+                        said = ", ".join(first["pr_codes"]) or (f"it answered {', '.join(first['co_codes'])}" if first["co_codes"] else "")
+                        why = f"; the first payer ({first['group']}) left {usd(first['pr'])} on the patient" + (f" ({said})" if said else "")
+                    if past_all:
+                        return expired(lead + why)
+                    res["appeal_block"] = "fees"
+                    return put("work_now", "fees", lead + why + ": find out why, then dispute or bill the right payer")
                 if not past_all:
                     res["appeal_block"] = "fees"
                     return put("work_now", "fees", paid + ": a Medicaid member is not billed for it; find out why, then dispute the takeback "

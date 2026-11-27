@@ -1012,6 +1012,41 @@ def test_f1need_past_the_dispute_window_the_share_is_still_billed_to_the_patient
     w.store.close()
 
 
+def _share_taken_back_after(w, pcn: str, first: str | None) -> None:
+    """The supplement pays $16.00 as second payer and withholds it later (PLB WO naming the claim), after a first payer that
+    denied the service as the practice's (first='denied': CO-50, nothing on the patient), or with no first payer's answer
+    on file (first=None)."""
+    w.remit(clean_visits(1, 25, "99214", "223.65", "80.00"), "20260301", **KY)
+    if first == "denied":
+        w.remit([clm(pcn, "1", "223.65", "0.00", sv("99214", "223.65", "0.00", 1, "CAS*CO*50*223.65~"), payer_ctl="MC1")], "20260415", **KY)
+    w.remit([clm(pcn, "2", "223.65", "16.00", sv("99214", "223.65", "16.00", 1, "CAS*OA*23*207.65~"), payer_ctl="GP1")], "20260425", **GAP)
+    w.remit([visit_paid("CB0000900C017", who=OTHER, payer_ctl="GP9", paid="16.00")], "20260803",
+            plb=f"PLB*1777777772*20261231*WO:5550001 {pcn}*16.00~", **GAP)
+
+
+@pytest.mark.parametrize("first", ["denied", None])
+def test_f1need_a_second_payers_takeback_is_billed_to_the_patient_only_as_far_as_the_first_payer_left_it(tmp_path, tbkind, first):
+    """Hand trace of the world copy: a second payer's payment taken back where the first payer's standing answer was a
+    contractual denial (nothing on the patient), and one whose first payer's answer is not on file. Neither is the
+    patient's share on the remittances, so neither says bill the patient (never a bill on a guess): the takeback's own
+    work, with the reason, and the step offers no Billed the patient."""
+    from remitwatch import story
+    w = World(tmp_path, tbkind)
+    _share_taken_back_after(w, "CB0000302C017", first)
+    w.run("r1", today="2026-09-20")
+    (r,) = w.rows("signal='TAKEBACK' AND COALESCE(stale, 0) = 0")
+    assert (r["work_state"], r["state_rule"]) == ("work_now", "fees"), r["state_basis"]
+    basis = r["state_basis"] or ""
+    assert "bill the patient" not in basis and basis.endswith("find out why, then dispute or bill the right payer"), basis
+    if first == "denied":
+        assert "the first payer (Medicare KY (CGS J15)) left $0.00 on the patient (it answered CO-50)" in basis, basis
+    else:
+        assert "the first payer's answer is not on file, so whether the patient owes it cannot be checked" in basis, basis
+    nxt = story.explain(w.store.conn, r["finding_id"], today="2026-09-20")["next_step"]
+    assert nxt["route"] == "fees" and "billed_patient" not in nxt["buttons"] and "Bill the patient" not in nxt["action"], nxt
+    w.store.close()
+
+
 def test_f1need_billed_the_patient_waits_for_the_patients_payment_not_a_payers_answer(tmp_path, tbkind):
     """A person bills the patient the $16.00 (Billed the patient, the step's button): the item waits for the patient's
     payment in EMA, as a patient-group denial does (states._billed_patient), at once in the drawer and after the next run;
