@@ -38,10 +38,13 @@ Done on the integration worktree (`$S/tk/wt/integ`, not yet pushed when this was
   answer now takes back that service's payment; the content bridge chooses a claim's EMA claim by its patient when several
   share its content). The hand test and what it shows: `plans/final_trace_2026-11-27.md`.
 
-Release state: python3 suite on 330f4b5 green (4,306 passed); the other three environments ran from
-`$S/tk/tools/integ_suite.sh 330f4b5 final3 all` (`$S/tk/runs/final3_*`); both node checks pass. Then push both branch
-names and main, and check /api/health on both sites (both ran f601b6c before). After the deploy the owner accepts the
-vanished change on the Data tab (the trace file says why and what to look at first).
+Released 2026-11-27 21:05 UTC: main = 330f4b5, both sites' /api/health show it (Vercel's self-test passes). Suites on
+330f4b5: python3 4,306 passed; newest libraries 4,333; Python 3.12/SQLite 3.45 4,333; Python 3.11.1/SQLite 3.40 only
+the allowed serialize failures (217, and the many-requests self-test, which fails on serialize too); both node checks
+pass; tests/test_docs.py with the private words passes. main was left at the code commit (the plans commits after it
+would only restart the server during its first cycle). Owner's step after the deploy: accept the vanished change on the
+Data tab (plans/final_trace_2026-11-27.md). Open: the 33 automatic closures with no payment named (self-check
+closure_proof, Data tab), the auditor's 79 "already done" August items by class (the trace file), the F2 cap question.
 
 ### Integrator's notes on what the units found (2026-11-26 20:45 UTC)
 - **privacy-3 is a merge blocker for the hook.** Its verifier refuted it only because nothing runs the self-check at
