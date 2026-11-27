@@ -7132,11 +7132,13 @@ class Detector:
             for old in sorted(set(heirs.get(cd["pcn"]) or ())):
                 # the older bill of the same visit, chased before this bill was made: its work passes on (answers-1)
                 self.__dict__.setdefault("_heirs", {}).setdefault(fid, []).append((OPEN_837_ID, old))
+            self._fold_837_into(fid, heirs.get(cd["pcn"]))
         for e in sorted(set(heirs) & set(ext)):
             # an older bill only the 837s know whose visit a newer bill of the exports' carries: the exports' item is the one
             # chased, and takes the older bill's work (save: heir keys)
             olds = sorted(set(heirs[e]))
             self.__dict__.setdefault("_heirs", {}).setdefault(ext[e]["fid"], []).extend((OPEN_837_ID, old) for old in olds)
+            self._fold_837_into(ext[e]["fid"], olds)
             f = self.findings.get(ext[e]["fid"])
             if f is not None:
                 note = (f"This visit was billed before on claim {', '.join(olds)}, which no payer answered either: the practice made "
@@ -7174,10 +7176,15 @@ class Detector:
                 d["n"] += 1
                 d["billed_cents"] += billed
         weeks: Counter = Counter()
+        # a store no 837 file was ever read into has no claims_837 table: no send week to count, and nothing went wrong
+        # (logged as an error, it made every such run read 'partial')
+        has_837 = self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims_837'").fetchone()
         try:
-            for bht, n in self.conn.execute("""SELECT bht_created, COUNT(DISTINCT patient_control_number) FROM claims_837
-                                               WHERE bht_created >= ? AND patient_control_number IS NOT NULL
-                                                 AND TRIM(COALESCE(frequency_code, '')) <> '8' GROUP BY bht_created""", (since or "",)):
+            sends = self.conn.execute("""SELECT bht_created, COUNT(DISTINCT patient_control_number) FROM claims_837
+                                         WHERE bht_created >= ? AND patient_control_number IS NOT NULL
+                                           AND TRIM(COALESCE(frequency_code, '')) <> '8' GROUP BY bht_created""",
+                                      (since or "",)) if has_837 else ()
+            for bht, n in sends:
                 wk = week_of(real_day(bht))
                 if wk:
                     weeks[wk] += n
@@ -7519,6 +7526,29 @@ class Detector:
         if dt["prior"]:
             f["appeal_deadline"], f["deadline_basis"], f["legal_deadline"] = dt["deadline"], dt["basis"], None
 
+    def _fold_837_into(self, fid: str, olds) -> None:
+        """The never-answered items of the older bills a carrier item now stands for (the one-visit rule), named in its
+        evidence's 'folded' list as every fold names the items it carries: the self-check's vanished test reads the list as
+        the route those items left the list by (without it, it keeps an older item a person worked listed beside its
+        carrier: the visit chased twice), the decision log as where they went, the Results tab as duplicates spared."""
+        f = self.findings.get(fid)
+        if f is None or not olds:
+            return
+        try:
+            ev = json.loads(f.get("evidence") or "{}")
+        except ValueError as exc:
+            from . import runlog
+            runlog.caught(exc, "detect.fold_837_into")
+            return
+        if not isinstance(ev, dict):
+            return
+        folded = list(ev.get("folded") or [])
+        have = {x.get("finding_id") if isinstance(x, dict) else x for x in folded}
+        add = [{"finding_id": _fid(OPEN_837_ID, o), "rule": "837_one_visit"} for o in sorted(set(olds)) if _fid(OPEN_837_ID, o) not in have]
+        if add:
+            ev["folded"] = folded + add
+            f["evidence"] = json.dumps(ev, default=str)
+
     def _hand_to_answers(self, olds_of: dict[str, list], done: dict) -> None:
         """An older bill whose visit a newer bill a payer answered as primary carries (fx-837-r2-6) hands its work to that
         answer's item (save: heir keys): the newer bill's item on a date and code of the visit (a denial, an underpayment),
@@ -7537,6 +7567,7 @@ class Detector:
             hit = [i for i in items if (i[1], i[2]) in want] or [i for i in items if not i[3]]
             if hit:
                 self.__dict__.setdefault("_heirs", {}).setdefault(hit[0][0], []).extend((OPEN_837_ID, o) for o in olds)
+                self._fold_837_into(hit[0][0], olds)
 
     def _837_resends(self, prim: set, ema_ids: set, ema_sub: dict) -> dict[str, tuple]:
         """Bills a payer answered as primary (prim) whose newest submission the 837s show sent again after the bill's first

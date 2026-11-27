@@ -126,6 +126,36 @@ def test_the_work_on_the_older_bill_passes_to_the_bill_made_again(tmp_path, kind
     s.close()
 
 
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_self_check_sees_the_older_bills_item_folded_into_the_bill_made_again(tmp_path, kind):
+    """(answers-1 with the self-check's vanished test, merged at 59f6822.) Bill CB0000M71's never-answered item is listed
+    and a biller starts it; the practice makes the bill again as CB0000M72. The next run lists the visit once, on M72, and
+    the older item leaves the list by a route the self-check knows: M72's evidence names it as folded, so the vanished
+    check finds nothing to keep. (Without it, the check kept M71 listed beside M72: the visit chased twice.)"""
+    from remitwatch import selfcheck as sc
+    from remitwatch.actions import apply_status
+    s = _store(tmp_path, kind)
+    member = "WDUP000071"
+    send(s, tmp_path, [clm837("CB0000M71C017", V, member=member)], "20260915")
+    _remits(s, tmp_path, _visits(), "20261020")
+    found = _chased(s, "t1")
+    assert set(found) == {"CB0000M71C017"}
+    old = found["CB0000M71C017"]["finding_id"]
+    apply_status(s.conn, old, "in_progress", "Called Anthem: no record of it", actor="biller")
+    s.conn.commit()
+    send(s, tmp_path, [clm837("CB0000M72C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, _visits(start=40), "20261110")
+    found = _chased(s, "t2")
+    _show(found)
+    assert set(found) == {"CB0000M72C017"}
+    ev = json.loads(found["CB0000M72C017"]["evidence"] or "{}")
+    assert old in [x.get("finding_id") for x in ev.get("folded") or [] if isinstance(x, dict)], ev.get("folded")
+    van = next(r for r in sc.meta_get(s.conn, sc.K_LAST)["checks"] if r["id"] == "vanished")
+    print(van["status"], van["info"])
+    assert van["status"] == "ok" and van["info"]["routes"].get("folded") == 1, van
+    s.close()
+
+
 def _exports_claim(s, claim_id: str, sent: str, **kw) -> None:
     """EMA's weekly exports list this claim: its 99214 charge (September 14) and its status, Submitted on `sent`."""
     from tests.test_workable import ema
@@ -1528,3 +1558,24 @@ def test_every_except_block_the_fixer_added_logs_through_runlog_caught():
                     if isinstance(h, ast.ExceptHandler) and not logs(h):
                         silent.append(f"{rel}:{h.lineno} {fn.name}")
     assert not silent, "except blocks with no runlog.caught: " + "; ".join(sorted(set(silent)))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_store_no_837_was_read_into_logs_no_error_from_the_837_pass(tmp_path, kind, monkeypatch):
+    """(fx-837-r2-8's follow-up, found by tests/test_hooks.py at the 59f6822 merge.) A practice whose 837 files were never
+    read has no claims_837 table: the send weeks then have nothing to count, which is no error. Logging it as a contained
+    error made every such run read 'partial' in its manifest and on Vercel's one log line."""
+    from remitwatch import runlog
+    seen: list = []
+    orig = runlog.caught
+
+    def spy(exc, step=None, *a, **k):
+        seen.append(step)
+        return orig(exc, step, *a, **k)
+    monkeypatch.setattr(runlog, "caught", spy)
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims_837'").fetchone()
+    _chased(s, "t1")
+    assert not [x for x in seen if "837" in str(x) or "waiting" in str(x)], seen
+    s.close()

@@ -142,3 +142,30 @@ def test_an_older_exports_bill_stays_given_way_once_the_newer_bill_of_the_visit_
     assert any(r["patient_control_number"] == "CB0000E82C017" for r in rows), "control: E82's denial is listed"
     assert not any(r["patient_control_number"] == "CB0000E81C017" and r["signal"] == "NO_ANSWER" for r in rows), rows
     s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_older_bills_item_leaves_the_list_when_its_visit_was_paid_on_the_remade_bill(tmp_path, kind):
+    """F6 need (selfcheck's vanished check, merged at 59f6822): bill CB0000M95's never-answered item is listed; the
+    practice makes the bill again as CB0000M96 and Anthem pays M96 in full (October 30). The visit is paid: the 837 pass
+    no longer lists M95 (the newer bill answered as primary carries the visit, fx-837-r2-6; T-N10 is the same case for a
+    service paid under another bill of the member). With no item on M96 there is nothing to fold M95 into, and the
+    vanished check finds no route (its own bill got no answer), so it keeps M95 listed: a paid visit chased as never
+    answered. A route for it is needed: e.g. a claim-level item whose service (bill's member and patient, date, code) a
+    primary payer answered on another bill since it was raised, or the detector's own list of the items its rules dropped
+    with the rule (passed in the self-check's context as delivered_again is)."""
+    from remitwatch import selfcheck as sc
+    from tests.test_837_sends import V, _chased, answer, send
+    from tests.test_fx_837 import clm837
+    s = _store(tmp_path, kind)
+    member = "WDUP000095"
+    send(s, tmp_path, [clm837("CB0000M95C017", V, member=member)], "20260915")
+    _remits(s, tmp_path, _visits(), "20261020")
+    assert "CB0000M95C017" in _chased(s, "t1")
+    send(s, tmp_path, [clm837("CB0000M96C017", V, member=member)], "20260925")
+    _remits(s, tmp_path, [answer("CB0000M96C017", status="1", paid="117.60")], "20261030")
+    _remits(s, tmp_path, _visits(start=40), "20261110")
+    second = _chased(s, "t2")
+    van = next(r for r in sc.meta_get(s.conn, sc.K_LAST)["checks"] if r["id"] == "vanished")
+    assert "CB0000M95C017" not in second, (sorted(second), van["status"], van["info"])
+    s.close()
