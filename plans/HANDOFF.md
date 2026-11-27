@@ -38,9 +38,14 @@ a unit from its branch and progress file (the brief says what done means), or st
 | review of every change since 2026-11-23 | none (findings go to `plans/review_2026-11-26.md`) | `plans/briefs/2026-11-26_review.md` | **done**: 37 findings, every verdict in; they feed the fix wave |
 | a17, the independent every-claim auditor | `wip/a17` | `plans/briefs/2026-11-26_a17.md` | **merged** at 2874e3d (plans only: the auditor, its sourced window table, the report). After its fix round, Work now (services since 2026-01-01): correct 1,357 ($219,685), already done 165, already worked 27, duplicate 5, wrong amount 190 ($16,814), undecided 37; money left on the table 762 services ($88,179), plus 139 ($27,678) past windows the table could not verify. Score again with the fix wave merged before the final trace |
 | deadlines: every payer window from its primary source (the A17 research's 28 disagreements with codes.py, and the review's answers-8) | `wip/deadlines` | `plans/briefs/2026-11-26_deadlines.md` | **merged** at 63fc3df (23:40 UTC): build, two reviews (15 findings, all fixed), fix round; merged cleanly on top of fix7c, the shared modules' tests pass on the merge (469); full python3 suite on 63fc3df: 3,068 passed, 0 failed (29 skipped, 1 xfailed). Its leftovers are fix-wave F8 (codes.py) and parts of F4 and F6 |
-| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | run wf_ea1ab0ef-037: built (316b9d8; three needs routed to F2), two reviews running, then one fix round |
-| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | run wf_91b074e9-48a: built (3a7f95b; needs routed to F3c, F5, F6), two reviews running, then one fix round |
-| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | run wf_fc5edc8c-c0f: built (a2120cd; needs on F3a's functions go to F3c), two reviews running, then one fix round |
+| fix wave F1 ledger and takebacks | `wip/fx-ledger` | `plans/briefs/2026-11-26_fixwave.md` (section F1) | run wf_ea1ab0ef-037: built (316b9d8; three needs routed to F2), reviewed (14 findings), fix round running |
+| fix wave F3a the 837 pass and sizing | `wip/fx-837` | the same brief, section F3a | run wf_91b074e9-48a: built (3a7f95b; needs routed to F3c, F5, F6), reviewed (14 findings), fix round running |
+| fix wave F3b the exports, the twins and G8 | `wip/fx-exports` | the same brief, section F3b | run wf_fc5edc8c-c0f: built (a2120cd; needs on F3a's functions go to F3c), reviewed (12 findings), fix round running |
+| fix wave F2 recoveries and closures | `wip/fx-recover` | the same brief, section F2 (with F1's routed needs, after F1 merges) | run wf_fa21bf23-007, started 01:54 UTC: build, two reviews, one fix round |
+| fix wave F4 the EMA side and the bare $0 rule | `wip/fx-ema` | the same brief, section F4 | run wf_ebdf14ed-6fe, started 01:54 UTC |
+| fix wave F5 people and decision 2's follow-ups | `wip/fx-people` | the same brief, section F5 (F3a's page needs after F3a merges) | run wf_ab3cfbba-d2b, started 01:54 UTC |
+| fix wave F6 hosts | `wip/fx-hosts` | the same brief, section F6 (F3a's host needs after F3a merges) | run wf_53e32423-10f, started 01:54 UTC |
+| fix wave F8 the deadlines follow-ups | `wip/fx-windows` | the same brief, section F8 | run wf_3690391d-bc8, started 01:54 UTC |
 
 Merged: fix7d, fix7c, deadlines, hook, decisions, a17's tool. Next, as each fix round ends: F1, F3a, F3b (F3a before
 F3b), then F3c (the two passes' needs on each other), then batch 2 (F2, F4, F5, F6, F8) as each ends, then F7. Each merge:
@@ -91,11 +96,14 @@ the release gates (section 0 below, "Then, in order").
   (A17 review a17-r1-3, 23:05 UTC): the VA Community Care claims go out under 837 payer id VACCN and every send is named
   as Optum/UnitedHealthcare, so the name rules may give them UHC's windows; check the product's group and windows for
   that payer id against the va_ccn rows of plans/tools/a17/payer_windows.json and fix by the payer id if they differ.
-- **The release's re-analysis leaves 1,892 open items ($203,702) the new rules no longer produce** (hook, cycle 1 on the
-  world: UNDERPAID_VS_OWN_RATE 1,248, NO_ANSWER 364, MPPR_EXCESS 85, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72,
-  SECOND_RATE 29, others 21). The vanished self-check keeps them listed until a person accepts. The final stage explains
-  them by rule (A17 and hand-traces per group) and writes the explanation the owner reads before pressing Accept; none
-  is accepted unexplained.
+- **The release's re-analysis leaves open items the new rules no longer produce.** On the merged code at 947203b (hook,
+  decisions, the merge fixes; one server cycle on a private world copy, 2026-11-27 02:00 UTC, no error, safe mode off,
+  detection 245 s at a 1.1 GB peak): 2,255 items, $219,047 (UNDERPAID_VS_OWN_RATE 1,586 / $80,702, NO_ANSWER 364 /
+  $93,022, MPPR_EXCESS 108, CLAIM_DENIED_UNPAID 73, REJECTED_PRE_PAYER 72, SECOND_RATE 30, others 22), plus 9 items
+  ($5,387) the left-record check warns about. On wip/hook alone it was 1,892 ($203,702); the rise is fix7c's
+  plan-level rates. The vanished self-check keeps them listed until a person accepts. The final stage explains them by
+  rule (A17 and hand-traces per group) and writes the explanation the owner reads before pressing Accept; none is
+  accepted unexplained. The fix wave will move these numbers again: measure on the final merge.
 - **Batch 1's builders (2026-11-27 00:50 UTC): what they routed.** F1's three needs and two of its open questions are in
   the brief's F2 section (a part paid as the whole service on another bill; the Medicaid share's size; denials of voided
   claims; one service on a rejected and a denial item; 129 second payers' shares taken back in full, $6,424.85, on no
