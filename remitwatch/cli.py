@@ -661,15 +661,26 @@ HASHED_TABLES = ("findings", "finding_events", "payer_fax", "faxes", "note_lesso
                  "progress_snapshots", "line_handling", "line_links")
 
 
-def _cloud_image(st, log=print):
+def _cloud_image(st, log=print, *, check: bool = True):
     """The state folder's store with the journal applied, the alert-mail record and the Practice figures put in: what the
-    Vercel site shows, as one store. Returns (Store, details)."""
+    Vercel site shows, as one store. Returns (Store, details). An image the site's last run did not save (or a missing
+    one) raises cloud.StoreImageProblem; with check=False (a tool that only reads a copy, like compare-cloud) the image is
+    read as it is and details['image_problem'] holds the check's sentence (hosts-3)."""
     from . import cloud
     from .api import ASSUMPTIONS, ASSUMPTIONS_KEY
     log(f"Reading the store from {st.describe()}...")
-    store, existed = cloud.load_raw(st)
+    problem = None
+    try:
+        store, existed = cloud.load_raw(st)
+    except cloud.StoreImageProblem as exc:
+        if check:
+            raise
+        problem = str(exc)
+        store, existed = cloud.load_raw(st, check=False)
     if not existed:
-        return None, {}
+        if store is not None:
+            store.close()
+        return None, ({"image_problem": problem} if problem else {})
     journal = cloud.read_actions(st)
     done, left, _ = cloud.apply_actions(store.conn, journal) if journal else ([], [], False)
     waiting = [(n, a) for n, a in journal if n in set(left)]
@@ -686,7 +697,8 @@ def _cloud_image(st, log=print):
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ASSUMPTIONS_KEY, figures.decode()))
     conn.commit()
     return store, {"journal_applied": len(done), "journal_waiting": len(left), "waiting": [_waiting_line(n, a) for n, a in waiting],
-                   "alerts_marked_mailed": mailed, "last_report": marks.get("last_report"), "practice_figures": bool(figures)}
+                   "alerts_marked_mailed": mailed, "last_report": marks.get("last_report"), "practice_figures": bool(figures),
+                   **({"image_problem": problem} if problem else {})}
 
 
 def _waiting_line(name: str, a: dict) -> str:
@@ -823,7 +835,13 @@ def cmd_import_cloud(args: argparse.Namespace) -> int:
     if st is None:
         print("Set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN (the same values as on Vercel), then run this again.")
         return 1
-    store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True))
+    try:
+        store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True))
+    except cloud.StoreImageProblem as exc:
+        # the image is not the one the site's last run saved (or it is missing, or cut short): nothing is moved, and the
+        # check's own sentence says what to do (hosts-3)
+        print(exc)
+        return 1
     if store is None:
         print("The state folder has no store yet: nothing to move. Start this server with an empty store instead.")
         return 1
@@ -955,7 +973,16 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
     if st is None or not os.path.exists(args.db):
         print("Needs the Dropbox settings and this server's store.")
         return 1
-    store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True))
+    try:
+        # the image as it is, even one the site's last run did not save: the comparison is still worth reading, and the
+        # mismatch is said first (hosts-3)
+        store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True), check=False)
+    except cloud.StoreImageProblem as exc:      # an image that cannot be read at all (cut short)
+        print(exc)
+        return 1
+    problem = details.get("image_problem")
+    if problem:
+        print(f"Not a proof of the move: {problem}")
     if store is None:
         print("The state folder has no store.")
         return 1
@@ -1004,9 +1031,13 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
     print(f"{'table'.ljust(width)}  {'Vercel':>9}  {'server':>9}")
     for t, a, b, verdict in rows:
         print(f"{t.ljust(width)}  {str(a):>9}  {str(b):>9}  {verdict}")
-    print(json.dumps({"different": bad, "vercel": _baseline(theirs), "server": _baseline(mine), "waiting": details.get("waiting") or []}, indent=1))
+    print(json.dumps({"different": bad, "vercel": _baseline(theirs), "server": _baseline(mine), "waiting": details.get("waiting") or [],
+                      **({"image_problem": problem} if problem else {})}, indent=1))
     mine.close()
     store.close()
+    if problem:
+        print(f"Not a proof of the move: {problem}")
+        return 1
     return 0 if not bad else 2
 
 

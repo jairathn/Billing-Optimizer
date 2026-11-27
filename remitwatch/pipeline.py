@@ -45,6 +45,33 @@ CHILD_TIMEOUT_SECONDS = 170 * 60        # a cycle the scheduler started is stopp
 LOCK_STALE_MINUTES = 180                # a lock with no heartbeat for this long was left behind by a crash; longer than the child timeout
 STOP_WAIT_SECONDS = 3                   # when the server stops, the time its running cycle gets to end before it is killed
 BOOT_MARGIN_SECONDS = 120               # a lock last refreshed this long before the machine started was left by the restart
+# An analysis is owed: input may have been read that no saved analysis has seen. The serverless cycle keeps the same mark
+# (remitwatch.cloud) and the archive waits while it is set (archive.META_DETECT_PENDING); one key, one meaning, on both
+# hosts, so a store moved from the Vercel site with its analysis still owed is analysed by the server's first cycle.
+DETECT_PENDING = "cloud:detect_pending"
+
+
+def analysis_owed(conn) -> bool:
+    """Whether the store says an analysis is owed (DETECT_PENDING): a cycle read, or may have read, input and stopped
+    before an analysis saved after it."""
+    try:
+        return conn.execute("SELECT 1 FROM meta WHERE key=?", (DETECT_PENDING,)).fetchone() is not None
+    except sqlite3.Error:       # no meta table yet: a new store, which the first cycle analyses anyway
+        return False
+
+
+def owe_analysis(conn) -> None:
+    """Say an analysis is owed, committed at once: written before a reader may commit anything, so no input can be in the
+    store without it (hosts-1: a cycle whose analysis stopped left its remittances unanalysed until another file came)."""
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, '1')", (DETECT_PENDING,))
+    conn.commit()
+
+
+def analysis_paid(conn) -> None:
+    """The owed analysis is done (one saved after everything read), or this cycle read nothing that needs one."""
+    conn.execute("DELETE FROM meta WHERE key=?", (DETECT_PENDING,))
+    conn.commit()
 
 
 def _now() -> str:
@@ -513,6 +540,14 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             lg_box.append(ema_ledger.open_for_store(db_path))
         return lg_box[0]
     try:
+        # (hosts-1) an analysis is owed from before this cycle may read anything until one is saved after it, or until the
+        # cycle has seen that nothing it read needs one: a cycle stopped in between (a code bug, the memory limit, the
+        # container stopped by a deploy) leaves the mark, and the next cycle analyses what was read, new files or not
+        owed = analysis_owed(store.conn)
+        if owed:
+            out["analysis_owed"] = True
+        else:
+            owe_analysis(store.conn)
         # uploads cut off part-way (their pieces and records, after a day) go at every cycle, not only when someone opens
         # the Upload page: a cut-off report can hold patient data and up to the upload cap
         swept = _ema_step(out, "uploads_sweep", sweep_uploads, db_path)
@@ -672,8 +707,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             people = people_changed_since_detection(store.conn)
             if people:
                 out["people_changed"] = True
+        analyse = changed or force_detect or not has_run or rules_changed or people or owed
+        if not analyse:
+            analysis_paid(store.conn)   # nothing this cycle read needs an analysis, and no earlier one was owed
         store.close()
-        if changed or force_detect or not has_run or rules_changed or people:
+        if analyse:
             t_det = time.time()
             with rl.step("detect"):     # the detection run and the run log share one id
                 summary = run_detection(db_path, run_id=rl.run_id, skip_activity="activity" in plan["skip"])
@@ -681,6 +719,8 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             sc.mark(out, "detect", t_det)
         store = Store(db_path)
         reg.conn = store.conn           # the registry writes to the store as it is now (the first connection is closed)
+        if analyse:
+            analysis_paid(store.conn)   # the analysis saved after everything this cycle and the stopped ones read
         heartbeat(store.conn, token)
         if "detect" in out and store.conn.execute("SELECT 1 FROM meta WHERE key=?", (ema_ledger.META_KEEP_DIRTY,)).fetchone() \
                 and (lg_box or os.path.exists(ema_ledger.ledger_path(db_path))):
