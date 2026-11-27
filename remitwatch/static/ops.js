@@ -128,7 +128,7 @@ function opLogsHtml(l){
 function opStoreHtml(a){
   const health = (a.health || []).filter(h => h && h.title);
   const hist = (a.history || []).slice(-7).reverse();
-  const histRows = hist.map(h => `<div class="small">${esc(h.day || String(h.at || '').slice(0, 10))}: the store ${h.hot_mb != null ? Number(h.hot_mb).toLocaleString() + ' MB' : '?'}${h.peak_mb ? `, peak memory ${Number(h.peak_mb).toLocaleString()} MB` : ''}${h.share != null ? ` (${Math.round(h.share * 100)}% of its limit)` : ''}${h.retired && h.retired.bills ? `; ${Number(h.retired.bills).toLocaleString()} older claims moved to the archive` : ''}</div>`).join('');
+  const histRows = hist.map(h => `<div class="small">${esc(h.day || (typeof practiceDate === 'function' ? practiceDate(h.at) : String(h.at || '').slice(0, 10)))}: the store ${h.hot_mb != null ? Number(h.hot_mb).toLocaleString() + ' MB' : '?'}${h.peak_mb ? `, peak memory ${Number(h.peak_mb).toLocaleString()} MB` : ''}${h.share != null ? ` (${Math.round(h.share * 100)}% of its limit)` : ''}${h.retired && h.retired.bills ? `; ${Number(h.retired.bills).toLocaleString()} older claims moved to the archive` : ''}</div>`).join('');
   return `<div class="panel" id="opStore"><div class="panel-head"><h2>Store size and memory</h2>
       <span class="small muted">Older settled claims move to an archive the daily run never loads; Find a claim still opens them.</span></div>
     ${(a.lines || []).map(t => `<div class="small">${esc(t)}</div>`).join('') || '<div class="small muted">No run has measured the store yet.</div>'}
