@@ -6496,7 +6496,7 @@ class Detector:
         """One person under two of EMA's patient ids: for the weekly exports' claims that share a visit (date, code and part)
         under different patient ids, who each claim's patient is (_who: the remittances' names for its bill, EMA's patient
         through the claims the A/R or the bill map ties to an EMA claim, and the keyed name and birth date there). Patient
-        ids whose claims are one person (_same_person: the same keyed name and birth date, or the same keyed name under the
+        ids whose claims are one person (_one_patient: the same keyed name and birth date, or the same keyed name under the
         same member id, as the 837 pass matches them) are one patient. Never the keyed name alone (a father and a son of one
         name), nor a member id's one remitted name (family members on one subscriber id): fx-exports-r2-3, r2-4. {claim id:
         the patient they share} for the claims so joined; every other claim keeps its own patient id."""
@@ -6523,7 +6523,7 @@ class Detector:
             for i, a in enumerate(named):
                 for b in named[i + 1:]:
                     pa, pb = find(by[a]["patient"]), find(by[b]["patient"])
-                    if pa != pb and self._same_person(who[a], who[b]):
+                    if pa != pb and self._one_patient(who[a], who[b]):
                         parent[max(pa, pb)] = min(pa, pb)
         return {p: find(by[p]["patient"]) for p in want}
 
@@ -7484,7 +7484,7 @@ class Detector:
         return out
 
     @staticmethod
-    def _same_person(a: dict, b: dict) -> bool:
+    def _one_patient(a: dict, b: dict) -> bool:
         """Whether two claims' patients (_who) are one person, as the 837 pass matches them (_837_one_visit): the same keyed
         name and birth date, or the same keyed name under the same member id, each name from the claim's own evidence.
         Never the keyed name alone (a father and a son of one name: JR and SR are dropped from it), and never a member id
@@ -8259,7 +8259,7 @@ class Detector:
         """One visit chased under two bills across the two never-answered passes (answers-1, the exports' side): a visit
         (date, code and part of the service) on an item of EMA's weekly exports that the practice billed again under a newer
         bill that only the 837s know, and that the 837 pass lists, is chased under the newer bill only. The patient must be
-        one person (_same_person: the same keyed name and birth date, or the same keyed name under the same member id, each
+        one person (_one_patient: the same keyed name and birth date, or the same keyed name under the same member id, each
         from the claim's own evidence; never a member id or its one remitted name: two people on one subscriber id seen the
         same day are two services, fx-exports-r2-3; never the keyed name alone: a father and a son of one name, r2-4). The
         newer bill went out after the older (an earlier or same-day send is not a bill made again). And an exports' item
@@ -8327,7 +8327,7 @@ class Detector:
                        for cd in cds}
             who = self._who(cds, answers)
             for e, ps in pairs.items():
-                same = {p for p in ps if self._same_person(who.get(e) or {}, who.get(p) or {})}
+                same = {p for p in ps if self._one_patient(who.get(e) or {}, who.get(p) or {})}
                 if same:
                     same_of[e] = same_of.get(e, set()) | same
         if not same_of:

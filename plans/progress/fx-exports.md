@@ -2,16 +2,124 @@
 
 Brief: `plans/briefs/2026-11-26_fixwave.md`, section "F3b the exports, the twins and G8" (and the common brief
 `plans/briefs/2026-11-26_common.md`). Branch `wip/fx-exports`, started from the integration tip bc29767 (fix7d merged).
-Private folder: `$S/tk/units/fx-exports/` (mode 700; scripts `measure.sh`, `snap2.py`, `compare.py`, `a17cmp.py`, `ht.py`
-(hand-trace: raw rows of a finding's bill, dates as days from the visit, ids hashed), `breakfix.py`, `breakfix2.py`,
-`claim_audit_a17.py` + `a17/payer_windows.json` taken from origin/wip/a17).
+Private folder: `$S/tk/units/fx-exports/` (mode 700; scripts `measure.sh`, `measure_both.sh`, `snap2.py`, `compare.py`,
+`compare2.py`, `a17cmp.py`, `ht.py`, `ht2.py` (hand-trace: raw rows of a finding's bill, dates as days from the visit, ids
+hashed), `breakfix2.py` (break several places, run the named tests, restore exactly), `claim_audit_a17.py` + `a17/` (the
+merged A17 from the integration tip 8c59195; the build round's copy is in `old_a17/`)). The reviewers' tests are under
+`$S/tk/review/fx-exports-r1-tests/` and `fx-exports-r2-tests/` (a copy in `$S/tk/units/fx-exports/rt/`).
 
 Functions this fixer owns (detect.py): `run_ema_open_claims`, `_ema_check_open_claims`, `_ema_claims_found`,
-`_send_day_twins`, `run_ema_report_claims`, and the new helpers they call: `_export_patients`, `_note_resent_bill`,
-`_claim_content`, `_unanswered_before_send`, `_bills_with_lines`, `_g8_one_service`, `_exports_yield_to_newer_bills`.
-Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date as the unseen meta's newest_835.
+`_send_day_twins`, `run_ema_report_claims`, and the helpers they call that this fixer wrote: `_export_patients`,
+`_note_resent_bill`, `_claim_content`, `_unanswered_before_send`, `_bills_with_lines`, `_g8_one_service`,
+`_exports_yield_to_newer_bills`, and in the fix round `_print_batch_paid`, `_twins_by_name`, `_billed_under`, `_who`,
+`_one_patient`, `_prior_work`, `_fold_into`. Small edits outside (no fixer owns these lines): `_save_ema_wiring` writes
+the feed date as the unseen meta's newest_835 (build round); `_patient_keys` takes two keyword arguments with defaults,
+`member_names=True` and `persons=None` (fix round; every other caller keeps its behaviour).
 
-## State (updated 2026-11-27 00:45 UTC)
+## State (updated 2026-11-27 02:00 UTC): the fix round
+
+FIX_ROUND_STATE
+
+## The fix round: each review finding and its outcome
+
+| Finding | Outcome | Test (tests/test_fx_exports.py, both store kinds) |
+|---|---|---|
+| r1-1 high: a corrected bill in the print batch after a denial is not listed | fixed: `_ema_check_open_claims` keeps the after-send day for a claim in the print batch (as the tip did); the duplicate rule is its own step, `_print_batch_paid`: only a payment that still stands (net of takebacks and reversals, the claim's own payer company, the service's own part) on its EMA claim, another EMA claim of the patient, or another bill's remittance line the ledger keeps | test_a_print_batch_rebill_of_a_visit_the_payer_denied_is_still_listed_to_be_sent (denied and reversed), test_a_print_batch_rebill_of_a_visit_paid_on_its_835_is_a_duplicate, test_a_print_batch_duplicate_made_after_the_visit_was_paid_is_not_listed |
+| r2-1 medium: the same, a corrected C002 of the bill or a new bill after another bill's denial | fixed by r1-1's change | test_a_corrected_claim_left_in_the_print_batch_after_its_denial_is_still_listed (both cases) |
+| r2-7 low: a print-batch claim waits as 'no source can check' when a stray remittance is newer than the feed date | fixed: the print batch is exempt from that wait (its due day is the practice's own, dated by the day EMA's exports reach) | test_a_claim_never_sent_is_listed_to_be_sent_whatever_stray_remittance_is_newer |
+| r1-5 high: two claims take the same named send-day twin (a child's unpaid claim answered by the parent's) | fixed: `_twins_by_name`: a name from the claim's own evidence (`_who`: its bill's remittances, the EMA claim a bridge found, EMA's patient) chooses one of several twins, one to one (two claims naming the same twin take neither); a member id's one remitted name never chooses | test_a_childs_claim_never_takes_its_parents_send_day_twin_by_the_subscribers_name, test_two_claims_whose_names_choose_the_same_twin_take_neither, test_a_member_ids_one_remitted_name_never_chooses_a_send_day_twin, test_send_day_twins_of_two_patients_are_told_apart_by_the_patients_name (restated on export claims: own evidence) |
+| r1-3 medium: a lone twin naming another patient answers the claim | fixed: a twin whose EMA claim names someone else than the claim's own evidence is not its twin; with only a member id's one remitted name, twins that all name others are rejected unless such a patient is billed under the claim's member id elsewhere (`_billed_under`: their other bills' 837s carry it, a dependent) | test_a_lone_send_day_twin_of_another_named_patient_does_not_answer_the_claim (the reviewer's), test_a_lone_send_day_twin_of_another_patient_never_answers_a_claim_emas_reports_name, test_a_lone_send_day_twin_of_a_patient_billed_under_the_claims_member_id_still_answers_it |
+| r1-4 medium, r2-6 low: the before-send bridge takes another patient's unanswered EMA claim | fixed: `_unanswered_before_send` takes nothing when nothing names the claim's patient, nor when an answered EMA claim of its lines names the patient; a member id's one remitted name only confirms a lone candidate | test_the_before_send_bridge_never_takes_another_patients_claim_when_the_claims_own_was_answered (the reviewers' two worlds), test_an_answered_ema_claim_of_the_patient_with_the_claims_lines_blocks_the_bridge; answers-7's test restated with the member's remittance naming the patient |
+| r2-3 medium: the cross-pass yield merges two children on one subscriber id | fixed: `_one_patient` (the same keyed name and birth date, or the same keyed name under the same member id, each from the claim's own evidence), never a member id's one remitted name | test_a_child_whose_sibling_was_never_remitted_keeps_its_own_visit, test_a_member_ids_one_remitted_name_never_makes_two_bills_one_visit, test_two_people_on_one_subscriber_id_seen_the_same_day_stay_two_services |
+| r2-4 medium: the one-visit rules join a father and son of one name | fixed: `_export_patients` and the yield join by `_one_patient`, never the keyed name alone | test_a_father_and_son_of_one_name_are_two_patients_for_the_one_visit_rules (both rules), test_a_father_and_son_named_only_by_their_members_remittances_stay_two_patients (the reviewer's two worlds), test_one_person_under_two_ema_patient_ids_is_one_patient_for_the_one_visit_rule (restated: name and birth date, or name under one member id) |
+| r1-2 medium, r2-5 low: a person's work on the exports' item does not follow when the newer item was already listed | fixed on this branch by keeping it: an exports' item a person worked whose newer item was listed before this run stays listed with its work, and both items point to each other (save() hands work only to an item new in its run). The full fix (the work follows) needs save(): F3a's fix round added that clause (see Needs) | test_work_on_an_export_item_stays_on_a_listed_item_when_the_patients_name_arrives_later, test_an_unworked_export_item_yields_when_the_patients_name_arrives_later; `plans/progress/fx-exports_needs_save.py` (not collected) holds the test for after the merge |
+| r2-2 medium: the kept resend is listed twice once F3a chases resends, and includes a service already paid | fixed: the kept resend is sized at the services no remittance of the bill answered; `_exports_yield_to_newer_bills` makes it yield to the 837 pass's item of the same bill when one is listed (F3a's `_837_resends`); the answers-5 test's two bills have different patients | test_a_bill_sent_again_after_its_primary_answer_is_chased_once (the reviewer's; also passes on a scratch merge with origin/wip/fx-837), test_an_export_resend_yields_to_the_837_passs_item_for_the_same_bill, test_an_export_claim_whose_bill_went_out_again_stays_listed_when_nothing_else_chases_it |
+| (found at the 8c59195 merge) the hook's vanished self-check keeps a yielded item listed | fixed: `_fold_into` records where a claim's chase went in the carrying item's evidence ('folded'), for the yield and the exports' one-visit rule | test_an_unworked_export_item_yields_when_the_patients_name_arrives_later, test_an_export_claim_listed_before_gives_its_visit_to_a_newer_bill_and_is_not_kept_by_the_self_check |
+| (F3a's need) an exports' claim not due yet is not on the waiting view | done: `run_ema_open_claims` calls `_note_waiting` where it exists (wip/fx-837); checked on a scratch merge | test_an_exports_claim_not_due_yet_is_noted_for_the_waiting_view |
+
+Every fix broken on purpose and restored exactly (sha256 equal, `breakfix2.py`): the print batch's after day, its wait,
+the duplicate rule and its standing check; the own-evidence veto, the one-to-one rule, the member-name veto and its
+dependent exception, member names choosing twins; the bridge's name requirement and its answered-claim guard; the
+joins by name alone, by a member id's name, by person keys; the keep-for-work branch; the resend carrier and sizing;
+the waiting-view call; both folds. Each break made its tests fail.
+
+The reviewers' 28 test cases (r1 and r2, both kinds) on this branch: 26 pass. The two that fail are r1-2's
+(test_work_on_an_export_item_follows_the_newer_bill_when_the_patients_name_arrives_after_both_were_listed): its world
+names the patient only through the member id's one remitted name, which by r2-3 never joins two claims, so the yield it
+asserts does not happen (its own message: "the test no longer reaches the rule"); the restated test covers the finding.
+
+## Decisions taken (for the reviewers)
+
+- One principle for who a claim's patient is: a name from the claim's own evidence (its bill's remittances, the EMA
+  claim a bridge found, EMA's patient for an export claim) can join two claims (with the same member id, or with the
+  same birth date) and choose a twin; a member id's one remitted name never joins and never chooses (a subscriber's id
+  covers the family: r1-5, r2-3), but it may keep a claim from taking another person's EMA claim (r1-3; with the
+  dependent exception) and may confirm a lone candidate of the before-send bridge (as answers-7's review proposed).
+- The 837's own patient (F3a's claims_837.patient_key and person_key, READ_VERSION 2) is not read here. It is the
+  natural own evidence for 837-only claims; adding it to `_who` is a few lines at the merge, but the test builders'
+  placeholder names (clm837 names every subscriber 'SAMPLE PAT') then contradict the remittances' and EMA's invented
+  names in many worlds, so it should land with its own test review (see Needs).
+- answers-7 without any name is no longer bridged: the claim's own EMA claim may be the answered one (r2-6), so the
+  claim and Production's item for the other EMA claim both stay listed (the tip's behaviour).
+- r1-2/r2-5: keeping both items (with hints both ways) rather than leaving the work on a row no list shows, until
+  save() hands work to an untouched listed heir.
+- r2-2: the kept resend's size follows F3a (the services no remittance of the bill answered); the plain exports' path
+  for a bill answered before (the tip's L03 control) is unchanged.
+- The duplicate rule for the print batch uses the claim's own evidence only (`_patient_keys` without member names).
+
+## Needs from others
+
+- Integrator, at the merge with wip/fx-837 (its save() now hands an item's work to an untouched listed heir, fx-837-r1-3):
+  in `_exports_yield_to_newer_bills`, narrow the keep-for-work branch to both items worked, i.e. replace
+  `prior.get(fid, {}).get("worked") and to_fid in prior:` with `prior.get(fid, {}).get("worked") and
+  prior.get(to_fid, {}).get("worked"):`. Checked on a scratch merge (my branch at 12f0287 + origin/wip/fx-837 d4fc535):
+  then `plans/progress/fx-exports_needs_save.py` passes (the work follows to the newer bill's item) and
+  test_work_on_an_export_item_stays_on_a_listed_item_when_the_patients_name_arrives_later is to be restated for the
+  both-worked case (both stay, pointing to each other). Move the needs test into tests/test_fx_exports.py then.
+- F3a / integrator: `run_ema_open_claims.live_items` gives None for a charge the exports do not give (two places:
+  `None if sig in unknown else sig[4]`, and the status fallback `None if (v[0], v[1]) in unknown else v[2]`) once F3a's
+  `_emit_open_claim` (which sums `x[2] or 0`) is merged; F3a's stopgap in `_emit_open_claim` goes then. F3a's test:
+  plans/progress/fx-837_needs_tests.py::test_an_exports_charge_row_with_no_charge_given_is_priced_at_the_payers_rate.
+- F3a: its needs test test_an_exports_claim_not_due_yet_is_on_the_waiting_view reads the view's rows as dicts
+  (`c.get("claim_id")`); `_finish_waiting` stores lists `[pcn, grp, sent, due, billed]`. With `c[0]` it passes on the
+  scratch merge (this branch's `_note_waiting` call is in).
+- F3a or the integrator: the 837's own patient (claims_837.patient_key and person_key, READ_VERSION 2) as own evidence in
+  `_who` (read the bill's 837 rows where the columns exist; add to 'names' and 'persons'). Then check the worlds whose 837s
+  name 'SAMPLE PAT' (tests/test_837_sends.clm837) while the remittances or EMA name someone else (tests/test_fx_exports.py,
+  test_837_sends.py, test_ema_wiring.py): an own-evidence name that differs vetoes a send-day twin.
+- F3a's need for F3b not done in this round (not among the review's findings): `run_ema_open_claims`' newest_for, a newer
+  exports' bill a payer answered as primary keeps carrying the visit (fx-837-r2-6's exports side). Test:
+  plans/progress/fx-837_needs_tests.py::test_an_older_exports_bill_stays_given_way_once_the_newer_bill_of_the_visit_is_answered.
+  The older bill is listed beside the newer bill's denial: a duplicate on the list, not a claim dropped. Next F3b round.
+- F6 (selfcheck.check_vanished) and runlog: this branch records a yield as a fold ('folded' in the carrying item's
+  evidence, rules exports_yield_to_newer_bill and exports_one_visit); runlog's decision log names every fold
+  `archive_rules:fold_into` (it could read the entry's own 'rule'). After the F3a merge, check that the 837 pass's own
+  one-visit yields are not kept by the vanished self-check (they record no fold).
+- F4 (ema_checks.claim_answers' content bridge): an export claim whose own EMA claim is outside Production's dates can be
+  bridged by content to another patient's EMA claim when it is the only one of that content (seen in a test world while
+  writing r2-4's tests; the world was given each bill's own EMA claim). Not changed here; no real-data count.
+- Build round needs, answered: F3a did the reverse of answers-1 (50fb8eb, `_837_export_carriers`) and the 837 patient
+  read (READ_VERSION 2); `s837` index 7 is still read by `_claim_content`.
+
+## Merges
+
+MERGES_SECTION
+
+## Suites
+
+SUITES_SECTION
+
+## Measurements (fix round)
+
+MEASURE_SECTION
+
+## Hand trace (fix round)
+
+TRACE_SECTION
+
+## Build round (kept for the record)
+
+### State at the end of the build round (2026-11-27 00:45 UTC)
 
 - Every finding and residual in scope is fixed but one residual (export claims dated only by the visit day get no
   send-day twins: left, see below). `tests/test_fx_exports.py`: 18 tests, 42 cases (both store kinds), green; every fix
@@ -24,7 +132,7 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
   unit merged) at 97ea88e (after it), with no conflict. The measurement's branch code is 39c5121: this branch plus the
   integration tip as of 5eb528e; it does not include fix7c's or the deadlines unit's merges.
 
-## Findings and residuals: status
+### Findings and residuals: status
 
 | Item | Status | Test (tests/test_fx_exports.py) |
 |---|---|---|
@@ -39,7 +147,7 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
 | residual: exports' one-visit rule by one EMA patient id | fixed: `_export_patients`: EMA patient ids whose keyed names meet are one patient for the one-visit rule | test_one_person_under_two_ema_patient_ids_is_one_patient_for_the_one_visit_rule |
 | residual: export claims dated only by the visit day get no send-day twins | left, by design: a send-day twin needs the day the claim went out, and such a claim has none (no submission date, no bill date, no 837); the content bridge still applies to it. In the world the tip had 2 such items, both lines billed $0, which answers-3 now leaves out: none is left | (none) |
 
-## Decisions taken (for the reviewers)
+### Decisions taken (for the reviewers)
 
 - answers-1: the reviewer's own scenario had no name for the patient anywhere (only the subscriber id). The brief and the
   verifier say never merge on the subscriber id alone (two people on one id seen the same day are two services), so the
@@ -55,7 +163,7 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
 - Print batch: a bill EMA made again after its visit was paid by the same payer, and left in the print batch, is a
   duplicate of a paid visit; test_837_sends claim 89 asserted the opposite and was changed with that reason.
 
-## Needs from others
+### Needs from others
 
 - F3a (837 pass): the reverse of answers-1 (an 837-only bill OLDER than an exports' bill of the same visit yields to the
   exports' item). wip/fx-837 has `_837_one_visit` with carriers; check at the merge that it covers an exports' carrier.
@@ -75,7 +183,7 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
   `_note_waiting(pcn, grp, sent, due, billed)` where run_ema_open_claims skips a claim not due yet (the function exists
   only on wip/fx-837).
 
-## Suites
+### Suites
 
 - tests/test_fx_exports.py (42 cases) green in all four environments: python3 (3.13, SQLite 3.53), the newest libraries
   (venv2_compat), 3.12 with SQLite 3.45, 3.11.1 with SQLite 3.40.0.
@@ -100,11 +208,11 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
   again with one line each), plus the brief's known flaky banner test
   (tests/test_feed_and_day.py::test_the_pages_say_how_far_the_remittances_reach[server]), which passed when run again.
 
-## Next command
+### Next command
 
     cd $S/tk/wt/fx-exports && python3 -m pytest -q tests/test_fx_exports.py
 
-## Measurements (private world copy: the live store image of 2026-11-24 with EMA's reports; today 2026-11-24)
+### Measurements (private world copy: the live store image of 2026-11-24 with EMA's reports; today 2026-11-24)
 
 Runs: the tip's code (bc29767) and this branch twice: 4ba364b (cec8036 plus the integration tip 5eb528e) and 39c5121
 (the token-line fix on top). Each on a fresh copy, then A17 (claim_audit_a17.py from origin/wip/a17, --as-of 2026-11-24).
@@ -150,7 +258,7 @@ this branch's cost at about 5 s: the three passes it touches took 102.6 s on the
 themselves: _claim_content 1.8 s (two calls), _unanswered_before_send 0.5 s, _export_patients 0.2 s, _g8_one_service and
 _exports_yield_to_newer_bills under 0.1 s. Peak memory unchanged.
 
-## Hand trace (27 moved items, raw rows: 835s, 837 sends and lines, EMA's export rows and report lines; ht.py, ht2.py)
+### Hand trace (27 moved items, raw rows: 835s, 837 sends and lines, EMA's export rows and report lines; ht.py, ht2.py)
 
 - Right (25):
   - 2 export claims whose only line is an 88305 billed $0 (the 26 and the TC): nothing owed (A17: ZERO_CHARGE).

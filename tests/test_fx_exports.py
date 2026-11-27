@@ -1444,3 +1444,17 @@ def test_an_export_claim_listed_before_gives_its_visit_to_a_newer_bill_and_is_no
     folded = json.loads(found["CB0000N82C017"]["evidence"]).get("folded") or []
     assert [x["finding_id"] for x in folded] == [_fid("EMA_OPEN_CLAIM", "CB0000N81C017")], folded
     s.close()
+
+
+# ----------------------------------------------------------------------------------------------- one name, one method
+def test_no_method_of_the_detector_is_defined_twice():
+    """(found on the world copy) A method defined twice in one class silently replaces the first: this branch's patient
+    matcher once took the name of the MPPR rule's own `_same_person`, and the detection run failed on the real data."""
+    import ast
+    import collections
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "remitwatch", "detect.py")
+    tree = ast.parse(open(path).read())
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            names = collections.Counter(n.name for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+            assert not [n for n, c in names.items() if c > 1], (node.name, [n for n, c in names.items() if c > 1])
