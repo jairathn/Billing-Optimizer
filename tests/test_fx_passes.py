@@ -12,6 +12,8 @@ of plans/progress/fx-837.md and fx-exports.md. Their tests are ported here, with
 - Work on an exports' item that yields follows to the newer bill's item when nobody worked that one; both stay listed,
   pointing to each other, when both were worked.
 - An older exports' bill stays given way once the newer bill of the visit is answered as primary.
+- A claim sent to its secondary payer is sized by what the primary left the patient on the lines (2430 AMT*EAF), as the
+  practice's files carry it, when the primary wrote no PR adjustment.
 
 Every claim id, member number, name, amount and date here is invented (the repository's builders: tests/test_837_sends,
 tests/test_fx_837, tests/test_fx_exports, tests/test_workable, tests/test_ema_wiring, tests/ema_fixtures). Each test that
@@ -29,7 +31,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from remitwatch.detect import WAITING_837_META, Detector  # noqa: E402
-from tests.test_837_sends import KINDS, V, _chased, _remits, _store, _visits, answer, send  # noqa: E402
+from tests.test_837_sends import ANTHEM, HUMANA, KINDS, V, _chased, _remits, _store, _visits, answer, send  # noqa: E402
 from tests.test_fx_837 import clm837  # noqa: E402
 from tests.test_fx_exports import _ema_store, _rebill_world, ema_env  # noqa: E402,F401
 
@@ -385,4 +387,45 @@ def test_a_claim_no_line_of_which_can_be_priced_says_its_size_is_not_known(tmp_p
     f = found["CB0000G01C017"]
     assert f["signal"] == "NO_ANSWER" and f["shortfall_cents"] is None, (f["signal"], f["shortfall_cents"])
     assert "Its size is not known" in (f["hint"] or "") and "G2211" in f["hint"], f["hint"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_secondary_send_is_sized_by_what_the_primary_left_on_its_lines(tmp_path, kind):
+    """(The brief's check on the reread world: 4,441 sends carry the payer before's loop, none of them with an AMT*EAF on
+    the claim; the files carry it on each line, 2430, and 68 sends have no PR adjustment to read instead, 60 of them
+    because the payer before left the patient nothing.) Humana pays 99214 at $117.60 as a primary. Three claims only the
+    837s know went to Humana as the secondary payer (SBR01 S) on September 15 after Anthem answered on paper (no Anthem
+    remittance is on file); Humana has not answered by November 10. What Anthem left the patient is only on the line:
+    - CB0000E01: Anthem paid $117.60 and left nothing (the line's AMT*EAF 0, no CAS*PR): Humana owes nothing, no item;
+    - CB0000E02: Anthem paid $97.60 and left $20.00 (the line's AMT*EAF, no CAS*PR): the item is $20.00, not $117.60;
+    - CB0000E03: Anthem left $23.52, in both the line's CAS*PR and its AMT*EAF: the item is $23.52.
+    The reader keeps the lines' sum as what Anthem left (other_left_cents), and a file the reader before read (version 3,
+    nothing left on file) is listed to be read again and filled in."""
+    from remitwatch import x12_837 as X
+    s = _store(tmp_path, kind)
+    claims = [
+        clm837("CB0000E01C017", V, payer=HUMANA, resp="S", other={"payer": ANTHEM, "paid": 117.60, "lines": [(117.60, 0, 0.0)]}),
+        clm837("CB0000E02C017", V, payer=HUMANA, resp="S", other={"payer": ANTHEM, "paid": 97.60, "lines": [(97.60, 0, 20.00)]}),
+        clm837("CB0000E03C017", V, payer=HUMANA, resp="S", other={"payer": ANTHEM, "paid": 94.08, "lines": [(94.08, 23.52, 23.52)]}),
+    ]
+    send(s, tmp_path, claims, "20260915")
+    rows = {r[0]: r[1:] for r in s.conn.execute(
+        "SELECT patient_control_number, other_left_cents, other_pr_cents FROM claims_837")}
+    assert rows == {"CB0000E01C017": (0, None), "CB0000E02C017": (2000, None), "CB0000E03C017": (2352, 2352)}, rows
+    _remits(s, tmp_path, _visits(), "20261110", payer="HUMANA", payer_id="61101")
+    found = _chased(s, "t1")
+    assert "CB0000E01C017" not in found, "Anthem left the patient nothing: Humana owes nothing on it"
+    assert found["CB0000E02C017"]["shortfall_cents"] == 2000, found["CB0000E02C017"]["shortfall_cents"]
+    assert found["CB0000E03C017"]["shortfall_cents"] == 2352, found["CB0000E03C017"]["shortfall_cents"]
+    assert json.loads(found["CB0000E02C017"]["evidence"])["sent_as"]["left_cents"] == 2000
+    # a store whose 837s were read by the reader before (version 3) lists them to be read again, and reading fills them in
+    s.conn.execute("UPDATE claims_837 SET other_left_cents=NULL, read_version=3")
+    s.conn.commit()
+    data = next(tmp_path.glob("*.837")).read_bytes()
+    assert X.files_to_reread(s.conn) == [X.parse_837_bytes(data)["claims"][0]["file_sha256"]]
+    X.reread_837_bytes(s.conn, data)
+    again = {r[0]: r[1] for r in s.conn.execute("SELECT patient_control_number, other_left_cents FROM claims_837")}
+    assert again == {"CB0000E01C017": 0, "CB0000E02C017": 2000, "CB0000E03C017": 2352}, again
+    assert X.files_to_reread(s.conn) == []
     s.close()

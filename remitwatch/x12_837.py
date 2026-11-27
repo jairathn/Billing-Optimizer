@@ -20,7 +20,10 @@ Read since READ_VERSION 2 (the fix wave's F3a), per claim:
   carries the subscriber's member id, and only the patient tells two family members on one id apart;
 - for a claim sent to a payer after another payer answered it (2320/2330B): the other payer that answered just before
   it (its name, id and responsibility), what the payers before it paid (AMT*D), and what that payer left to the patient
-  (AMT*EAF, else its CAS*PR adjustments on the claim and on the lines' 2430 SVD): what a secondary payer is asked to pay.
+  (AMT*EAF of its claim loop, else, since READ_VERSION 4, the sum of its lines' AMT*EAF (2430), else its CAS*PR
+  adjustments on the claim and on the lines' 2430 SVD): what a secondary payer is asked to pay. The practice's files
+  carry AMT*EAF on the lines only; a payer that left the patient nothing writes no PR adjustment, so only the lines'
+  AMT*EAF of 0 says so.
   The payers before a claim are those whose place (2320 SBR01) comes before the claim's own (SBR01): the guide asks for
   loop 2320 whenever another payer may pay, so a claim to the primary lists the secondary there with nothing adjudicated,
   and a secondary's claim may list the tertiary after it. With no place on the claim, only an other payer's loop that
@@ -38,9 +41,10 @@ from typing import Any
 
 from .x12_835 import Seg, cents, iso_date, iter_segments, sniff_delims, split_envelopes, to_float
 
-# claims read since the patient loop, SBR01/SBR09 and the other payer's loop were read (2), and since the other payer is
-# the one before the claim's own place, with the patient's keyed first name (3)
-READ_VERSION = 3
+# claims read since the patient loop, SBR01/SBR09 and the other payer's loop were read (2), since the other payer is
+# the one before the claim's own place, with the patient's keyed first name (3), and since what that payer left the
+# patient is read from the lines' AMT*EAF (2430) when its claim loop has none (4)
+READ_VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS claims_837 (
@@ -192,7 +196,7 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                     claim["other_payer_name"], claim["other_payer_id"], claim["other_payer_resp"] = last["name"], last["id"], last["resp"]
                     paid = [o["paid"] for o in before if o["paid"] is not None]
                     claim["other_paid_cents"] = sum(paid) if paid else None
-                    claim["other_left_cents"] = last["left"]
+                    claim["other_left_cents"] = last["left"] if last["left"] is not None else last["line_left"]
                     pr = last["pr"] + last["line_pr"]
                     claim["other_pr_cents"] = pr if (last["has_pr"] or pr) else None
                 claims.append(claim)
@@ -232,7 +236,7 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                     # 2320: another payer of this claim (its responsibility); its loops follow until the service lines
                     where = "other"
                     others.append({"resp": seg.get(1) or None, "name": None, "id": None, "paid": None, "left": None, "pr": 0,
-                                   "line_pr": 0, "has_pr": False, "adjudicated": False})
+                                   "line_pr": 0, "line_left": None, "has_pr": False, "adjudicated": False})
             elif sid == "PAT" and claim is None:
                 if pat is not None and seg.get(1):
                     pat["rel"] = seg.get(1)
@@ -306,6 +310,14 @@ def parse_837_bytes(data: bytes, source: str = "", salt: bytes | None = None) ->
                     elif q == "EAF":
                         others[-1]["left"] = cents(seg.get(2))
                         others[-1]["adjudicated"] = True
+                elif where == "line_other" and others and seg.get(1) == "EAF":
+                    # 2430: what the payer of this line's SVD left the patient on the line; their sum is what it left on
+                    # the claim when its claim loop has no AMT*EAF (a payer that left nothing writes no CAS*PR, only this)
+                    v = cents(seg.get(2))
+                    o = _svd_owner(others, svd_payer, claim.get("payer_resp"))
+                    if v is not None:
+                        o["line_left"] = (o["line_left"] or 0) + v
+                    o["adjudicated"] = True
             elif sid == "SVD":
                 where = "line_other"
                 svd_payer = seg.get(1) or None
