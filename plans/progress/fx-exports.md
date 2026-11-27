@@ -11,7 +11,7 @@ Functions this fixer owns (detect.py): `run_ema_open_claims`, `_ema_check_open_c
 `_claim_content`, `_unanswered_before_send`, `_bills_with_lines`, `_g8_one_service`, `_exports_yield_to_newer_bills`.
 Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date as the unseen meta's newest_835.
 
-## State (updated 2026-11-26 23:15 UTC)
+## State (updated 2026-11-26 23:45 UTC)
 
 - Every finding and residual in scope is fixed but one residual (export claims dated only by the visit day get no
   send-day twins: left, see below). `tests/test_fx_exports.py`: 18 tests, 42 cases (both store kinds), green; every fix
@@ -72,6 +72,25 @@ Small edit outside: `_save_ema_wiring` (no fixer owns it) writes the feed date a
   tests/test_workable.py::test_each_claim_is_chased_once_at_its_own_size_and_closed_ones_show_as_written_off. Also F3a's
   `_note_waiting(pcn, grp, sent, due, billed)` where run_ema_open_claims skips a claim not due yet (the function exists
   only on wip/fx-837).
+
+## Suites
+
+- tests/test_fx_exports.py (42 cases) green in all four environments: python3 (3.13, SQLite 3.53), the newest libraries
+  (venv2_compat), 3.12 with SQLite 3.45, 3.11.1 with SQLite 3.40.0.
+- Related suites after the token fix (test_fx_exports, test_837_sends, test_answer_needs_proof, test_ema_wiring,
+  test_workable, test_money_falls_off, test_sizes_and_rates, test_ema_checks, test_states, test_story,
+  test_archive_rules, test_ema_pages, test_ema_pages2, test_selfcheck): 984 passed.
+- Full suite in python3 (plans/tools/shard.sh, 2 shards, on 1b9a99c's code but for the logging-only 9b30ce9 change
+  landing while it ran): 2,931 passed, 29 skipped, 1 xfailed, 1 failed: tests/test_feed_and_day.py::
+  test_the_pages_say_how_far_the_remittances_reach[serverless] (a browser test: the banner was still empty when read on a
+  loaded machine); it passes when run again alone, on both hosts. Not caused by this branch.
+- Full suite in 3.11.1 with SQLite 3.40.0 (venv_sqlite340, 2 shards, on 1b9a99c): 2,815 passed, 13 skipped, 1 xfailed,
+  109 failed and 24 errors, every one of them for the build's missing Connection.serialize (the serialize class
+  CLAUDE.md allows there; rerun with one line each, all 133 name `serialize`): test_cloud 29, test_ema_intake 27,
+  test_hotfix2d 14, test_feed_and_day 7, test_hotfix2 7, test_status_and_sends 6, test_feeds 5, test_hotfix2c 5,
+  test_archive 4 (compact kind), test_runlog 4, test_parity 4, test_repair 4, test_ema_ledger 3, 2 each in test_swing,
+  test_cycle_converges and test_notes_bodies_cli, 1 each in test_fax, test_aws, test_api_review, review6/test_r6_cov_holds,
+  test_efficiency, test_ema_reports, test_diagnose and test_hotfix2_pages.
 
 ## Next command
 
