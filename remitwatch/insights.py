@@ -758,21 +758,27 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
                                  f"counted (${cents / 100:,.2f} paid). {listed(lost)}"),
                       "who": "Billing lead: ask TriZetto for the whole remittance again, or look it up on the payer's portal, and check "
                              "those claims before anyone chases them."})
-    # A payer reversed a payment no remittance on file shows (trace finding T-I5): for a service after the payer's first
-    # remittance on file, the remittance that paid it is missing. The analysis saves the counts (detect.REVERSALS_NOT_ON_FILE_META)
+    # A payer took back a payment no remittance on file shows: a reversal (trace finding T-I5), or a recoupment withheld from
+    # a later check naming the claim (money-1). For a service after the payer's first remittance on file, the remittance that
+    # paid it is missing. The analysis saves the counts (detect.REVERSALS_NOT_ON_FILE_META)
     from .detect import REVERSALS_NOT_ON_FILE_META
     rev = _meta(conn, REVERSALS_NOT_ON_FILE_META) or {}
     if isinstance(rev, dict) and int(rev.get("claims") or 0) > 0:
         n, cents = int(rev.get("claims") or 0), int(rev.get("cents") or 0)
         old_n, old_cents = int(rev.get("older_claims") or 0), int(rev.get("older_cents") or 0)
+        rc_n, rc_cents = int(rev.get("recouped_claims") or 0), int(rev.get("recouped_cents") or 0)
         items.append({"key": "reversal_not_on_file", "ok": False, "claims": n, "cents": cents, "lines": int(rev.get("lines") or 0),
+                      "entries": int(rev.get("entries") or 0), "recouped_claims": rc_n, "recouped_cents": rc_cents,
                       "older_claims": old_n, "older_cents": old_cents,
                       "title": (f"A payer took back a payment that no remittance on file shows (${cents / 100:,.2f})" if n == 1 else
                                 f"Payers took back payments on {n} claims that no remittance on file shows (${cents / 100:,.2f})"),
                       "detail": ("The remittance that paid " + ("that claim" if n == 1 else "those claims") + " is missing: nothing on file "
-                                 "shows the payment, so it is not counted, and the reversal takes nothing from the payments that are."
-                                 + (f" {old_n} more {'claim reverses a payment' if old_n == 1 else 'claims reverse payments'} made before the "
-                                    f"remittances on file begin (${old_cents / 100:,.2f}): that is expected." if old_n else "")),
+                                 "shows the payment, so it is not counted, and the takeback takes nothing from the payments that are."
+                                 + ((f" {'The claim was' if n == 1 else f'{rc_n} of the claims were'} taken back by a recoupment the payer "
+                                     f"withheld from a later check (${rc_cents / 100:,.2f}); one of $500 or more is also on the work list, "
+                                     "to match to the payer's letter.") if rc_n else "")
+                                 + (f" {old_n} more {'claim takes back a payment' if old_n == 1 else 'claims take back payments'} made before "
+                                    f"the remittances on file begin (${old_cents / 100:,.2f}): that is expected." if old_n else "")),
                       "who": "Billing lead, with TriZetto: ask for the remittances that paid those claims (the payer's portal shows each "
                              "payment) and put them in the Dropbox folder."})
     info = _meta(conn, "activity:info") or {}
