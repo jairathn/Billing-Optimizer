@@ -746,6 +746,12 @@ def test_a_handed_on_analysis_says_the_money_read_and_not_analysed(box):
         (folder / f"r{n:03d}.RMT").write_bytes(remit("".join(claims[i:i + 10]), "100.00", seg_count=99, isa_ctrl=f"{n + 1:09d}",
                                                      pay_date=recent))
     assert "detect" in _cloud(state, client)
+    # the next file arrives in a later second than that analysis began, as in a real chain (its next run comes minutes
+    # later): cloud.read_since_analysis compares the file's reading with the analysis's start to the second, so a file
+    # read in the very same second would be taken as one that analysis saw (the test failed whenever the two shared it)
+    began = int(time.time())
+    while int(time.time()) == began:
+        time.sleep(0.02)
     later = [claim(300 + i, svc("99214", "223.65", "76.09", "76.09", "CAS*CO*186*51.71~CAS*CO*45*95.85~"), cfi="16")
              for i in range(5)]
     (folder / "later.RMT").write_bytes(remit("".join(later), "100.00", seg_count=99, isa_ctrl="000000050", pay_date=recent))
