@@ -306,5 +306,9 @@ caution stays). Open second-role remainders: none in this world (r1-7 and r1-8 c
   kinds: they want `recovered_cents` on an item still open, which r1-8 answers differently, above); r2 13 passed,
   2 skipped (the API cases on the in-memory store kind, by the reviewer's own skip).
 - Node checks: calc_model_check 79 of 79, lab_review_check 143 of 143; features.js parses.
+- Full suite at fb3ddf3 (two shards each, `plans/tools/shard.sh`): python3 3.13.18 (SQLite 3.53.1) 3,022 passed,
+  29 skipped, 1 xfailed, none failed. 3.11.1 (SQLite 3.40.0): 2,903 passed, 13 skipped, 1 xfailed, 110 failed, 25
+  errors; the 135 are all `Connection.serialize` missing in that build (CLAUDE.md allows them), and the same 135 fail
+  the same way on the tree before this round (a07a5a6, run on the same ids).
 - Breaks: r1-1 2, r1-2 2, r1-3 and r2-1 6, r1-4 to r1-7 10, r2-2 to r2-5 10; each failed its tests and the restore
   left `git status` clean (`$S/tk/units/decisions/probe/breaks.py` with a plan of old and new text per fix).
