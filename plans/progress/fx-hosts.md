@@ -5,7 +5,7 @@ Branch `wip/fx-hosts`, from the integration tip 8c59195, merged with the tip 59f
 Tests: `tests/test_fx_hosts.py` (the reviewer's since-hosts-tests and the verifier's since-hosts-verify-tests, ported, plus
 the unit's own; invented data only). Private folder: `$S/tk/units/fx-hosts/` (mode 700).
 
-Last updated: 2026-11-27 02:50 UTC.
+Last updated: 2026-11-27 03:25 UTC.
 
 ## Done (each fix broken on purpose and restored: `$S/tk/units/fx-hosts/breaks.py`, every break fails its tests)
 
@@ -64,15 +64,43 @@ Last updated: 2026-11-27 02:50 UTC.
   analysis panel. `PRESS_ONLY_TEXT` itself is unchanged (the fax closing note named in the brief does not use it on this
   tip: no reader found). Tests: the Data tab's panel payload (and 'all', 'off'), the setup status, ops.js drawn by node.
 
+## Measured (private world copy, store of 11-24 with EMA's reports; today 2026-11-27; aggregates only)
+
+One server cycle (pipeline.run_cycle, no new files, as after a deploy) on a fresh copy with the integration tip 59f6822 and
+with this branch (76dc904, which holds the tip 59f6822: plans only). Both analysed (the rules changed since the copy's
+last analysis): 16,555 findings in the run, 18,801 in the store, 6,831 listed to work ($2,052,817.03), safe mode off.
+- Items: 0 appear, 0 vanish, 0 change (signal, status, work state, stale, dollars, payer group, deadline, category,
+  hint compared item by item). Nothing moves by signal or payer group: these fixes change when the hosts analyse and what
+  they say, not what an analysis finds.
+- A17 (plans/tools/claim_audit_a17.py, as of 2026-11-27) on each copy after its cycle: every class identical (verdicts
+  and left on the table), e.g. Work now correct 4,968 ($778,181.74), already done 2,821 ($775,699.68), undecided 1,275.
+- The branch's cycle left no analysis owed (the mark cleared after the save) and recorded supersede:seen [34168, 34168].
+  Cycle time under load: tip 500-554 s, branch 330-545 s.
+- hosts-2's first recheck on the copy decided supersession again (0.8 s) and changed no flag: 74 copies hidden before and
+  after. Hand-trace: all 74 checked from the raw rows by an independent script (same payer, trace number and payment
+  date; every claim and PLB of the hidden copy on a complete, balanced standing version; or a claim-less copy that does
+  not add up with the same payment): 73 right, 1 unclear (a group with no complete, balanced version: the version with
+  the claims stands, the claim-less copy with the same payment is hidden, no claim or dollar lost), 0 wrong; 26 of them
+  read by hand (the unclear one, the 3 that do not add up, 22 identical older copies): 25 right, 1 unclear.
+- With no item moved there is no moved item to hand-trace; the trace above is of the one real-data decision these fixes
+  re-run.
+
 ## Half done / next
 
-- F3a's routed needs, after the tip carries "Merge wip/fx-837" (not yet at 02:50 UTC): read the 837 files again once on
-  each host (`x12_837.files_to_reread`, `reread_837_bytes`: the server from the path its `files` row names, Vercel from
-  Dropbox), and `cloud.SERVING_TABLES` with claims_837 (no patient_key, person_key) and lines_837 for the findings'
-  bills; tests in `plans/progress/fx-837_needs_tests.py` on wip/fx-837; measure the serving copy before and after.
-- Measurement on the world copy (`$S/tk/units/fx-hosts/cycle_world.py TREE LABEL`: one server cycle, today 2026-11-27,
-  findings snapshot `snap_<label>.sqlite`): tip running, then branch; then the diff and A17 classes.
-- Suites at the end: python3 full, 3.11.1/SQLite 3.40 full; node checks (static/ops.js changed).
+- F3a's routed needs, after the tip carries "Merge wip/fx-837" (not yet at 03:25 UTC). Prepared and tested on a private
+  staging branch (this branch with wip/fx-837 merged, never pushed to a wip/ branch of mine before the merge):
+  `pipeline.reread_837` (the server: the copy it read, or a file of the same name and bytes under REMITWATCH_DATA_DIR;
+  only bytes whose SHA-256 is the file's; a deadline; missing files counted and remembered per reader version and host),
+  `cloud.reread_837` (Vercel: from Dropbox by the name each file was read under, dropbox_seen; 12 parallel downloads in
+  batches of 200; a transient error tried by a later run; what is left holds the chain and the analysis), and
+  `cloud.SERVING_TABLES` with claims_837 (no patient_key, person_key, first_key, file, member id) and lines_837 for the
+  items' bills (SERVING_BUILD 11). 14 tests (both store kinds, both hosts), fx-837's three F6 tests among them; each part
+  broken on purpose fails its tests (11 breaks). On the world copy: 5,383 837 files (194 MB) all read before READ_VERSION 2
+  (the image's paths are a Vercel run's scratch paths), every one found by name among the Dropbox files the store has seen
+  (5,272 one name, 111 several, none only in the first load's archive); the copy would carry 13,385 of 158,573 837 claims
+  and 36,035 of 327,332 lines (about 5 MB of values). The files themselves are not in this container, so the read again
+  itself is measured on invented files only.
+- Suites at the end: python3 full, 3.11.1/SQLite 3.40 full; node checks (static/ops.js changed): both node checks pass.
 
 ## Tests (python3 3.13)
 
@@ -80,7 +108,7 @@ Last updated: 2026-11-27 02:50 UTC.
 - Related files on the first WIP (api_review, archive, cloud, cycle_converges, diagnose, ema_intake, feeds, hook_review,
   hooks, hotfix2c, hotfix2d, parity, runlog, selfcheck, swing, uploads, aws): 783 passed, 27 skipped, 0 failed.
 - Second related run (fx_hosts, selfcheck, hooks, hook_review, cloud, cycle_converges, runlog, diagnose, results,
-  feed_and_day, fax, merge_vanished_policy, docs) on 564047f: running.
+  feed_and_day, fax, merge_vanished_policy, docs): 777 passed, 1 skipped, 0 failed.
 
 ## Needs from others
 
