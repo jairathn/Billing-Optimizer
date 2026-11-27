@@ -51,12 +51,31 @@ ownership table, what every fixer delivers). Rules: `plans/briefs/2026-11-26_com
 - Related suites (the takeback, settled, archive-rule, CO-45, decisions, review3, selfcheck, results, states, story,
   rates suites): 1,435 passed after the test changes above.
 
+## Done (residuals), commit "fx-recover: pattern items list the claims still short; Results credits a review's claims"
+- The routine-rate review's line list (detect.py `emit_second_rates`, `_still_short`, `_answered_since`,
+  `_emit_pattern_settled`, `_emit_pattern(left=)`): a claim the payer took back or paid more since leaves the review (a
+  new review and a worked one), named in evidence `left` ([claim id, date, why, money now, line key]); one paid more since
+  is a one-off that its payment closes as recovered; a worked review whose every claim left is closed (its recovery what
+  the payer's money on them rose by). Tests: 2 (both store kinds).
+- The repricing request's line list (detect.py `_note_paid_more`; the routing of a sent request's claims and of a new
+  request's claims): a claim the payer paid the difference on without taking its first payment back leaves the request
+  (new or worked), named as repriced at its new amount, its one-off closed as recovered on its own line, as a claim taken
+  back and paid again already was. Repriced and taken-back entries carry their line key. Test: 1 (new and worked).
+- Results credits a review (results.py `_pattern_ever`, `_pattern_refs`, `_item_json(prev)`, `update_registry`'s previous
+  item, `_pattern_claims`, `_pattern_facts`, `_fold_patterns`, `attribute`): the registry keeps every claim a review ever
+  listed (claims that left it at its first registration too); each claim is worked out as an item of its own (its first
+  flag day the review's, or the day the payer paid that claim when it joined later; only the review's payer's records), in
+  the review's group, then folded into the review (each claim's takebacks offset its own payments only). A person's Paid
+  mark on a review counts when no payment after each claim's own flag shows. Tests: 7 (both store kinds).
+- Every fix broken on purpose and restored ($U/scripts/breaks.py, 10 more breaks; each fails its tests).
+- Related suites (fx_recover, plan_rates, results, review_rates, sizes_and_rates, review3 patterns and views, review6
+  pattern windows and holds, resolution, features, insights, desk, selfcheck, archive, claims): 805 passed, 1 xfailed.
+
 ## In progress
-- The residuals (next section's item 2).
+- The other residuals.
 
 ## Left, in order
-1. The residuals: J3490, $0 lines on Work now, the status-1 supplement, the second payer's share above Medicaid's rate,
-   the pattern items' line lists and Results credit.
+1. The residuals: J3490, $0 lines on Work now, the status-1 supplement, the second payer's share above Medicaid's rate.
 2. F1's routed needs, after `git log origin/claude/ecstatic-fermi-orfcgo --grep 'Merge wip/fx-ledger'` shows the merge.
 3. Measure on a private world copy (tip against branch), A17 classes, hand-trace 20+ moved items. Also measure the
    claim-level-paid and rebilled-paid CO-45 drops (privacy-4's "money counted nowhere" check) and how many settling

@@ -556,3 +556,300 @@ def test_money3_a_secondary_share_another_item_counted_is_not_counted_again_by_t
     assert "KENTUCKY MEDICAID" in closed, f"the scenario no longer closes Medicaid's denial as secondary: {brief(rows)}"
     assert sum(r["recovered_cents"] or 0 for r in rows) <= 9408 + 2352, f"recovered more than arrived: {closed}"
     w.store.close()
+
+
+# =========================================================================== residual: a routine-rate review lists the lines still short
+
+def _pattern_world(tmp_path, kind) -> World:
+    """Anthem allows 99214 at $117.60 on 25 visits and at $100.00 on 8 (claims 101 to 108): one routine-rate review."""
+    from tests.test_features import claim, svc
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(101, 8, "99214", "223.65", "100.00"), "20260415")
+    return w
+
+
+def _repaid(w: World) -> None:
+    """June 10: the payer reverses claim 101's $100.00 and pays it $117.60; claim 102's corrected claim (C024) is paid the
+    $17.60 more."""
+    from tests.test_features import NPI
+    who = lambda i: f"NM1*QC*1*SAMPLE*PAT****MI*M{i:08d}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~"   # noqa: E731
+    rev = (f"CLP*CB0000101C017*22*-223.65*-100.00*0.00*12*PC101*11~{who(101)}"
+           "SVC*HC:99214*-223.65*-100.00**-1~DTM*472*20260401~CAS*CO*45*-123.65~")
+    again = (f"CLP*CB0000101C017*1*223.65*117.60*0.00*12*PC101B*11~{who(101)}"
+             "SVC*HC:99214*223.65*117.60**1~DTM*472*20260401~CAS*CO*45*106.05~AMT*B6*117.60~")
+    more = (f"CLP*CB0000102C024*1*223.65*17.60*0.00*12*PC102B*11~{who(102)}"
+            "SVC*HC:99214*223.65*17.60**1~DTM*472*20260401~CAS*CO*45*106.05~CAS*OA*23*100.00~AMT*B6*117.60~")
+    w.remit([rev, again, more], "20260610")
+
+
+def test_pattern_a_routine_rate_review_leaves_out_the_claims_the_payer_repaid_since(tmp_path, kind):
+    w = _pattern_world(tmp_path, kind)
+    w.run("r1", today="2026-05-01")
+    first = w.rows("signal='SECOND_RATE'")
+    assert len(first) == 1 and json.loads(first[0]["evidence"])["lines"] == 8
+    _repaid(w)
+    w.run("r2", today="2026-07-01")
+    rows = w.rows("signal='SECOND_RATE' AND COALESCE(stale,0)=0")
+    assert len(rows) == 1, brief(rows)
+    ev = json.loads(rows[0]["evidence"])
+    print(ev["lines"], [c[0] for c in ev["claims"]], ev.get("left"))
+    assert sorted(c[0] for c in ev["claims"]) == [f"CB{i:07d}C017" for i in range(103, 109)], ev["claims"]
+    assert rows[0]["shortfall_cents"] == 6 * 1760, rows[0]["shortfall_cents"]
+    assert sorted((x[0], x[2]) for x in ev.get("left") or []) == [("CB0000101C017", "taken back"), ("CB0000102C017", "paid more since")]
+    w.store.close()
+
+
+def test_pattern_a_worked_routine_rate_review_keeps_its_claims_but_those_the_payer_repaid(tmp_path, kind):
+    """A person works the review (Started); the payer then repays two of its claims. The review keeps its other six claims
+    and names the two that left; it is not reopened as new work."""
+    w = _pattern_world(tmp_path, kind)
+    w.run("r1", today="2026-05-01")
+    fid = w.rows("signal='SECOND_RATE'")[0]["finding_id"]
+    w.store.conn.execute("UPDATE findings SET status='in_progress', notes='asked the payer' WHERE finding_id=?", (fid,))
+    w.store.conn.commit()
+    _repaid(w)
+    w.run("r2", today="2026-07-01")
+    r = w.rows(f"finding_id='{fid}'")[0]
+    ev = json.loads(r["evidence"])
+    print(r["status"], ev["lines"], ev.get("left"))
+    assert r["status"] == "in_progress" and ev["lines"] == 6 and r["shortfall_cents"] == 6 * 1760
+    assert sorted(x[0] for x in ev.get("left") or []) == ["CB0000101C017", "CB0000102C017"]
+    w.store.close()
+
+
+@pytest.fixture
+def results_env(monkeypatch):
+    """The Results tab's own settings (tests/test_results.py's): a server, on the practice's US Eastern calendar."""
+    from remitwatch import states
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setenv("REMITWATCH_TZ", "America/New_York")
+    for k in ("VERCEL", "REMITWATCH_STATE_DIR", "REMITWATCH_EMA_REPORTS"):
+        monkeypatch.delenv(k, raising=False)
+    states._RESPONSE_CACHE.clear()
+    states._RECOVERY_CACHE.clear()
+
+
+def test_results_credit_a_recovery_on_a_routine_rate_reviews_claims_to_it(tmp_path, kind, results_env):
+    """The review was flagged on May 1. In June the payer reverses claim 101's $100.00 and pays $117.60, and pays claim 102
+    $17.60 more: $35.20 came back on the review's claims after its flag, and the Results tab counts it for the review."""
+    from remitwatch import results
+    w = _pattern_world(tmp_path, kind)
+    w.run("r1", today="2026-05-01")
+    fid = w.rows("signal='SECOND_RATE'")[0]["finding_id"]
+    w.store.conn.execute("UPDATE findings SET first_seen='2026-05-01T12:00:00+00:00' WHERE finding_id=?", (fid,))
+    w.store.conn.commit()
+    results.refresh(w.store.conn, today="2026-05-02", force=True)
+    _repaid(w)
+    w.run("r2", today="2026-07-01")
+    results.refresh(w.store.conn, today="2026-07-01", force=True)
+    detail = (results._meta(w.store.conn, results.LISTS_KEY, {}) or {}).get("detail", {})
+    got = detail.get(fid) or {}
+    print({k: got.get(k) for k in ("returned", "taken_back", "members")}, [(e.get("date"), e.get("cents")) for e in got.get("events") or []])
+    assert got.get("returned") == 3520, got
+    w.store.close()
+
+
+def _detail(w: World, fid: str) -> dict:
+    from remitwatch import results
+    return ((results._meta(w.store.conn, results.LISTS_KEY, {}) or {}).get("detail", {}) or {}).get(fid) or {}
+
+
+def _flag_review(w: World, today: str) -> str:
+    """The routine-rate review raised by the run of `today`, flagged that day, and Results' registry brought up to date."""
+    from remitwatch import results
+    fid = w.rows("signal='SECOND_RATE'")[0]["finding_id"]
+    w.store.conn.execute("UPDATE findings SET first_seen=? WHERE finding_id=?", (f"{today}T12:00:00+00:00", fid))
+    w.store.conn.commit()
+    results.refresh(w.store.conn, today=today, force=True)
+    return fid
+
+
+def test_results_a_claim_that_joined_the_review_later_counts_what_the_payer_paid_more(tmp_path, kind, results_env):
+    """The review is flagged on May 1 on claims 101 to 108. Claim 109 is paid $100.00 on June 1 and joins it. On July 1
+    the payer reverses that $100.00 and pays $117.60: $17.60 came back for the review, not $117.60 (claim 109's own
+    payment came before that claim was flagged, so its takeback is money paid before the flag)."""
+    from remitwatch import results
+    from tests.test_features import NPI
+    w = _pattern_world(tmp_path, kind)
+    w.run("r1", today="2026-05-01")
+    fid = _flag_review(w, "2026-05-01")
+    w.remit(clean_visits(109, 1, "99214", "223.65", "100.00"), "20260601")
+    w.run("r2", today="2026-06-02")
+    rows = w.rows("signal='SECOND_RATE' AND COALESCE(stale,0)=0")
+    assert [r["finding_id"] for r in rows] == [fid] and "CB0000109C017" in [c[0] for c in json.loads(rows[0]["evidence"])["claims"]]
+    results.refresh(w.store.conn, today="2026-06-02", force=True)
+    assert not _detail(w, fid).get("returned"), _detail(w, fid)       # claim 109's own payment is no money back
+    who = f"NM1*QC*1*SAMPLE*PAT****MI*M{109:08d}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~"
+    w.remit([f"CLP*CB0000109C017*22*-223.65*-100.00*0.00*12*PC109*11~{who}SVC*HC:99214*-223.65*-100.00**-1~DTM*472*20260401~"
+             "CAS*CO*45*-123.65~",
+             f"CLP*CB0000109C017*1*223.65*117.60*0.00*12*PC109B*11~{who}SVC*HC:99214*223.65*117.60**1~DTM*472*20260401~"
+             "CAS*CO*45*106.05~AMT*B6*117.60~"], "20260701")
+    w.run("r3", today="2026-07-02")
+    results.refresh(w.store.conn, today="2026-07-02", force=True)
+    got = _detail(w, fid)
+    assert (got.get("returned"), got.get("taken_back")) == (1760, 0), got
+    w.store.close()
+
+
+def test_results_a_second_payers_money_on_a_reviews_claim_is_not_the_reviews(tmp_path, kind, results_env):
+    """After the review's flag a second payer pays its share of claim 103 ($23.52). The review asks Anthem for its rate:
+    that money is no answer to it, and Results counts nothing for the review."""
+    from remitwatch import results
+    from tests.test_features import claim, svc
+    w = _pattern_world(tmp_path, kind)
+    w.run("r1", today="2026-05-01")
+    fid = _flag_review(w, "2026-05-01")
+    w.remit([claim(103, svc("99214", "223.65", "23.52", None, "CAS*OA*23*100.00~CAS*CO*45*100.13~"), status="2")], "20260610", **MCD)
+    w.run("r2", today="2026-07-01")
+    results.refresh(w.store.conn, today="2026-07-01", force=True)
+    assert not _detail(w, fid).get("returned"), _detail(w, fid)
+    w.store.close()
+
+
+def test_results_the_registry_keeps_every_claim_a_review_listed():
+    """A routine-rate review's registered item keeps every claim it listed (a claim the payer repaid leaves the review, and
+    its money still counts). On the first registration the claims that had left it are taken in too; after that a claim
+    that came and went between two runs, never listed, is not."""
+    from remitwatch import results
+    f = {"finding_id": "f1", "signal": "SECOND_RATE", "category": "underpayment", "procedure_code": "99214",
+         "payer_group": "Anthem / BCBS",
+         "evidence": json.dumps({"claims": [["CB1", "2026-04-01", 10000, 1760], ["CB2", "2026-04-01", 10000, 1760]],
+                                 "line_keys": ["k1", "k2"], "left": [["CB3", "2026-04-01", "paid more since", 11760, "k3"]]})}
+    first = json.loads(results._item_json(f))
+    ever = json.loads(first["evidence"])["ever"]
+    assert sorted((c[0], c[2], c[3]) for c in ever) == [("CB1", "99214", "k1"), ("CB2", "99214", "k2"), ("CB3", "99214", "k3")], ever
+    again = dict(f, evidence=json.dumps({"claims": [["CB2", "2026-04-01", 10000, 1760]], "line_keys": ["k2"],
+                                         "left": [["CB1", "2026-04-01", "taken back", 0, "k1"],
+                                                  ["CB4", "2026-04-01", "paid more since", 11760, "k4"]]}))
+    second = json.loads(results._item_json(again, json.dumps(first)))
+    assert sorted(c[0] for c in json.loads(second["evidence"])["ever"]) == ["CB1", "CB2", "CB3"], second
+
+
+def test_results_credit_a_repricing_request_with_the_claims_the_payer_repriced(tmp_path, kind, results_env):
+    """A repricing request (OLD_FEE_SCHEDULE) for ten January visits paid on the 2025 schedule is flagged on April 15. On
+    May 1 the payer reprices four of them (each $76.64 reversed and $82.36 paid): $22.88 came back on the request's
+    claims, counted once (each repriced claim is also closed on its own line)."""
+    from remitwatch import results
+    from tests.test_plan_rates import DOC, DR, many, reversal, types
+    from tests.test_sizes_and_rates import World as RWorld
+    w = RWorld(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(100, 25, "99213", "156.66", "76.64", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(200, 25, "99213", "156.66", "82.36", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit(many(900, 10, "99213", "156.66", "76.64", cfi="16", dos="20260112"), "20260215", **payer)
+    w.run(today="2026-04-15")
+    fid = w.one("signal='OLD_FEE_SCHEDULE'")["finding_id"]
+    w.store.conn.execute("UPDATE findings SET first_seen='2026-04-15T12:00:00+00:00' WHERE finding_id=?", (fid,))
+    w.store.conn.commit()
+    results.refresh(w.store.conn, today="2026-04-15", force=True)
+    w.remit([reversal(900 + k, "99213", "156.66", "76.64", cfi="16", dos="20260112") for k in range(4)]
+            + many(900, 4, "99213", "156.66", "82.36", cfi="16", dos="20260112"), "20260501", **payer)
+    w.run(today="2026-06-15")
+    results.refresh(w.store.conn, today="2026-06-15", force=True)
+    detail = (results._meta(w.store.conn, results.LISTS_KEY, {}) or {}).get("detail", {})
+    got = detail.get(fid) or {}
+    assert got.get("returned") == 4 * (8236 - 7664), got
+    money = results._meta(w.store.conn, results.DASH_KEY, {})["money"]
+    assert money["returned_cents"] == 4 * (8236 - 7664), money
+    w.store.close()
+
+
+def test_results_a_reviews_money_is_counted_once_beside_older_items_on_its_claims(tmp_path, kind, results_env):
+    """Claims 101 and 102 are first flagged as one-offs (April 16); with six more the review takes them in (May 1). On June
+    10 the payer repays 101, 102 and 103 ($17.60 each): $52.80 came back, counted once (101's and 102's for the one-offs
+    flagged first, 103's for the review), the review in one group with the items it shares claims with."""
+    from remitwatch import results
+    from tests.test_features import NPI
+    w = World(tmp_path, kind)
+    w.remit(clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(101, 2, "99214", "223.65", "100.00"), "20260415")
+    w.run("r0", today="2026-04-16")
+    ones = [r["finding_id"] for r in w.rows("signal='UNDERPAID_VS_OWN_RATE'")]
+    assert len(ones) == 2, brief(w.rows())
+    w.store.conn.execute("UPDATE findings SET first_seen='2026-04-16T12:00:00+00:00'")
+    w.store.conn.commit()
+    results.refresh(w.store.conn, today="2026-04-16", force=True)
+    w.remit(clean_visits(103, 6, "99214", "223.65", "100.00"), "20260420")
+    w.run("r1", today="2026-05-01")
+    fid = _flag_review(w, "2026-05-01")
+    _repaid(w)
+    who = f"NM1*QC*1*SAMPLE*PAT****MI*M{103:08d}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~"
+    w.remit([f"CLP*CB0000103C024*1*223.65*17.60*0.00*12*PC103B*11~{who}SVC*HC:99214*223.65*17.60**1~DTM*472*20260401~"
+             "CAS*CO*45*106.05~CAS*OA*23*100.00~AMT*B6*117.60~"], "20260610")
+    w.run("r2", today="2026-07-01")
+    results.refresh(w.store.conn, today="2026-07-01", force=True)
+    got = {f: _detail(w, f).get("returned") for f in ones + [fid]}
+    assert got == {ones[0]: 1760, ones[1]: 1760, fid: 1760}, got
+    money = results._meta(w.store.conn, results.DASH_KEY, {})["money"]
+    assert money["returned_cents"] == 3 * 1760, money
+    # one group: the review and the items it shares claims with (each group's money counted once, as the lift counts it)
+    att = results.attribute(w.store.conn, "2026-07-01")
+    assert len({att["groups"].get(f) for f in ones + [fid]}) == 1, {f: att["groups"].get(f) for f in ones + [fid]}
+    assert sum(att["group_money"].values()) == 3 * 1760, att["group_money"]
+    w.store.close()
+
+
+def test_results_a_person_marking_a_review_paid_counts_when_no_payment_shows(tmp_path, kind, results_env):
+    """A person marks the review Paid ($50.00 on June 20) and no payment of its claims after their flags shows it. Claim
+    109, which joined the review in June, was paid then, but that payment is the claim's own, not money back: the person's
+    mark is counted, as it is for any item with no payment record after its flag."""
+    from remitwatch import results
+    w = _pattern_world(tmp_path, kind)
+    w.run("r1", today="2026-05-01")
+    fid = _flag_review(w, "2026-05-01")
+    w.remit(clean_visits(109, 1, "99214", "223.65", "100.00"), "20260601")
+    w.run("r2", today="2026-06-02")
+    results.refresh(w.store.conn, today="2026-06-02", force=True)
+    w.store.conn.execute("""UPDATE findings SET status='resolved', recovered_cents=5000, recovered_date='2026-06-20', auto_note=NULL
+                            WHERE finding_id=?""", (fid,))
+    w.store.conn.commit()
+    results.refresh(w.store.conn, today="2026-07-01", force=True)
+    got = _detail(w, fid)
+    assert got.get("returned") == 5000 and [e.get("kind") for e in got.get("events") or []] == ["mark"], got
+    w.store.close()
+
+
+def _repricing_world(tmp_path, kind):
+    """UnitedHealthcare's 2026 rate for 99213 is $82.36 (2025: $76.64); ten January 2026 visits (claims 900 to 909) were paid
+    at the 2025 amount: one repricing request (tests/test_plan_rates.py's world)."""
+    from tests.test_plan_rates import DOC, DR, many, types
+    from tests.test_sizes_and_rates import World as RWorld
+    w = RWorld(tmp_path, kind)
+    types(w, (DOC, "127.80", DR, 1))
+    payer = dict(payer="UNITEDHEALTHCARE", payer_id="UHCTEST")
+    w.remit(many(100, 25, "99213", "156.66", "76.64", cfi="16", dos="20250610"), "20250701", **payer)
+    w.remit(many(200, 25, "99213", "156.66", "82.36", cfi="16", dos="20260105"), "20260310", **payer)
+    w.remit(many(900, 10, "99213", "156.66", "76.64", cfi="16", dos="20260112"), "20260215", **payer)
+    return w, payer
+
+
+def _paid_difference(w, payer: dict, claims: range, day: str) -> None:
+    """The payer pays the $5.72 difference on each claim's corrected claim (C024), its first payment left standing."""
+    from tests.test_plan_rates import DOC, DR
+    w.remit([f"CLP*CB{i:07d}C024*1*156.66*5.72*0.00*16*PC{i:07d}B*11~NM1*QC*1*PATIENT*P{i:05d}****MI*M{i:08d}~"
+             f"NM1*82*{DR}****XX*{DOC}~DTM*232*20260112~SVC*HC:99213*156.66*5.72**1~DTM*472*20260112~"
+             "CAS*CO*45*74.30~CAS*OA*23*76.64~AMT*B6*82.36~" for i in claims], day, **payer)
+
+
+@pytest.mark.parametrize("worked", [False, True])
+def test_pattern_a_repricing_request_leaves_out_the_claims_the_payer_paid_more_since(tmp_path, kind, worked):
+    """The payer pays four of the ten claims the $5.72 difference on corrected claims, without taking their first payments
+    back. The request lists the six still owed (a request someone worked as well), and names the four as repriced, each at
+    $82.36 now."""
+    from tests.test_plan_rates import pcn
+    w, payer = _repricing_world(tmp_path, kind)
+    w.run(today="2026-04-15")
+    fid = w.one("signal='OLD_FEE_SCHEDULE'")["finding_id"]
+    if worked:
+        w.store.conn.execute("UPDATE findings SET status='in_progress' WHERE finding_id=?", (fid,))
+        w.store.conn.commit()
+    _paid_difference(w, payer, range(900, 904), "20260501")
+    w.run(today="2026-06-15")
+    item = w.one("signal='OLD_FEE_SCHEDULE'")
+    assert item["finding_id"] == fid
+    listed = sorted(c[0] for c in item["ev"]["claims"])
+    assert listed == sorted(pcn(i) for i in range(904, 910)) and item["shortfall_cents"] == 6 * (8236 - 7664), \
+        (listed, item["shortfall_cents"])
+    assert sorted((c[0], c[4]) for c in item["ev"].get("repriced") or []) == [(pcn(i), 8236) for i in range(900, 904)], \
+        item["ev"].get("repriced")
+    w.store.close()

@@ -3243,7 +3243,13 @@ class Detector:
             lines = self.pattern_lines.get(fid)
             if lines:
                 kp = tuple(w["key_parts"])
-                self._emit_pattern(kp, lines, w.get("usual_cents"), w.get("note") or "", w.get("continues"))
+                # the claims the payer took back or paid more since leave the review (fix7c's leftover): it lists the ones
+                # still short, and names the others
+                keep, left = self._still_short(lines)
+                if keep:
+                    self._emit_pattern(kp, keep, w.get("usual_cents"), w.get("note") or "", w.get("continues"), left=left)
+                else:
+                    self._emit_pattern_settled(kp, lines, left, w)
         self.emit_old_schedules()
         self.emit_provider_gaps()
         if not self.second_rates:
@@ -3288,6 +3294,16 @@ class Detector:
             r = self.yard_by_key.get(key)
             if not r or not group:
                 continue
+            # a claim the payer took back or paid more since is short no more: it leaves the review (fix7c's leftover). One
+            # paid more since is a one-off the archive rules close as recovered; one taken back is the takeback rules' work
+            _keep, left = self._still_short([l for l, _one in group])
+            gone_keys = {x[3] for x in left}
+            for l, one_off in group:
+                if l["line_key"] in gone_keys and not self._gone(l):
+                    self._emit(*one_off)
+            group = [(l, one) for l, one in group if l["line_key"] not in gone_keys]
+            if not group:
+                continue
             lines = [l for l, _one in group]
             grp, year, code, ylabel, pos = key
             tier = "unknown" if ylabel.startswith("full") else "nonphysician"     # the PA/NP reason reads the yardstick's own tier
@@ -3320,7 +3336,71 @@ class Detector:
                 n += 1
                 kp = ("SECOND_RATE", grp, year, code, ylabel, pos, amount, "continuation", n)
             self._emit_pattern(kp, lines, rate, note, continues, by_tier=tiers, by_state=states, by_plan=plans,
-                               at_amount=self.yard_obs.get(r.get("payer_key"), {}).get(amount, 0), for_code=r["n"])
+                               at_amount=self.yard_obs.get(r.get("payer_key"), {}).get(amount, 0), for_code=r["n"], left=left)
+
+    def _still_short(self, lines: list) -> tuple[list, list]:
+        """The lines of a routine-rate review the payer has not answered again since: (still short, left). A line leaves
+        when the payer took its payment back since (_gone: its replacement, paid at the same amount, is a line of the review
+        in its own right) or paid the service more since (a payment of the same bill, code, date and part, standing, by the
+        same payer, made after this line's or on another claim the same day). left: [claim id, date of service, why, line
+        key, the payer's money standing on the service now] (fix7c's leftover: a review kept lines the payer had reversed
+        or repaid)."""
+        keep, left = [], []
+        for l in lines:
+            now, more = self._answered_since(l)
+            if self._gone(l):
+                left.append([l.get("patient_control_number"), l.get("service_date"), "taken back", l["line_key"], now])
+            elif more:
+                left.append([l.get("patient_control_number"), l.get("service_date"), "paid more since", l["line_key"], now])
+            else:
+                keep.append(l)
+        return keep, left
+
+    def _answered_since(self, l) -> tuple[int, list]:
+        """The payer's money standing on a paid line's service now (the same bill, code, date and part, by the same payer),
+        and its payments of that service made after the line's own (later, or the same day on another claim)."""
+        mine = l.get("payment_date") or l.get("txn_payment_date") or ""
+        who = l.get("payer_id") or l.get("payer_name")
+        part = component_of(l.get("modifiers_list"))
+        evs = [e for e in self._events_of((bill_of(l.get("patient_control_number")), l.get("procedure_code"), l.get("service_date")))
+               if e[6] == who and e[3] in ("1", "19") and pays_part(event_part(e), part)]
+        more = [e for e in evs if e[8] != l["line_key"] and (e[0] > mine or (e[0] == mine and e[4] != l.get("patient_control_number")))]
+        return sum(e[2] for e in evs), more
+
+    def _note_paid_more(self, l, r: dict) -> bool:
+        """A line a repricing request holds, or would hold, that the payer paid more since without taking its payment back
+        (_answered_since): repriced all the same. It leaves the request, which names it as repriced (its new amount the
+        payer's money on the service now), as a claim taken back and paid again does (_note_gone). Fix wave F2: a request
+        kept claims the payer had repaid."""
+        now, more = self._answered_since(l)
+        if not more or self._gone(l):
+            return False
+        key = self.line_to_old.get(l["line_key"]) or (l["payer_group"], l["year"])
+        self.old_gone[key].append((l, r, now, max(e[0] for e in more),
+                                   [{"date": e[0], "amount_cents": e[2], "kind": "payment", "claim": e[4], "trace": e[1],
+                                     "code": l.get("procedure_code")} for e in more]))
+        return True
+
+    def _emit_pattern_settled(self, kp: tuple, lines: list, left: list, w: dict) -> None:
+        """A worked routine-rate review every claim of which the payer took back or paid more since: listed closed, the
+        claims named (evidence left), its recovery what the payer's money on them rose by (never below zero), as a
+        repricing request whose every claim was repriced is (emit_old_schedules)."""
+        self._emit_pattern(kp, lines, w.get("usual_cents"), w.get("note") or "", w.get("continues"), left=left)
+        f = self.findings.get(_fid("SECOND_RATE", *kp))
+        if f is None:
+            return
+        paid = {l["line_key"]: l.get("paid_cents") or 0 for l in lines}
+        back = sum(max(int(x[4] or 0) - paid.get(x[3], 0), 0) for x in left)
+        when = max((e[0] for l in lines for e in self._events_of((bill_of(l.get("patient_control_number")), l.get("procedure_code"),
+                                                                    l.get("service_date"))) if e[0]), default=None)
+        note = (f"Every claim of this review was answered again since: {sum(1 for x in left if x[2] == 'paid more since')} paid more, "
+                f"{sum(1 for x in left if x[2] == 'taken back')} taken back (each named in the review)")
+        ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+        ev["paid_later"] = {"payment_date": when, "paid_cents": back, "how": "every claim answered again since",
+                            "claims": [[x[0], x[1], x[2], x[4]] for x in left]}
+        f["evidence"] = json.dumps(ev, default=str)
+        f["recovered_cents"], f["recovered_date"] = min(back, f.get("shortfall_cents") or back), when
+        f["auto_status"], f["auto_notes"] = "resolved", note
 
     def _gone(self, l) -> bool:
         """A line paid more than $0 whose payment no longer stands in full: the payer reversed it, or took some of it back
@@ -3547,11 +3627,11 @@ class Detector:
             evidence["continues"] = continues
         if repriced:
             evidence["repriced"] = [[l.get("patient_control_number"), l.get("service_date"), l["procedure_code"], l.get("paid_cents"),
-                                     again, when] for l, _r, again, when in repriced]
+                                     again, when, l["line_key"]] for l, _r, again, when in repriced]
             evidence["repriced_cents"] = back
         if taken:
-            evidence["taken_back"] = [[l.get("patient_control_number"), l.get("service_date"), l["procedure_code"], l.get("paid_cents")]
-                                      for l, _r in taken]
+            evidence["taken_back"] = [[l.get("patient_control_number"), l.get("service_date"), l["procedure_code"], l.get("paid_cents"),
+                                       l["line_key"]] for l, _r in taken]
         base = {"payer_group": grp, "payer_kind": first.get("payer_kind"),
                 "payer_name": Counter(l.get("payer_name") for l in lines_all).most_common(1)[0][0] or grp, "year": year,
                 "procedure_code": codes[0] if len(codes) == 1 else None, "payment_date": last_paid}
@@ -3653,8 +3733,10 @@ class Detector:
                 f["hint"] = f"Filing windows close {lo[0]} to {hi[0]}" if lo[0] != hi[0] else None
 
     def _emit_pattern(self, kp: tuple, lines: list, rate: int | None, note: str, continues: str | None, by_tier: Counter | None = None,
-                      by_state: Counter | None = None, by_plan: Counter | None = None, at_amount: int | None = None, for_code: int | None = None) -> None:
-        """One SECOND_RATE finding for these lines, with each claim's filing deadline."""
+                      by_state: Counter | None = None, by_plan: Counter | None = None, at_amount: int | None = None, for_code: int | None = None,
+                      left: list | None = None) -> None:
+        """One SECOND_RATE finding for these lines, with each claim's filing deadline; `left`, the claims that left it since
+        (_still_short), named in its evidence."""
         _sig, grp, year, code, tier, pos, amount = kp[:7]
         rate = rate or max((l.get("allowed_cents") or 0) for l in lines)
         n = len(lines)
@@ -3694,6 +3776,10 @@ class Detector:
                     "lines_open": len(live)}
         if continues:
             evidence["continues"] = continues
+        if left:
+            # the claims the payer took back or paid more since, no longer short at this amount: [claim id, date of service,
+            # why, the payer's money on it now, its line] (results.py keeps counting the review's money on them)
+            evidence["left"] = [[x[0], x[1], x[2], x[4], x[3]] for x in left]
         title = (f"{grp} allowed {code} at ${amount/100:,.2f} instead of its usual ${rate/100:,.2f} on {n} line{'s' if n != 1 else ''} "
                  f"in {year} ({ratio:.0%} of usual)" + (": paid since an earlier finding at this amount was worked" if continues else ""))
         # the id is _fid("SECOND_RATE", *kp), and kp itself starts with "SECOND_RATE": kept as the first release had it
@@ -4558,9 +4644,9 @@ class Detector:
                     self.pattern_lines[worked_in].append(l)
                     continue
                 old_in = self.line_to_old.get(l["line_key"]) or self.claim_to_old.get((l["patient_control_number"], code, l.get("service_date"), allowed))
-                if old_in and not self._gone(l):
+                if old_in and not self._gone(l) and not self._answered_since(l)[1]:
                     # a claim of a repricing request someone sent: it stays in that request whatever the rules now say (one the
-                    # payer took back since leaves it below, as any line taken back does)
+                    # payer took back or paid more since leaves it below, as any line taken back does)
                     self.old_worked_lines[old_in].append(l)
                     continue
                 if allowed == (l.get("charge_cents") or 0):
@@ -4628,10 +4714,10 @@ class Detector:
                     # owed the rise: it belongs in the payer's one repricing request (fix7c-r1-3: a 1 percent rise left out)
                     old = self._old_schedule_of(l, allowed, r)
                     if old is not None:
-                        if not self._gone(l):
-                            self.old_schedule[(l["payer_group"], l["year"])].append((l, None, r, old))
-                        else:
+                        if self._gone(l):
                             self._note_gone(l, r)
+                        elif not self._note_paid_more(l, r):
+                            self.old_schedule[(l["payer_group"], l["year"])].append((l, None, r, old))
         self._settle_mppr_candidates()
         self._settle_co45_candidates()
         self._settle_unpaid_lines()
@@ -4882,6 +4968,11 @@ class Detector:
             old = self._old_schedule_of(l, allowed, r)
             if old is not None:
                 if not self._gone(l):
+                    if self._note_paid_more(l, r):
+                        # repriced since by a payment of the difference: named on the request; a one-off its payment closes
+                        # as recovered on its own line, as a claim taken back and paid again is (below)
+                        self._emit(*one_off)
+                        return
                     self.old_schedule[(l["payer_group"], l["year"])].append((l, one_off, r, old))
                     return
                 # priced on the old schedule, then taken back by the payer (fix7c-r2-1): no claim of the repricing request.
