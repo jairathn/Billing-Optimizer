@@ -107,8 +107,18 @@ asserts does not happen (its own message: "the test no longer reaches the rule")
   evidence, rules exports_yield_to_newer_bill and exports_one_visit); runlog's decision log names every fold
   `archive_rules:fold_into` (it could read the entry's own 'rule'). After the F3a merge, check that the 837 pass's own
   one-visit yields are not kept by the vanished self-check (they record no fold).
-- F3a / integrator, at the merge with wip/fx-837 (found on a scratch merge, 2026-11-27 03:20 UTC): fx-837's 837 one-visit yield records no fold, so the hook's vanished self-check (merged at 8c59195; wip/fx-837 lacks it) keeps the older bill's item listed: 10 cases of tests/test_fx_837.py's work tests fail on 072a920 merged with 8c59195 alone (and the same on 072a920 + this branch), e.g. test_the_work_on_the_older_bill_passes_to_the_bill_made_again. The yield needs the same record as this branch's `_fold_into(carrier, gone, rule, note)` (evidence 'folded' on the newer bill's item).
-- Self-check / save owner (the hook's keeper): an item kept by the vanished self-check is re-listed from detection's stale row, which on the world copy had lost the service's part and was priced as the whole service: the two $0-billed export claims of one 88305 visit (TC $16.17 and 26 $42.76; this branch's answers-3 rule no longer lists them, A17: nothing billed) came back at $98.00 each.
+- F3a / integrator, at the merge with wip/fx-837 (found on a scratch merge, 2026-11-27 03:20 UTC): fx-837's 837
+  one-visit yield records no fold, so the hook's vanished self-check (merged at 8c59195; wip/fx-837 lacks it) keeps the
+  older bill's item listed: 10 cases of tests/test_fx_837.py's work tests fail on 072a920 merged with 8c59195 alone (and
+  the same on 072a920 + this branch), e.g. test_the_work_on_the_older_bill_passes_to_the_bill_made_again. The yield
+  needs the same record as this branch's `_fold_into(carrier, gone, rule, note)` (evidence 'folded' on the newer bill's
+  item).
+- Self-check / save owner (the hook's keeper): an item kept by the vanished self-check is re-listed from detection's
+  stale row, which on the world copy had lost the service's part and was priced as the whole service: the two $0-billed
+  export claims of one 88305 visit (TC $16.17 and 26 $42.76; this branch's answers-3 rule no longer lists them, A17:
+  nothing billed) came back at $98.00 each. Their leaving the list itself needs the route F6 has for an item a rule
+  dropped with no carrier (the fix-wave brief, F3a's routed need: the detector passes the items its rules dropped, with
+  the rule, into the check's context): here the rule is answers-3's 'billed nothing' (export_billed_nothing, 10 claims).
 - F4 (ema_checks.claim_answers' content bridge): an export claim whose own EMA claim is outside Production's dates can be
   bridged by content to another patient's EMA claim when it is the only one of that content (seen in a test world while
   writing r2-4's tests; the world was given each bill's own EMA claim). Not changed here; no real-data count.
@@ -119,7 +129,8 @@ asserts does not happen (its own message: "the test no longer reaches the rule")
 
 - e641d38 merged the integration tip 8c59195 (hook, decisions and a17 merged) before the measurement; 944dec5 merged
   59f6822 (plans only: the handoff and the final-stage brief). The measured code is c41f286, which equals this branch on
-  59f6822. At the final push the tip was still 59f6822 (fetched 2026-11-27 04:00 UTC): no further merge.
+  59f6822. Before the final push the tip had moved to 2331bdc (the fix-wave brief's routings, plans only): merged at
+  48d0ed7; the code measured and tested is unchanged by it.
 - Scratch merges (not pushed), with origin/wip/fx-837 at 072a920: tests/test_fx_exports.py, test_837_sends.py and
   test_ema_wiring.py pass; tests/test_fx_837.py has 10 failing cases (its work tests), which fail the same on 072a920 merged
   with 8c59195 alone: the hook's vanished self-check keeps the older bill's item, as wip/fx-837 lacks the hook merge and
