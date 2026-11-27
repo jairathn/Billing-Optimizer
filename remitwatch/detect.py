@@ -7281,10 +7281,12 @@ class Detector:
         payer, or None when fewer than 20 are on file. A service is the patient (the 835's name key, else the bill), the
         date, the code and the part (26, TC or the whole), counted once by its final outcome however often it was
         answered: paid when a payment of it still stands on any answer, or EMA's postings show the payer's insurance money
-        on it (a payment no 835 carries). Rule 4.2 asks whether the payer pays the code, so a service denied several
-        times and then paid is one paid service, never several unpaid answers (Kentucky and Indiana Medicaid). EMA's
-        vocabulary names some groups apart ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group
-        of the same family and kind counts."""
+        on it, net of what it took back (a payment no 835 carries). Rule 4.2 asks whether the payer pays the code, so a
+        service denied several times and then paid is one paid service, never several unpaid answers (Kentucky and Indiana
+        Medicaid). A payment EMA posted under a company's plan the name rules put in the Medicaid catch-all is that
+        company's, never the state's Medicaid's (ema_checks._same_payer_named, fix6's reading). EMA's vocabulary names
+        some groups apart ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group of the same
+        family and kind counts."""
         if self.__dict__.get("_share") is None:
             from . import ema_checks as ec
             from .codes import component_of
@@ -7307,7 +7309,9 @@ class Detector:
             # loop (a loop that rebound them answered the run's first question for the last service read)
             for (s_grp, s_code, _who, s_svc, _part), (paid, nk) in services.items():
                 if not paid and nk is not None:
-                    paid = any(ec._same_payer(g, s_grp) for g in ema_paid.get((nk, s_svc, s_code), ()))
+                    # the payer's own money EMA shows on the service, its takebacks netted out: what still stands
+                    paid = sum(c for g, name, c in ema_paid.get((nk, s_svc, s_code), ())
+                               if ec._same_payer_named(g, name, s_grp)) > 0
                 a = share[(s_grp, s_code)]
                 a[1] += 1
                 a[0] += 1 if paid else 0
@@ -7340,20 +7344,23 @@ class Detector:
         return out
 
     def _share_ema_paid(self) -> dict:
-        """{(name key, date, code): the payer groups whose insurance money EMA posted on the patient's service} (any of its
-        EMA claims, never the surgery center's), for _paid_share: a payment no 835 carries still says the payer paid."""
-        out: dict = defaultdict(set)
+        """{(name key, date, code): [(payer group, payer name, cents)]}: the insurance money EMA posted on the patient's
+        service (any of its EMA claims, never the surgery center's) by each payer it was posted under, payments and the
+        takebacks posted later on other checks summed together, for _paid_share: a payment no 835 carries still says the
+        payer paid, one it took back in full says nothing. The name tells a company's plan in the Medicaid catch-all from
+        the state's own program."""
+        out: dict = defaultdict(list)
         if not self.ema_on:
             return out
         try:
             from . import ema_checks as ec
-            for nk, svc, cpt, grp in self.conn.execute(
-                    """SELECT l.name_key, l.svc, l.cpt, y.payer_group FROM ema_line_payments y
+            for nk, svc, cpt, grp, payer, cents in self.conn.execute(
+                    """SELECT l.name_key, l.svc, l.cpt, y.payer_group, y.payer, SUM(y.ins_paid) FROM ema_line_payments y
                        JOIN ema_lines l ON l.link = y.link AND l.svc = y.svc AND l.cpt = y.cpt
-                       WHERE COALESCE(y.ins_paid, 0) > 0 AND l.name_key IS NOT NULL AND COALESCE(l.facility, 0) = 0 AND l.svc >= ?
-                       GROUP BY 1, 2, 3, 4 HAVING SUM(y.ins_paid) > 0""", (ec.POLICY_SINCE,)):
-                if grp:
-                    out[(nk, svc, cpt)].add(grp)
+                       WHERE COALESCE(y.ins_paid, 0) <> 0 AND l.name_key IS NOT NULL AND COALESCE(l.facility, 0) = 0 AND l.svc >= ?
+                       GROUP BY 1, 2, 3, 4, 5""", (ec.POLICY_SINCE,)):
+                if grp and cents:
+                    out[(nk, svc, cpt)].append((grp, payer, int(cents)))
         except sqlite3.Error as exc:
             from .runlog import caught
             caught(exc, "paid_share.ema")

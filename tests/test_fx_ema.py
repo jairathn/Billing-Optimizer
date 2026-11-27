@@ -630,6 +630,32 @@ def test_the_medicaid_catch_alls_research_speaks_only_for_a_code_it_rarely_pays(
     assert (got.get("paid"), got.get("answered"), got.get("researched")) == (0, 22, "claim"), got
 
 
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_owners_table_shows_the_measure_of_a_researched_pattern_the_payer_otherwise_pays(tmp_path, kind):
+    """fx-ema-r1-5, its second part (C5, ema_checks.ema_denials): a researched pattern of the owner's table says how often
+    the payer paid the code whenever the measure is known, rare or not. Blue Cross (Anthem) denied a 2026 77600 that only
+    EMA saw (CO-97; the research's rule makes 77600 not payable from 2026); EMA shows it paid 22 services of 77600 in 2025.
+    The pattern 'Anthem / BCBS|77600|from 2026-01-01|payer_policy' carries paid 22 of 23 answered (before: blank, since
+    the pair is not rare)."""
+    s, lg = _world(tmp_path, kind)
+    rows = []
+    for i in range(22):
+        n = 500 + i
+        svc = D(2025, 3, 3) + dt.timedelta(days=i)
+        rows += [charge(F.link_no(n), cpt="77600", amount=400, patient=_name(n), svc=svc, posted=svc),
+                 pay(F.link_no(n), f"PAID{n}", 150, cpt="77600", patient=_name(n), svc=svc, posted=svc + dt.timedelta(days=20))]
+    n, svc = 530, D(2026, 2, 2)
+    rows += [charge(F.link_no(n), cpt="77600", amount=400, patient=_name(n), svc=svc, posted=svc),
+             pay(F.link_no(n), "EMAONLY530", 0, cpt="77600", patient=_name(n), svc=svc, posted=D(2026, 3, 2)),
+             adj(F.link_no(n), "CO-97", 400, cpt="77600", patient=_name(n), svc=svc, posted=D(2026, 3, 2))]
+    denial_world(s, lg, tmp_path, rows)
+    lg.close()
+    _run(s)
+    lo = json.loads(s.conn.execute("SELECT value FROM meta WHERE key = ?", (ec.C5_LEFT_OUT_KEY,)).fetchone()[0])
+    got = ((lo.get("payer_policy") or {}).get("patterns") or {}).get("Anthem / BCBS|77600|from 2026-01-01|payer_policy") or {}
+    assert (got.get("paid"), got.get("answered"), got.get("researched")) == (22, 23, "never_payable"), lo
+
 def _c6_copay_case(s, lg, tmp_path, n, *, expected_usd, copay_usd, paid_usd):
     """Blue Cross denied claim n's 99213 (CO-16) and no 835 pays it; EMA shows the patient's copay paid at the visit and
     Blue Cross's later payment on a paper check (no allowed amount, nothing put on the patient). Returns the item."""

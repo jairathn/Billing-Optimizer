@@ -3139,8 +3139,9 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     decisions = _meta(conn, POLICY_KEY, {}) or {}
     ema_share: dict[tuple, list] = {}
 
-    def never_paid(grp: str, cpt: str) -> tuple | None:
-        """(paid, answered) when this payer pays the code on 5% or less of at least 20 answered 2025-2026 lines."""
+    def measure(grp: str, cpt: str) -> tuple | None:
+        """(paid, answered): the services of this payer and code since 2025 it answered and paid (rule 4.2's measure),
+        when at least 20 are on file, else None."""
         got = None
         if paid_share is not None:
             try:
@@ -3161,9 +3162,11 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
                     ema_share[(g, c)] = [paid or 0, n or 0]
                 ema_share[("", "")] = [0, 0]
             got = ema_share.get((grp, cpt))
-        if got and got[1] >= POLICY_MIN_ANSWERED and got[0] <= POLICY_MAX_PAID_SHARE * got[1]:
-            return tuple(got)
-        return None
+        return tuple(got) if got and got[1] >= POLICY_MIN_ANSWERED else None
+
+    def never_paid(m: tuple | None) -> tuple | None:
+        """The measure when this payer pays the code on 5% or less of at least 20 answered 2025-2026 services."""
+        return m if m and m[0] <= POLICY_MAX_PAID_SHARE * m[1] else None
     for ln in lines:
         key = (ln["link"], ln["svc"], ln["cpt"])
         rs = [r for r in reasons.get(key, []) if r[0] not in ("", "PR") and r[2] not in ROUTINE_CLASSES and r[1] not in C5_SKIP_CODES]
@@ -3276,9 +3279,11 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             got = sum(v for lk2, v in paid_elsewhere.get((ln["name_key"], ln["svc"], ln["cpt"]), {}).items() if lk2 != ln["link"])
             if got >= PAID_SINCE_SHARE * expected:
                 continue
-        pol = never_paid(dgrp, ln["cpt"])
+        m = measure(dgrp, ln["cpt"])
+        pol = never_paid(m)
         # a payer and code the research covers for this payer group counts too (remitwatch.rarely_paid, the owner's
-        # decision 4), on the dates its rule covers: a pattern per period where the rule changed on a date
+        # decision 4), on the dates its rule covers: a pattern per period where the rule changed on a date. The owner's
+        # table shows the measure whenever it is known, rare or not, so a researched pattern says how often the payer paid
         res = rarely_paid.entry_for(dgrp, ln["cpt"], ln["svc"])
         if pol or rarely_paid.applies(res, False):
             # the owner's table shows the pattern whatever the decision (so it can be changed back); its lines are left out
@@ -3288,8 +3293,8 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             dec_p = rarely_paid.decision_for(decisions, key_p)
             decision = (dec_p or {}).get("decision") or "pursue"
             lo = left_out.setdefault("payer_policy", {"n": 0, "cents": 0, "patterns": {}})
-            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": pol[0] if pol else None,
-                                                   "answered": pol[1] if pol else None, "n": 0, "cents": 0, "decision": decision,
+            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": m[0] if m else None,
+                                                   "answered": m[1] if m else None, "n": 0, "cents": 0, "decision": decision,
                                                    "default": dec_p is None,
                                                    "researched": res["verdict"] if rarely_paid.applies(res, bool(pol)) else None})
             pt["n"] += 1

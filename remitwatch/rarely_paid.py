@@ -157,8 +157,9 @@ MATCHES = ("exact", "alias", "family")
 def entry_for(group: str | None, code: str | None, service_date: str | None = None) -> dict | None:
     """The researched entry for this payer group and code on that date: the entry that names the group first, then one
     that lists it as another spelling, then one of the same company's plans of the same kind ('match' says which). A copy
-    each call. Only an exact one stands on its own: the others apply where the run found the pair rarely paid too
-    (applies), since a state's Medicaid program, say, pays most codes when the claim is right."""
+    each call. Only an exact one stands on its own (an exact one of the Medicaid catch-all aside): the others apply where
+    the run found the pair rarely paid too (applies), since a state's Medicaid program, say, pays most codes when the
+    claim is right."""
     if not group or not code:
         return None
     best, rank = None, 9
@@ -174,8 +175,17 @@ def entry_for(group: str | None, code: str | None, service_date: str | None = No
 
 def applies(entry: dict | None, rare: bool) -> bool:
     """Whether a researched entry speaks for an item: always when it names the item's payer group, else only for a pair
-    the run found rarely paid (5% or less of at least 20 answered lines)."""
-    return bool(entry) and (entry.get("match") == "exact" or bool(rare))
+    the run found rarely paid (5% or less of at least 20 answered services). The Medicaid catch-all ('Medicaid (other)',
+    states.MEDICAID_CATCH_ALL) holds many payers at once (a state's program under a spelling the name rules do not
+    place, the companies' Medicaid plans), so an entry that names it speaks only for a pair the run found rarely paid,
+    as another spelling's does: a code those payers pay in the end is never shown as one they do not pay, nor put in
+    the owner's table where an Accept would write its services off (review fx-ema-r1-5)."""
+    if not entry:
+        return False
+    from .states import MEDICAID_CATCH_ALL
+    if entry.get("match") == "exact" and entry.get("payer_group") != MEDICAID_CATCH_ALL:
+        return True
+    return bool(rare)
 
 
 def is_rare(paid: Any, answered: Any) -> bool:
