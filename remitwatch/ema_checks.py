@@ -3440,7 +3440,7 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
             part = "other_835"
         it["split"][part] += contr
         totals[part] += contr
-        own = fdl.get((bill, svc, cpt)) if mapped else None
+        own = _own_deadline(fdl, (bill, svc, cpt), grp) if mapped else None
         if _still_recoverable(grp, kind, first, svc, lags, t, payer=payer, carc=code, own_deadline=own):
             it["inside"] += contr
     out = []
@@ -3474,26 +3474,41 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
     return out
 
 
-def _finding_line_deadlines(conn: sqlite3.Connection) -> dict[tuple, str]:
-    """{(bill, date, code): the latest last day of the 835 items on file for the line} (the item's own deadline, or the
-    payer's own limit where later): an inside-the-window count reads a line an item covers by the date the item has."""
-    out: dict[tuple, str] = {}
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _finding_line_deadlines(conn: sqlite3.Connection) -> dict[tuple, list[tuple]]:
+    """{(bill, date, code): [(payer group, last day)]}: each 835 item on file for the line with its payer group and its last
+    day (its own deadline, or the payer's own limit where later), so an inside-the-window count reads a line an item
+    covers by the date of the item of the payer whose write-off it counts (_own_deadline), never by another payer's item
+    on the same bill, date and code (review fx-ema-r2-7). A date that is empty or not a day is no date (r2-8: an empty
+    deadline once stopped C7 and C9 for the whole store)."""
+    out: dict[tuple, list] = defaultdict(list)
     if not _table(conn, "findings"):
         return out
     have = _cols(conn, "findings")
     if not {"patient_control_number", "service_date", "procedure_code", "appeal_deadline"} <= have:
         return out
-    pick = ", ".join(c if c in have else "NULL" for c in ("original_procedure_code", "billed_code", "legal_deadline"))
+    pick = ", ".join(c if c in have else "NULL" for c in ("original_procedure_code", "billed_code", "legal_deadline", "payer_group"))
     where = " AND COALESCE(stale, 0) = 0" if "stale" in have else ""
-    for pcn, svc, code, ocode, bcode, legal, dl in conn.execute(
+    for pcn, svc, code, ocode, bcode, legal, grp, dl in conn.execute(
             f"""SELECT patient_control_number, service_date, procedure_code, {pick}, appeal_deadline FROM findings
                 WHERE patient_control_number IS NOT NULL AND appeal_deadline IS NOT NULL{where}"""):
-        b = _bill(pcn)
-        last = max(str(x)[:10] for x in (dl, legal) if x)
-        for c in (code, ocode, bcode):
-            if c and last > out.get((b, svc, c), ""):
-                out[(b, svc, c)] = last
+        days = [str(x)[:10] for x in (dl, legal) if x and _DAY_RE.match(str(x)[:10])]
+        if not days:
+            continue
+        b, last = _bill(pcn), max(days)
+        for c in {code, ocode, bcode} - {None, ""}:
+            out[(b, svc, c)].append((grp, last))
     return out
+
+
+def _own_deadline(fdl: dict, key: tuple, group: str | None) -> str | None:
+    """The latest last day of the items on file for the line (bill, date, code) whose payer is `group` (the payer group of
+    the write-off being counted), or None when no item of that payer covers the line: the payer's own rule dates it then
+    (_still_recoverable)."""
+    got = [last for g, last in fdl.get(key) or () if g and group and _same_payer(g, group)]
+    return max(got) if got else None
 
 
 def _finding_line_keys(conn: sqlite3.Connection) -> set[tuple]:
@@ -3566,7 +3581,8 @@ def timely_writeoffs(conn: sqlite3.Connection, *, today: str | None = None) -> d
         out["by_group"][grp] = out["by_group"].get(grp, 0) + cents
         if (bill and (bill, svc, cpt) in fkeys) or lk in ekeys:
             out["covered_cents"] += cents
-        if _still_recoverable(grp, kind, first, svc, lags, t, payer=payer, own_deadline=fdl.get((bill, svc, cpt)) if bill else None):
+        if _still_recoverable(grp, kind, first, svc, lags, t, payer=payer,
+                              own_deadline=_own_deadline(fdl, (bill, svc, cpt), grp) if bill else None):
             out["inside_cents"] += cents
     return out
 
