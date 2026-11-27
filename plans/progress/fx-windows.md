@@ -23,7 +23,16 @@ and detect._emit_proto now pass the denial's reason, `carc`).
       (`$S/tk/units/fx-windows/scripts/mutate.py`; each run with its own bytecode folder).
 - [x] docs/RESEARCH_SUMMARY.md: "Follow-ups read in the primary source (November 27, 2026)"; tests/test_docs.py green
       with the private word list.
-- [ ] Measurement on the final code, A17 classes, hand-trace (below), full suites.
+- [x] Measurement on a private world copy, tip vs branch, A17 classes (below); the final code measured again.
+- [x] Hand-trace of 30 moved items from the raw rows (below): 29 right, 1 unclear, 0 wrong.
+- [x] Suites: the whole suite in python3 (3.13.18, SQLite 3.53.1) on fffc96f: 3,373 passed, 29 skipped, 1 xfailed, 3 failed,
+      the 3 this branch's own rules changed (tests/test_story.py's Anthem CO-50 window, tests/test_archive.py's April
+      CO-50 denial), fixed at 0892a41 and 346b3aa; then the files the rules touch, on the final code: 615 passed. Python
+      3.11.1 with SQLite 3.40.0, the whole suite on 38bedf8: 3,193 passed, 13 skipped, 1 xfailed, 153 failed and 47
+      errors, every one but the story test above stopping at `Connection.serialize`, which that build lacks (CLAUDE.md:
+      only tests that serialize a store image may fail there); on the final code, the changed and window files
+      (test_story, test_archive, test_fx_windows, test_payer_windows*, test_workable): 309 passed, 4 failed, the 4 the
+      store image's serialize.
 
 ## The five items and what changed (codes.py unless said)
 1. Anthem commercial clinical appeals. Anthem's own member: a denial as not medically necessary or experimental
@@ -177,5 +186,7 @@ branch wrote. Verdicts: 29 right, 1 unclear, 0 wrong (30 items).
   clinical appeal's 180 days as its date and the dispute's two years as its last day.
 
 ## Next command
-- `$S/tk/units/fx-windows/scripts/measure.sh <tag> <tree>` (one world copy at a time), then
-  `python3 -I -B $S/tk/units/fx-windows/scripts/compare.py <before snap> <after snap> <out.json>`.
+- Merge the integration tip again when batch 1 lands, then `python3 -m pytest -q tests/test_fx_windows.py` and the files
+  the rules touch (tests/test_payer_windows*.py, test_story, test_archive, test_features, test_workable, test_ema_checks,
+  test_837_sends, test_states, test_ema_wiring, test_remitwatch). A new measurement: `$S/tk/units/fx-windows/scripts/
+  measure.sh <tag> <tree>` (one world copy at a time; the scripts stay in the private folder).
