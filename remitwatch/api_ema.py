@@ -35,7 +35,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -804,9 +804,37 @@ def _c7_key(group: Any, reason: Any, carc: Any) -> str:
     return f"{group or ''}|||{str(reason or carc or '')}"
 
 
+def _listed_policy_items(c: sqlite3.Connection, keys: Iterable[str]) -> dict[str, list]:
+    """{pattern: [items, cents]}: the items listed now (live, To do or started) that each payer-policy pattern holds, by
+    the key the run folds them under (rarely_paid.pattern_key of the item's payer group, billed code and date): what the
+    row counts is what the Worklist shows, after every rule of the run (a count taken at the fold, before the later rules
+    closed or set aside some of its items, was larger than the list)."""
+    from . import rarely_paid as rp
+    want = set(keys)
+    out: dict[str, list] = {k: [0, 0] for k in want}
+    fcols = _cols(c, "findings") if _table(c, "findings") else set()
+    if not want or not {"signal", "evidence", "payer_group"} <= fcols:
+        return out
+    pick = [x for x in ("finding_id", "signal", "category", "payer_group", "procedure_code", "original_procedure_code",
+                        "service_date", "paid_cents", "line_key", "shortfall_cents", "evidence") if x in fcols]
+    ws = " AND COALESCE(work_state, '') IN ('work_now', 'waiting')" if "work_state" in fcols else ""
+    for r in c.execute(f"""SELECT {', '.join(pick)} FROM findings WHERE COALESCE(stale, 0) = 0
+                           AND status IN ('open', 'in_progress'){ws}"""):
+        f = dict(zip(pick, r))
+        for code, day in rp.item_codes(f):
+            key = rp.pattern_key(f.get("payer_group"), code, day)
+            if key in out:
+                out[key][0] += 1
+                out[key][1] += int(f.get("shortfall_cents") or 0)
+                break
+    return out
+
+
 def _payer_policies(c: sqlite3.Connection, stored: dict) -> dict:
     """The codes a payer almost never pays, as the run folded them (meta ema:payer_policy: every one; the table the run
-    stores keeps its 500 largest rows): {pattern: {group, code, paid, answered, n, cents}}."""
+    stores keeps its 500 largest rows): {pattern: {group, code, paid, answered, n, cents}}, each pattern's n and cents
+    the items listed now (_listed_policy_items) on the whole store; the dashboard's copy (no findings to count) keeps
+    what the run counted."""
     out: dict = {}
     pp = _meta(c, "ema:payer_policy", {}) or {}
     pats = pp.get("patterns") if isinstance(pp, dict) else None
@@ -816,6 +844,14 @@ def _payer_policies(c: sqlite3.Connection, stored: dict) -> dict:
         if isinstance(row, dict) and row.get("kind") == "payer_policy" and row.get("pattern") and row["pattern"] not in out:
             out[row["pattern"]] = {"n": row.get("items"), "cents": row.get("cents"), "paid": row.get("paid"), "answered": row.get("answered"),
                                    "decision": row.get("decision"), "default": row.get("default")}
+    # a pattern the run pursued is counted by the items the Worklist lists now (after every rule of the run); one it set
+    # aside on the owner's Accept keeps what the run set aside (those items are off the Worklist and stay counted here)
+    pursued = {k for k, p in out.items() if (p.get("decision") or "pursue") == "pursue"}
+    if pursued and _table(c, "findings") and c.execute("SELECT 1 FROM findings LIMIT 1").fetchone():
+        live = _listed_policy_items(c, pursued)
+        for key in pursued:
+            n, cents = live.get(key) or (0, 0)
+            out[key].update(n=n, cents=cents)
     return out
 
 

@@ -93,6 +93,7 @@ META_KEEP_DIRTY = "ema:keep_dirty"
 META_KEEP_RULE = "ema:keep_rule"            # the keep rule the store's summaries were built by (KEEP_RULE)
 META_MAP_COVERAGE = "ema:map_coverage"
 META_RETAIN_HELD = "ema:retain_held"        # retention that waits for a person (the Data tab shows it)
+META_NAME_RULES = "ema:name_rules"          # the payer-name rules the stored payer groups were made by (_name_rules_hash)
 
 # the work database refresh() attaches to the store connection (and the ledger's alias there)
 _W = "emaw"
@@ -1500,8 +1501,11 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
             LEFT JOIN {W}.pa_alw w ON w.link = a.link AND w.svc = a.svc AND w.cpt = a.cpt""")
     _drop(conn, "pa_agg", "pa_py", "pa_pat", "pa_pj", "pa_pad", "pa_alw")     # their pages are reused from here on
     _line_indexes(conn)
+    # whether an insurer answered the line, as the never-answered rule reads it (ema_checks.line_answered_sql): a bare $0
+    # row under a check is no answer, so a claim closed 'Resolved/Other' on one is given up, not settled
+    from .ema_checks import line_answered_sql
     x(f"""UPDATE {W}.pa_full SET balance = charges - ins_paid - contractual - noncontractual - pat_paid_joined - pat_adj_joined,
-              status_class = rw_status_class(status, ins_answer_rows > 0),
+              status_class = rw_status_class(status, {line_answered_sql('pa_full')}),
               twin_link = CASE WHEN person IS NULL THEN NULL ELSE (SELECT MIN(t.link) FROM {W}.pa_full t
                   WHERE t.person = pa_full.person AND t.svc = pa_full.svc AND t.cpt = pa_full.cpt AND t.link <> pa_full.link) END""")
     n_ev = _events(conn)
@@ -2083,6 +2087,28 @@ def _ledger_changed(conn: sqlite3.Connection, ledger: Ledger) -> bool:
     return _meta_get(conn, META_KEEP_DIRTY) is not None
 
 
+def _name_rules_hash(conn: sqlite3.Connection) -> str:
+    """A digest of every rule that gives an EMA payer name its group: the code's name rules (codes.PAYER_RULES, the VA
+    network's pattern, payer ids and group), the owner's aliases (REMITWATCH_EMA_PAYER_ALIASES) and the aliases learned
+    from the weekly exports' payer ids (meta ema:payer_aliases_learned). The stored rows keep the group they were made
+    with; a release or a newly learned alias that changes this re-groups them at the next refresh (refresh)."""
+    from . import codes
+    h = hashlib.sha256()
+    for part in (repr(list(codes.PAYER_RULES)), er.VA_RULE.pattern, repr(sorted(er.VA_PAYER_IDS)), repr(er.VA_GROUP),
+                 os.environ.get("REMITWATCH_EMA_PAYER_ALIASES", ""), er._learned_raw(conn)):
+        h.update(str(part).encode("utf-8", "replace"))
+        h.update(b"\0")
+    return h.hexdigest()[:24]
+
+
+def _regroup_ar(conn: sqlite3.Connection) -> int:
+    """The A/R's stored rows given the groups the name rules give now (the payer the row is billed to, as the reader sets
+    them: ema_reports._stage_ar_groups). Part B re-groups the lines, payments and checks."""
+    payer = ("CASE WHEN lower(coverage) LIKE 'secondary%' AND secondary_payer IS NOT NULL THEN secondary_payer "
+             "ELSE primary_payer END")
+    return conn.execute(f"UPDATE main.ema_ar SET payer_group = rw_payer_group({payer}), payer_kind = rw_payer_kind({payer})").rowcount
+
+
 def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", log: Any = print,
             release: Any = None) -> dict:
     """Bring the store's EMA summaries up to date.
@@ -2093,7 +2119,11 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     Part A or when meta ema:map_dirty is set. 'A', 'B' and 'AB' run those parts. Part A needs the ledger; Part B reads
     only the store. With a ledger, retention runs first and the catalog is brought in line with the ledger
     (sync_catalog). The store changes in one transaction at the end. Nothing here reads the store's items: the same data
-    gives the same summaries, whatever the last detection run listed.
+    gives the same summaries, whatever the last detection run listed. The payer names' groups follow the name rules of
+    now: the aliases learned from the weekly exports' payer ids are brought up to date first (learn_payer_aliases: the VA
+    network EMA names after its administrator), and when the rules differ from the ones the stored rows were made by
+    (meta ema:name_rules), Part B runs to re-group the lines, payments and checks, and the A/R's rows are re-grouped with
+    it, without waiting for a new report (the brief's F8 needs).
 
     `release` (serverless): called with no argument as soon as the ledger is no longer needed (after Part A, before Part
     B), to save the scratch ledger to the state folder and delete it, so the temporary folder never holds the ledger and
@@ -2107,6 +2137,18 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     out: dict = {"part_a": None, "part_b": None, "retained": 0, "catalog": 0, "retain_held": None, "released": False}
     if parts not in ("auto", "A", "B", "AB"):
         raise ValueError("parts is one of auto, A, B, AB")
+    try:
+        er.learn_payer_aliases(conn)
+    except sqlite3.Error as exc:
+        from .runlog import caught
+        caught(exc, "ema_ledger.learn_aliases")     # the map learned before stays in use
+    rules = _name_rules_hash(conn)
+    regroup = _meta_get(conn, META_NAME_RULES) != rules
+    if regroup and not (conn.execute("SELECT 1 FROM ema_lines LIMIT 1").fetchone()
+                        or conn.execute("SELECT 1 FROM ema_ar LIMIT 1").fetchone()):
+        _meta_set(conn, META_NAME_RULES, rules)     # nothing stored yet: nothing to re-group
+        conn.commit()
+        regroup = False
     if ledger is not None and not ledger.readonly:
         bind = ledger.bind_salt(er.salt_fingerprint(salt))
         if bind:
@@ -2130,7 +2172,7 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     want_a = parts in ("A", "AB") or (parts == "auto" and ledger is not None and _ledger_changed(conn, ledger))
     if want_a and ledger is None:
         raise ValueError("Part A needs the posting ledger.")
-    want_b = parts in ("B", "AB") or (parts == "auto" and (want_a or _meta_get(conn, META_MAP_DIRTY) is not None))
+    want_b = parts in ("B", "AB") or (parts == "auto" and (want_a or regroup or _meta_get(conn, META_MAP_DIRTY) is not None))
     if not (want_a or want_b):
         return out
     boxes = ledger.boxes() if ledger is not None else _catalog_boxes(conn)
@@ -2166,6 +2208,11 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
                        conflicts=out["part_b"]["map"]["conflicts"], facility=out["part_b"]["map"]["facility"],
                        patient_day=out["part_b"]["map"]["patient_day"], at=_now())
             meta[META_MAP_COVERAGE] = json.dumps(cov, sort_keys=True)
+            # Part B's marks gave the lines, payments and checks the groups of now; the A/R's rows follow in the same
+            # transaction, and the rules they were made by are recorded with them
+            if regroup:
+                out["ar_regrouped"] = _regroup_ar(conn)
+            meta[META_NAME_RULES] = rules
         out["published"] = _publish(conn, part_a=want_a, meta=meta, cutoff=cutoff)
     out["seconds"] = round(time.time() - t0, 1)
     pb = out.get("part_b") or {}

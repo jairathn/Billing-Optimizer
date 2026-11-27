@@ -750,7 +750,8 @@ def test_a_second_payer_whose_only_answer_is_in_ema_was_billed(store, ledger, tm
     kw8, kw9 = dict(patient=2, secondary=P["commercial"]), dict(patient=1, secondary=P["commercial"])
     rows = [charge(F.link_no(8), **kw8), pay(F.link_no(8), "777000222", 90, posted=D(2026, 4, 3), **kw8),
             adj(F.link_no(8), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw8),
-            pay(F.link_no(8), "PAPER-81", 0, posted=D(2026, 4, 17), payer=P["commercial"], **kw8),
+            # its $0 answer carries its proof, the allowed amount (a bare $0 row is no answer: tests/test_fx_ema.py)
+            pay(F.link_no(8), "PAPER-81", 0, posted=D(2026, 4, 17), payer=P["commercial"], allowed=30, **kw8),
             charge(F.link_no(9), **kw9), pay(F.link_no(9), "777000223", 90, posted=D(2026, 4, 3), **kw9),
             adj(F.link_no(9), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw9),
             adj(F.link_no(9), "CO-27", 30, posted=D(2026, 4, 18), payer=P["commercial"], **kw9)]
@@ -1282,11 +1283,11 @@ def test_remittance_denials_of_a_code_the_payer_never_pays_as_primary_are_its_po
     owner accepts it (decisions 14 and 16); a code the payer does pay stays an appeal."""
     for n in range(22):                      # 22 denials of G6001 as primary, and 6 payments of it as the second payer
         remit(store, trace=f"7776{n:05d}", paid_on="2026-02-10", payer="UNITEDHEALTHCARE TEST",
-              claims=[{"pcn": F.claim_id(800 + n), "last": f"RAD{n}", "first": "JULIET", "member": f"J{n:011d}",
+              claims=[{"pcn": F.claim_id(800 + n), "last": f"RAD{chr(65 + n)}", "first": "JULIET", "member": f"J{n:011d}",
                        "lines": [("2026-02-02", "G6001", 260, 0, [("CO", "197", 260)])]}])
     for n in range(6):
         remit(store, trace=f"7777{n:05d}", paid_on="2026-02-10", payer="UNITEDHEALTHCARE TEST", status="2",
-              claims=[{"pcn": F.claim_id(850 + n), "last": f"SEC{n}", "first": "KILO", "member": f"K{n:011d}",
+              claims=[{"pcn": F.claim_id(850 + n), "last": f"SEC{chr(65 + n)}", "first": "KILO", "member": f"K{n:011d}",
                        "lines": [("2026-02-02", "G6001", 260, 30, [("PR", "2", 0)])]}])
     remit(store, trace=F.check_no(61), paid_on="2026-03-28", payer="UNITEDHEALTHCARE TEST",
           claims=[{"pcn": F.claim_id(61), "lines": [(S, "99213", 150, 0, [("CO", "197", 150)])]}])

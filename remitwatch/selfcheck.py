@@ -3146,7 +3146,11 @@ def _charges_since(conn: sqlite3.Connection, newest: str, today: str) -> tuple[i
     if _has_table(conn, "ema_lines") and conn.execute("SELECT 1 FROM ema_lines LIMIT 1").fetchone():
         cols = set(_cols(conn, "ema_lines"))
         if {"svc", "charges"} <= cols:
-            no_answer = "COALESCE(ins_answer_rows, 0) = 0" if "ins_answer_rows" in cols else "1"
+            # a line the insurer answered, as the never-answered rule reads it (a bare $0 row under a check is no answer)
+            from .ema_checks import line_answered_sql
+            need = {"ins_paid", "contractual", "noncontractual", "allowed", "ins_answer_rows", "zero_pay_rows"}
+            no_answer = (f"NOT {line_answered_sql('ema_lines')}" if need <= cols else
+                         "COALESCE(ins_answer_rows, 0) = 0" if "ins_answer_rows" in cols else "1")
             to_ins = "COALESCE(ins_charges, 0) > 0" if "ins_charges" in cols else "1"
             n = conn.execute(f"""SELECT COALESCE(SUM(charges), 0) FROM ema_lines WHERE svc > ? AND {to_ins} AND {no_answer}""",
                              (str(newest)[:10],)).fetchone()[0]
@@ -3383,12 +3387,14 @@ def audit_due(conn: sqlite3.Connection, today: Any = None) -> bool:
     return not last or (_days(last, t) or 0) >= AUDIT_EVERY_DAYS
 
 
-def _windows(group: str | None, kind: str | None) -> tuple[int, int]:
-    """(appeal days, filing days) for a payer group: codes.py's windows, read as data (as the answer keys did)."""
+def _windows(group: str | None, kind: str | None, **facts: Any) -> tuple[int, int]:
+    """(appeal days, filing days) for a payer group: codes.py's windows, read as data (as the answer keys did), with the
+    plan facts the product passes (codes.rule_facts: the payer's name, the filing indicator, the reason, paid or not), so
+    one plan of a group is never given another's window."""
     try:
         from .codes import appeal_rule, filing_rule
-        a = appeal_rule(group, kind)
-        f = filing_rule(group, kind)
+        a = appeal_rule(group, kind, **facts)
+        f = filing_rule(group, kind, **facts)
         legal = a.get("legal") or {}
         days = int(a.get("days") or 180)
         if legal.get("days"):
@@ -3398,6 +3404,43 @@ def _windows(group: str | None, kind: str | None) -> tuple[int, int]:
         return days, int(f.get("days") or 365)
     except Exception:          # noqa: BLE001
         return 180, 365
+
+
+def _rule_facts(**facts: Any) -> dict:
+    """The plan facts the product passes for a line (codes.rule_facts: the plan, the payer's name and id, the filing
+    indicator, the denial's reason, paid or not), those known only: what the self-audit hands the window rules."""
+    try:
+        from .codes import PLAN_FACTS
+    except ImportError:                 # pragma: no cover  (an older codes.py: the names it always took)
+        PLAN_FACTS = ("plan", "payer_name", "payer_id", "cfi", "state", "carc", "paid")
+    out = {}
+    for k, v in facts.items():
+        if k not in PLAN_FACTS or v is None:
+            continue
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                continue
+        out[k] = v
+    return out
+
+
+def _appeal_end(group: str | None, kind: str | None, answered: str | None, svc: str | None, **facts: Any) -> str | None:
+    """The last day to work a line the payer answered on `answered`, as the product dates its item (states.windows, with the
+    plan facts codes.rule_facts gives): the payer's dispute window from that answer, its own limit where later
+    (codes.window_end, codes.legal_deadline); for a payer that takes no appeal of an ordinary claim denial (Kentucky
+    Medicaid, 907 KAR 1:671) its corrected or new claim's window from the date of service (codes.corrected_rule)."""
+    try:
+        from . import codes
+        r = codes.appeal_rule(group, kind, **facts)
+        if r.get("no_appeal"):
+            cr = codes.corrected_rule(group, kind, **facts)
+            return codes.window_end(svc, cr) if cr and svc else None
+        ends = [d for d in (codes.window_end(answered, r), codes.legal_deadline(answered, r)) if d]
+        return max(ends) if ends else None
+    except Exception as exc:          # noqa: BLE001  (a rule that cannot date the line dates it by the usual 180 days)
+        _caught(exc, "selfcheck.appeal_end")
+        return _add(answered, 180)
 
 
 def _item_index(conn: sqlite3.Connection) -> dict:
@@ -3620,17 +3663,23 @@ class _Facts:
                 for link, bill in conn.execute(f"SELECT link, bill FROM {table} WHERE link IS NOT NULL AND bill IS NOT NULL"):
                     self.bill_of_link[int(link)] = bill
         if _has_table(conn, "ema_lines"):
+            # whether and when a payer answered each line, as the never-answered rule reads it (ema_checks: a bare $0 row
+            # under a check, no reason, allowed amount or adjustment, answers nothing)
+            from .ema_checks import first_answer_days, line_answered_sql
+            fa = first_answer_days(conn, "sc_fa") if _has_table(conn, "ema_line_payments") and _has_table(conn, "ema_line_reasons") else None
+            first_sql = f"(SELECT a.d FROM temp.{fa} a WHERE a.link = l.link AND a.svc = l.svc AND a.cpt = l.cpt)" if fa else "l.first_ins_posting"
             for (bill, link, svc, cpt, grp, kind, second, charges, ins_charges, ins, bal, nonroutine, den_first, first_ans,
-                 last_paid, status_class, fac, answers, first_charge) in conn.execute(
-                    """SELECT bill, link, svc, cpt, payer_group, payer_kind, secondary_payer, COALESCE(charges, 0),
-                              COALESCE(ins_charges, 0), COALESCE(ins_paid, 0), COALESCE(balance, 0), COALESCE(nonroutine, 0),
-                              denial_first_posted, first_ins_posting, last_ins_paid, status_class, COALESCE(facility, 0),
-                              COALESCE(ins_answer_rows, 0), first_charge_posted
-                       FROM ema_lines WHERE svc >= ?""", (SERVICE_FROM,)):
+                 last_paid, status_class, fac, answers, first_charge, payer, plan) in conn.execute(
+                    f"""SELECT l.bill, l.link, l.svc, l.cpt, l.payer_group, l.payer_kind, l.secondary_payer, COALESCE(l.charges, 0),
+                              COALESCE(l.ins_charges, 0), COALESCE(l.ins_paid, 0), COALESCE(l.balance, 0), COALESCE(l.nonroutine, 0),
+                              l.denial_first_posted, {first_sql}, l.last_ins_paid, l.status_class, COALESCE(l.facility, 0),
+                              {line_answered_sql('l')}, l.first_charge_posted, l.primary_payer, l.plan
+                       FROM ema_lines l WHERE l.svc >= ?""", (SERVICE_FROM,)):
                 key = (bill or self.bill_of_link.get(int(link)) or f"link:{link}", str(svc)[:10], cpt or "")
                 e = self.ema.get(key)
                 if e is None:
-                    e = self.ema[key] = {"links": [], "group": grp, "kind": kind, "second": second, "charges": 0, "ins_charges": 0,
+                    e = self.ema[key] = {"links": [], "group": grp, "kind": kind, "second": second, "payer": payer,
+                                         "plan": (plan or "").strip() or None, "charges": 0, "ins_charges": 0,
                                          "ins_paid": 0, "balance": 0, "nonroutine": 0, "den_first": None, "first_ans": None,
                                          "last_paid": None, "status": set(), "facility": False, "answers": 0, "first_charge": None}
                 e["links"].append(link)
@@ -3643,6 +3692,8 @@ class _Facts:
                 e["first_charge"] = min(x for x in (e["first_charge"], first_charge) if x) if (e["first_charge"] or first_charge) else None
                 e["status"].add(status_class)
                 e["facility"] = e["facility"] or bool(fac)
+            if fa:
+                conn.execute(f"DROP TABLE IF EXISTS temp.{fa}")
         self.reasons: dict[tuple, set] = defaultdict(set)
         if _has_table(conn, "ema_line_reasons") and _has_table(conn, "ema_lines"):
             for bill, link, svc, cpt, code, cls in conn.execute(
@@ -3658,7 +3709,8 @@ class _Facts:
                              SELECT {bill} AS bill, l.service_date AS svc, COALESCE(l.original_procedure_code, l.procedure_code) AS code,
                                     l.payment_date AS paid_on, COALESCE(l.paid_cents, 0) AS paid, l.claim_status_code AS st,
                                     c.payer_name AS payer, c.claim_filing_indicator AS cfi, l.line_key AS line_key,
-                                    l.patient_control_number AS pcn, COALESCE(l.charge_cents, 0) AS charge
+                                    l.patient_control_number AS pcn, COALESCE(l.charge_cents, 0) AS charge,
+                                    c.contract_class AS plan, c.payer_id AS payer_id
                              FROM lines l JOIN claims c ON c.claim_key = l.claim_key
                              JOIN transactions t ON t.transaction_key = l.transaction_key
                              WHERE COALESCE(t.superseded, 0) = 0 AND l.service_date >= ?""", (SERVICE_FROM,))
@@ -3742,17 +3794,17 @@ def _cov_denials(facts: _Facts, idx: dict) -> list[dict]:
                        AND a.reason_code NOT IN ({excluded}) GROUP BY a.line_key""")
     conn.execute("CREATE INDEX temp.ix_sc_den ON sc_den(line_key)")
     latest: dict[tuple, tuple] = {}
-    for b, svc, code, paid_on, payer, cfi, carc, charge, pcn in conn.execute(
-            """SELECT s.bill, s.svc, s.code, s.paid_on, s.payer, s.cfi, d.carc, s.charge, s.pcn FROM temp.sc_svc s
+    for b, svc, code, paid_on, payer, cfi, carc, charge, pcn, plan, pid in conn.execute(
+            """SELECT s.bill, s.svc, s.code, s.paid_on, s.payer, s.cfi, d.carc, s.charge, s.pcn, s.plan, s.payer_id FROM temp.sc_svc s
                JOIN temp.sc_den d ON d.line_key = s.line_key WHERE s.st IN ('1','19') AND s.paid = 0 AND s.charge > 0"""):
         key = (b, str(svc)[:10], code)
         if is_facility(pcn):
             continue
         if key not in latest or str(paid_on) > str(latest[key][0]):
-            latest[key] = (paid_on, payer, cfi, carc, charge)
+            latest[key] = (paid_on, payer, cfi, carc, charge, plan, pid)
     conn.execute("DROP TABLE IF EXISTS temp.sc_den")
     out = []
-    for key, (paid_on, payer, cfi, carc, charge) in latest.items():
+    for key, (paid_on, payer, cfi, carc, charge, plan, pid) in latest.items():
         grp, kind = _group_kind(payer, cfi)
         if facts.policy(grp, key[2]):
             continue
@@ -3764,8 +3816,10 @@ def _cov_denials(facts: _Facts, idx: dict) -> list[dict]:
         got = max(r835, int(e.get("ins_paid") or 0))
         if got >= SETTLED_SHARE * exp or moved >= 0.8 * exp or "paid" in (e.get("status") or set()):
             continue
-        appeal_days, _f = _windows(grp, kind)
-        deadline = _add(paid_on, appeal_days)
+        # the plan facts the product passes for the item (codes.rule_facts: the plan, the payer's name and id, the filing
+        # indicator, the reason, unpaid), so one plan of a group is dated by its own window
+        deadline = _appeal_end(grp, kind, paid_on, key[1], **_rule_facts(plan=plan, payer_name=payer, payer_id=pid, cfi=cfi,
+                                                                          carc=carc, paid=False))
         if not deadline or deadline < facts.today:
             continue
         cents = max(0, min(int(charge), int(exp) - max(0, got)))
@@ -3796,8 +3850,9 @@ def _cov_auto_writeoffs(facts: _Facts, idx: dict) -> list[dict]:
         exp = facts.usual.get((grp, key[2])) or e["nonroutine"]
         if e["ins_paid"] >= SETTLED_SHARE * exp or (e["last_paid"] and e["last_paid"] > e["den_first"]):
             continue
-        appeal_days, _f = _windows(grp, kind)
-        deadline = _add(e["den_first"], appeal_days)
+        top = sorted(c for c, _cls in facts.reasons.get(key, set()))
+        deadline = _appeal_end(grp, kind, e["den_first"], key[1], **_rule_facts(
+            plan=e.get("plan"), payer_name=e.get("payer"), carc=top[0] if len(top) == 1 else None, paid=e["ins_paid"] > 0))
         if not deadline or deadline < facts.today:
             continue
         cents = min(int(e["nonroutine"]), int(e["charges"])) if e["charges"] > 0 else int(e["nonroutine"])
@@ -3826,7 +3881,7 @@ def _cov_unanswered(facts: _Facts, idx: dict) -> list[dict]:
         wait = max(30, int(g.get("svc_p95") or g.get("p95") or 45)) if isinstance(g, dict) else 45
         if (_days(e["first_charge"], facts.today) or 0) < wait:
             continue
-        appeal_days, filing_days = _windows(e["group"], e["kind"])
+        appeal_days, filing_days = _windows(e["group"], e["kind"], **_rule_facts(plan=e.get("plan"), payer_name=e.get("payer")))
         deadline = _add(key[1], filing_days + appeal_days)
         if not deadline or deadline < facts.today:
             continue
@@ -3886,6 +3941,7 @@ def _cov_secondary(facts: _Facts, idx: dict) -> list[dict]:
     conn = facts.conn
     if not _has_table(conn, "ema_line_payments"):
         return []
+    from .ema_checks import answer_row_sql
     out = []
     for key, e in facts.ema.items():
         second = e["second"]
@@ -3895,10 +3951,19 @@ def _cov_secondary(facts: _Facts, idx: dict) -> list[dict]:
             continue
         if not e["last_paid"] or (_days(e["last_paid"], facts.today) or 0) < 30:
             continue
+        # an answer on the line from a payer other than the primary, as the product reads one (detect._ema_lines_for): a
+        # payment row that answers (ema_checks.answer_row_sql: a bare $0 row, no reason, allowed amount or adjustment,
+        # answers nothing) or that payer's own reason posted on the line
         roles = set()
         for link in e["links"]:
-            roles |= {r for (r,) in conn.execute("SELECT DISTINCT role FROM ema_line_payments WHERE link = ? AND svc = ? AND cpt = ?",
+            roles |= {r for (r,) in conn.execute(f"""SELECT DISTINCT y.role FROM ema_line_payments y
+                                                     WHERE y.link = ? AND y.svc = ? AND y.cpt = ? AND {answer_row_sql('y')}""",
                                                  (link, key[1], key[2]))}
+            if _has_table(conn, "ema_line_reasons"):
+                for (who,) in conn.execute("""SELECT DISTINCT payer FROM ema_line_reasons WHERE link = ? AND svc = ? AND cpt = ?
+                                              AND COALESCE(grp, '') NOT IN ('', 'PR') AND payer IS NOT NULL""", (link, key[1], key[2])):
+                    if who != e.get("payer") and _group_kind(who)[0] != e["group"]:
+                        roles.add("other")
         if roles - {"primary"}:
             continue
         own_group = e["group"]
@@ -3909,14 +3974,31 @@ def _cov_secondary(facts: _Facts, idx: dict) -> list[dict]:
         crossed = any(st == "19" for _d, _p, st, _py, _cfi, _pr, _lk in ans)
         if crossed and (_days(e["last_paid"], facts.today) or 0) < 45:
             continue
-        _a, filing_days = _windows(second, "supplement")
-        deadline = _add(e["last_paid"], filing_days)
+        # the second payer's own first-filing rule, as it counts a claim it gets second (codes.second_claim_window, as the
+        # product dates the item), from the group its name gives: never its name read as a group
+        deadline = _second_end(conn, second, key[1], e["last_paid"], own_group)
         if not deadline or deadline < facts.today:
             continue
         out.append({"key": "|".join(key), "category": "open_balance_in_window" if crossed else "secondary_not_billed",
                     "reason": "crossover_no_answer" if crossed else "second_payer", "payer_group": own_group,
                     "month": key[1][:7], "cents": int(e["balance"]), "deadline": deadline, "held": _held(idx, key)})
     return out
+
+
+def _second_end(conn: sqlite3.Connection, second: str, svc: str | None, first_paid: str | None, first_group: str | None) -> str | None:
+    """A second payer's last day for a share the first payer left: its group by EMA's name rules, its first-filing rule
+    with its name as the plan fact, counted as it counts a second claim (codes.second_claim_window: the safe date, the
+    payer's own last day where later), as the product dates SECONDARY_NOT_BILLED."""
+    try:
+        from . import codes
+        from .ema_reports import payer_group_of
+        sgrp, skind = payer_group_of(conn, second)
+        rule = codes.filing_rule(sgrp, skind, payer_name=second)
+        safe, last, _how = codes.second_claim_window(rule, svc, str(first_paid or "")[:10] or None, first_payer=first_group)
+        return last or safe
+    except Exception as exc:          # noqa: BLE001  (a rule that cannot date the share dates it a year from the payment)
+        _caught(exc, "selfcheck.second_end")
+        return _add(first_paid, 365)
 
 
 def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
@@ -3933,12 +4015,13 @@ def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
         mppr = frozenset()
     modes: dict[tuple, Counter] = defaultdict(Counter)
     rows = conn.execute("""SELECT l.line_key, l.patient_control_number, l.service_date, l.procedure_code, l.payment_date, l.payer_name,
-                                  c.claim_filing_indicator, COALESCE(l.allowed_cents, 0), COALESCE(l.paid_cents, 0), l.modifiers
+                                  c.claim_filing_indicator, COALESCE(l.allowed_cents, 0), COALESCE(l.paid_cents, 0), l.modifiers,
+                                  c.contract_class, c.payer_id
                            FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
                            WHERE COALESCE(t.superseded, 0) = 0 AND l.claim_status_code IN ('1','19') AND COALESCE(l.paid_cents, 0) > 0
                              AND COALESCE(l.paid_units, 1) = 1 AND l.service_date >= ? AND l.procedure_code GLOB '[0-9][0-9][0-9][0-9][0-9]'""",
                         (SERVICE_FROM,)).fetchall()
-    for _lk, _pcn, svc, code, _pd, name, cfi, allowed, _paid, mods in rows:
+    for _lk, _pcn, svc, code, _pd, name, cfi, allowed, _paid, mods, _plan, _pid in rows:
         if allowed > 0 and not (mods and mods not in ("[]", "")):
             modes[(_group_kind(name, cfi)[0], code, str(svc)[:4])][allowed] += 1
     usual = {}
@@ -3948,7 +4031,7 @@ def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
         if n >= 8 and m / n >= 0.6:
             usual[k] = (top, cnt, n)
     out = []
-    for lk, pcn, svc, code, paid_on, name, cfi, allowed, paid, mods in rows:
+    for lk, pcn, svc, code, paid_on, name, cfi, allowed, paid, mods, plan, pid in rows:
         if (mods and mods not in ("[]", "")) or is_facility(pcn) or allowed <= 0:
             continue
         grp, kind = _group_kind(name, cfi)
@@ -3962,11 +4045,11 @@ def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
         ratio = allowed / rate
         if any(abs(ratio - r) <= 0.02 for r in (0.85, 0.5, 0.75, 0.25)) and (code in mppr or abs(ratio - 0.85) <= 0.02):
             continue
-        appeal_days, _f = _windows(grp, kind)
-        deadline = _add(paid_on, appeal_days)
+        key = (bill_of(pcn), str(svc)[:10], code)
+        deadline = _appeal_end(grp, kind, paid_on, str(svc)[:10], **_rule_facts(plan=plan, payer_name=name, payer_id=pid,
+                                                                                    cfi=cfi, paid=True))
         if not deadline or deadline < facts.today:
             continue
-        key = (bill_of(pcn), str(svc)[:10], code)
         out.append({"key": "|".join(key), "category": "short_vs_payer_rate", "reason": "below_own_rate", "payer_group": grp,
                     "month": key[1][:7], "cents": int(short), "deadline": deadline, "held": _held(idx, key)})
     return out

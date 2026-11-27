@@ -297,6 +297,29 @@ def _same_payer(a: Any, b: Any) -> bool:
     return bool(a) and bool(b) and (a == b or _family(a) == _family(b))
 
 
+def _catch_all_company(group: Any, name: Any) -> str | None:
+    """The family of the company an EMA payer name begins with, for a name the payer-name rules put in the Medicaid
+    catch-all ('Medicaid (other)', states.MEDICAID_CATCH_ALL): EMA names a company's Medicaid plan '<company> Medicaid
+    Community Plan', and a state's own program under a spelling the rules do not place (say 'Medicaid of Ohio'; the
+    rules read Kentucky's and Indiana's as their own groups) lands there too, so only the name tells a company's plan
+    from a state's Medicaid (fix6's reading, states._ema_payer_is_denier). None for any other payment: its group
+    decides."""
+    from .states import MEDICAID_CATCH_ALL
+    if group != MEDICAID_CATCH_ALL or not name:
+        return None
+    fam = _family(name)
+    return fam if fam and fam != _family(group) else None
+
+
+def _same_payer_named(group: Any, name: Any, other: Any) -> bool:
+    """Whether a payment EMA posted under payer `name` (its group `group`) is payer group `other`'s: by the groups
+    (_same_payer), except that a company's plan in the Medicaid catch-all is that company's, never the state's Medicaid."""
+    co = _catch_all_company(group, name)
+    if co is not None:
+        return bool(other) and co == _family(other)
+    return _same_payer(group, other)
+
+
 def _by_group(d: dict, group: Any, default: Any) -> Any:
     if not d:
         return default
@@ -444,10 +467,11 @@ def turnaround(conn: sqlite3.Connection, *, ledger: Any = None, today: str | Non
     ema:turnaround:
       svc_p95     the 835s: days from the date of service to a bill's first answer (claim status 1, 19 or 4), service in
                   the last two years; groups with at least 20 bills, else 45 days
-      charge_p95  Production: days from a claim's first charge posting to its first insurance posting (a payment, a $0
-                  answer or any reason code); at least 20 claims, else 45 days. Read from the posting ledger when one is
-                  given (every claim), else kept from the last time it was (while the ledger has not changed since),
-                  else from the store's kept lines (which leave out most claims paid cleanly, so it runs long)"""
+      charge_p95  Production: days from a claim's first charge posting to the payer's first answer on it (a payment, a $0
+                  answer with its proof, or a reason code: first_answer_days; a bare $0 row under a check answers
+                  nothing); at least 20 claims, else 45 days. Worked out from the store's EMA lines, which hold every
+                  line of the posting ledger, when the ledger is given (basis 'ledger'), else kept from the last time it
+                  was (while the ledger has not changed since), else from the lines as they are"""
     _prepare(conn)
     svc: dict = {}
     if _table(conn, "claims") and _table(conn, "transactions"):
@@ -468,38 +492,24 @@ def turnaround(conn: sqlite3.Connection, *, ledger: Any = None, today: str | Non
     stored = _meta(conn, TURNAROUND_KEY, {}) or {}
     rev = _ledger_rev(conn)
     charge: dict = {}
-    if ledger is not None:
-        basis = "ledger"
-        lc = ledger.conn
-        names = {i: n for i, n in lc.execute("SELECT id, name FROM names")}
-        cache: dict = {}
-
-        def grp_of(i: Any) -> str:
-            if i not in cache:
-                cache[i] = er.payer_group_of(conn, names.get(i))[0]
-            return cache[i]
-        lc.create_function("ec_grp", 1, grp_of)
-        newest_post = lc.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
-        since = _add(newest_post, -365 * TURNAROUND_YEARS) or "0000"
-        charge = _sql_percentiles(lc, """SELECT ec_grp(pp) AS grp, CAST(julianday(fa) - julianday(fc) AS INTEGER) AS d FROM (
-                SELECT g.pp AS pp, g.fc AS fc, (SELECT MIN(q.posted) FROM postings q WHERE q.link = g.link AND q.posted >= g.fc
-                       AND (COALESCE(q.ins_paid, 0) <> 0 OR q.check_no IS NOT NULL OR q.grp IS NOT NULL)) AS fa
-                FROM (SELECT p.link AS link, MIN(CASE WHEN COALESCE(p.charges, 0) > 0 THEN p.posted END) AS fc,
-                             MAX(p.primary_payer) AS pp
-                      FROM postings p WHERE p.link IS NOT NULL AND (COALESCE(p.flags, 0) & 17) = 0 GROUP BY p.link) g
-                WHERE g.fc >= ?) WHERE fa IS NOT NULL""", (since,))
-    elif stored.get("charge_basis") == "ledger" and stored.get("ledger_rev") == rev and stored.get("charge"):
+    if ledger is None and stored.get("charge_basis") == "ledger" and stored.get("ledger_rev") == rev and stored.get("charge"):
         basis = "ledger"
         charge = stored["charge"]
-    else:
-        basis = "kept_lines"
+    elif _table(conn, "ema_lines"):
+        # each claim's first charge posting and the payer's first answer since (its bare $0 rows aside: a batch check that
+        # lists a claim it does not pay is no answer, so it never makes the payer look quicker than it is)
+        basis = "ledger" if ledger is not None else "kept_lines"
         newest_post = conn.execute("SELECT MAX(last_posted) FROM ema_lines").fetchone()[0]
         since = _add(newest_post, -365 * TURNAROUND_YEARS) or "0000"
-        charge = _sql_percentiles(conn, """SELECT grp, CAST(julianday(fa) - julianday(fc) AS INTEGER) AS d FROM (
-                SELECT MAX(payer_group) AS grp, MIN(first_charge_posted) AS fc,
-                       MIN(CASE WHEN first_ins_posting >= first_charge_posted THEN first_ins_posting END) AS fa
-                FROM ema_lines WHERE (COALESCE(flags, 0) & 17) = 0 GROUP BY link)
-                WHERE fc >= ? AND fa IS NOT NULL""", (since,))
+        fa = first_answer_days(conn, "ec_tfa")
+        charge = _sql_percentiles(conn, f"""SELECT grp, CAST(julianday(fa) - julianday(fc) AS INTEGER) AS d FROM (
+                SELECT g.grp AS grp, g.fc AS fc, (SELECT MIN(a.d) FROM temp.{fa} a WHERE a.link = g.link AND a.d >= g.fc) AS fa
+                FROM (SELECT link, MAX(payer_group) AS grp, MIN(first_charge_posted) AS fc FROM ema_lines
+                      WHERE (COALESCE(flags, 0) & 17) = 0 GROUP BY link) g
+                WHERE g.fc >= ?) WHERE fa IS NOT NULL""", (since,))
+        _drop(conn, fa)
+    else:
+        basis = "kept_lines"
     out: dict = {}
     for g in sorted(set(svc) | set(charge)):
         if not g:
@@ -1350,18 +1360,28 @@ def _status_claims(conn: sqlite3.Connection, cls: str) -> dict[str, dict]:
     return claims
 
 
-def _still_recoverable(grp: str | None, kind: str | None, first: str | None, svc: str | None, lags: dict, t: str) -> bool:
-    """Whether money written off on a denial is still inside a window that can recover it: the payer's appeal window from
-    EMA's posting less the payer's usual delay, or, for a payer that takes no appeal of an ordinary claim denial (Kentucky
+def _still_recoverable(grp: str | None, kind: str | None, first: str | None, svc: str | None, lags: dict, t: str,
+                       payer: str | None = None, carc: str | None = None, own_deadline: str | None = None) -> bool:
+    """Whether money written off on a denial is still inside a window that can recover it: the item's own last day when an
+    item on file covers the line (`own_deadline`: the date the product gave it); else the payer's appeal window from EMA's
+    posting less the payer's usual delay, with the plan facts the product passes (codes.rule_facts: the payer's name, the
+    reason), the payer's own limit where later; or, for a payer that takes no appeal of an ordinary claim denial (Kentucky
     Medicaid, 907 KAR 1:671), its corrected or new claim's limit from the date of service (907 KAR 1:673: twelve months).
     The owner's rule 2 counts written-off money with what is still recoverable (deadlines review r1-4)."""
-    rule = appeal_rule(grp, kind)
+    if own_deadline:
+        return str(own_deadline)[:10] >= t
+    facts = {k: v for k, v in (("payer_name", payer), ("carc", carc)) if v}
+    rule = appeal_rule(grp, kind, **facts)
     if rule.get("no_appeal"):
-        fix = corrected_rule(grp, kind)
+        fix = corrected_rule(grp, kind, **facts)
         end = window_end(svc, fix) if fix and svc else None
         return bool(end) and end >= t
     start = _add(first, -_lag(lags, grp, "p95"))
-    return bool(start) and (_add(start, rule["days"]) or "") >= t
+    if not start:
+        return False
+    used = rule_at(start, rule) or rule
+    ends = [d for d in (window_end(start, used) or _add(start, used["days"]), _legal_deadline(start, used)) if d]
+    return bool(ends) and max(ends) >= t
 
 
 def _filing(grp: str | None, kind: str | None, svc: str | None, payer: str | None = None) -> tuple[str | None, str]:
@@ -1580,25 +1600,31 @@ def answers_through(conn: sqlite3.Connection, payer_group: str | None, newest_83
 _REASON_SQL = "(zr.grp <> '' OR zr.code GLOB 'N[0-9]*' OR zr.code GLOB 'M[0-9]*' OR zr.code GLOB 'MA[0-9]*')"
 
 
-def zero_answer_sql(y: str = "y") -> str:
+def zero_answer_sql(y: str = "y", same_check: bool = True) -> str:
     """SQL that is true for a $0 row EMA posted under a check (ema_line_payments, alias `y`: a check number and no insurance
     money) that is a payer's $0 answer: one that carries its proof, an allowed amount on the row, or the payer's reason
     (a CARC of any group: a denial, the contractual write-down, the patient's share; or a remark code) posted on the same
     line that day. A bare $0 row (a batch check that lists a claim it does not pay: no reason, no allowed amount, no
     adjustment, nothing put on the patient) answers nothing: the claim may be paid weeks later on another check, or never.
     EMA posts a payment's reasons and adjustments as rows of their own, without the check number, on the same day, and
-    repeats the line's allowed amount on each of its rows: an allowed amount says the payer adjudicated the line. A store
-    whose summary keeps the routine reasons (CO-45, the patient's share) of only some lines reads a $0 answer whose only
-    proof is one of those as bare until it holds it: the claim stays listed, never dropped."""
+    repeats the line's allowed amount on each of its rows: an allowed amount says the payer adjudicated the line. A $0 row
+    on a check of the payer that paid another line of the same EMA claim (the same check number and payer) is its answer
+    too: the payer adjudicated the claim on that check and paid nothing on this line (a second payer that pays the
+    procedures' coinsurance and not the visit's copay; review fx-ema-r1-4). A store whose summary keeps the routine
+    reasons (CO-45, the patient's share) of only some lines reads a $0 answer whose only proof is one of those as bare
+    until it holds it: the claim stays listed, never dropped. same_check=False leaves the same-check reading out (a caller
+    that must tell a $0 row's own proof from its check's: detect.run_secondary_not_billed)."""
+    check = (f" OR EXISTS (SELECT 1 FROM ema_line_payments zck WHERE zck.link = {y}.link AND zck.check_no = {y}.check_no "
+             f"AND zck.payer = {y}.payer AND COALESCE(zck.ins_paid, 0) > 0)") if same_check else ""
     return (f"(COALESCE({y}.check_no, '') <> '' AND COALESCE({y}.ins_paid, 0) = 0 AND (COALESCE({y}.allowed, 0) <> 0 "
             f"OR EXISTS (SELECT 1 FROM ema_line_reasons zr WHERE zr.link = {y}.link AND zr.svc = {y}.svc AND zr.cpt = {y}.cpt "
-            f"AND {_REASON_SQL} AND (zr.first_posted = {y}.posted OR zr.last_posted = {y}.posted))))")
+            f"AND {_REASON_SQL} AND (zr.first_posted = {y}.posted OR zr.last_posted = {y}.posted)){check}))")
 
 
-def answer_row_sql(y: str = "y") -> str:
+def answer_row_sql(y: str = "y", same_check: bool = True) -> str:
     """SQL that is true for an EMA payment row (ema_line_payments, alias `y`) that is a payer's answer: insurance money on
     it (a payment, or one taken back), or a $0 answer that carries its proof (zero_answer_sql)."""
-    return f"(COALESCE({y}.ins_paid, 0) <> 0 OR {zero_answer_sql(y)})"
+    return f"(COALESCE({y}.ins_paid, 0) <> 0 OR {zero_answer_sql(y, same_check)})"
 
 
 def line_answered_sql(l: str = "l") -> str:
@@ -1608,6 +1634,22 @@ def line_answered_sql(l: str = "l") -> str:
     reason posted on its own). A line whose only answers are $0 rows with none of these was not answered."""
     return (f"(COALESCE({l}.ins_paid, 0) <> 0 OR COALESCE({l}.contractual, 0) <> 0 OR COALESCE({l}.noncontractual, 0) <> 0 "
             f"OR COALESCE({l}.allowed, 0) <> 0 OR COALESCE({l}.ins_answer_rows, 0) > COALESCE({l}.zero_pay_rows, 0))")
+
+
+def first_answer_days(conn: sqlite3.Connection, name: str = "ec_fa") -> str:
+    """temp.<name> (link, svc, cpt, d): the day each EMA claim line was first answered by a payer, its bare $0 rows aside
+    (the never-answered rule's predicates: an answer row, answer_row_sql, insurance money or a $0 row under a check with
+    its proof; or the payer's reason posted on the line, a CARC of any group or a remark code). A line no payer answered
+    has no row. Returns the table's name."""
+    conn.execute(f"DROP TABLE IF EXISTS temp.{name}")
+    conn.execute(f"""CREATE TEMP TABLE {name} AS SELECT link, svc, cpt, MIN(d) AS d FROM (
+                     SELECT y.link AS link, y.svc AS svc, y.cpt AS cpt, y.posted AS d FROM ema_line_payments y
+                     WHERE {answer_row_sql('y')}
+                     UNION ALL
+                     SELECT zr.link, zr.svc, zr.cpt, zr.first_posted FROM ema_line_reasons zr WHERE {_REASON_SQL})
+                     WHERE d IS NOT NULL GROUP BY link, svc, cpt""")
+    conn.execute(f"CREATE INDEX temp.ix_{name} ON {name}(link, svc, cpt)")
+    return name
 
 
 def _bare_zero_rows(conn: sqlite3.Connection, links: Iterable[int]) -> dict[int, dict]:
@@ -2198,6 +2240,25 @@ def _threshold(f: dict) -> int:
     return int(math.ceil(CLOSE_SHARE * e)) if e > 0 else 1
 
 
+def _paid_with_patient(same: int, cover: int, f: dict) -> bool:
+    """Whether the item's own payer's later payment pays the item (C6), the patient's money on the line counted: with
+    nothing from the patient, the payment reaches _threshold (half of what the item is expected to bring); with the
+    patient's money beside it (`cover`: the copay, coinsurance or deductible the patient paid on the line), the payer's
+    payment is judged against the share it owes, what the item is expected to bring less what the patient paid, and must
+    reach half of that (CLOSE_SHARE), as a payment with no copay is judged against half of the whole. A token payment
+    beside a large copay is a partial payment, never 'paid' (review fx-ema-r1-2, r2-6: $1 beside a $60 copay on a $100
+    service, $12 beside $40). A short payment never counts the patient's money (the caller gives no cover)."""
+    if same <= 0:
+        return False
+    if same >= _threshold(f):
+        return True
+    if cover <= 0 or f.get("category") in SHORT_CATEGORIES:
+        return False
+    e = f.get("expected_cents") or f.get("shortfall_cents") or 0
+    owed = max(0, int(e) - int(cover))
+    return same >= int(math.ceil(CLOSE_SHARE * owed))
+
+
 def _pattern(f: dict, carc: str | None) -> str:
     mods = (f.get("modifiers") or "").split(",")[0].strip()
     return f"{f.get('payer_group') or ''}|{f.get('procedure_code') or ''}|{mods}|{carc or ''}"
@@ -2353,7 +2414,7 @@ def _moved_stands(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
 def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr, lags, policy, no_patient: bool = False,
                 same: Callable | None = None) -> dict:
     fid = f["finding_id"]
-    same = same or (lambda group, f_: _same_payer(group, f_.get("payer_group")) if f_.get("payer_group") else False)
+    same = same or (lambda group, f_, payer=None: _same_payer_named(group, payer, f_.get("payer_group")) if f_.get("payer_group") else False)
     ema_item = f.get("signal") == "EMA_DENIED"
     bill = _bill(f.get("patient_control_number"))
     res: dict = {"link": None, "bill": bill, "as_of": None, "covered": False, "facility": 0, "shared_line": False,
@@ -2467,12 +2528,12 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
                 after = bool(when) and bool(remit_day) and when > remit_day
             else:
                 after = bool(anchor) and (p["posted"] or "") >= anchor
-                if ema_item and after and (p["posted"] or "") == anchor and not same(p["group"], f):
+                if ema_item and after and (p["posted"] or "") == anchor and not same(p["group"], f, p["payer"]):
                     # another payer's payment posted the day of an EMA-only denial came before it (C5's own rule): the first
                     # payer's payment on the posting that also carried the second payer's denial never pays that denial
                     after = False
             row = {"check": p["check"], "posted": p["posted"], "payer": p["payer"], "group": p["group"], "cents": p["cents"],
-                   "kind": "835" if via835 else "ema", "same": same(p["group"], f),
+                   "kind": "835" if via835 else "ema", "same": same(p["group"], f, p["payer"]),
                    "link": ln["link"], "date_835": p["date_835"] if via835 else None, "svc": ln["svc"], "cpt": ln["cpt"]}
             pool = "835" if via835 else ("same" if row["same"] else "other")
             cents = p["cents"]
@@ -2516,6 +2577,7 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
             if z["last"] and anchor and z["last"] > anchor:
                 others_later = True
         res["patient_after"] += ln["pat_after_denial"] or 0
+        res["patient_paid"] = res.get("patient_paid", 0) + (ln["pat_paid_joined"] or 0)
     res["anchor"], res["anchor_basis"] = anchors[0] if anchors else (None, None)
     # what was paid before the item and still stands: takebacks (by the item's own remittance, or later) net it out
     res["taken_back"] = takeback
@@ -2527,6 +2589,17 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         res["paid_before"] = 0
     if not res["paid_before"]:
         paid_before_rows = []
+    # what the patient paid on the line (the copay, coinsurance or deductible the payer put on the patient) is part of what
+    # a service brings: the item's own payer's later payment of its part on a check, the patient's share beside it, pays the
+    # item (an Anthem Medicare Advantage 99212 paid in full with the copay is paid, not half paid). Never for a short
+    # payment (its shortfall already leaves the patient's share out), never beside another payer's payment or a posting
+    # that only moved a payment from another line (no check), and never for an item valued at the balance a first payer
+    # left (that patient's money is the first payer's share, not this payer's)
+    balance_left = ema_item and any("balance left" in str(b) for b in _ev(f).get("expected_basis") or [])
+    checked = any(r["same"] and r["check"] and r["cents"] > 0 for r in after_ema)
+    cover = (max(0, res.get("patient_paid") or 0) if checked and not balance_left and f.get("category") not in SHORT_CATEGORIES
+             else 0)
+    res["patient_cover"] = cover
     after_ema.sort(key=lambda r: (r["posted"] or "", r["check"] or ""))
     if after_ema:
         a = after_ema[0]
@@ -2573,7 +2646,7 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     nothing_after = not any_after and res["patient_after"] == 0 and not others_later
     pay_after = res["paid_after_same"] + res["paid_after_other"]
     on = None
-    if res["paid_after_same"] > 0 and res["paid_after_same"] >= thr:
+    if _paid_with_patient(res["paid_after_same"], cover, f):
         out, on = "paid_after", (res["first_paid_after"] or {}).get("date")
     elif res["paid_after_other"] > 0 and res["paid_after_other"] >= thr:
         out, on = "paid_after_other", (res["first_paid_after"] or {}).get("date")
@@ -2660,13 +2733,18 @@ def learn_payer_equivalence(conn: sqlite3.Connection) -> dict:
 
 
 def _payer_matcher(conn: sqlite3.Connection, own_payer: dict) -> Callable[[Any, dict], bool]:
-    """same(EMA payer group, item): the item's own payer, by the group names (_same_payer) or by the EMA groups seen paying
-    the item's 835 payer's own traces (learn_payer_equivalence)."""
+    """same(EMA payer group, item, EMA payer name): the item's own payer, by the group names (_same_payer) or by the EMA
+    groups seen paying the item's 835 payer's own traces (learn_payer_equivalence). A company's plan EMA names into the
+    Medicaid catch-all is that company's (_catch_all_company), never the state's Medicaid: a Medicare Advantage plan's
+    check posted under '<company> Medicaid Community Plan' never pays a Medicaid denial as Medicaid's own."""
     equiv = {k: set(v) for k, v in (_meta(conn, EQUIV_KEY, {}) or {}).items() if isinstance(v, list)}
 
-    def same(group: Any, f: dict) -> bool:
+    def same(group: Any, f: dict, payer: Any = None) -> bool:
         if not group:
             return False
+        co = _catch_all_company(group, payer)
+        if co is not None:
+            return bool(f.get("payer_group")) and co == _family(f.get("payer_group"))
         if f.get("payer_group") and _same_payer(group, f.get("payer_group")):
             return True
         name = own_payer.get(f.get("transaction_key") or "") or f.get("payer_name")
@@ -2710,7 +2788,10 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
     Same payer group and at least half of what the item is expected to bring (95% of the shortfall for downcoding and
     underpayment) closes it; another payer's payment gives a hint about a second payer; less gives a "partly paid per
     EMA" hint; a payment before the item's remittance gives the paid-before hint (G4), never a closure. Later payments
-    an 835 carries are the archive rules' (the 835 decides). Patient payments never count.
+    an 835 carries are the archive rules' (the 835 decides). The patient's money counts only beside the payer's own
+    payment on a check (o['patient_cover']): the payer's payment is then judged against the share it owes, half of what
+    the item is expected to bring less what the patient paid (_paid_with_patient), and the patient's part is returned
+    ('patient_cents', 'patient_date') for a proof row of its own.
     Returns {finding id: {'action': 'close'|'hint_other_payer'|'hint_partial'|'hint_paid_before', 'paid_cents', 'date',
     'check_tail', 'payer', 'note', 'hint', 'used': (check, posted, link, date of service, code)}}. The wiring calls _mark_paid for 'close' when
     REMITWATCH_EMA_CLOSES is on, else sets the hint; with closes=False the note is worded as a hint."""
@@ -2732,15 +2813,23 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
         same, other = o.get("paid_after_same") or 0, o.get("paid_after_other") or 0
         rows = [p for p in o.get("payments") or [] if p["kind"] == "ema"]
         as_of = o.get("as_of")
-        if same > 0 and same >= thr:
+        # the patient's share beside the payer's payment (o['patient_cover']: what the patient paid on the line; none for a
+        # short payment): the payer's payment is then judged against the share it owes (_paid_with_patient)
+        cover = o.get("patient_cover") or 0
+        if _paid_with_patient(same, cover, f):
             first = min((p for p in rows if p["same"]), key=lambda p: (p["posted"] or "", p["check"] or ""))
             payer = first["payer"] or first["group"]
             note = (f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} (check ending {_tail(first['check'])}, "
-                    f"postings through {as_of}). Reopen it if that payment is for something else.")
+                    + (f"and {_usd(cover)} paid by the patient on the line, " if same < thr and cover else "")
+                    + f"postings through {as_of}). Reopen it if that payment is for something else.")
             out[fid] = {"action": "close", "paid_cents": same, "date": first["posted"], "check_tail": _tail(first["check"]),
                         "payer": payer, "note": note,
                         "hint": f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} (no 835): check before marking it paid",
-                        "used": _used(first)}
+                        "used": _used(first),
+                        # the patient's money that, beside the payer's payment, made the item paid: a proof row of its own
+                        # (detect._close_from_ema), dated by its newest posting where the store keeps it
+                        "patient_cents": cover if same < thr and cover else 0,
+                        "patient_date": o.get("patient_paid_on") if same < thr and cover else None}
             b = o.get("paid_before_first") or {}
             if (f.get("category") in ("denial", "bundling") and not (f.get("paid_cents") or 0) and b
                     and (o.get("paid_before") or 0) >= thr and (o.get("balance") or 0) < -CREDIT_MIN):
@@ -3071,7 +3160,10 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     mapped = [ln for ln in lines if ln["bill"] and ln["map_method"] != "conflict"]
     by_bill = _lines_835_by_bill(conn, {ln["bill"] for ln in mapped})
     nk_keys = {(ln["name_key"], ln["svc"], ln["cpt"]) for ln in lines if not (ln["facility"] or 0) and ln["name_key"] is not None}
-    seen_nk = _name_day_codes_835(conn, nk_keys)
+    seen_nk = _name_day_codes_835(conn, nk_keys, with_parts=True)
+    # the part of the service each EMA line bills (EMA's lines carry no modifiers): an 835 line for the patient, date and
+    # code answers it only for its own part (part_fits: the TC paid never covers a denial of the reading, 26)
+    own_parts = line_parts(conn, {(ln["link"], ln["svc"], ln["cpt"]) for ln in lines if ln["name_key"] is not None})
     paid_elsewhere = _paid_on_other_links(conn, nk_keys)
     claim_ids = _claim_id_of_links(conn, {ln["link"] for ln in lines})
     items: dict[tuple, dict] = {}
@@ -3080,8 +3172,9 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     decisions = _meta(conn, POLICY_KEY, {}) or {}
     ema_share: dict[tuple, list] = {}
 
-    def never_paid(grp: str, cpt: str) -> tuple | None:
-        """(paid, answered) when this payer pays the code on 5% or less of at least 20 answered 2025-2026 lines."""
+    def measure(grp: str, cpt: str) -> tuple | None:
+        """(paid, answered): the services of this payer and code since 2025 it answered and paid (rule 4.2's measure),
+        when at least 20 are on file, else None."""
         got = None
         if paid_share is not None:
             try:
@@ -3090,16 +3183,23 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
                 got = None
         if not got:
             if not ema_share:
-                # an answered line (a bare $0 row under a check answers nothing: line_answered_sql)
-                for g, c, n, paid in conn.execute(f"""SELECT payer_group, cpt, COUNT(*), SUM(COALESCE(ins_paid, 0) > 0) FROM ema_lines
-                                                     WHERE svc >= ? AND ({line_answered_sql('ema_lines')} OR denial_first_posted IS NOT NULL)
-                                                     GROUP BY 1, 2""", (POLICY_SINCE,)):
+                # per service (the patient, date and code, on any of EMA's claims for it: a claim denied and sent again is
+                # one service), by its final outcome: answered when any of its lines was (a bare $0 row under a check answers
+                # nothing: line_answered_sql), paid when insurance money stands on any of them (rule 4.2 counts services,
+                # never answers, so a service denied three times and then paid is one paid service)
+                for g, c, n, paid in conn.execute(f"""SELECT g, c, COUNT(*), SUM(paid > 0) FROM (
+                            SELECT payer_group AS g, cpt AS c, MAX(COALESCE(ins_paid, 0)) AS paid,
+                                   MAX({line_answered_sql('ema_lines')} OR denial_first_posted IS NOT NULL) AS answered
+                            FROM ema_lines WHERE svc >= ? GROUP BY payer_group, cpt, svc, COALESCE(name_key, -link))
+                        WHERE answered GROUP BY g, c""", (POLICY_SINCE,)):
                     ema_share[(g, c)] = [paid or 0, n or 0]
                 ema_share[("", "")] = [0, 0]
             got = ema_share.get((grp, cpt))
-        if got and got[1] >= POLICY_MIN_ANSWERED and got[0] <= POLICY_MAX_PAID_SHARE * got[1]:
-            return tuple(got)
-        return None
+        return tuple(got) if got and got[1] >= POLICY_MIN_ANSWERED else None
+
+    def never_paid(m: tuple | None) -> tuple | None:
+        """The measure when this payer pays the code on 5% or less of at least 20 answered 2025-2026 services."""
+        return m if m and m[0] <= POLICY_MAX_PAID_SHARE * m[1] else None
     for ln in lines:
         key = (ln["link"], ln["svc"], ln["cpt"])
         rs = [r for r in reasons.get(key, []) if r[0] not in ("", "PR") and r[2] not in ROUTINE_CLASSES and r[1] not in C5_SKIP_CODES]
@@ -3111,7 +3211,8 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         if net < DENIAL_MIN and not ar_row:
             continue
         # 2. no 835 coverage (the patient-day key of a professional line too: a corrected claim under a new bill)
-        if not (ln["facility"] or 0) and ln["name_key"] is not None and (ln["name_key"], ln["svc"], ln["cpt"]) in seen_nk:
+        if not (ln["facility"] or 0) and ln["name_key"] is not None and part_fits(
+                own_part(own_parts.get(key)), seen_nk.get((ln["name_key"], ln["svc"], ln["cpt"])) or ()):
             continue
         if ln["bill"] and ln["map_method"] != "conflict":
             codes = {ln["cpt"]}
@@ -3151,7 +3252,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             # a payment of the denying payer's posted the day of its denial paid the line (C6 reads it the same way), except
             # beside an A/R denial with no reason posted: there it is the part the payer paid, the A/R's amount the rest
             ar_partial = bool(ar_row) and net < DENIAL_MIN
-            if day > first_denial or (day == first_denial and _same_payer(p[3], dgrp) and not ar_partial):
+            if day > first_denial or (day == first_denial and _same_payer_named(p[3], p[2], dgrp) and not ar_partial):
                 paid_after += p[4]
             else:
                 paid_before.append(p)
@@ -3211,9 +3312,11 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             got = sum(v for lk2, v in paid_elsewhere.get((ln["name_key"], ln["svc"], ln["cpt"]), {}).items() if lk2 != ln["link"])
             if got >= PAID_SINCE_SHARE * expected:
                 continue
-        pol = never_paid(dgrp, ln["cpt"])
+        m = measure(dgrp, ln["cpt"])
+        pol = never_paid(m)
         # a payer and code the research covers for this payer group counts too (remitwatch.rarely_paid, the owner's
-        # decision 4), on the dates its rule covers: a pattern per period where the rule changed on a date
+        # decision 4), on the dates its rule covers: a pattern per period where the rule changed on a date. The owner's
+        # table shows the measure whenever it is known, rare or not, so a researched pattern says how often the payer paid
         res = rarely_paid.entry_for(dgrp, ln["cpt"], ln["svc"])
         if pol or rarely_paid.applies(res, False):
             # the owner's table shows the pattern whatever the decision (so it can be changed back); its lines are left out
@@ -3223,8 +3326,8 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             dec_p = rarely_paid.decision_for(decisions, key_p)
             decision = (dec_p or {}).get("decision") or "pursue"
             lo = left_out.setdefault("payer_policy", {"n": 0, "cents": 0, "patterns": {}})
-            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": pol[0] if pol else None,
-                                                   "answered": pol[1] if pol else None, "n": 0, "cents": 0, "decision": decision,
+            pt = lo["patterns"].setdefault(key_p, {"group": dgrp, "code": ln["cpt"], "paid": m[0] if m else None,
+                                                   "answered": m[1] if m else None, "n": 0, "cents": 0, "decision": decision,
                                                    "default": dec_p is None,
                                                    "researched": res["verdict"] if rarely_paid.applies(res, bool(pol)) else None})
             pt["n"] += 1
@@ -3312,6 +3415,7 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
                             WHERE COALESCE(z.contractual, 0) <> 0 AND z.grp NOT IN ('', 'PR')
                               AND z.reason_class NOT IN ({_routine_sql()})""").fetchall()
     fkeys = _finding_line_keys(conn)
+    fdl = _finding_line_deadlines(conn)
     ekeys = _ema_item_links(conn)
     by_bill = _lines_835_by_bill(conn, {r[9] for r in rows if r[9] and r[10] != "conflict"})
     nk835 = _name_day_codes_835(conn, {(r[11], r[1], r[2]) for r in rows if r[11] is not None and not r[12]})
@@ -3341,7 +3445,8 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
             part = "other_835"
         it["split"][part] += contr
         totals[part] += contr
-        if _still_recoverable(grp, kind, first, svc, lags, t):
+        own = _own_deadline(fdl, (bill, svc, cpt), grp) if mapped else None
+        if _still_recoverable(grp, kind, first, svc, lags, t, payer=payer, carc=code, own_deadline=own):
             it["inside"] += contr
     out = []
     for (grp, reason, year), it in sorted(groups.items()):
@@ -3372,6 +3477,43 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
     _set_meta(conn, C7_KEY, {"cents": sum(totals.values()), "split_cents": dict(totals), "items": len(out), "at": _now()})
     conn.commit()
     return out
+
+
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _finding_line_deadlines(conn: sqlite3.Connection) -> dict[tuple, list[tuple]]:
+    """{(bill, date, code): [(payer group, last day)]}: each 835 item on file for the line with its payer group and its last
+    day (its own deadline, or the payer's own limit where later), so an inside-the-window count reads a line an item
+    covers by the date of the item of the payer whose write-off it counts (_own_deadline), never by another payer's item
+    on the same bill, date and code (review fx-ema-r2-7). A date that is empty or not a day is no date (r2-8: an empty
+    deadline once stopped C7 and C9 for the whole store)."""
+    out: dict[tuple, list] = defaultdict(list)
+    if not _table(conn, "findings"):
+        return out
+    have = _cols(conn, "findings")
+    if not {"patient_control_number", "service_date", "procedure_code", "appeal_deadline"} <= have:
+        return out
+    pick = ", ".join(c if c in have else "NULL" for c in ("original_procedure_code", "billed_code", "legal_deadline", "payer_group"))
+    where = " AND COALESCE(stale, 0) = 0" if "stale" in have else ""
+    for pcn, svc, code, ocode, bcode, legal, grp, dl in conn.execute(
+            f"""SELECT patient_control_number, service_date, procedure_code, {pick}, appeal_deadline FROM findings
+                WHERE patient_control_number IS NOT NULL AND appeal_deadline IS NOT NULL{where}"""):
+        days = [str(x)[:10] for x in (dl, legal) if x and _DAY_RE.match(str(x)[:10])]
+        if not days:
+            continue
+        b, last = _bill(pcn), max(days)
+        for c in {code, ocode, bcode} - {None, ""}:
+            out[(b, svc, c)].append((grp, last))
+    return out
+
+
+def _own_deadline(fdl: dict, key: tuple, group: str | None) -> str | None:
+    """The latest last day of the items on file for the line (bill, date, code) whose payer is `group` (the payer group of
+    the write-off being counted), or None when no item of that payer covers the line: the payer's own rule dates it then
+    (_still_recoverable)."""
+    got = [last for g, last in fdl.get(key) or () if g and group and _same_payer(g, group)]
+    return max(got) if got else None
 
 
 def _finding_line_keys(conn: sqlite3.Connection) -> set[tuple]:
@@ -3426,6 +3568,7 @@ def timely_writeoffs(conn: sqlite3.Connection, *, today: str | None = None) -> d
     t = _today(today)
     lags = _lags(conn)
     fkeys = _finding_line_keys(conn)
+    fdl = _finding_line_deadlines(conn)
     ekeys = _ema_item_links(conn)
     out: dict = {"cents": 0, "rows": 0, "by_month": {}, "by_group": {}, "covered_cents": 0, "inside_cents": 0}
     gcache: dict = {}
@@ -3443,7 +3586,8 @@ def timely_writeoffs(conn: sqlite3.Connection, *, today: str | None = None) -> d
         out["by_group"][grp] = out["by_group"].get(grp, 0) + cents
         if (bill and (bill, svc, cpt) in fkeys) or lk in ekeys:
             out["covered_cents"] += cents
-        if _still_recoverable(grp, kind, first, svc, lags, t):
+        if _still_recoverable(grp, kind, first, svc, lags, t, payer=payer,
+                              own_deadline=_own_deadline(fdl, (bill, svc, cpt), grp) if bill else None):
             out["inside_cents"] += cents
     return out
 

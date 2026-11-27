@@ -9381,21 +9381,44 @@ class Detector:
         return self._ratios.get((payer_group, code))
 
     def _paid_share(self, payer_group: str | None, code: str | None) -> tuple[int, int] | None:
-        """(lines paid, lines answered) for a payer group and code on the 835s of services since 2025, answered as the
-        primary payer (a payment still standing counts as paid), or None when fewer than 20 are on file. EMA's vocabulary names some groups apart
-        ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group of the same family and kind counts."""
+        """(services paid, services answered) for a payer group and code, services since 2025 answered as the primary
+        payer, or None when fewer than 20 are on file. A service is the patient (the 835's name key, else the bill), the
+        date, the code and the part (26, TC or the whole), counted once by its final outcome however often it was
+        answered: paid when a payment of it still stands on any answer, or EMA's postings show the payer's insurance money
+        on it, net of what it took back (a payment no 835 carries). Rule 4.2 asks whether the payer pays the code, so a
+        service denied several times and then paid is one paid service, never several unpaid answers (Kentucky and Indiana
+        Medicaid). A payment EMA posted under a company's plan the name rules put in the Medicaid catch-all is that
+        company's, never the state's Medicaid's (ema_checks._same_payer_named, fix6's reading). EMA's vocabulary names
+        some groups apart ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group of the same
+        family and kind counts."""
         if self.__dict__.get("_share") is None:
             from . import ema_checks as ec
-            share: dict[tuple, list] = defaultdict(lambda: [0, 0])
+            from .codes import component_of
+            names = self._share_patients()
+            ema_paid = self._share_ema_paid()
+            services: dict[tuple, list] = {}
             for l in self.lines:
                 # its answers as the primary payer (paid, or denied as primary): a second payer's payments of the cost share
                 # say nothing of whether the payer pays the code itself
                 if (l.get("service_date") or "") < ec.POLICY_SINCE or not l.get("procedure_code") \
                         or l.get("claim_status_code") not in ("1", "4", "19"):
                     continue
-                a = share[(l["payer_group"], l["procedure_code"])]
+                who = names.get(l["claim_key"]) or ("bill", bill_of(l["patient_control_number"]))
+                key = (l["payer_group"], l["procedure_code"], who, l["service_date"], component_of(l.get("modifiers_list")))
+                s = services.setdefault(key, [False, names.get(l["claim_key"])])
+                if (self.standing.get(l["line_key"]) or 0) > 0:
+                    s[0] = True
+            share: dict[tuple, list] = defaultdict(lambda: [0, 0])
+            # the service's own names (s_...): the parameters payer_group and code are the question asked, read after the
+            # loop (a loop that rebound them answered the run's first question for the last service read)
+            for (s_grp, s_code, _who, s_svc, _part), (paid, nk) in services.items():
+                if not paid and nk is not None:
+                    # the payer's own money EMA shows on the service, its takebacks netted out: what still stands
+                    paid = sum(c for g, name, c in ema_paid.get((nk, s_svc, s_code), ())
+                               if ec._same_payer_named(g, name, s_grp)) > 0
+                a = share[(s_grp, s_code)]
                 a[1] += 1
-                a[0] += 1 if (self.standing.get(l["line_key"]) or 0) > 0 else 0
+                a[0] += 1 if paid else 0
             self._share = dict(share)
         got = self._share.get((payer_group, code))
         if not got:
@@ -9405,6 +9428,47 @@ class Detector:
             hits = [v for (g, c), v in self._share.items() if c == code and ec._family(g) == fam and kinds(g) == kinds(payer_group)]
             got = [sum(v[0] for v in hits), sum(v[1] for v in hits)] if hits else None
         return tuple(got) if got and got[1] >= 20 else None
+
+    def _share_patients(self) -> dict:
+        """{claim key: the 835 patient's name key} for _paid_share (the corrected name where the payer gave one), {} when
+        the store cannot key names (no salt)."""
+        out: dict = {}
+        try:
+            from . import ema_checks as ec
+            ec._prepare(self.conn)
+            for ck, nk in self.conn.execute(
+                    """SELECT claim_key, COALESCE(rw_name_key(COALESCE(corrected_patient_last, patient_last),
+                                                              COALESCE(corrected_patient_first, patient_first)),
+                                                  rw_name_key(patient_last, patient_first)) FROM claims"""):
+                if nk is not None:
+                    out[ck] = nk
+        except sqlite3.Error as exc:
+            from .runlog import caught
+            caught(exc, "paid_share.patients")      # the bill stands for the patient then
+        return out
+
+    def _share_ema_paid(self) -> dict:
+        """{(name key, date, code): [(payer group, payer name, cents)]}: the insurance money EMA posted on the patient's
+        service (any of its EMA claims, never the surgery center's) by each payer it was posted under, payments and the
+        takebacks posted later on other checks summed together, for _paid_share: a payment no 835 carries still says the
+        payer paid, one it took back in full says nothing. The name tells a company's plan in the Medicaid catch-all from
+        the state's own program."""
+        out: dict = defaultdict(list)
+        if not self.ema_on:
+            return out
+        try:
+            from . import ema_checks as ec
+            for nk, svc, cpt, grp, payer, cents in self.conn.execute(
+                    """SELECT l.name_key, l.svc, l.cpt, y.payer_group, y.payer, SUM(y.ins_paid) FROM ema_line_payments y
+                       JOIN ema_lines l ON l.link = y.link AND l.svc = y.svc AND l.cpt = y.cpt
+                       WHERE COALESCE(y.ins_paid, 0) <> 0 AND l.name_key IS NOT NULL AND COALESCE(l.facility, 0) = 0 AND l.svc >= ?
+                       GROUP BY 1, 2, 3, 4, 5""", (ec.POLICY_SINCE,)):
+                if grp and cents:
+                    out[(nk, svc, cpt)].append((grp, payer, int(cents)))
+        except sqlite3.Error as exc:
+            from .runlog import caught
+            caught(exc, "paid_share.ema")
+        return out
 
     def fold_payer_policy(self) -> None:
         """Denials from the remittances of a code the payer pays on 5% or less of at least 20 lines it answered as primary
@@ -10214,14 +10278,24 @@ class Detector:
                 self.ema_counts["c6_" + str(act)] += 1
 
     def _close_from_ema(self, f: dict, r: dict, o: dict, how: str, note: str) -> None:
-        """Close an item by a payment EMA posted on a check no 835 carries, with that payment as the proof row."""
+        """Close an item by a payment EMA posted on a check no 835 carries, with that payment as the proof row, and the
+        patient's money on the line as a row of its own where it decided the verdict (C6's copay rule: the payer's payment
+        judged against the share it owes), so the rows add up to what the item calls paid (review fx-ema-r1-3)."""
         payer, cents, when = r.get("payer") or "insurance", r.get("paid_cents") or 0, r.get("date")
+        proof = [{"date": when, "source": "production", "kind": "payment", "payer": payer, "amount_cents": cents,
+                  "codes": [], "text": f"EMA posted {_usd(cents)} from {payer} on a check ending {r.get('check_tail') or ''} "
+                                       "that no 835 carries", "decisive": True}]
+        pat, pat_on = int(r.get("patient_cents") or 0), r.get("patient_date")
+        if pat > 0:
+            proof.append({"date": pat_on, "source": "production", "kind": "patient_payment", "payer": "the patient",
+                          "amount_cents": pat, "codes": [], "decisive": True,
+                          "text": f"EMA shows {_usd(pat)} paid by the patient on the line (copay, coinsurance or deductible), "
+                                  + (f"the newest posting on {pat_on}" if pat_on else "its posting date not kept by the store")})
         detail = {"payment_date": when, "claim": f.get("patient_control_number"), "paid_cents": cents, "how": how,
                   "trace": f"EMA check ending {r.get('check_tail') or ''}", "source": "EMA Production", "payer": payer,
-                  "ema_link": o.get("link"), "postings_through": o.get("as_of"),
-                  "proof": [{"date": when, "source": "production", "kind": "payment", "payer": payer, "amount_cents": cents,
-                             "codes": [], "text": f"EMA posted {_usd(cents)} from {payer} on a check ending {r.get('check_tail') or ''} "
-                                                  "that no 835 carries", "decisive": True}]}
+                  "ema_link": o.get("link"), "postings_through": o.get("as_of"), "proof": proof}
+        if pat > 0:
+            detail["patient_paid_cents"] = pat
         used = ("ema",) + tuple(r.get("used") or (when, r.get("check_tail"), o.get("link")))
         self._mark_paid(f, when, cents if r.get("recover_cents") is None else max(0, min(cents, r["recover_cents"])), note, detail,
                         used=used)
@@ -10342,10 +10416,14 @@ class Detector:
                 self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
                 self.conn.execute("CREATE TEMP TABLE dt_links (link INTEGER, svc TEXT, cpt TEXT)")
                 self.conn.executemany("INSERT INTO temp.dt_links VALUES (?,?,?)", {(r[3], r[1], r[2]) for r in rows})
-                for lk, svc, cpt, grp, cents, posted in self.conn.execute(
-                        """SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0), y.posted FROM temp.dt_links d
-                           JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
-                    pays[(lk, svc, cpt)].append((grp, cents, posted))
+                # each payment row and whether it answers (ema_checks.answer_row_sql: a bare $0 row under a check, with no
+                # reason, allowed amount or adjustment, is no second payer's answer), and whether only its check makes it
+                # one (a $0 row on the check that paid another line of the claim: run_secondary_not_billed reads it so)
+                for lk, svc, cpt, grp, cents, posted, answer, own in self.conn.execute(
+                        f"""SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0), y.posted, {ec.answer_row_sql('y')},
+                                   {ec.answer_row_sql('y', same_check=False)}
+                            FROM temp.dt_links d JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
+                    pays[(lk, svc, cpt)].append((grp, cents, posted, bool(answer), bool(own)))
                 for lk, svc, cpt, zg, code, payer, first, cents in self.conn.execute(
                         """SELECT z.link, z.svc, z.cpt, z.grp, z.code, z.payer, z.first_posted,
                                   COALESCE(z.contractual,0) + COALESCE(z.noncontractual,0) FROM temp.dt_links d
@@ -10366,11 +10444,13 @@ class Detector:
                         elsewhere[(nk, svc, cpt)].append((lk, grp, cents))
                     self.conn.execute("DROP TABLE IF EXISTS temp.dt_nk")
             for b, svc, cpt, lk, sec, prim, grp, bal, pat, chg, nk in rows:
-                other = sum(c for g, c, _p in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
+                other = sum(c for g, c, _p, _a, _o in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
                 other += sum(c for olk, g, c in elsewhere.get((nk, svc, cpt), []) if olk != lk and c > 0 and g and grp
                              and not ec._same_payer(g, grp))
-                # every answer on the line from a payer other than the primary: a payment row ($0 included) or its own reason
-                answers = [(p or "", g, c, "payment") for g, c, p in pays.get((lk, svc, cpt), []) if g and grp and not ec._same_payer(g, grp)]
+                # every answer on the line from a payer other than the primary: a payment row ($0 included, with its proof) or
+                # its own reason
+                answers = [(p or "", g, c, "payment" if o else "same_check") for g, c, p, a, o in pays.get((lk, svc, cpt), [])
+                           if a and g and grp and not ec._same_payer(g, grp)]
                 for zg, code, payer, first, cents in reasons.get((lk, svc, cpt), []):
                     if payer not in groups_of:
                         groups_of[payer] = er.payer_group_of(self.conn, payer)[0] if payer else None
@@ -10399,6 +10479,7 @@ class Detector:
         cands: dict[tuple, Line] = {}
         other_paid: set[tuple] = set()
         second_835: dict[tuple, list] = defaultdict(list)       # (bill, date, code) -> second payers' remittances: (date, payer)
+        crossed_nil: dict[tuple, str] = {}                      # (bill, date, code) -> first crossover that carried no share of it
         for l in self.lines:
             code, dos = l.get("procedure_code"), l.get("service_date")
             if not code or not dos or code in ("99024", "G2211"):
@@ -10409,6 +10490,12 @@ class Detector:
                 # processed as a second (or third) payer, or reversed: an answer from a second payer, whatever it paid
                 second_835[key].append((l.get("payment_date") or l.get("txn_payment_date") or "", l.get("payer_id") or l.get("payer_name")))
                 continue
+            if st == "19" and not (self.standing.get(l["line_key"]) or 0) and l.get("payer_kind") != "supplement" \
+                    and sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3")) <= 100:
+                # the first payer crossed the claim over when it paid nothing of this line and left no share of it
+                day = (l.get("payment_date") or l.get("txn_payment_date") or "")[:10]
+                if day and day < crossed_nil.get(key, "9999"):
+                    crossed_nil[key] = day
             if st not in ("1", "19") or not (self.standing.get(l["line_key"]) or 0) or l.get("payer_kind") == "supplement":
                 continue
             pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
@@ -10466,6 +10553,12 @@ class Detector:
                     continue
                 # the second payer answered in EMA after the first payer's payment: a $0 payment row or a reason of its own
                 ans = [a for a in e.get("answers") or [] if (a[0] or "") >= paid_on[:10]]
+                if ans and l.get("claim_status_code") != "19" and crossed_nil.get(key, "9999") < paid_on[:10]:
+                    # the line reached the second payer on a crossover that carried no share of it (the first payer had
+                    # denied it), and the share came on a later answer that was not crossed over: a $0 the second payer
+                    # listed for it beside its payment of that crossover's other lines answered the crossover, never this
+                    # share (review fx-ema-r1-4, its line the review called right to list)
+                    ans = [a for a in ans if a[3] != "same_check"]
                 if ans:
                     self.ema_counts["snb_second_answered_ema"] += 1
                     continue
