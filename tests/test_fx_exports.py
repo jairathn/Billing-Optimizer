@@ -137,7 +137,19 @@ def _volume(s) -> None:
 BC = ("BLUE CROSS TEST", "BCT01")
 
 
-def _rebill_world(tmp_path, kind, *, named: bool, extra_17110: bool = False, worked: bool = False, two_runs: bool = False):
+def _read_before_v2(s, *claim_ids: str) -> None:
+    """These claims' 837s as the reader kept them before x12_837.READ_VERSION 2: no patient (as every 837 on the real copy of
+    2026-11-24 until the hosts read them again). A world whose premise is that nothing, or only a remittance, names the
+    patient needs it: an 837 read since names the patient itself, and the clm837 builder names every one SAMPLE PAT
+    (the 837's own patient: tests/test_fx_passes.py)."""
+    q = ",".join("?" * len(claim_ids))
+    s.conn.execute(f"UPDATE claims_837 SET patient_key=NULL, person_key=NULL, first_key=NULL, read_version=0 "
+                   f"WHERE patient_control_number IN ({q})", claim_ids)
+    s.conn.commit()
+
+
+def _rebill_world(tmp_path, kind, *, named: bool, extra_17110: bool = False, worked: bool = False, two_runs: bool = False,
+                  worked_newer: bool | str = False, old_837: bool | None = None):
     """(answers-1) Sample's visit of March 2 (a 99214 at $200; extra_17110: and a 17110 at $150) went to Blue Cross on claim
     F.claim_id(31), which EMA's weekly exports list (submitted March 3; its 837 names member MEMBER000031). No payer answered
     it. The practice made the bill again as F.claim_id(32) (the 99214 alone), sent March 13; only the 837s know it (member
@@ -147,7 +159,11 @@ def _rebill_world(tmp_path, kind, *, named: bool, extra_17110: bool = False, wor
     named: nothing but the member id's one remitted name ties them (an earlier visit's remittance names the member's
     patient), which never makes two claims one person.
     worked, two_runs: a first run before the names arrive lists both; a biller starts the exports' item ('Called Blue Cross:
-    no record of it'); EMA's reports naming both arrive before the second run."""
+    no record of it'); EMA's reports naming both arrive before the second run. worked_newer: another biller also starts the
+    newer bill's item ('Claim resent by fax'); 'touched': sets it Started and back to To do, recording nothing.
+    old_837: the two 837s were read before x12_837.READ_VERSION 2, so they name no patient (as every 837 on the real copy
+    of 2026-11-24 until the hosts read them again); by default when the world's premise is that nothing names the patient
+    (not named, or the first of two runs): an 837 read since names the patient itself (tests/test_fx_passes.py)."""
     from remitwatch.actions import apply_status
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, load, remit as raw_remit
@@ -176,12 +192,22 @@ def _rebill_world(tmp_path, kind, *, named: bool, extra_17110: bool = False, wor
     lines31 = [("99214", "200.00", "20260302")] + ([("17110", "150.00", "20260302")] if extra_17110 else [])
     send(s, tmp_path, [clm837(F.claim_id(31), lines31, payer=BC, member="MEMBER000031")], "20260303")
     send(s, tmp_path, [clm837(F.claim_id(32), [("99214", "210.00", "20260302")], payer=BC, member="MEMBER000031")], "20260313")
+    if old_837 if old_837 is not None else (two_runs or not named):
+        _read_before_v2(s, F.claim_id(31), F.claim_id(32))
     if two_runs:
         found = _chased(s, "t1", today="2026-05-03")
         assert {F.claim_id(31), F.claim_id(32)} <= set(found), sorted(found)
         if worked:
             apply_status(s.conn, found[F.claim_id(31)]["finding_id"], "in_progress", "Called Blue Cross: no record of it",
                          actor="biller")
+            s.conn.commit()
+        if worked_newer == "touched":
+            # a person set the newer bill's item Started and back to To do: it was touched, though nothing is recorded on it
+            apply_status(s.conn, found[F.claim_id(32)]["finding_id"], "in_progress", None, actor="biller2")
+            apply_status(s.conn, found[F.claim_id(32)]["finding_id"], "open", None, actor="biller2")
+            s.conn.commit()
+        elif worked_newer:
+            apply_status(s.conn, found[F.claim_id(32)]["finding_id"], "in_progress", "Claim resent by fax", actor="biller2")
             s.conn.commit()
         if later:
             load(s, lg, tmp_path, [], tie_ar + own_ar)      # the A/R that names both claims' patient arrives
@@ -234,17 +260,20 @@ def test_an_export_claim_keeps_the_services_the_newer_bill_does_not_carry(tmp_pa
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_work_on_an_export_item_stays_on_a_listed_item_when_the_patients_name_arrives_later(tmp_path, kind, ema_env):
-    """(fx-exports-r1-2, r2-5) The first run lists both bills (nothing names their patient yet), and a biller starts the
-    exports' item with a note. EMA's reports naming the patient arrive; the second run finds the one visit. The newer
-    bill's item was already listed, and save() hands an item's work only to an item new in its run: so the exports' item
-    stays listed with its Started and its note, pointing to the newer bill, and the newer bill's item points back. Never
-    the person's work on a row no list shows (see plans/progress/fx-exports.md, Needs from others: save())."""
+    """(fx-exports-r1-2, r2-5; restated by F3c for both items worked) The first run lists both bills (nothing names their
+    patient yet); one biller starts the exports' item ('no record of it'), another the newer bill's ('resent by fax'). EMA's
+    reports naming the patient arrive; the second run finds the one visit. Neither person's work is moved onto the other's:
+    the exports' item stays listed with its Started and its note, pointing to the newer bill, and the newer bill's item keeps
+    its own and points back, so a person checks which is the payer's claim and sets the other Done. (One worked by nobody
+    takes the work: tests/test_fx_passes.py.)"""
     from tests import ema_fixtures as F
-    s, found = _rebill_world(tmp_path, kind, named=True, worked=True, two_runs=True)
+    s, found = _rebill_world(tmp_path, kind, named=True, worked=True, two_runs=True, worked_newer=True)
     assert {F.claim_id(31), F.claim_id(32)} <= set(found), sorted(found)
     x, y = found[F.claim_id(31)], found[F.claim_id(32)]
     assert x["status"] == "in_progress" and "no record of it" in (x["notes"] or ""), (x["status"], x["notes"])
+    assert y["status"] == "in_progress" and "resent by fax" in (y["notes"] or ""), (y["status"], y["notes"])
     assert F.claim_id(32) in (x["hint"] or "") and F.claim_id(31) in (y["hint"] or ""), (x["hint"], y["hint"])
+    assert "both items were worked" in x["hint"], x["hint"]
     s.close()
 
 
@@ -612,7 +641,8 @@ def test_a_claim_charged_days_before_its_837_went_out_is_listed_once(tmp_path, k
     the claim's patient Bravo Sample. EMA claim 91 is the only claim of those lines that no payer answered, charged before
     the send, and it names that patient: it is this claim's, and the claim is listed once (the 837 pass's item, which
     carries EMA claim 91). With nothing naming the patient it cannot be told (the next tests: fx-exports-r1-4, r2-6).
-    token: each claim also carries a J3590 billed at a token $0.01, nothing owed but part of its content."""
+    token: each claim also carries a J3590 billed at a token $0.01, nothing owed but part of its content. (The 837 was read
+    before the reader kept the patient: with it, the 837 names the patient itself, tests/test_fx_passes.py.)"""
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
     s, lg = _ema_store(tmp_path, kind)
@@ -632,6 +662,7 @@ def test_a_claim_charged_days_before_its_837_went_out_is_listed_once(tmp_path, k
     bc = ("BLUE CROSS TEST", "BCT01")
     send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")] + ([("J3590", "0.01", "20260302")] if token else []),
                               payer=bc, member="MEMBER000091")], "20260320")
+    _read_before_v2(s, F.claim_id(91))
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
@@ -649,7 +680,8 @@ def _g8_world(tmp_path, kind, *, second_unanswered=False, member_name=None, othe
     member MEMBER000091) that no 835 answers, EMA claim 91 charged March 3 with its lines (patient 'Sample, Bravo Q'), and
     another patient's EMA claim 92 of the same lines, paid April 10 (or, second_unanswered, not paid). member_name: an
     earlier visit's remittance naming the member's patient. other_bill: another bill with the same lines to Blue Cross,
-    sent April 25 (not due yet), that no EMA claim is tied to."""
+    sent April 25 (not due yet), that no EMA claim is tied to. The 837s were read before the reader kept the patient (the
+    837's own patient: tests/test_fx_passes.py)."""
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
     s, lg = _ema_store(tmp_path, kind)
@@ -673,6 +705,7 @@ def _g8_world(tmp_path, kind, *, second_unanswered=False, member_name=None, othe
     send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")], payer=bc, member="MEMBER000091")], "20260320")
     if other_bill:
         send(s, tmp_path, [clm837(F.claim_id(93), [("99214", "200.00", "20260302")], payer=bc, member="MEMBER000093")], "20260425")
+    _read_before_v2(s, F.claim_id(91), F.claim_id(93))
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
@@ -736,6 +769,7 @@ def _paid_own_world(tmp_path, kind, *, ninety_four: bool):
     denial_world(s, lg, tmp_path, rows)
     _volume(s)
     send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")], payer=BC, member="MEMBER000091")], "20260320")
+    _read_before_v2(s, F.claim_id(91))         # nothing names the patient: the 837 too was read before it kept one
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
@@ -783,6 +817,7 @@ def test_an_answered_ema_claim_of_the_patient_with_the_claims_lines_blocks_the_b
               claims=[{"pcn": F.claim_id(95), "status": "1", "member": "MEMBER000091", "last": "SAMPLE", "first": "BRAVO",
                        "lines": [("2026-02-02", "99213", 150, 80, [("CO", "45", 70)])]}])
     send(s, tmp_path, [clm837(F.claim_id(91), [("99214", "200.00", "20260302")], payer=BC, member="MEMBER000091")], "20260320")
+    _read_before_v2(s, F.claim_id(91))         # nothing names the patient: the 837 too was read before it kept one
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
