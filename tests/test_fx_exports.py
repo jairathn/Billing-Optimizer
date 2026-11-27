@@ -1029,7 +1029,11 @@ def test_two_claims_whose_names_choose_the_same_twin_take_neither(tmp_path, kind
         "SELECT patient_control_number, ema_link FROM findings WHERE signal='NO_ANSWER' AND COALESCE(stale,0)=0 "
         "AND patient_control_number IN (?, ?)", (F.claim_id(81), F.claim_id(82)))}
     s.close()
-    assert set(got) == {F.claim_id(81), F.claim_id(82)}, f"listed {got}: the son's bill was answered by his father's EMA claim"
+    # the son's bill is never answered by his father's EMA claim. The father's own bill is answered by it: the birth date
+    # with the name (EMA's patient for the father's bill) names EMA claim 81 his, which the keyed name alone, the same for
+    # both, could not (the content bridge's patient choice, the release's August 2026 hand test)
+    assert F.claim_id(82) in got, f"listed {got}: the son's bill was answered by his father's EMA claim"
+    assert F.claim_id(81) not in got, f"listed {got}: the father's bill, answered on his own EMA claim 81, is still chased"
     assert F.link_no(81) not in got.values(), got
 
 

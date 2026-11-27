@@ -1881,9 +1881,30 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
             for cid, lk, n, grp in cand:
                 if charge_lines.get(lk) == n and (not need[cid].get("payer_group") or not grp or _same_payer(grp, need[cid]["payer_group"])):
                     by_claim[cid].append(lk)
+            # several EMA claims of the same content that day (patients seen for the same visit at the same fee): the one
+            # whose patient is the claim's (its keyed name with the birth date where both give one, else the keyed name: the
+            # claim's own evidence, its 837 first) is its EMA claim, when exactly one is (the release's August 2026 hand
+            # test: such claims were chased as never answered while EMA showed them paid)
+            many = {cid: lks for cid, lks in by_claim.items() if len(lks) > 1
+                    and (need[cid].get("persons") or need[cid].get("names"))}
+            who_of: dict[int, tuple] = {}
+            for lpart in _chunks(sorted({lk for lks in many.values() for lk in lks})):
+                _temp(conn, "ec_bw", ["link INTEGER PRIMARY KEY"], [(x,) for x in lpart])
+                for lk, per, nk in conn.execute("SELECT link, person, name_key FROM ema_lines WHERE link IN (SELECT link FROM temp.ec_bw)"):
+                    pp, nn = who_of.setdefault(lk, (set(), set()))
+                    if per is not None:
+                        pp.add(per)
+                    if nk is not None:
+                        nn.add(nk)
             for cid, lks in by_claim.items():
                 if len(lks) == 1:
                     found[cid] = (lks[0], "content")
+                elif cid in many:
+                    persons, names = set(need[cid].get("persons") or ()), set(need[cid].get("names") or ())
+                    mine = [lk for lk in lks if (who_of.get(lk, (set(), set()))[0] & persons) or
+                            (not (persons and who_of.get(lk, (set(), set()))[0]) and who_of.get(lk, (set(), set()))[1] & names)]
+                    if len(mine) == 1:
+                        found[cid] = (mine[0], "content_patient")
         for c in part:
             cid = c["claim_id"]
             got = found.get(cid)

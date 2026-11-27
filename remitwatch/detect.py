@@ -8641,10 +8641,15 @@ class Detector:
         # the claim's content is every line it charged, a token charge included (_claim_content): EMA's claim carries it
         content = self._ema_step(step + "_content", self._claim_content, cds) or {}
         cds = [dict(cd, content=content.get(cd["pcn"]) or [(x[0], x[1], x[2]) for x in cd["items"]]) for cd in cds]
+        # who each claim's patient is (its own evidence: the 837, its bill's remittances, EMA's patient): the content bridge
+        # chooses by it among EMA claims of the same content that day
+        who = self._ema_step(step + "_who", self._who, cds, {}) or {}
         for cd in cds:
             own = cd.get("match_group") or self._ema_group(cd.get("ema_payer")) or cd.get("grp")
+            w = who.get(cd["pcn"]) or {}
             claims.append({"claim_id": cd["pcn"], "sent": cd["sent"], "payer_group": own,
-                           "lines": [(x[1], x[0], x[2]) for x in cd["content"] if x[1]]})
+                           "lines": [(x[1], x[0], x[2]) for x in cd["content"] if x[1]],
+                           "persons": sorted(w.get("persons") or ()), "names": sorted(w.get("names") or ())})
             old = (normalize_payer(cd["ema_payer"])[0] if cd.get("grp") == VA_GROUP[0] and cd.get("ema_payer") else cd.get("grp"))
             if old and old != own:
                 alt[cd["pcn"]] = old
