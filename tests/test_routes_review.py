@@ -141,6 +141,22 @@ def test_r1_2_a_claim_status_call_the_payer_answered_is_no_first_appeal(store, a
     assert c1["request"] == "claim_status_or_reprocess", (c1["request"], c1["best"]["name"])
 
 
+
+@pytest.mark.parametrize("note", ["Call or portal check",                                   # The payer is working on it
+                                  "Asked the payer by Phone: provider services"])            # the card's note before the fix
+def test_r1_2_a_status_call_on_a_denial_is_no_level_of_appeal(store, note):
+    """A denial whose person only asked the payer (a call or a portal check, marked Sent) and heard no: the call was no
+    level of appeal, so the first-level appeal is still the request, never the payer's second level."""
+    world(store, payer="AETNA", payer_group="Aetna", payer_kind="commercial", status="open")
+    c0, _ = card(store)
+    assert c0["request"] == "reconsideration_or_first_appeal"
+    event(store, "F1", "manual", at="2026-04-01T10:00:00", frm="open", to="appealed", note=note)
+    event(store, "F1", "manual", at="2026-04-08T10:00:00", frm="appealed", to="in_progress", note="The payer said no: denial stands")
+    store.conn.execute("UPDATE findings SET status='in_progress' WHERE finding_id='F1'")
+    store.conn.commit()
+    c1, _ = card(store)
+    assert c1["request"] == "reconsideration_or_first_appeal", (c1["request"], (c1.get("best") or {}).get("name"))
+
 @pytest.mark.parametrize("mode", ["server", "serverless"])
 def test_r1_2_i_asked_the_payer_is_a_line_in_the_history_that_parks_nothing(store, tmp_path, monkeypatch, mode):
     """routes-r1-2 (the state). What the card's "I asked the payer" posts (the item's event API, 'asked') changes no status:
@@ -268,6 +284,20 @@ def test_r1_4_the_card_never_names_a_number_its_send_does_not_use(store, tmp_pat
     assert _digits(fx2["on_file"]) == api._payer_number("VA Community Care") == _digits(fx2["published"])
     assert _main_button(_html(c2, tmp_path, buttons=["fax_payer"])) == "Start the fax"
 
+
+
+def test_r1_4_a_second_level_never_names_the_first_levels_number(store):
+    """With only the first level's appeal number on file (fax.number_for falls back to it for level 2), the card names no
+    second-level number on file: it says to fax the published number by hand, after confirming it."""
+    world(store, payer="UMWA HEALTH AND RETIREMENT FUNDS", payer_group="UMWA Health & Retirement Funds", payer_kind="commercial",
+          status="in_progress")
+    event(store, "F1", "manual", at="2026-04-01T10:00:00", frm="open", to="appealed", note="Sent a first-level appeal by Portal: UMWA")
+    event(store, "F1", "manual", at="2026-04-20T10:00:00", frm="appealed", to="in_progress", note="The payer said no: upheld")
+    _fax_numbers(store, "UMWA Health & Retirement Funds", appeal="8005550123")
+    c, _ = card(store)
+    fx = c["best"]["fax"]
+    assert c["request"] == "second_level_appeal" and fx["by_hand"] and not fx["sendable"] and fx["on_file"] == ""
+    assert "555-0123" not in fx["words"] and "800-382-7792" in fx["words"] and "Confirm it before the first fax" in fx["words"]
 
 @needs_node
 @pytest.mark.parametrize("case", ["tricare_coding_edit", "healthspring_clinical"])
@@ -550,6 +580,12 @@ def test_r2_7_every_empty_field_says_what_to_fill(store):
             for x in fields:
                 assert x.get("set") or (x["fill"] and x["fill"] != "by hand"), (r["key"], x["label"])
 
+
+
+def test_r2_7_a_label_no_rule_knows_still_says_what_to_fill():
+    """A label a later table adds that no field rule knows is still a field that says what goes there."""
+    fields, steps = routes.fill(["Invented label no payer prints"], {})
+    assert not steps and fields[0]["value"] == "" and fields[0]["fill"] == routes.OTHER_FILL
 
 @needs_node
 def test_r2_8_a_partly_filled_field_says_what_it_still_needs(tmp_path):
