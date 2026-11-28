@@ -33,6 +33,8 @@ async function clip(page) {
       return {
         in_next_step: !!box && box.contains(card),
         above_buttons: before(card, box && box.querySelector(':scope > .todo-actions')),
+        below_buttons: before(box && box.querySelector(':scope > .todo-actions'), card),
+        leads: !!card.querySelector('.rc-actions button.primary'),
         below_next_line: before(box && box.querySelector(':scope > .todo-next'), card),
         head: (card.querySelector('.rc-head') || {}).innerText || '',
         main_button: ((card.querySelector('.rc-actions button') || {}).innerText || '').trim(),

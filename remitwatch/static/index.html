@@ -623,9 +623,9 @@ function xpRedrawBox(id, d, seq){
   const ch = d.querySelector('#xpChips'); if(ch) ch.innerHTML = xpChips(f, (shown.verdict || {}).state || f.work_state);
   if(typeof panelFacts === 'function') panelFacts(f, x, d);      // the head's money and due date follow the next step
   const offers = (nx.buttons || []).some(k => k === 'build_packet' || k === 'fax_payer');
-  // the panel never contradicts itself (CRITIQUE_biller 2): an item that is over, or one whose next step bills someone,
-  // offers no appeal letter and no fax beside its next step
-  const ws = (shown.verdict || {}).state || f.work_state, over = ['done', 'accepted', 'expired'].includes(ws);
+  // the panel never contradicts itself (CRITIQUE_biller 2): an item that is over or waits on the payer, or one whose next
+  // step bills someone, offers no appeal letter and no fax beside its next step
+  const ws = (shown.verdict || {}).state || f.work_state, over = ['done', 'accepted', 'expired', 'waiting'].includes(ws);
   const bills = (nx.buttons || []).some(k => k === 'mark_billed' || k === 'billed_patient');
   const lr = d.querySelector('#letterRow'); if(lr) lr.hidden = offers || over || bills;
   const fr = d.querySelector('#fxOneRow'); if(fr && f.status !== 'appealed') fr.hidden = offers || over || bills;

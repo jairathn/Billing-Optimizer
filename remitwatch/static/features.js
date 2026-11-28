@@ -564,19 +564,22 @@ function xpBoxHtml(f, x, r){
   // the route leads once nothing is left to prepare: its button (call, open the portal, start the fax) is the one filled
   // button; while a packet or a note is still to be made, or a decision taken, the next step's own button leads
   const leads = !!card && !card.fallback && (hasPacket || !['build_packet', 'attach_note', 'find_note', 'upload_note', 'decide'].includes(primary));
+  // the route is the current step when it leads (above the buttons, its own button filled); while the next step's own button
+  // leads (a packet to build, a decision to take), the route is the step after it and comes below the buttons
+  const route = xpRouteHtml(f, x, r, !leads);
   const key = k => ({mark_sent: 's', let_go: 'l', mark_billed: 'b', billed_patient: 'b', log_outcome: 'n', open_in_ema: 'e'})[k];
   return `<div class="todo-box xp-box next" id="xpBox">
     <div class="next-label">Next step${nx.who ? ` <span>· ${esc(nx.who)}</span>` : ''}</div>
     ${nx.action ? `<p class="next-text todo-next">${esc(nx.action)}</p>` : ''}
     ${due ? `<div class="small next-due">${due}</div>` : ''}
     ${steps.length ? `<details class="xp-steps"><summary class="small">${steps.length === 1 ? 'The step' : `The ${steps.length} steps`}</summary><ol class="small">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
-    ${xpRouteHtml(f, x, r, !leads)}
+    ${leads ? route : ''}
     ${(nx.needs || []).length ? `<div class="small muted">It needs: ${esc(nx.needs.join('; '))}</div>` : ''}
     ${sib ? `<div class="small muted">${pl(sib, 'other open item')} on this visit: work them together.</div>` : ''}
     <div class="todo-err sev-high small" id="xpErr" role="alert"></div>
     <div class="actions todo-actions next-actions">${primary ? `<button${leads ? '' : ' class="primary"'} data-xp="${primary}" title="${esc(XP_BUTTON[primary])} (Enter)" id="xpMain">${esc(XP_BUTTON[primary])}</button>` : ''}
       ${more.length ? `<details class="xp-more"><summary class="small">More</summary><div class="actions">${more.map(k => `<button class="ghost" data-xp="${k}"${key(k) ? ` title="Key ${key(k)}"` : ''}>${esc(XP_BUTTON[k])}</button>`).join('')}</div></details>` : ''}</div>
-    <div id="xpMsg" class="small"></div></div>
+    <div id="xpMsg" class="small"></div>${leads ? '' : route}</div>
     ${vd.sentence || strength || worth ? `<details class="why" id="xpWhyLine"><summary><span class="why-label">Why</span> <span class="xp-verdict">${esc(rowsCited.length ? xpUncited(vd.sentence) : (vd.sentence || 'How sure the site is'))}</span></summary>
       <div>${rowsCited.length ? `<a href="#" class="xp-rows small" data-rows="${rowsCited.join(',')}">${rowsCited.length > 1 ? 'Rows' : 'Row'} ${rowsCited.join(', ')}</a> in the story below. ` : ''}${strength}
       ${worth ? `<div class="small"${rec.basis ? ` title="${esc(rec.basis)}"` : ''}>${worth}</div>` : ''}</div></details>` : ''}`;
@@ -697,11 +700,11 @@ function xpRouteHtml(f, x, r, quiet){
   return `<section class="rc-card send-step" id="rcCard" aria-label="How to send it">
     <div class="rc-head"><span class="chip">${esc(RC_CH[b.channel] || b.channel)}</span> <b>${esc(b.line)}</b> <span class="easy">Easiest</span>${due}
       ${b.required ? ' <span class="chip">required</span>' : ''}${rcChip(b.verified, b.unverified_why)}</div>
+    <div class="actions rc-actions">${quiet ? rcAction(f, b, r, nx, c).replace(/class="primary" /g, '') : rcAction(f, b, r, nx, c)}<button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button><span class="small muted rc-count" id="rcCount" aria-live="polite"></span></div>
     <div class="small muted">${esc(c.payer)}: ${esc(c.request_label)}${c.variant_why ? ' · ' + esc(c.variant_why) : ''}</div>
     ${c.deadline_note ? `<div class="small sev-medium">${esc(c.deadline_note)}</div>` : ''}
     ${b.where && !(b.action || {}).url ? `<div class="small">Send to: <b>${esc(b.where)}</b>${b.form ? ' · form: ' + esc(b.form) : ''}</div>` : (b.form ? `<div class="small">Form: ${esc(b.form)}</div>` : '')}
     ${b.fax ? `<div class="small ${b.fax.sendable ? '' : 'sev-medium'}">${esc(b.fax.words)}</div>` : ''}
-    <div class="actions rc-actions">${quiet ? rcAction(f, b, r, nx, c).replace(/class="primary" /g, '') : rcAction(f, b, r, nx, c)}<button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button><span class="small muted rc-count" id="rcCount" aria-live="polite"></span></div>
     ${facts ? `<table class="small rc-fields"><tbody>${facts}</tbody></table>` : ''}
     ${facts ? '<div class="privacy-note">Copied details stay on this computer\'s clipboard until you copy something else. RemitWatch keeps no record of what you copied.</div>' : ''}
     ${rcNamesOff(c)}

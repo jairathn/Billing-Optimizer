@@ -1049,7 +1049,9 @@ body:has(#drawer.open) :is(.page-actions, .ph-go) .primary { background: var(--s
 .dr-line, .dr-more { margin: 0; }
 #drawer tr.is-item > td { background: var(--surface-3); }
 .next-due { color: var(--text-2); }
-.why-label { font-weight: var(--fw-semibold); }
+#drawer details.why > summary { display: block; }
+#drawer details.why > summary::after { display: inline-block; margin-left: 4px; vertical-align: -2px; }
+.why-label { font-weight: var(--fw-semibold); margin-right: 4px; }
 details.why > summary .xp-verdict { color: var(--text-2); font-weight: var(--fw-regular); }
 details.why > div > .small { margin-top: var(--sp-1); }
 /* the small forms: a title, a line of help, the reason chips, the fields, Save and Cancel */
@@ -1071,7 +1073,12 @@ details.why > div > .small { margin-top: var(--sp-1); }
   -webkit-mask: var(--i-check) center / contain no-repeat; mask: var(--i-check) center / contain no-repeat; }
 .chip-opt kbd { font-size: var(--fs-xs); }
 .xp-input { width: 100%; margin: var(--sp-1) 0; }
-/* one filled button at a time: while a form is open, its Save is the one */
+/* one filled button at a time: with the panel docked beside a page, the panel's main button is the one (the page's turns
+   secondary until the panel closes); while a form is open, its Save is the one */
+body:has(#drawer.open) #view button.primary, body:has(#drawer.open) #view .btn.primary {
+  background: var(--surface); border-color: var(--border-strong); color: var(--text); box-shadow: none; }
+/* the panel's title takes the page title's size, so a page and its docked panel keep to six sizes together (the checks) */
+.dr-title, #drawer h2.dr-title { font-size: var(--fs-2xl); line-height: var(--lh-2xl); letter-spacing: -.02em; }
 #drawer.dr-form-open .next .primary, .xp-box.has-form #xpMain.primary {
   background: var(--surface); border-color: var(--border-strong); color: var(--text); box-shadow: none; }
 /* the route: its line, its main button, the copy rows (number key, label, value, Copy), the count and I sent it */
@@ -1094,6 +1101,9 @@ table.rc-fields tr.rc-empty { background: var(--surface-2); }
 .rc-sent label { display: flex; flex-direction: column; gap: 4px; color: var(--text-2); }
 .rc-sent input { width: 16rem; max-width: 100%; }
 @media (max-width: 640px) {
+  /* the panel is a full sheet: the page under it is not read or counted until it closes */
+  body:has(#drawer.open) #view { visibility: hidden; }
+  .dr-title, #drawer h2.dr-title { font-size: var(--fs-lg); line-height: var(--lh-lg); }
   .chip-opt { height: 40px; }
   .st-form .actions button { height: 44px; flex: 1 1 auto; }
   table.rc-fields tr.copyrow { grid-template-columns: 20px minmax(0, 1fr) auto; }
