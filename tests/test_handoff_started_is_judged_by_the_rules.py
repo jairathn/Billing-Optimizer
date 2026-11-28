@@ -15,6 +15,11 @@ What holds now:
   2. A person who presses Started on that item themselves keeps it Work now past the window, named and dated (a person's
      decision is never overwritten by an automatic one); a person's lines that move with a whole hand-off do the same.
   3. The self-check past_window looks at such a Started too.
+  4. A person's own Started (or Sent, with its faxes) carried to the line's new id by the run (a new signal on the same
+     line, or the same claim under its other key: detect.carry_to_heirs) decides the heir's state in the very run that
+     carries it, as it did on the old id: Detector.save moves the person's lines and the item's faxes to the heir before
+     the states are decided (review r1 of replay-fix-2a: they moved only after, so the heir was judged as To do for one
+     run, with a basis naming a hand-off from the claim's chase).
 
 Every claim, member, amount and date is invented (the builders of tests/test_features.py, tests/test_remitwatch.py and
 tests/test_workable.py). Each case runs on the server's store file, on the compact in-memory store the serverless cycle
@@ -265,4 +270,69 @@ def test_a_persons_started_carried_to_the_lines_new_id_decides_its_state_in_the_
     rows = c.execute("SELECT run_id, kind, rule FROM item_decisions WHERE finding_id=? AND kind='state'", (h["finding_id"],)).fetchall() \
         if c.execute("SELECT 1 FROM sqlite_master WHERE name='item_decisions'").fetchone() else []
     assert not [tuple(r) for r in rows], [tuple(r) for r in rows]
+    s.close()
+
+
+@pytest.mark.parametrize("store_kind", ["file", "compact"])
+def test_a_persons_started_on_a_claim_listed_under_its_ema_claim_number_stays_theirs_when_the_837s_name_it(tmp_path, store_kind,
+                                                                                                           monkeypatch):
+    """The other heir path (gapfix G8's same claim under two identities): a person marks the chase of EMA's claim 74
+    Started themselves; the 837s then name its claim id and the 837 pass lists it under that id, taking the old item whole
+    (status, notes, history). In the run that carries it, the person's own Started decides the item: Work now by their
+    status, named and dated, never To do with a hand-off's words."""
+    from tests import ema_fixtures as F
+    from tests.test_gap_one_claim import _listed, _run, _send, _visit, _work, _world
+    s, lg = _world(tmp_path, store_kind, monkeypatch, _visit())
+    try:
+        _run(s, "m1")
+        first = _listed(s)
+        assert [(r["signal"], r["patient_control_number"], r["ema_link"]) for r in first] == [("NO_ANSWER", None, F.link_no(74))], first
+        old = first[0]
+        _work(s, old["finding_id"], status="in_progress", note="Called Blue Cross about the claim (invented)")
+        _send(s, tmp_path, "20260309")
+        _run(s, "m2")
+        now = _listed(s)
+        assert len(now) == 1 and now[0]["finding_id"] != old["finding_id"], [(r["finding_id"], r["status"]) for r in now]
+        it = now[0]
+        assert it["status"] == "in_progress" and s.conn.execute(
+            "SELECT COUNT(*) FROM finding_events WHERE finding_id=? AND kind='manual' AND to_status='in_progress'",
+            (it["finding_id"],)).fetchone()[0] == 1, "the person's Started went with the claim to its new id"
+        assert (it["work_state"], it["state_rule"]) == ("work_now", "person_started"), (
+            f"the person's own Started, carried to the claim's new id, was judged by the automatic rules in the run that "
+            f"carried it: {it['work_state']} / {it['state_rule']}: {it['state_basis']}")
+        assert (it["state_basis"] or "").startswith("Started by biller on Apr 25, 2026"), it["state_basis"]
+    finally:
+        lg.close()
+        s.close()
+
+
+def test_a_faxed_appeals_heir_is_judged_on_its_newest_fax_in_the_run_that_carries_it(tmp_path, kind, monkeypatch):
+    """A person faxed the appeal of a downcoded visit (Sent, Oct 1) and faxed it again on Nov 10 (a fax line only). The
+    run of Nov 20 waits on the payer until Dec 25. New claim files then give the line's money a new id: in the run that
+    carries it, the heir is judged on its faxes as the old id was (Waiting, follow-up Dec 25), never on the first send
+    alone (follow-up due since Nov 15) because its faxes still sat on the old id."""
+    from tests.test_hotfix2d import _claim_files_arrive, _downcode_store, _fax_record, _fax_the_appeal, _first_downcode, _heir
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    s = _reopened(_downcode_store(tmp_path, kind), kind)
+    c = s.conn
+    old = _first_downcode(c)
+    _fax_the_appeal(c, old)
+    actions.apply_fax(c, _fax_record(old, key="out:fake:2", at="2026-11-10T15:00:00+00:00"))
+    c.commit()
+    s = _reopened(s, kind)
+    Detector(s, run_id="r1b", today="2026-11-20").run()
+    c = s.conn
+    c.row_factory = sqlite3.Row
+    got = dict(c.execute("SELECT work_state, state_rule, follow_up_on FROM findings WHERE finding_id=?", (old,)).fetchone())
+    assert (got["work_state"], got["follow_up_on"]) == ("waiting", "2026-12-25"), got
+    _claim_files_arrive(s)
+    s = _reopened(s, kind)
+    Detector(s, run_id="r2", today="2026-11-20").run()
+    c = s.conn
+    c.row_factory = sqlite3.Row
+    h = _heir(c)
+    got = dict(c.execute("SELECT work_state, state_rule, follow_up_on, state_basis FROM findings WHERE finding_id=?", (h,)).fetchone())
+    assert (got["work_state"], got["follow_up_on"]) == ("waiting", "2026-12-25"), (
+        f"the heir was judged without its newest fax in the run that carried it: {got}")
+    assert c.execute("SELECT COUNT(*) FROM faxes WHERE finding_id=?", (h,)).fetchone()[0] == 2
     s.close()

@@ -1000,7 +1000,11 @@ def test_an_appeal_being_faxed_when_its_item_gets_a_new_id_follows_the_heir(tmp_
 
 def test_the_heir_of_an_item_being_faxed_waits_for_the_fax_too(tmp_path, monkeypatch):
     """Review mr-4 on the server's pages: while the fax is going out, the heir's panel shows it, and a second Appeal by fax
-    on the heir, or a person's status change, waits for it (409 in_flight), as on the item it was pressed on."""
+    on the heir, or a person's status change, waits for it, as on the item it was pressed on: the status change is refused
+    (409 in_flight); the second Appeal is held, never sent. The run that carries the line to its new id judges the heir on
+    its fax (review r1 of replay-fix-2a: the faxes move to the heir before the states are decided), so the heir waits on
+    that fax and the send is held as for any item waiting on work already done, exactly what the item it was pressed on
+    answers after a run."""
     from remitwatch import actions
     from remitwatch.detect import Detector
     s = _downcode_store(tmp_path, "file")
@@ -1017,8 +1021,9 @@ def test_the_heir_of_an_item_being_faxed_waits_for_the_fax_too(tmp_path, monkeyp
     client, line, _api = _site(tmp_path, monkeypatch, str(tmp_path / "s.sqlite"))
     d = client.get(f"/api/findings/{heir}").json()
     assert [x["direction"] for x in d["faxes"]] == ["out"], "the heir's panel shows no fax"
+    assert (d["finding"]["work_state"], d["finding"]["appeal_block"]) == ("waiting", "waiting"), "the heir is judged on its fax"
     r = client.post("/api/appeals/send", json={"finding_id": heir, "stale_ok": True}, headers=XHR)
-    assert r.status_code == 409 and r.json()["code"] == "in_flight", r.json()
+    assert (r.status_code, r.json().get("status"), r.json().get("code")) == (200, "held", "blocked"), r.json()
     r = client.post(f"/api/findings/{heir}/status", json={"status": "dismissed", "notes": "not worth it", "seen_status": "open"}, headers=XHR)
     assert r.status_code == 409 and r.json()["code"] == "in_flight", r.json()
     assert line.sent == {}

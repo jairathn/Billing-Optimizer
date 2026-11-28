@@ -12986,6 +12986,14 @@ class Detector:
         # every item's state, decided in one place (remitwatch.states) on the status just settled; an item a person set
         # back to work after an automatic closure is judged without the payment that closure rested on (they rejected it)
         self._overridden = overridden
+        if moved:
+            # a person's own lines (their Started or Sent, their notes) and the item's faxes go with the line's money to its
+            # new id BEFORE the states are decided, so the heir is judged on them in this very run, as the old id was: never
+            # as To do for one run with a hand-off's words (review r1 of replay-fix-2a). carry_to_heirs moves the rest below
+            have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for table in ("finding_events", "faxes"):
+                if table in have:
+                    c.executemany(f"UPDATE {table} SET finding_id=? WHERE finding_id=?", [(n, o) for o, n in moved])
         self._set_states(out_rows)
         rows = [tuple(r.get(k) for k in cols) for r in out_rows]
         # (the EMA line summary keeps every line, whatever this run lists: no refresh waits on the items saved here)
