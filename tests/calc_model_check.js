@@ -474,10 +474,16 @@ ok('r4_q_defaults_placeholders', M.Q_DEFAULT.medicare === 0.5 && M.Q_DEFAULT.com
      && !r.some(k => ['bx_patients', 'ak_patients', 'benign', 'excisions'].includes(k)), JSON.stringify(r));
 }
 
-// item 34: at 640px and below the view tabs wrap instead of scrolling sideways; the per-minute table fits its panel
+// item 34: at 640px and below the view tabs wrap instead of scrolling sideways; the per-minute table fits its panel.
+// The styles live in static/rw.css: every tab strip wraps, and at a phone's width only the strips that are not tabs
+// scroll sideways.
 {
-  const narrow = htmlSrc.slice(htmlSrc.indexOf('@media(max-width:640px){\n  header{'));
-  ok('r34_narrow_tabs_wrap', /\.segs\[role=tablist\][^{]*\{flex-wrap:wrap;overflow-x:visible\}/.test(narrow.slice(0, narrow.indexOf('\n}')))
+  const cssSrc = fs.readFileSync(require('path').join(__dirname, '../remitwatch/static/rw.css'), 'utf8');
+  const narrow = cssSrc.slice(cssSrc.indexOf('@media (max-width: 640px) {'));
+  const block = narrow.slice(0, narrow.indexOf('\n}'));
+  ok('r34_narrow_tabs_wrap', /\n\.seg-group, \.segs \{[^}]*flex-wrap: wrap;/.test(cssSrc)
+     && /\.segs:not\(\[role="tablist"\]\):not\(\.wrap\) \{ flex-wrap: nowrap; overflow-x: auto;/.test(block)
+     && !/\.segs\[role="?tablist"?\][^{]*\{[^}]*(nowrap|overflow-x: auto)/.test(cssSrc)
      && /#labMinutes table th,#labMinutes table td\{padding:5px 4px\}/.test(calcSrc), '');
 }
 
@@ -554,8 +560,10 @@ ok('r36_zero_rows_dropped', /all\.map\(\(\[label\], i\) => ra\[i\] \|\| rb\[i\] 
      && /more a week \([\d.]+ a clinic day\)$/.test(row(small, 'Visits')) && /more a week/.test(row(small, 'Mohs cases')) && /Any one of these closes it on its own/.test(small),
      [row(big, 'Visits'), row(big, 'Mohs cases'), row(small, 'Visits')].join(' | '));
 
-  // gate 9: the header's Lock button closes the Calculator too, and says so
-  const lock = (htmlSrc.match(/<button id="lockBtn"[^>]*>[^<]*<\/button>/) || [''])[0];
+  // gate 9: the Lock button closes the Calculator too, and says so (it sits beside the Owner places in the sidebar,
+  // which static/shell.js draws on every page)
+  const shellSrc = fs.readFileSync(require('path').join(__dirname, '../remitwatch/static/shell.js'), 'utf8');
+  const lock = (shellSrc.match(/<button id="lockBtn"[^>]*>[^<]*<\/button>/) || [''])[0];
   ok('g9_lock_button_names_both_tabs', />Lock<\/button>$/.test(lock) && /title="[^"]*the Providers and Calculator tabs[^"]*"/.test(lock), lock);
 }
 

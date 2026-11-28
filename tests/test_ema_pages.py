@@ -1300,7 +1300,10 @@ def test_the_blind_spot_banner_shows_under_the_tabs_of_every_page_and_never_twic
         pytest.skip("node is not installed")
     html = open(os.path.join(STATIC, "index.html"), encoding="utf-8").read()
     assert html.index('<nav id="nav"></nav>') < html.index('<div id="blindBar"') < html.index('<main id="view">')
-    assert re.search(r"@media print\{[^{]*#blindBar", html)          # a printed letter or batch never carries the banner
+    # a printed letter or batch never carries the banner (the print rules live in the stylesheet, static/rw.css, since
+    # the page's inline <style> block moved there)
+    rw_css = open(os.path.join(STATIC, "rw.css"), encoding="utf-8").read()
+    assert re.search(r"@media print\s*\{[^{]*#blindBar", rw_css)
     script = tmp_path / "blind.js"
     script.write_text(BLIND_JS, encoding="utf-8")
     res = subprocess.run([NODE, str(script), STATIC], capture_output=True, text=True, timeout=60)
