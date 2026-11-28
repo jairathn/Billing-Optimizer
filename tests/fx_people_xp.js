@@ -33,19 +33,42 @@ function panel(what, note, name) {
   const d = { querySelector: q => (q === '#xpMsg' ? box : (q === '#xpErr' ? { set textContent(v) { errs.push(v); } } : null)) };
   return { d, save: els[`#${name}Save`], errs };
 }
+// the call or portal check (features.js xpOutcome, unit ui-panel): what the payer said as a chip, the amount typed in the
+// panel's own field (no browser box), the reference and the note; its Save
+function callPanel(note) {
+  const els = { '#callSave': {}, '#callCancel': {}, '#callForm': {}, '#callNote': { value: note || '' }, '#callRef': { value: '' }, '#callAmt': { value: '' }, '#callCode': { value: '' } };
+  const chips = ['in_process', 'paid', 'denied', 'no_claim', 'records', 'wrong_payer'].map(k => ({ dataset: { ans: k }, setAttribute() {} }));
+  const box = { className: '', set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html; },
+    querySelector: q => els[q] || null, querySelectorAll: q => (q === '[data-ans]' ? chips : []) };
+  const errs = [];
+  const d = { querySelector: q => (q === '#xpMsg' ? box : (q === '#xpErr' ? { set textContent(v) { errs.push(v); } } : null)) };
+  return { d, box, els, chips, errs };
+}
 const ITEM = { finding_id: 'f-invented', status: 'appealed', shortfall_cents: 3460, charge_cents: 22365, signal: 'UNDERPAID_VS_OWN_RATE' };
 
+// typed: the amounts typed one after another, Save pressed after each ('DEFAULT': the field left as it starts); clicks: Save
+// pressed that many times at once (a double click) with the first amount typed
 async function outcome(what, note, typed, clicks, item) {
   const calls = [];
   // the panel's status(): the POST with what the panel showed, then the drawer is drawn again: a short wait for the answer
   const status = (st, notes, extra) => new Promise(ok => setTimeout(() => { calls.push(Object.assign({ status: st, notes }, extra || {})); ok(); }, 30));
-  const { d, save, errs } = panel(what, note, 'xpo');
-  asked.length = 0; answers = typed === undefined ? [] : typed.slice();
-  ctx.xpOutcome(Object.assign({}, ITEM, item || {}), d, status, m => errs.push(m));
-  const runs = [];
-  for (let i = 0; i < (clicks || 1); i++) runs.push(Promise.resolve(save.onclick && save.onclick()));     // a double click: two clicks before the first answer
-  await Promise.all(runs);
-  return { asked: asked.map(a => ({ msg: a.msg, def: a.def })), sent: calls, errors: errs };
+  const p = callPanel(note);
+  ctx.xpOutcome(Object.assign({}, ITEM, item || {}), p.d, status, m => p.errs.push(m));
+  const chip = p.chips.find(c => c.dataset.ans === (what === 'working' ? 'in_process' : what));
+  if (chip) chip.onclick();
+  const html = p.box.innerHTML || '';
+  const hint = (html.match(/<span class="hint">([\s\S]*?)<\/span>/) || [])[1] || '';
+  const start = (html.match(/<input id="callAmt"[^>]*>/) || [''])[0];
+  const amounts = (typed || []).slice(), save = p.els['#callSave'];
+  if ((clicks || 1) > 1) {
+    if (amounts.length && amounts[0] !== 'DEFAULT') p.els['#callAmt'].value = amounts[0];
+    const runs = [];
+    for (let i = 0; i < clicks; i++) runs.push(Promise.resolve(save.onclick && save.onclick()));     // a double click: two clicks before the first answer
+    await Promise.all(runs);
+  } else {
+    for (const a of (amounts.length ? amounts : [undefined])) { if (a !== undefined && a !== 'DEFAULT') p.els['#callAmt'].value = a; await (save.onclick && save.onclick()); }
+  }
+  return { hint: hint.trim(), start_empty: !/\svalue=/.test(start), sent: calls, errors: p.errs };
 }
 async function decide(clicks) {
   const calls = [];

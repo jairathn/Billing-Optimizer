@@ -799,8 +799,9 @@ def _check_card(seen: dict, want: dict) -> None:
     best = want["best"]
     for name in ("desktop", "phone"):
         v = seen["views"][name]
-        # in the next step, under its Next line and above its buttons
-        assert v["in_next_step"] and v["below_next_line"] and v["above_buttons"], (name, v)
+        # in the next step, under its Next line; above its buttons when it leads (its own button the filled one), below them
+        # while the next step's own button leads (moved with the same guarantee, unit ui-panel: one clear way through)
+        assert v["in_next_step"] and v["below_next_line"] and (v["above_buttons"] if v["leads"] else v["below_buttons"]), (name, v)
         # one line: the channel, the way, the time it takes, the deadline; its main button
         assert v["head"].startswith("Portal") and best["line"] in v["head"] and " by " in v["head"], (name, v["head"])
         assert v["main_button"] == best["action"]["label"], (name, v["main_button"])

@@ -2,281 +2,53 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>RemitWatch</title>
-<style>
-:root{color-scheme:light;--bg:#f6f7f9;--panel:#ffffff;--ink:#17202a;--muted:#5d6b7a;--line:#e3e7ec;--accent:#1f5fbf;--accent-ink:#fff;--bad:#b42318;--warn:#b54708;--good:#067647;--soft:#eef2f7;--chip:#eaf0fb}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--accent-ink:#0b1220;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731;--chip:#22304a}}
-:root[data-theme="dark"]{color-scheme:dark;--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--accent-ink:#0b1220;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731;--chip:#22304a}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-header h1{font-size:18px;margin:0 16px 0 0}
-header .fresh{color:var(--muted);font-size:12px;flex:1 1 240px}
-header select,header input,.filters select,.filters input,.lh-tools select,.lh-tools input,.more-f select,.more-f input,#tierSel,button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
-button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);cursor:pointer}
-button{cursor:pointer}
-nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
-nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;cursor:pointer}
-#blindBar:empty,#scBar:empty{display:none}
-nav a.active{background:var(--chip);color:var(--ink);font-weight:600}
-main{padding:16px;max-width:1500px;margin:0 auto}
-#swingBar{max-width:1500px;margin:0 auto;padding:0 16px}
-.grid{display:grid;gap:12px}
-.kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
-.kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;cursor:pointer}
-.kpi .v{font-size:22px;font-weight:700;margin-top:4px}
-.kpi .l{color:var(--muted);font-size:12px}
-.kpi .s{color:var(--muted);font-size:12px;margin-top:2px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:12px}
-.panel h2{font-size:15px;margin:0 0 8px}
-.two{grid-template-columns:1fr 1fr}
-@media(max-width:900px){.two{grid-template-columns:1fr}}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-th{color:var(--muted);font-weight:600;font-size:12px;white-space:nowrap;cursor:pointer}
-td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-tr.row:hover{background:var(--soft);cursor:pointer}
-tr.na-stand td{background:var(--soft)}
-.scroll.na-list{max-height:60vh}
-.chip{display:inline-block;padding:1px 7px;border-radius:999px;background:var(--chip);font-size:11px;margin-right:4px;white-space:nowrap}
-.chip.hint{background:none;border:1px solid var(--warn);white-space:normal}
-.sev-high{color:var(--bad);font-weight:600}.sev-medium{color:var(--warn)}.sev-low,.sev-info{color:var(--muted)}
-.filters{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;align-items:center}
-.muted{color:var(--muted)}
-.note{color:var(--muted);font-size:12px;margin:4px 0 8px}
-.pager{display:flex;gap:8px;align-items:center;margin-top:8px;color:var(--muted);font-size:12px}
-#drawer{position:fixed;top:0;right:-760px;width:740px;max-width:100vw;height:100vh;background:var(--panel);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.2);overflow:auto;transition:right .2s;z-index:20;padding:16px}
-#drawer.open{right:0}
-#drawer h2{margin:0 0 6px;font-size:16px}
-pre{background:var(--soft);padding:10px;border-radius:8px;overflow:auto;font-size:12px;white-space:pre-wrap}
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;z-index:30;align-items:center;justify-content:center}
-.modal.open{display:flex}
-.modal .box{background:var(--panel);width:900px;max-width:96vw;max-height:92vh;overflow:auto;border-radius:10px;padding:16px}
-.heat td{text-align:right;font-variant-numeric:tabular-nums}
-.bar{height:8px;background:var(--chip);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
-.actions button{margin-right:6px;margin-bottom:6px}
-.legend{font-size:12px;color:var(--muted);columns:2;column-gap:24px}
-.legend b{color:var(--ink)}
-.chartbox{position:relative;height:320px}
-.small{font-size:12px}
-td.who{min-width:9.5rem} td.who a.pt{font-weight:600;color:inherit;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
-td.who a.pt:hover{text-decoration-color:currentColor} td.day{white-space:nowrap}
-.ok{color:var(--good)}
-.alert{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:10px 12px;margin:8px 0;background:var(--panel)}
-.alert.acknowledged{opacity:.75}.alert.cleared{opacity:.55;border-left-color:var(--muted)}
-.alert .ttl{font-weight:600;margin:4px 0}
-.alert .row1{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
-#bellBtn b{margin-left:4px}
-#feedChip{font-size:12px;color:var(--muted)}
-td.row{cursor:pointer}
-tr.picked{background:var(--chip)}
-table.pvt th{white-space:normal;vertical-align:bottom;max-width:150px;cursor:default}
-table.pvt td:first-child{white-space:nowrap}
-table.pvt th:first-child,table.pvt td:first-child{position:sticky;left:0;background:var(--panel);z-index:1}
-table.pvt tr.picked td:first-child{background:var(--chip)}
-table.pvt tr.row:hover td:first-child{background:var(--soft)}
-table.pvt td .sub{display:block;color:var(--muted);font-size:11px;font-weight:400}
-.grid.two > *{min-width:0}
-.panel{overflow-x:auto}
-tr.row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.smc > .small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:600px){table.pvt td:first-child{white-space:normal;min-width:112px;max-width:42vw}table.pvt td .sub{white-space:normal}}
-.filters select{max-width:72vw}
-.scroll{overflow:auto}
-.busy{opacity:.55;transition:opacity .15s}
-.warnbox{border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:12px}
-.rng{position:relative;height:10px;min-width:140px;background:var(--soft);border-radius:5px}
-.rng i{position:absolute;top:0;height:100%;border-radius:5px;background:var(--pv1,var(--accent));opacity:.55}
-.rng b{position:absolute;top:-3px;width:2px;height:16px;margin-left:-1px;background:var(--ink)}
-.sm{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
-.key{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle}
-details summary{cursor:pointer;color:var(--muted)}
-/* daily screens: Today, Worklist, Bigger wins, More */
-a{color:var(--accent)}
-.brand{font-size:18px;font-weight:700;color:var(--ink);text-decoration:none;margin-right:6px}
-@media(max-width:700px){#fresh{display:none}}
-button.ghost{background:none;border-color:transparent;color:var(--accent)} button.ghost:hover{background:var(--soft)}
-button:disabled{opacity:.5;cursor:default}
-.page-title{font-size:22px;line-height:1.2;margin:0}
-.page-head{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;margin:2px 0 10px}
-.today-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:8px 16px;margin:2px 0 12px}
-.donebox{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)} .donebox b{color:var(--ink)}
-.banner{border:1px solid var(--line);border-left:4px solid var(--warn);background:var(--panel);border-radius:10px;padding:10px 14px;margin-bottom:12px}
-.plan{display:grid;gap:10px}
-.step{display:flex;gap:14px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-.step .num{flex:0 0 32px;height:32px;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-weight:700}
-.step.is-done .num{background:var(--good)}
-.step .body{flex:1;min-width:0} .step .title{font-weight:650;font-size:15px} .step .line{color:var(--muted);margin-top:2px} .step .chips{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.step button{flex:0 0 auto;padding:8px 14px}
-@media(max-width:640px){.step{flex-wrap:wrap}.step button{width:100%}}
-.kind{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap;background:var(--chip)}
-.k-fix{background:rgba(31,95,191,.13);color:#1849a9}.k-auth{background:rgba(105,39,218,.12);color:#6927da}.k-note{background:rgba(14,122,92,.13);color:#0e7a5c}
-.k-rule{background:rgba(53,56,205,.12);color:#3538cd}.k-rate{background:rgba(181,71,8,.13);color:#93370d}.k-check{background:rgba(71,84,103,.13);color:#475467}.k-chase{background:rgba(196,50,10,.12);color:#b42318}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .k-fix{color:#9ec0ff}:root:not([data-theme="light"]) .k-auth{color:#c7a8ff}:root:not([data-theme="light"]) .k-note{color:#6fdcb6}:root:not([data-theme="light"]) .k-rule{color:#a9b0ff}:root:not([data-theme="light"]) .k-rate{color:#f5b878}:root:not([data-theme="light"]) .k-check{color:#c0c9d4}:root:not([data-theme="light"]) .k-chase{color:#ff9c8a}}
-:root[data-theme="dark"] .k-fix{color:#9ec0ff}:root[data-theme="dark"] .k-auth{color:#c7a8ff}:root[data-theme="dark"] .k-note{color:#6fdcb6}:root[data-theme="dark"] .k-rule{color:#a9b0ff}:root[data-theme="dark"] .k-rate{color:#f5b878}:root[data-theme="dark"] .k-check{color:#c0c9d4}:root[data-theme="dark"] .k-chase{color:#ff9c8a}
-.due-now{color:var(--bad);font-weight:650}.due-soon{color:var(--warn);font-weight:600}
-.k-bill{background:rgba(14,122,92,.10);color:#0e7a5c}.k-post{background:rgba(31,95,191,.10);color:#1849a9}
-/* an item's state and what EMA did to its line: the same words everywhere (remitwatch.states) */
-.xs{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;background:var(--chip);color:var(--ink)}
-.xs-now{background:rgba(180,35,24,.12);color:var(--bad)}.xs-wait{background:rgba(31,95,191,.13);color:var(--accent)}.xs-done{background:rgba(6,118,71,.14);color:var(--good)}
-.xs-quiet{background:var(--soft);color:var(--muted)}.xs-warn{background:rgba(181,71,8,.13);color:var(--warn)}
-.st-done{background:rgba(6,118,71,.14)}.st-accepted,.st-expired{background:var(--soft)}.st-cant_check{background:rgba(181,71,8,.13)}
-.xp-verdict{margin:6px 0 2px;font-weight:550}.xp-steps{margin:4px 0}.xp-steps ol{margin:4px 0;padding-left:20px}.xp-steps li{margin:3px 0}
-.xp-more{display:inline-block;vertical-align:top}.xp-more>summary{display:inline-block;padding:6px 8px;list-style:none}.xp-more[open]>summary{color:var(--ink)}
-.xp-log label{display:block;margin:3px 0}table.xp-story tr.has-item{background:var(--chip)}table.xp-story td{vertical-align:top}
-a.see-state.on{font-weight:650;color:var(--ink)}
-.keys{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px}.keys kbd{font:12px ui-monospace,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;background:var(--soft)}
-@media(max-width:640px){#keysBtn{display:none}}
-.panel-head{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;margin-bottom:6px}.panel-head h2{margin:0}
-.batch{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
-.batch:last-child{border-bottom:0}
-@media(max-width:760px){.batch{grid-template-columns:1fr 1fr}.batch .b-main{grid-column:1/-1}.batch button{grid-column:1/-1}}
-.change{display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)} .change > div{flex:1;min-width:0}
-.wins-list{margin:4px 0 10px;padding-left:18px} .wins-list li{margin:5px 0}
-.guide{background:var(--panel);border:1px solid var(--accent);border-radius:12px;padding:16px 18px;margin-bottom:14px}
-.guide-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.guide h2{margin:0;font-size:17px}
-.guide .lead{margin:6px 0 8px}.guide .steps{margin:0 0 8px;padding-left:20px}.guide .steps li{margin:5px 0}.guide-more{color:var(--muted);font-size:13px;margin-bottom:10px}
-.segs{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}
-.seg{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 10px;border-radius:8px;text-align:left}
-.seg.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
-.seg .cnt{color:var(--muted);font-size:12px;margin-left:2px}.seg-sub{font-size:11px;color:var(--muted)}
-.howbox{background:var(--soft);border-radius:8px;padding:8px 12px;margin:6px 0;font-size:13px}
-.wl-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;margin:6px 0}
-.bulk{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}.bulk[hidden]{display:none}
-table.wl td{vertical-align:middle} table.wl th{cursor:default}
-.st{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;background:var(--chip);white-space:nowrap}
-.st-in_progress{background:rgba(181,71,8,.13)}.st-appealed{background:rgba(31,95,191,.13)}.st-resolved{background:rgba(14,122,92,.15)}.st-lost,.st-dismissed{background:rgba(71,84,103,.13)}
-.empty{padding:24px;text-align:center;color:var(--muted)}
-.todo-box{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 12px;margin:8px 0 10px;background:var(--soft)}
-.todo-top{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-bottom:6px}.todo-what,.todo-next{margin:4px 0}
-.todo-actions{margin-top:8px}
-.rc-card{border-top:1px solid var(--line);margin:8px 0 4px;padding-top:8px}.rc-head{margin:2px 0 4px}.rc-actions{margin:6px 0 2px}
-table.rc-fields{margin:4px 0;border-collapse:collapse}table.rc-fields td{padding:2px 8px 2px 0;vertical-align:top;overflow-wrap:anywhere}
-.rc-attach{margin:2px 0 4px;padding-left:18px}.rc-source{margin-top:6px}.rc-sent{display:flex;flex-wrap:wrap;gap:6px;align-items:end;margin-top:6px}
-.rc-sent input{display:block;max-width:16rem}
-.calc-row{padding:6px 0;border-bottom:1px dashed var(--line)}
-.calc-row label{display:block;font-size:13px}
-.calc-ctl{display:flex;align-items:center;gap:8px}
-.calc-ctl input[type=range]{flex:1;min-width:0}
-.calc-num{width:78px}
-h3.calc-h{font-size:13px;margin:12px 0 2px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-table.calc-fall td{padding:7px 8px}
-table.calc-fall tr.calc-total td{border-top:2px solid var(--ink)}
-.lab-card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}
-.lab-card .lab-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer}
-.lab-impact{margin:4px 0}
-.sheet h2{margin-top:0}
-@media print{header,nav,#blindBar,#drawer,.no-print,#calcCtl,.panel:not(.sheet){display:none !important} body{background:#fff} .sheet{border:0}}
-.more-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
-.more-card{display:flex;flex-direction:column;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--ink);text-decoration:none}
-.more-card:hover{border-color:var(--accent)}
-.check{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line)}.check:last-child{border-bottom:0}
-.check .mark{flex:0 0 22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px}
-.check.ok .mark{background:rgba(6,118,71,.15);color:var(--good)}.check.bad .mark{background:rgba(180,35,24,.13);color:var(--bad)}
-.missed{margin:14px 2px}
-.fchip{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 10px;border-radius:999px;background:var(--chip);font-size:12px}
-.fchip button{border:0;background:none;padding:0 6px;color:var(--muted)}
-.statusbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
-.sigchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
-.sigchip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;font-size:13px;text-align:left}
-.sigchip.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
-@media(max-width:640px){.sigchips{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}.sigchip{flex:0 0 auto}}
-#drawer td,#drawer .todo-box{overflow-wrap:break-word}
-#drawer td.num,#drawer td.day,#drawer td.code{white-space:nowrap}
-#drawer tr.has-item{background:var(--soft)}
-.todo-err:empty,.st-err:empty{display:none}
-#rwNotice{position:fixed;left:16px;bottom:16px;z-index:40;max-width:min(520px,calc(100vw - 32px))}
-#rwNotice div{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:8px 12px;margin-top:6px;box-shadow:0 4px 14px rgba(0,0,0,.15);font-size:13px}
-table.wl input.sel,#selAll{width:20px;height:20px}
-/* category pages: tiles, what to do, the strip, the list head, the Details fold */
-.ph-row{display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:flex-start;gap:12px}.ph-row>div:first-child{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;flex:1;min-width:0}
-.ph-go{text-align:right;flex:0 0 auto}
-.allopen{margin:-4px 2px 8px}
-.why-chips{display:flex;flex-wrap:wrap;gap:6px;padding:4px 4px 8px 18px;align-items:center}
-nav a .bdg{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:var(--bad);color:var(--accent-ink);font-size:11px;font-weight:700;text-align:center;line-height:16px}
-nav a .bdg[hidden]{display:none}
-nav .gap{flex:1 1 12px}nav a.ref{font-size:13px}
-@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]):not([data-tab=results]),nav .gap{display:none}nav a{padding:6px 8px}
-  nav[data-cur=progress] a[data-tab=more],nav[data-cur=data] a[data-tab=more],nav[data-cur=providers] a[data-tab=more]{background:var(--chip);color:var(--ink);font-weight:600}}
-.mid-only{display:none}@media(min-width:641px) and (max-width:1359px){.mid-only{display:flex}}
-a.pile{color:var(--muted);text-decoration:none}a.pile:hover{text-decoration:underline;color:var(--accent)}
-.pile-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;padding:5px 4px 5px 18px;border-top:1px dashed var(--line);font-size:13px;cursor:pointer}.pile-row:hover{background:var(--soft)}
-.oneline{font-size:12px;color:var(--muted);margin:-4px 0 8px}
-.tiles{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:0 0 10px}
-.tile{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;cursor:pointer;min-width:0}
-.tile:focus-visible,.todo-row:focus-visible,.pile-row:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.tile .t-l{font-size:12px;color:var(--muted)}.tile .t-v{font-size:22px;font-weight:700;line-height:1.15}.tile .t-v small{font-size:13px;font-weight:600;color:var(--muted);margin-left:8px}
-.tile .t-s{font-size:12px;color:var(--muted)}.tile.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
-.tile.t-red .t-v{color:var(--bad)}.tile.t-ok .t-v{color:var(--good)}.tile.t-amber .t-v{color:var(--warn)}.tile.t-grey{background:var(--soft)}.tile.t-grey .t-v{color:var(--muted)}.tile.t-grey.on{background:var(--chip)}
-.desk-mid{display:grid;gap:10px}.desk-mid.has-side{grid-template-columns:minmax(0,1.6fr) minmax(0,1fr)}@media(max-width:900px){.desk-mid.has-side{grid-template-columns:1fr}}
-.todo-list,.fo-side{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 12px}
-.sec{font-size:12px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px}
-.todo-row{display:grid;grid-template-columns:auto minmax(12rem,1fr) auto fit-content(19rem);gap:10px;align-items:center;padding:7px 4px;border-top:1px solid var(--line);cursor:pointer}
-.todo-list .sec + .todo-row{border-top:0}.todo-row:hover{background:var(--soft)}.todo-row.on{background:var(--chip)}
-.todo-row .tr-n{white-space:nowrap;font-variant-numeric:tabular-nums}.todo-row .tr-pile{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media(max-width:700px){.todo-row{grid-template-columns:auto 1fr}.todo-row .tr-do{grid-column:1/-1;grid-row:2}.todo-row .tr-pile{grid-column:1/-1}}
-.fixonce{font-size:13px;margin:8px 2px 0;color:var(--ink)}.fo-tag{display:inline-block;font-size:11px;font-weight:650;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-right:4px}
-table.mini td{padding:4px 6px}
-.list-head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:14px 0 4px}.lh-tools{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}.lh-tools select[data-f=payer]{max-width:15rem}.lh-tools select,.lh-tools input,.more-f select,.more-f input{font-size:13px;padding:4px 6px}
-.more-f{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-end;margin:4px 0}.more-f[hidden]{display:none}.ph-only{display:none}
-div.bulk{display:flex;margin:4px 0}div.bulk[hidden]{display:none}
-details.fold{margin-top:16px}details.fold > summary{padding:10px 0;font-size:13px}
-.todo-chips,.fix-after,.howline,.ph-what{display:none}
-.kpi[data-go=""]{cursor:default}
-table.fees td{vertical-align:middle}
-.dr-head{display:flex;justify-content:space-between;align-items:start;gap:8px}
-#claimFind{width:13rem;font:inherit;font-size:13px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
-@media(max-width:640px){#claimFind{width:100%;order:9;font-size:16px}}
-details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > summary{padding:4px 0;font-size:13px}
-.why-fold{font-size:12px;margin:2px 0 8px}.why-fold .note{margin:4px 0 0}
-@media(max-width:640px){.ph-row{flex-direction:column}.ph-go{text-align:left}.lh-tools{margin-left:0}.tiles{grid-template-columns:1fr 1fr}.tile{padding:7px 10px}.tile .t-v{font-size:19px}
-  .desk-mid .todo-list,.fix-top{display:none}.todo-chips{display:flex;flex-wrap:wrap;gap:6px;padding-bottom:4px}.ph-what{display:block}.todo-chips .seg{flex:0 0 auto}.howline{display:block;font-size:13px;margin:4px 0}
-  .fix-after{display:block;margin-top:12px}.lh-tools select:not([data-f=payer]),.lh-tools input{display:none}.ph-only{display:contents}.more-f{justify-content:flex-start}}
-@media(max-width:640px){
-  header{position:static;padding:8px 12px}
-  nav{position:sticky;top:0;z-index:5;flex-wrap:nowrap;overflow-x:auto}
-  nav a{flex:0 0 auto}
-  #drawer table{display:block;overflow-x:auto}
-  .segs{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}.seg{flex:0 0 auto}
-  .segs[role=tablist],.segs.wrap{flex-wrap:wrap;overflow-x:visible}
-  table.wl thead{display:none}
-  table.wl,table.wl tbody{display:block;width:100%}
-  table.wl tr{position:relative;display:grid;grid-template-columns:1fr auto;gap:2px 10px;border:1px solid var(--line);border-radius:10px;margin:8px 0;padding:10px 12px;background:var(--panel)}
-  table.wl td{display:block;border:0;padding:0;width:auto}
-  table.wl td:first-child{position:absolute;right:10px;bottom:8px}
-  table.wl td.day{grid-column:1;grid-row:1}
-  table.wl td.num{grid-column:2;grid-row:1;text-align:right}
-  table.wl td.what{grid-column:1/-1;grid-row:2;margin-top:4px}
-  table.wl td.payer{grid-column:1/-1;grid-row:3;color:var(--muted);font-size:13px}
-  table.wl td.who{grid-column:1;grid-row:4;margin-right:30px}
-  #drawer{padding:12px}
-}
-</style>
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0d11" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/static/brand/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/brand/icon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/brand/icon-180.png">
+<script>
+// the theme and the sidebar a person chose on this computer, before the first paint, so nothing flashes (static/shell.js
+// keeps them; a browser that refuses storage gets the system's theme and the full sidebar)
+(function(){ try { var t = localStorage.getItem('rw:theme'); if(t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  if(localStorage.getItem('rw:sidebar') === 'rail') document.documentElement.setAttribute('data-sidebar', 'rail'); } catch(e){} })();
+</script>
+<link rel="preload" href="/static/fonts/inter-latin-opsz-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/rw.css?v=2026-11-28">
 </head>
 <body>
-<header>
-  <a class="brand" href="#today">RemitWatch</a>
-  <div class="fresh"><div id="feedChip"></div><div id="fresh">loading…</div></div>
-  <input id="claimFind" type="search" maxlength="200" placeholder="Find a claim" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line">
-  <button id="guideBtn" class="ghost" title="What this site does and how to use it">How this works</button>
-  <button id="keysBtn" class="ghost" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
-  <a id="uploadLink" href="/upload" hidden class="small" title="Bring EMA's exports, remittance files and visit notes in by hand">Upload from EMA</a>
-  <button id="bellBtn" title="alerts">Alerts</button>
-  <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
-  <label class="small">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
-  <button id="lockBtn" style="display:none" title="forget the owner's password on this page: the Providers and Calculator tabs and lines billed by provider close again">Lock</button>
-  <button id="themeBtn" title="theme">◐</button>
-</header>
+<a class="skip-link" href="#view">Skip to the page</a>
+<div class="app" id="app">
 <nav id="nav"></nav>
+<div class="app-main">
+<header class="topbar" id="topbar">
+  <span class="topbar-title" id="pageTitle" aria-hidden="true"></span>
+  <div class="search" role="search"><input id="claimFind" type="search" maxlength="200" placeholder="Search" autocomplete="off" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line"><kbd>/</kbd></div>
+  <label class="small analysis-only">Year <select id="yearSel"><option value="">All</option></select></label>
+  <label class="small analysis-only">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
+  <span class="grow"></span>
+  <a class="health" id="health" href="#data"><span id="feedChip">Checking the feeds</span></a>
+  <button class="icon-btn" id="bellBtn" aria-label="Alerts" title="Alerts"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-bell"/></svg><span class="dot-count" hidden></span></button>
+  <div class="menu-wrap"><button class="icon-btn" id="helpBtn" aria-label="Help" title="Help" aria-haspopup="menu" aria-expanded="false"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-help"/></svg></button>
+    <div class="menu" id="helpMenu" role="menu" hidden>
+      <button role="menuitem" id="guideBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-info"/></svg>How RemitWatch works</button>
+      <button role="menuitem" id="keysBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-keyboard"/></svg>Keyboard shortcuts<kbd class="kbd-right">?</kbd></button>
+      <button role="menuitem" id="findBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg>Search and go to<kbd class="kbd-right" id="findKey">Ctrl K</kbd></button>
+    </div></div>
+</header>
 <div id="swingBar" hidden></div>
-<div id="scBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
-<div id="blindBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
+<div id="scBar"></div>
+<div id="blindBar"></div>
 <main id="view"></main>
-<div id="drawer"></div>
+</div>
+</div>
+<nav class="tabbar" id="tabbar" aria-label="Places"></nav>
+<div id="drawer" tabindex="-1"></div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="/static/shell.js"></script>
 <script src="/static/swing.js"></script>
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
@@ -295,11 +67,10 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/asc.js"></script>
 <script src="/static/faxes.js"></script>
 <script>
-// Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
-// right in smaller type. The analysis pages are under More (and open by their address).
+// The app's routes (the sidebar, static/shell.js, draws the places): Today, Work's views (the category pages and the
+// Worklist), Faxes, Bigger wins, Results and the rest. The keys are the addresses (#today, #denials ...) and never change.
 const TABS = [['today','Today'],['denials','Denials'],['bundling','Bundling & modifiers'],['downcoding','Downcoding'],['contracts','Contracts & underpayment'],
   ['fees','Fees & takebacks'],['worklist','Worklist'],['faxes','Faxes'],['wins','Bigger wins'],['results','Results'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
-const REF_TABS = new Set(['results','progress','data','providers','calculator','more']);
 // pages opened by their address or from More, not from the main row; the owner's write-off policy table is one (static/policy.js)
 const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates'],['policy','Write-off policy']];
 const ALIASES = {appeals:'worklist'};        // the earlier Appeals queue is the Worklist
@@ -378,29 +149,45 @@ const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);       // never a name every object has (constructor, __proto__, toString)
 function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || own(ALIASES, k); }
 function initNav(){
-  const firstRef = (TABS.find(t=>REF_TABS.has(t[0]))||[])[0];       // the reference tabs stand apart, to the right
-  $('#nav').innerHTML = TABS.map(([k,l])=>`${k===firstRef?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
-  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
+  // the shell: the sidebar, the phone's tab bar, Help, the theme, Search and go to (static/shell.js)
+  RWShell.mount({page: 'app', link: '#', go: tab => { state.tab = tab; location.hash = tab; render(); }, find: text => findClaim(text),
+    onTheme: () => { if(state.tab === 'providers'){ if(typeof pvRedraw === 'function' && pvRedraw()) return; render(); } }});
+  document.querySelectorAll('#nav a[data-tab], #tabbar a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
     state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
   $('#lockBtn').onclick = ()=>{ pvForget(); render(); };
-  $('#themeBtn').onclick = ()=>{const r=document.documentElement; const dark = r.dataset.theme==='dark' || (r.dataset.theme!=='light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    r.dataset.theme = dark?'light':'dark'; if(state.tab==='providers'){ if(typeof pvRedraw==='function' && pvRedraw()) return; render(); } };
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
-  $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
+  $('#health').onclick = e=>{ e.preventDefault(); const anchor = e.currentTarget.dataset.anchor || null;
+    if(typeof tdGoData === 'function') tdGoData(anchor); else { state.tab='data'; location.hash='data'; render(); } };
   $('#guideBtn').onclick = ()=>openGuide();
   $('#keysBtn').onclick = ()=>keysSheet();
   $('#claimFind').onkeydown = e=>{ if(e.key==='Enter'){ e.preventDefault(); findClaim(e.target.value); } };
 }
+// The header's pill and bell, the sidebar's counts and the page's title, from what this page has heard (static/shell.js)
+function shellHeader(){
+  RWShell.update({meta: state.meta, sync: state.sync, blind: state.blind, alerts: state.alertsNew, brief: state.brief, exports: state.exports,
+    freshening: !!state.freshening, metaFailed: !state.meta && !!state.metaFailed});
+}
+// What the pill needs on every page, asked at most once in ten minutes: what the app cannot see (shared with blindBar)
+// and the EMA exports' ages. Both change with a run or an upload only.
+async function shellFeeds(){
+  const tasks = [];
+  if(Date.now() - (state.blindAt||0) > 600000){ state.blindAt = Date.now();
+    tasks.push(api('/api/ema/blind').then(x => { state.blind = x; }, () => { state.blindAt = 0; })); }
+  if(Date.now() - (state.exportsAt||0) > 600000){ state.exportsAt = Date.now();
+    tasks.push(api('/api/ema/exports').then(x => { state.exports = x; }, () => { state.exportsAt = 0; })); }
+  await Promise.all(tasks);
+  shellHeader();
+}
 async function loadMeta(){
   state.meta = await api('/api/meta');
-  const m = state.meta, r = m.remits||{}, runs = (m.runs||[])[0];
-  $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?(typeof practiceTime === 'function' ? practiceTime(runs.finished_at) : String(runs.finished_at).replace('T',' ').slice(0,16) + ' UTC'):'never'} · files ${m.files?m.files.n:0}`;
+  const m = state.meta;      // the remittance and file counts and the runs are on the Data tab; the header says what matters (shellHeader)
   $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
   $('#uploadLink').hidden = !(m.uploads || m.report_uploads);     // visit notes by hand on a server; EMA's reports on both hosts
   scBar();                                                         // safe mode said as soon as the site's settings say it
+  shellHeader();
 }
 async function loadSummary(){
   state.summary = await api('/api/summary?'+qs({year:state.year,status:state.status}));
@@ -413,14 +200,12 @@ async function render(){
   if(!state.meta){ try { await loadMeta(); } catch(e){} if(run !== state.run) return; }      // a cold start can fail the first call
   if(own(ALIASES, state.tab)){ state.tab = ALIASES[state.tab]; history.replaceState(null, '', '#'+state.tab); }
   if(!tabOpen(state.tab)) state.tab = 'today';
-  const classic = CLASSIC.some(t=>t[0]===state.tab);
-  $('#nav').dataset.cur = state.tab;            // between 641 and 1,359 px More stands for Progress, Data and Providers
-  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
-  const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
+  $('#nav').dataset.cur = state.tab;
+  RWShell.setActive(state.tab);                 // the place marked in the sidebar and the tab bar, the page's title
   scBar();                                       // safe mode, above everything on every page (the self-check's banner)
   blindBar();                                    // the blind-spot banner on every page; Today and Data draw their own
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
-  ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
+  ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.hidden = !NEEDS_SUMMARY.has(state.tab); });
   if(!own(DESKS, state.tab) && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; state.wlKey = null; }   // "item 3 of 50" means something on a list page only
   if(NEEDS_SUMMARY.has(state.tab)) await loadSummary();
   if(run !== state.run) return;
@@ -471,7 +256,7 @@ async function overview(v){
   const appealable = s.by_actionable.find(r=>r.actionable==='appeal')||{}, fix = s.by_actionable.find(r=>r.actionable==='correct_and_resubmit')||{};
   const dl = Object.fromEntries(s.deadlines.map(d=>[d.bucket,d]));
   const hot = (state.alertsNew||[]).filter(a=>a.severity!=='info').slice(0,4);
-  v.innerHTML = `${hot.length?`<div class="panel" style="margin-top:0"><h2>New alerts</h2>${hot.map(a=>`<div class="small"><span class="sev-${a.severity}">●</span> ${esc(a.title)}</div>`).join('')}<div class="small"><a id="goAlerts" style="cursor:pointer;color:var(--accent)">Open alerts</a></div></div>`:''}
+  v.innerHTML = `${hot.length?`<div class="panel" style="margin-top:0"><h2>New alerts</h2>${hot.map(a=>`<div class="small"><span class="sev-${a.severity}">●</span> ${esc(a.title)}</div>`).join('')}<div class="small"><a id="goAlerts" href="#alerts">Open alerts</a></div></div>`:''}
   <div class="grid kpis">
     ${kpi('Identified leakage', money(total(s.by_category)), 'all categories, '+(state.status==='all'?'all':'open')+' findings', 'overview')}
     ${kpi('Appealable', money(appealable.shortfall_cents), (appealable.n||0).toLocaleString()+' findings', 'appeals')}
@@ -494,7 +279,7 @@ async function overview(v){
   </div>
   <div class="panel"><h2>Context</h2>${s.info.map(r=>`<div class="small">• ${esc(r.title)}</div>`).join('')||'<div class="muted small">No context rows yet.</div>'}</div>`;
   v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{state.tab=k.dataset.go; render();});
-  if(v.querySelector('#goAlerts')) v.querySelector('#goAlerts').onclick=()=>{state.tab='alerts'; render();};
+  if(v.querySelector('#goAlerts')) v.querySelector('#goAlerts').onclick=e=>{ e.preventDefault(); state.tab='alerts'; location.hash='alerts'; render();};
   v.querySelectorAll('tr.row').forEach(tr=>{ const cat = tr.dataset.cat, sig = tr.dataset.sig;
     if(!['downcoding','bundling','denial','underpayment'].includes(cat)){ tr.classList.remove('row'); return; }   // fees and contract rows count other things
     tr.onclick = () => { state.tab = {downcoding:'downcoding', bundling:'bundling', denial:'denials', underpayment:'contracts'}[cat]; location.hash = state.tab;
@@ -650,11 +435,14 @@ function closeDetail(){
 // Escape closes what is on top: a window (the shortcuts, a fax preview, a letter, a bulk send) first, then the item's panel
 document.addEventListener('keydown', e=>{ if(e.key!=='Escape') return;
   if($('#modal').classList.contains('open')){ $('#modal').classList.remove('open'); return; }
-  if($('#drawer').classList.contains('open')) closeDetail(); });
+  if($('#drawer').classList.contains('open')){ if(typeof panelEscape === 'function' && panelEscape($('#drawer'))) return; closeDetail(); } });
 // Keyboard shortcuts for working a list (shown by ? and the ? button): j and k move through the list, or through the items
-// with an item open; Enter or o opens one; s marks it sent; l lets it go (it asks why); c copies the route card's filled
-// fields; / goes to the search box.
-const KEYS = [['j','Next item'],['k','Previous item'],['Enter or o','Open the item'],['s','Mark it sent'],['l','Let it go (asks why)'],['c','Copy every filled field of the route'],['/','Search the list'],['Esc','Close the item'],['?','These shortcuts']];
+// with an item open; o opens one. In an open item (features.js panelKey): Enter presses its main button; s, p, l and b open
+// the Sent, Paid, Let go and Billed forms in the panel; n logs a call or portal check; e opens EMA; y copies the claim ID;
+// 1 to 9 copy the route's fields and c all of them; u undoes the last change. / goes to the search box.
+const KEYS = [['j','Next item'],['k','Previous item'],['o','Open the item'],['Enter','In an item: its main button'],['s','Mark it sent'],['p','Mark it paid'],['l','Let it go (asks why)'],
+  ['b','Mark it billed'],['n','Log a call or portal check'],['e','Open it in EMA'],['y','Copy the claim ID'],['1 to 9','Copy that field of the route'],['c','Copy every filled field of the route'],
+  ['u','Undo the last change'],['/','Search the list'],['Esc','Close the form, then the item'],['?','These shortcuts']];
 function keysSheet(){
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Keyboard shortcuts</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="keys" style="margin-top:10px">${KEYS.map(([k, w])=>`<span>${k.split(' or ').map(x=>`<kbd>${esc(x)}</kbd>`).join(' or ')}</span><span>${esc(w)}</span>`).join('')}</div>`;
@@ -669,13 +457,9 @@ document.addEventListener('keydown', e=>{
   if(e.key === '?'){ e.preventDefault(); keysSheet(); return; }
   if(e.key === '/'){ const q = [...document.querySelectorAll('#view input[data-f="q"]')].find(x=>x.offsetParent!==null) || $('#claimFind'); if(q){ e.preventDefault(); q.focus(); } return; }
   if(open){
-    // s and l use the next step's own button, else the status bar's (each asks what it needs: Let go always asks why)
-    const hint = text => { const el = d.querySelector('#xpErr') || d.querySelector('.st-err'); if(el) el.textContent = text; };
-    if(e.key === 'j'){ e.preventDefault(); press('#nextItem'); }
-    else if(e.key === 'k'){ e.preventDefault(); press('#prevItem'); }
-    else if(e.key === 's'){ e.preventDefault(); press('[data-xp="mark_sent"]') || press('#sentNext') || press('[data-st="appealed"]') || hint('Nothing to mark sent here.'); }
-    else if(e.key === 'l'){ e.preventDefault(); press('[data-xp="let_go"]') || press('#letGoNext') || press('[data-st="dismissed"]') || hint('This item cannot be let go from here.'); }
-    else if(e.key === 'c'){ e.preventDefault(); press('#rcCopyAll') || hint('No route to copy here.'); }
+    // the panel's keys (features.js panelKey): s and l use the next step's own button, else the status menu's (each opens its
+    // form in the panel: Let go always asks why)
+    if(typeof panelKey === 'function') panelKey(e, d); else if(e.key === 'j') press('#nextItem');
     return;
   }
   const rows = [...document.querySelectorAll('#view tr.row[data-id]')]; if(!rows.length) return;
@@ -703,18 +487,23 @@ const walkGuarded = () => Date.now() < (state.walkUntil || 0);
 async function openDetail(id, opts){
   const seq = state.detailSeq = (state.detailSeq||0) + 1;     // the newest open wins: an older, slower answer is dropped
   state.detailId = id;
-  const d = $('#drawer'); d.classList.add('open'); d.inert = false; d.innerHTML='<div class="muted">loading…</div>';
+  const d = $('#drawer'); d.classList.add('open'); d.inert = false;
+  if(state.dirty) panelCacheDrop();                              // a change since: never an answer from before it
   const from = document.activeElement; if(from && from.closest && from.closest('#view')) state.detailFrom = from.closest('tr.row') || from;
-  state.detailId = id;
   // the address names the item, so it can be passed on: #item=<finding id> opens this panel (the page under it stays)
   if(location.hash !== '#item=' + id) history.replaceState(null, '', '#item=' + encodeURIComponent(id));
-  // the story, verdict and next step come in their own answer, so the item's own facts show at once
-  const told = api('/api/findings/'+encodeURIComponent(id)+'/explain').catch(e=>({explain_error: 'What to do could not be worked out just now ('+(e.message||'no answer')+').'}));
-  let r; try { r = await api('/api/findings/'+encodeURIComponent(id)); }
+  // the item's answers: kept from when it was the next item (Next opens at once then), else asked now with the head's frame
+  // shown until they come; the story, verdict and next step come in their own answer, so the item's own facts show first
+  const got = panelAnswers(id);
+  if(!got.ready){ d.innerHTML = panelSkeletonHtml(id); d.querySelector('#closeD').onclick = closeDetail; panelBindNav({finding_id: id}, d); }
+  const told = got.told;
+  let r; try { r = await got.item; }
   catch(e){ if(seq !== state.detailSeq) return;
     // its money has a new number since the page was drawn (a newer run): open it under that number
     if(e.code === 'changed' && e.body && e.body.heir && e.body.heir !== id) return openDetail(e.body.heir, opts);
-    d.innerHTML = `<div class="dr-head"><div><h2>Item not found</h2><div class="small muted">${e.status === 404 ? 'This item is no longer on the lists.' : 'The site did not answer just now: try again in a moment.'}</div></div><button id="closeD" aria-label="Close">✕</button></div><div class="note">It may have been closed and removed by a newer run. Find a claim (top of the page) finds it by its claim ID.</div>`; const c = d.querySelector('#closeD'); if(c) c.onclick = closeDetail; return; }
+    d.innerHTML = `<div class="dr-head"><div class="dr-top"><span class="crumb"><b>Item</b></span><button type="button" id="closeD" aria-label="Close (Esc)" title="Close (Esc)">${PANEL_ICON('x')}</button></div>
+      <h2 class="dr-title">Item not found</h2><div class="dr-meta">${e.status === 404 ? 'This item is no longer on the lists.' : 'The site did not answer just now: try again in a moment.'}</div></div>
+      <div class="dr-body"><div class="note">It may have been closed and removed by a newer run. Find a claim (top of the page) finds it by its claim ID.</div></div>`; const c = d.querySelector('#closeD'); if(c) c.onclick = closeDetail; return; }
   if(seq !== state.detailSeq) return;          // another item was opened meanwhile: the newest open wins
   if(r.archived && typeof opArchivedItem === 'function') return opArchivedItem(d, r);       // an older settled item the archive took (ops.js)
   const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
@@ -725,16 +514,18 @@ async function openDetail(id, opts){
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
   const ex = drawerExtras(f, r), plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : f.title;
   const letter = f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal) ? `<button id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>` : '';
-  d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')} <span id="xpChips">${typeof xpChips === 'function' ? xpChips(f, f.work_state) : ''}</span></div></div><button id="closeD" aria-label="Close">✕</button></div>
-    <div id="xpSlot"><div class="todo-box"><span class="muted small">Working out what to do…</span></div></div><div id="xpRuleSlot"></div>
-    ${letter ? `<div class="actions" id="letterRow">${letter}</div>` : ''}
+  // the head (features.js panelHeadHtml), then the next step, the panel's other ways to act, and the evidence in folds
+  d.innerHTML = panelHeadHtml(f, r, null) + `<div class="dr-body">
+    <div class="st-form" id="stForm" hidden></div>
+    <div class="st-err sev-high small" role="alert"></div>
+    <div id="xpSlot"><div class="todo-box next"><span class="muted small">Working out what to do…</span></div></div><div id="xpRuleSlot"></div>
+    ${letter ? `<div class="actions dr-more" id="letterRow">${letter}</div>` : ''}
     ${typeof faxDrawerHtml === 'function' ? faxDrawerHtml(f, r) : ''}
     ${typeof hideDrawerHtml === 'function' ? hideDrawerHtml(f) : ''}
-    <div class="statusbar"><span class="small muted">Status: <b>${esc(STATUS_WORDS[f.status]||f.status)}</b> · change to</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].filter(([s])=>s!==f.status).map(([s,l])=>`<button class="ghost small" data-st="${s}">${l}</button>`).join('')}</div>
-    <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
-    ${!f.claim_key && !f.line_key && f.patient_control_number ? `<div class="small" style="margin:6px 0">EMA claim ID <b>${esc(f.patient_control_number)}</b>${f.service_date ? ' · date of service ' + esc(f.service_date) : ''}${(f.evidence||{}).sent ? ' · sent ' + esc(f.evidence.sent) : ''} · no remittance from the payer for it</div>` : ''}
-    ${r.bill ? `<div class="small" style="margin:6px 0"><a href="#" id="openClaim">${f.signal === 'TAKEBACK' ? 'See the claim this was taken from: every remittance, line and adjustment' : 'See the whole claim: every remittance, line and adjustment'}</a></div>` : ''}
+    ${!f.claim_key && !f.line_key && f.patient_control_number ? `<div class="small dr-line">EMA claim ID <b>${esc(f.patient_control_number)}</b>${f.service_date ? ' · date of service ' + esc(f.service_date) : ''}${(f.evidence||{}).sent ? ' · sent ' + esc(f.evidence.sent) : ''} · no remittance from the payer for it</div>` : ''}
+    ${r.bill ? `<div class="small dr-line"><a href="#" id="openClaim">${f.signal === 'TAKEBACK' ? 'See the claim this was taken from: every remittance, line and adjustment' : 'See the whole claim: every remittance, line and adjustment'}</a></div>` : ''}
+    <div class="dr-folds">
     <details class="dfold"><summary>Claim details</summary>
     <table class="small">
       ${r.claim ? claimWhoRows(f, cl, showPhi()) : ''}
@@ -749,7 +540,7 @@ async function openDetail(id, opts){
     ${ex.facts}
     ${f.claim_key?`<h3 class="small">Claim lines on this remit</h3>
     <table class="small"><thead><tr><th>#</th><th>Code</th><th>Submitted</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Paid</th><th>Adjustments</th></tr></thead>
-    <tbody>${(r.lines||[]).map(l=>`<tr ${l.line_key===f.line_key?'style="background:var(--chip)"':''}><td>${esc(l.line_seq)}</td><td>${esc(l.procedure_code)}${mods(l.modifiers)}</td><td>${esc(l.original_procedure_code)}</td><td class="num">${money2(l.charge_cents)}</td><td class="num">${money2(l.allowed_cents)}</td><td class="num">${money2(l.paid_cents)}</td>
+    <tbody>${(r.lines||[]).map(l=>`<tr${l.line_key===f.line_key?' class="is-item"':''}><td>${esc(l.line_seq)}</td><td>${esc(l.procedure_code)}${mods(l.modifiers)}</td><td>${esc(l.original_procedure_code)}</td><td class="num">${money2(l.charge_cents)}</td><td class="num">${money2(l.allowed_cents)}</td><td class="num">${money2(l.paid_cents)}</td>
       <td>${(adjBy[l.line_key]||[]).map(a=>`<div>${esc(a.group_code)}-${esc(a.reason_code)} ${money2(a.amount_cents)} <span class="muted">${esc(a.text)}</span></div>`).join('')}${(remBy[l.line_key]||[]).map(a=>`<div class="muted">${esc(a.code)} ${esc(a.text)}</div>`).join('')}</td></tr>`).join('')}</tbody></table>
     ${(adjBy.claim||[]).length?`<div class="small">Claim-level: ${adjBy.claim.map(a=>esc(a.group_code)+'-'+esc(a.reason_code)+' '+money2(a.amount_cents)).join(', ')}</div>`:''}
     <h3 class="small">All remits for this claim</h3>
@@ -761,33 +552,16 @@ async function openDetail(id, opts){
     <div id="xpStorySlot"></div><div id="xpEmaSlot"></div><div id="xpWhy" hidden></div>
     ${ex.builder ? `<details class="dfold" id="builderFold"><summary>Build the appeal from the visit note</summary>${ex.builder}</details>` : ''}
     <details class="dfold"><summary>Technical details</summary><div class="small muted">${esc(f.title)} · ${esc(f.signal)} · ${esc(f.severity)} · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
-    <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre></details>`;
+    <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre></details></div></div>`;
   d.dataset.fid = id;
   state.walkUntil = opts && opts.walk ? Date.now() + WALK_GUARD_MS : 0;
   d.querySelector('#closeD').onclick=closeDetail;
-  d.querySelector('#closeD').focus({preventScroll:true});
+  panelBindHead(f, d, seq);                    // the status menu and its forms, Previous and Next, the claim ID's copy
+  d.scrollTop = 0; d.focus({preventScroll:true});      // the panel takes the keys: Enter presses its main button
   // the verdict, the next step and the story, when they come: or, if they cannot be worked out, the item's What to do box
   told.then(x => { if(!panelShows(seq, id) || !d.contains(d.querySelector('#xpSlot'))) return; xpFill(f, r, x || {}, d, id, seq); });
-  const bar = [...d.querySelectorAll('[data-st]')];
+  panelPrefetch(id);                           // the next items' answers, so Next opens at once
   const what = `${plain}${f.payer_group ? ' · ' + f.payer_group : ''}${f.shortfall_cents ? ' · ' + money2(f.shortfall_cents) : ''}`;
-  bar.forEach(b=>b.onclick=async()=>{
-    if(b.disabled || walkGuarded()) return;
-    bar.forEach(x=>x.disabled = true);          // one change at a time: a second click does nothing until the answer is back
-    const again = () => bar.forEach(x=>{ x.disabled = x.dataset.st === f.status; });
-    // setFindingStatus asks what the change takes: to confirm a Let go, the note on a claim no payer answered (by its reason),
-    // the amount paid; it sends the status this panel shows, so a change made elsewhere since is not undone
-    try {
-      if(!await setFindingStatus(id, b.dataset.st, f.shortfall_cents, f.signal, f.status, f.charge_cents)){ if(panelShows(seq, id)) again(); return; }
-      state.brief = null; state.dirty = true;
-      if(panelShows(seq, id)) openDetail(id); else notice(`Saved: ${what} is now ${STATUS_WORDS[b.dataset.st] || b.dataset.st}.`);
-    } catch(e){
-      const why = (e.message || 'no answer from the site');
-      if(e.code === 'changed' || e.code === 'in_flight') state.dirty = true;
-      if(!panelShows(seq, id)){ notice(`Not saved (${what}): ${why}`); return; }
-      const er = d.querySelector('.st-err'); if(er) er.textContent = 'Not saved: ' + why + (e.code ? '' : ' Try again.');
-      again();
-    } });
-  bindWhatToDo(f, d, seq);
   const oc = d.querySelector('#openClaim'); if(oc) oc.onclick = e => { e.preventDefault(); openClaim(r.bill, id); };
   d.querySelectorAll('a.claim-link').forEach(a => a.onclick = e => { e.preventDefault(); openClaim(a.dataset.claim, id); });
   bindDrawerExtras(id, d);
@@ -796,7 +570,7 @@ async function openDetail(id, opts){
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);
     if(!panelShows(seq, id)) return;            // the panel moved on: the letter of an item no longer shown is not opened
-    $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">${esc(p.subject)}</h2><button id="closeM">✕</button></div>
+    $('#modalBox').innerHTML = `<div class="dialog-head"><h2>${esc(p.subject)}</h2><button id="closeM" aria-label="Close">✕</button></div>
       ${p.corrected_claim_instructions?`<div class="panel"><b>Correction instructions</b><div>${esc(p.corrected_claim_instructions)}</div></div>`:''}
       <div class="actions" style="margin-top:8px"><button class="primary" id="copyL">Copy letter</button><button id="copyE">Copy evidence</button><span class="small muted">file by ${esc(p.deadline||'–')} · payer ${esc(p.payer_contact.phone)} ${esc(p.payer_contact.url)}</span></div>
       ${(p.checklist||[]).length ? `<div class="note sev-medium"><b>Before you send it</b>${p.checklist.map(c=>`<div>${esc(c)}</div>`).join('')}</div>` : ''}
@@ -818,7 +592,11 @@ function xpFill(f, r, x, d, id, seq){
   const slot = d.querySelector('#xpSlot');
   if(!x.explain || typeof xpBoxHtml !== 'function'){
     slot.innerHTML = whatToDoHtml(f, '') + (x.explain_error ? `<div class="small muted">${esc(x.explain_error)}</div>` : '');
+    slot.querySelectorAll('#prevItem, #nextItem').forEach(b => b.remove());       // Previous and Next are the head's
     bindWhatToDo(f, d, seq);         // the panel's own mark: the walk moves on only while this panel shows this item (H1)
+    panelBindNav(f, d);
+    // Let go asks why in the panel (a reason as a chip or in words), never in a browser box; saved, the next item opens
+    const lg = slot.querySelector('#letGoNext'); if(lg) lg.onclick = () => { if(!lg.disabled && !walkGuarded()) stOpen(f, d, seq, 'dismissed'); };
     const kind = state.brief ? kindFor(state.brief, f) : '', b = d.querySelector('#builderFold');
     if(b && kind === 'note' && ['open','in_progress'].includes(f.status)) b.open = true;      // no next step to open it: open as before
   } else {
@@ -840,20 +618,19 @@ function xpRedrawBox(id, d, seq){
   // the panel still shows this item (hotfix 2, H1): an answer that comes after the person opened another item never
   // moves the panel; it is said in a notice
   const here = () => seq == null ? state.detailId === id : (typeof panelShows !== 'function' || panelShows(seq, id));
-  const walk = async () => { if(!here()) return; const ids = state.worklist || [], i = ids.indexOf(id);
-    if(i >= 0 && i < ids.length - 1) return openDetail(ids[i + 1]);
-    if(i >= 0 && state.wlNext){ try { await state.wlNext(); } catch(e){} const nx = (state.worklist || [])[i + 1]; if(nx) return openDetail(nx); }
-    openDetail(id); };
   slot.innerHTML = xpBoxHtml(f, x, r);
-  const shown = xpEffective(f, x).explain;
+  const shown = xpEffective(f, x).explain, nx = shown.next_step || {};
   const ch = d.querySelector('#xpChips'); if(ch) ch.innerHTML = xpChips(f, (shown.verdict || {}).state || f.work_state);
-  const offers = ((shown.next_step || {}).buttons || []).some(k => k === 'build_packet' || k === 'fax_payer');
-  const lr = d.querySelector('#letterRow'); if(lr) lr.hidden = offers;
-  const fr = d.querySelector('#fxOneRow'); if(fr && f.status !== 'appealed') fr.hidden = offers;
-  xpBind(f, x, r, d, st => { if(!here()){ if(typeof notice === 'function') notice(`Saved: ${f.title || 'the item'} is now ${STATUS_WORDS[st] || st}.`); return; }
-    return ['appealed','dismissed','resolved','lost'].includes(st) ? walk() : openDetail(id); });
-  const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { const i = (state.worklist||[]).indexOf(id); if(i > 0) openDetail(state.worklist[i-1]); };
-  const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => walk();
+  if(typeof panelFacts === 'function') panelFacts(f, x, d);      // the head's money and due date follow the next step
+  const offers = (nx.buttons || []).some(k => k === 'build_packet' || k === 'fax_payer');
+  // the panel never contradicts itself (CRITIQUE_biller 2): an item that is over or waits on the payer, or one whose next
+  // step bills someone, offers no appeal letter and no fax beside its next step
+  const ws = (shown.verdict || {}).state || f.work_state, over = ['done', 'accepted', 'expired', 'waiting'].includes(ws);
+  const bills = (nx.buttons || []).some(k => k === 'mark_billed' || k === 'billed_patient');
+  const lr = d.querySelector('#letterRow'); if(lr) lr.hidden = offers || over || bills;
+  const fr = d.querySelector('#fxOneRow'); if(fr && f.status !== 'appealed') fr.hidden = offers || over || bills;
+  xpBind(f, x, r, d, (st, o) => { if(!here()){ if(typeof notice === 'function') notice(`Saved: ${f.title || 'the item'} is now ${STATUS_WORDS[st] || st}.`); return; }
+    return panelChanged(f, st, seq, o); });
 }
 // #item=<finding id>: the item's panel, over whatever page is open (a finding id in a message is one click away)
 function itemFromHash(){ const m = /^#item=([A-Za-z0-9_-]{1,80})$/.exec(location.hash); return m ? m[1] : null; }
@@ -864,8 +641,10 @@ async function freshen(){
   let r; try { r = await api('/api/sync/freshen', {method:'POST'}); } catch(e){ return; }
   if(!r || !r.started) return;
   const before = state.meta && state.meta.remits ? state.meta.remits.last_payment : null;
-  const was = $('#fresh').textContent;
-  $('#fresh').textContent = 'Looking for new payments (TriZetto, Dropbox)… ' + was;
+  state.freshening = true; shellHeader();        // the pill says it looks for new payments (TriZetto, Dropbox) until the run ends
+  try { await freshenWait(before); } finally { state.freshening = false; shellHeader(); }
+}
+async function freshenWait(before){
   for(let i = 0; i < 30; i++){
     await new Promise(ok => setTimeout(ok, 20000));
     let st; try { st = await api('/api/sync/status'); } catch(e){ continue; }
@@ -885,15 +664,16 @@ window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
 (async function(){
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
-  try { await loadMeta(); } catch(e){ if(!state.meta) $('#fresh').textContent='no data loaded yet'; }
+  try { await loadMeta(); } catch(e){ if(!state.meta){ state.metaFailed = true; shellHeader(); } }
   // the brief (the 7-day badges on the category tabs, the labels) is asked once: the first page and the panel wait on this
   // same answer. The bell and the feed chip fill in when theirs come; the first rows never wait for them
-  state.briefP = brief().catch(()=>null).finally(()=>{ state.briefP = null; });
+  state.briefP = brief().catch(()=>null).finally(()=>{ state.briefP = null; shellHeader(); });
   refreshHeader();
+  shellFeeds();
   const item = itemFromHash();
   if(!state.run) render();       // a click while the first answer was slow has drawn the page already
   if(item) openDetail(item);     // a link to one item: its panel over Today
-  setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);
+  setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); await shellFeeds(); } catch(e){} }, 120000);
   freshen();
 })();
 </script>

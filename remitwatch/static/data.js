@@ -37,7 +37,7 @@ async function dataTab(v){
   if(!m){ v.innerHTML = '<div class="panel"><h2>Data</h2><div class="note">The site did not answer with its settings. Reload the page in a minute.</div></div>'; return; }
   const covP = api('/api/coverage').catch(()=>null), emaP = api('/api/ema/data').catch(e=>({ready:false, error: e.message || 'no answer from the site'}));
   const anchor = state.dataAnchor; state.dataAnchor = null;
-  v.innerHTML = `<div id="dtBlind"></div><div id="checks"></div><div id="feedPanel"></div>
+  v.innerHTML = `<div id="dtBlind"></div><div id="dtEmaLine"></div><div id="checks"></div><div id="feedPanel"></div>
     <div id="dtEma"><div class="panel"><h2>EMA's reports</h2><div class="muted small">loading…</div></div></div>
     <section id="ops-panels"></section>
     <div id="dtGaps"></div>
@@ -67,7 +67,9 @@ async function dataTab(v){
       </ol>
       <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></details>`;
   // the checklist and the feeds come from the brief and the sync status: they never wait for EMA's figures
-  const fixed = Promise.all([dataChecks(v.querySelector('#checks')), feedPanel(v.querySelector('#feedPanel'))]);
+  // EMA's exports and reports in one line (moved here from Today: static/today.js tdEmaInto)
+  const fixed = Promise.all([dataChecks(v.querySelector('#checks')), feedPanel(v.querySelector('#feedPanel')),
+    typeof tdEmaInto === 'function' ? tdEmaInto(v.querySelector('#dtEmaLine')) : null]);
   const gaps = covP.then(cov => { const el = v.querySelector('#dtGaps'); if(el) el.innerHTML = dtGapsHtml(cov || {gaps: []}); });
   const emaDone = emaP.then(async ema => {
     ema = ema || {ready: false};

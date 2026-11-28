@@ -951,6 +951,8 @@ const out = {
   post: primary('post', ['mark_posted', 'copy_instructions']),
   done: primary('nothing', ['reopen']),
   box: ctx.xpBoxHtml(f, x('appeal', ['build_packet', 'let_go']), { packets: [] }),
+  // the panel's head (unit ui-panel): the state and the outcome chips, the item's place, Previous and Next moved there
+  head: ctx.panelHeadHtml(f, {}, x('appeal', ['build_packet', 'let_go'])),
   story: ctx.xpStoryHtml({ rows: [{ n: 1, date: '2026-03-28', source: '835', text: 'Denied <b>', amount_cents: 0, codes: [{ code: 'CO-197', meaning: 'no auth' }] },
                                   { n: 2, date: '2026-03-31', source: 'production', text: 'Written off', amount_cents: 15000, decisive: true }],
                           balance: { text: 'Charge $150.00 = written off $150.00. It reconciles to the cent.' }, reconciles: true, gap_cents: 0, notes: ['Kept on the server.'] }, [2]),
@@ -966,6 +968,8 @@ const out = {
   // review C1: the panel follows a person's newer status; no fax for a line the server will not send; a decision first
   by_status: ctx.xpBoxHtml(Object.assign({}, f, { work_state: 'accepted', state_by_status: true, status: 'dismissed', status_changed_at: '2026-05-03T10:00:00+00:00' }),
                            x('appeal', ['build_packet', 'fax_payer', 'let_go']), { packets: [] }),
+  by_status_head: ctx.panelHeadHtml(Object.assign({}, f, { work_state: 'accepted', state_by_status: true, status: 'dismissed', status_changed_at: '2026-05-03T10:00:00+00:00' }),
+                                    {}, x('appeal', ['build_packet', 'fax_payer', 'let_go'])),
   no_fax_paid: ctx.xpBoxHtml(f, x('appeal', ['build_packet', 'fax_payer', 'let_go'], { appeal_ok: false, appeal_block: 'paid' }), { packets: [{ packet_id: 'p' }] }),
   check_first: ctx.xpBoxHtml(f, x('appeal', ['build_packet', 'fax_payer'], { appeal_ok: false, appeal_block: 'likely_paid' }), { packets: [{ packet_id: 'p' }] }),
   decide: primary('decide', ['copy_instructions', 'log_outcome', 'let_go']),
@@ -1023,8 +1027,12 @@ def test_the_next_steps_one_main_button_follows_its_route(page):
     assert page["done"] == "Reopen"
     box = page["box"]
     assert "Denied; nobody worked it." in box and "Proven: two sources agree" in box and "Payer's limit" in box
-    assert "At stake" in box and "about" in box and "Auto write-off" in box and "Work now" in box
-    assert 'data-xp="let_go"' in box and "Item 2 of 3" in box and 'id="nextItem"' in box and 'id="prevItem"' in box
+    assert "At stake" in box and "about" in box and 'data-xp="let_go"' in box
+    # moved with the same guarantee (unit ui-panel): the state and EMA's outcome, the item's place, Previous and Next are in
+    # the panel's head, said once there (panelHeadHtml), with what is at stake
+    head = page["head"]
+    assert "Auto write-off" in head and "Work now" in head and "At stake" in head
+    assert "Item 2 of 3" in head and 'id="nextItem"' in head and 'id="prevItem"' in head
 
 
 def test_the_story_marks_its_decisive_rows_escapes_text_and_shows_the_balance(page):
@@ -1050,7 +1058,7 @@ def test_the_panel_follows_a_persons_newer_status_and_offers_no_fax_the_server_w
     no fax button for a line paid, credited, reprocessed or waiting; a line to check first keeps its fax under More, never
     as the main button; a decision first gets the decision's three choices, not "Log what happened"."""
     box = page["by_status"]
-    assert "Accepted" in box and "Let go by a person on May 3, 2026." in box and 'data-xp="reopen"' in box
+    assert "Let go by a person on May 3, 2026." in box and 'data-xp="reopen"' in box and "Accepted" in page["by_status_head"]
     assert 'data-xp="build_packet"' not in box and 'data-xp="let_go"' not in box
     assert 'data-xp="fax_payer"' not in page["no_fax_paid"] and 'data-xp="build_packet"' in page["no_fax_paid"]
     chk = page["check_first"]
@@ -1300,7 +1308,10 @@ def test_the_blind_spot_banner_shows_under_the_tabs_of_every_page_and_never_twic
         pytest.skip("node is not installed")
     html = open(os.path.join(STATIC, "index.html"), encoding="utf-8").read()
     assert html.index('<nav id="nav"></nav>') < html.index('<div id="blindBar"') < html.index('<main id="view">')
-    assert re.search(r"@media print\{[^{]*#blindBar", html)          # a printed letter or batch never carries the banner
+    # a printed letter or batch never carries the banner (the print rules live in the stylesheet, static/rw.css, since
+    # the page's inline <style> block moved there)
+    rw_css = open(os.path.join(STATIC, "rw.css"), encoding="utf-8").read()
+    assert re.search(r"@media print\s*\{[^{]*#blindBar", rw_css)
     script = tmp_path / "blind.js"
     script.write_text(BLIND_JS, encoding="utf-8")
     res = subprocess.run([NODE, str(script), STATIC], capture_output=True, text=True, timeout=60)
