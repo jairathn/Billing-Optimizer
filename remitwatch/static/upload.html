@@ -3,68 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RemitWatch upload</title>
-<style>
-:root{--bg:#f6f7f9;--panel:#fff;--ink:#17202a;--muted:#5d6b7a;--line:#e3e7ec;--accent:#1f5fbf;--bad:#b42318;--warn:#b54708;--good:#067647;--soft:#eef2f7}
-@media (prefers-color-scheme: dark){:root{--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{max-width:1180px;margin:0 auto;padding:20px 16px 60px}
-h1{font-size:22px;margin:8px 0 4px}
-h2{font-size:16px;margin:0 0 8px}
-h3{font-size:15px;margin:0}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:14px}
-.muted{color:var(--muted)}.small{font-size:13px}
-table{width:100%;border-collapse:collapse}
-th{text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:6px;border-bottom:1px solid var(--line)}
-td{padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:top;font-size:14px}
-td.num,th.num{text-align:right;white-space:nowrap}
-.ok{color:var(--good)}.no{color:var(--bad)}.warn{color:var(--warn)}
-button,input,textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
-button{cursor:pointer}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button:disabled{opacity:.5;cursor:default}
-a{color:var(--accent)}
-.top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
-.drop{display:block;position:relative;border:2px dashed var(--line);border-radius:10px;padding:22px 16px;text-align:center;background:var(--soft);cursor:pointer}
-.drop.over{border-color:var(--accent)}
-.drop:focus-within{outline:2px solid var(--accent);outline-offset:2px}
-.drop input{position:absolute;width:1px;height:1px;opacity:0}
-.card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px;overflow-wrap:anywhere}
-.card .name{font-weight:600;word-break:break-all}
-.card ul{margin:6px 0 0;padding-left:18px}.card li{margin:3px 0;font-size:14px}
-.chip{display:inline-block;font-size:12px;border-radius:999px;padding:1px 8px;background:var(--soft);color:var(--muted);margin-left:6px;white-space:nowrap;font-weight:600}
-.chip.ok{color:var(--good)}.chip.no{color:var(--bad)}.chip.warn{color:var(--warn)}
-.bar{height:6px;background:var(--soft);border-radius:3px;overflow:hidden;margin-top:6px}.bar>div{height:100%;background:var(--accent);width:0;transition:width .2s}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
-.guide ol{padding-left:20px;margin:6px 0}.guide li{margin:8px 0}
-.guide b{font-weight:600}
-details summary{cursor:pointer;font-weight:600}
-.attach{position:relative;display:inline-block}
-.attach input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
-.export{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:14px 22px;border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:10px}
-.export.over{border-color:var(--accent);background:var(--soft)}
-.export dl{display:grid;grid-template-columns:110px minmax(0,1fr);gap:4px 10px;margin:8px 0 0;font-size:14px}
-.export dt{color:var(--muted);font-size:13px}.export dd{margin:0}
-.export dd ul{margin:0;padding-left:18px}
-.export .cols{font-size:13px;margin:4px 0 0;padding-left:18px;columns:2;column-gap:18px}
-.export .cols li{break-inside:avoid;margin:2px 0}
-.howto{border-left:3px solid var(--line);padding:2px 0 2px 12px}
-.howto .text{white-space:pre-wrap;font-size:14px;margin:4px 0}
-.howto .ask{font-size:14px;color:var(--warn);margin:4px 0}
-.howto textarea{width:100%;min-height:120px;resize:vertical}
-.howto .theirs{border:1px solid var(--line);border-radius:6px;background:var(--soft);padding:6px 10px;margin:6px 0}
-.howto input{width:100%;max-width:260px}
-.hist{font-size:13px;margin-top:6px}.hist .v{border-top:1px solid var(--line);padding:6px 0;white-space:pre-wrap}
-.status-line{font-size:14px;margin-top:4px}
-.big{font-size:14px}
-@media (max-width:760px){.export{grid-template-columns:1fr}.export .cols{columns:1}.export dl{grid-template-columns:1fr}.export dt{margin-top:4px}}
-@media (max-width:640px){td.hide-sm,th.hide-sm{display:none}}
-</style>
+<title>Upload from EMA · RemitWatch</title>
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0d11" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/static/brand/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/brand/icon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/brand/icon-180.png">
+<script>
+// the theme and the sidebar a person chose on this computer, before the first paint (static/shell.js keeps them)
+(function(){ try { var t = localStorage.getItem('rw:theme'); if(t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  if(localStorage.getItem('rw:sidebar') === 'rail') document.documentElement.setAttribute('data-sidebar', 'rail'); } catch(e){} })();
+</script>
+<link rel="preload" href="/static/fonts/inter-latin-opsz-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/rw.css?v=2026-11-28">
 </head>
 <body>
-<main>
+<a class="skip-link" href="#main">Skip to the page</a>
+<div class="app" id="app">
+<nav id="nav"></nav>
+<div class="app-main">
+<header class="topbar" id="topbar">
+  <span class="topbar-title" id="pageTitle" aria-hidden="true">Upload from EMA</span>
+  <button type="button" class="search search-btn" id="searchBtn" aria-label="Search and go to"><span>Search</span><kbd>/</kbd></button>
+  <span class="grow"></span>
+  <a class="health" id="health" href="/#data"><span id="feedChip">Upload from EMA</span></a>
+  <a class="icon-btn" id="bellBtn" href="/#alerts" aria-label="Alerts" title="Alerts"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-bell"/></svg><span class="dot-count" hidden></span></a>
+  <div class="menu-wrap"><button class="icon-btn" id="helpBtn" aria-label="Help" title="Help" aria-haspopup="menu" aria-expanded="false"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-help"/></svg></button>
+    <div class="menu" id="helpMenu" role="menu" hidden>
+      <a role="menuitem" href="/#today" id="guideLink"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-info"/></svg>How RemitWatch works</a>
+      <button role="menuitem" id="findBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg>Search and go to<kbd class="kbd-right" id="findKey">Ctrl K</kbd></button>
+    </div></div>
+</header>
+<main class="page doc" id="main">
   <div id="swingBar" hidden></div>
-  <div class="top"><h1>Upload from EMA</h1><a href="/">Back to the dashboard</a></div>
+  <div class="page-head"><div><h1 class="page-title">Upload from EMA</h1></div></div>
   <div id="pressLine" class="small" hidden></div>
   <div class="muted">Until ModMed approves an API connection, EMA's side reaches RemitWatch as reports exported by hand. Each week, pull the five exports below from EMA and drop them here (or put them in the Dropbox folder). They go through the same reading and analysis as the files from Dropbox. Large reports are fine: this page compresses them and sends them in pieces, and a broken upload carries on where it stopped.</div>
 
@@ -112,6 +84,11 @@ details summary{cursor:pointer;font-weight:600}
     <div class="small">Before a file is sent, this page works out its checksum (SHA-256). Large files go in pieces of 4 MB, each checked as it arrives, and the whole file is checked against that checksum at the end: a file that does not arrive whole is not kept, nor one no export EMA makes looks like (one that unpacks to hundreds of times its size, or has a line longer than a megabyte). On the practice's server each file is kept in the same protected place as RemitWatch's store; on the Vercel site, reports and exports go to the private Dropbox folder RemitWatch keeps its data in. The files themselves are never emailed. Exports and remittance files never leave RemitWatch's storage. A visit note leaves it only inside the appeal packet built from it: faxed to the payer, or emailed where the practice has allowed that. When the note review is switched on, the note is also read by that review. Reports and exports are read by the next cycle; what each held, and what it replaced, then shows here. Uploading the same file again changes nothing: RemitWatch knows a file by its checksum, the same way whether it was uploaded or found in the Dropbox folder.</div>
   </div>
 </main>
+</div>
+</div>
+<nav class="tabbar" id="tabbar" aria-label="Places"></nav>
+<script src="/static/shell.js"></script>
+<script>RWShell.mount({page: 'upload', link: '/#'}); RWShell.live();</script>
 <script src="/static/upload.js"></script>
 <script src="/static/swing.js"></script>
 <script>swingLoad(document.getElementById('swingBar'));</script>
