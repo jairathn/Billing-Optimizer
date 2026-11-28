@@ -140,25 +140,57 @@ function notice(text){ let n = document.getElementById('rwNotice'); if(!n){ n = 
   const line = document.createElement('div'); line.textContent = text; n.appendChild(line); setTimeout(()=>line.remove(), 9000); }
 function qs(o){ return Object.entries(o).filter(([k,v])=>v!==''&&v!=null).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&'); }
 function sweepCharts(){ Object.keys(state.charts).forEach(id=>{ const c=state.charts[id]; if(!c.canvas || !c.canvas.isConnected){ c.destroy(); delete state.charts[id]; } }); }
-function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el) return;
+function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el || typeof Chart === 'undefined') return;
   if(!el.parentElement.classList.contains('chartbox')){ const box=document.createElement('div'); box.className='chartbox'; el.parentElement.insertBefore(box, el); box.appendChild(el); }
   cfg.options = Object.assign({maintainAspectRatio:false}, cfg.options||{});
-  state.charts[id]=new Chart(el, cfg); }
-const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8c6d1f','#6c757d'];
+  ((cfg.data||{}).datasets||[]).forEach(d => { d.tension = 0; });          // straight lines: a curve invents peaks and dips between months
+  // months read "Jan 2026", "Feb", never "2026-02", and no label is turned on its side (CRITIQUE_premium changes 9 and 11)
+  const L = (cfg.data||{}).labels;
+  if(Array.isArray(L) && L.length && L.every(x => /^\d{4}-\d{2}$/.test(String(x)))) cfg.data.labels = L.map((m, i) => {
+    const mo = new Date(m + '-15T12:00:00').toLocaleDateString('en-US', {month: 'short'}); return i === 0 || m.endsWith('-01') ? mo + ' ' + m.slice(0, 4) : mo; });
+  if(cfg.type === 'bar' || cfg.type === 'line'){ const o = cfg.options, ax = o.indexAxis === 'y' ? 'y' : 'x'; o.scales = o.scales || {};
+    o.scales[ax] = Object.assign({}, o.scales[ax]); o.scales[ax].ticks = Object.assign({maxRotation: 0, autoSkip: true}, o.scales[ax].ticks); }
+  vizSaid(el, cfg);
+  state.charts[id]=new Chart(el, cfg); (state.chartCfg = state.chartCfg || {})[id] = cfg; }
+// Charts take their colors from the stylesheet's --viz-* tokens (docs/DESIGN.md, Color) in both themes: the four series in
+// the validated order, then the context grays. Chart.js's font, ink and grid follow the tokens too, and a theme change
+// draws every chart on the page again in the new colors (CRITIQUE_premium change 9).
+const VIZ_TOKENS = ['--viz-1','--viz-2','--viz-3','--viz-4','--viz-context','--viz-muted','--viz-accent-2','--viz-axis'];
+const palette = [];
+function vizTheme(){
+  const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim();
+  const old = palette.slice(); palette.length = 0; VIZ_TOKENS.forEach(n => palette.push(v(n) || '#8b94a3'));
+  if(typeof Chart === 'undefined') return;
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily; Chart.defaults.font.size = 12;
+  Chart.defaults.color = v('--text-2'); Chart.defaults.borderColor = v('--viz-grid');
+  if(!old.length) return;
+  const swap = c => { const i = old.indexOf(c); return i >= 0 ? palette[i] : c; };
+  Object.keys(state.charts || {}).forEach(id => { const cfg = (state.chartCfg || {})[id]; if(!cfg) return;
+    ((cfg.data||{}).datasets||[]).forEach(d => ['backgroundColor','borderColor'].forEach(k => { if(Array.isArray(d[k])) d[k] = d[k].map(swap); else if(typeof d[k] === 'string') d[k] = swap(d[k]); }));
+    try { chart(id, cfg); } catch(e){ console.warn(e); } });
+}
+// each chart's text equivalent: its datasets and their totals, said on the canvas for a screen reader (the tables beside
+// the charts carry every figure)
+function vizSaid(el, cfg){ try { const ds = (cfg.data||{}).datasets||[], labels = (cfg.data||{}).labels||[];
+  const sum = d => (d.data||[]).reduce((a, x) => a + (typeof x === 'number' ? x : 0), 0);
+  el.setAttribute('role', 'img');
+  el.setAttribute('aria-label', `Chart of ${labels.length} ${labels.length === 1 ? 'point' : 'points'}${labels.length ? ' from ' + labels[0] + ' to ' + labels[labels.length - 1] : ''}: ` + ds.map(d => `${d.label || 'values'}, ${Math.round(sum(d)).toLocaleString()} in all`).join('; ') + '.');
+} catch(e){} }
+vizTheme();
 
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);       // never a name every object has (constructor, __proto__, toString)
 function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || own(ALIASES, k); }
 function initNav(){
   // the shell: the sidebar, the phone's tab bar, Help, the theme, Search and go to (static/shell.js)
   RWShell.mount({page: 'app', link: '#', go: tab => { state.tab = tab; location.hash = tab; render(); }, find: text => findClaim(text),
-    onTheme: () => { if(state.tab === 'providers'){ if(typeof pvRedraw === 'function' && pvRedraw()) return; render(); } }});
+    onTheme: () => { vizTheme(); if(state.tab === 'providers'){ if(typeof pvRedraw === 'function' && pvRedraw()) return; render(); } }});
   document.querySelectorAll('#nav a[data-tab], #tabbar a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
     state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
   $('#lockBtn').onclick = ()=>{ pvForget(); render(); };
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
-  $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
+  // the bell opens its short list of the newest alerts (static/shell.js bellMenu), with "See all" to the Alerts page
   $('#health').onclick = e=>{ e.preventDefault(); const anchor = e.currentTarget.dataset.anchor || null;
     if(typeof tdGoData === 'function') tdGoData(anchor); else { state.tab='data'; location.hash='data'; render(); } };
   $('#guideBtn').onclick = ()=>openGuide();
@@ -267,7 +299,7 @@ async function overview(v){
     ${kpi('Downcoded', money(cat.downcoding), 'code or level reduced', 'downcoding')}
     ${kpi('Fees and takebacks', money(cat.fees), 'PLB withholds', 'fees')}
     ${kpi('Due in 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' appeals · expired '+money((dl.expired||{}).shortfall_cents), 'appeals')}
-    ${kpi('Recovered on later remits', money((s.resolved_by_later_remit||{}).shortfall_cents), ((s.resolved_by_later_remit||{}).n||0)+' lines paid after rework (auto-resolved)', 'denials')}
+    ${kpi('Paid on a later remittance', money((s.resolved_by_later_remit||{}).shortfall_cents), ((s.resolved_by_later_remit||{}).n||0)+' lines paid after rework, closed by the rules (Results counts what came back on flagged items)', 'denials')}
   </div>
   <div class="grid two">
     <div class="panel"><h2>Leakage by month of service</h2><canvas id="cMonth"></canvas></div>

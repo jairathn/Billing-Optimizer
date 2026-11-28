@@ -97,8 +97,8 @@ function ascRuleHtml(d, s){
     <h2>What ${esc(ry)} does to the ASC's cases</h2>
     <div class="small muted">${esc(site.label || 'The')} ASC: ${esc(ascTitle(site.county))} County, ${esc(site.state || '')} (CBSA ${esc(site.cbsa || '?')} ${esc(site.cbsa_name || '')}), ASC wage index ${esc(wi[py] != null ? wi[py] : '?')} in ${esc(py)} and ${esc(wi[ry] != null ? wi[ry] : '?')} in ${esc(ry)}.
       The cases the practice's surgeons billed there in ${esc(d.from)} to ${esc(d.to)} (a closure after a Mohs the same day, or an excision with its repair, billed on the ASC's claim), at that pace for a year, priced at Medicare's ASC rates of ${esc(lab[py] || py)} and of ${esc(lab[ry] || ry)}${d.source ? ` (${esc(d.source)})` : ''}. ${esc(from)}</div>
-    <div class="grid kpis" style="margin-top:10px" id="ascTiles"></div>
-    <table class="calc-cards" style="margin-top:10px" id="ascKinds">
+    <div class="grid kpis mt-3" id="ascTiles"></div>
+    <table class="calc-cards mt-3" id="ascKinds">
       <thead><tr><th>Payer</th><th class="num">Cases a year</th><th class="num">Pays the ASC, as a share of Medicare's rate</th><th>Follows Medicare's yearly rates</th>
         <th class="num">${esc(py)}</th><th class="num">${esc(ry)}</th><th class="num">Change</th></tr></thead>
       <tbody>${kinds.map(k => `<tr><td>${esc(AscModel.LABEL[k])}</td><td class="num" data-label="Cases a year" id="ascKn-${k}"></td>${shareCell(k)}${followCell(k)}
@@ -110,7 +110,7 @@ function ascRuleHtml(d, s){
       <label class="small">The practice's share of the ASC <input type="number" id="ascOwn" class="calc-num" min="0" max="100" step="any" value="${esc(own)}" placeholder="not entered" style="width:112px" aria-label="The practice's share of the ASC, %"> %</label>
       <label class="small"><input type="checkbox" id="ascQr" ${s.ascqr ? 'checked' : ''}> The ASC does not meet quality reporting (ASCQR): about 2% less on A2, G2 and P2 codes, both years</label>
     </div>
-    <div id="ascMedicare" class="small" style="margin-top:6px"></div>
+    <div id="ascMedicare" class="small mt-2"></div>
     <h3 style="margin:14px 0 4px">The surgeons' fees for the same cases</h3>
     <table class="calc-cards" id="ascPro"><thead><tr><th>Payer</th><th class="num">${esc(py)}</th><th class="num">${esc(ry)}</th><th class="num">Change</th></tr></thead><tbody></tbody></table>
     <div class="note">Medicare's physician fee schedule for ${esc(py)} and ${esc(ry)}: the Mohs in the clinic at the office amount, the closure at the ASC at the facility amount, the 50% rule across the two claims; Medicare Advantage at what it pays the surgeons against Medicare. ${esc(ascMaNote(s, py, ry))} Commercial and other plans pay the surgeons by their own contracts: the Calculator's waterfall has each plan's ${esc(ry)} change, and the ${esc(ry)} same-day visit rule, which is not counted here.</div>
@@ -226,7 +226,7 @@ function ascTypesDraw(v, R){
   });
   box.innerHTML = `<h2>A case, at Medicare's rates</h2>
     <div class="small muted">What Medicare pays for one case of each type as the ASC's cases were billed (the ASC's claim after its discounting; the surgeon's fees for the Mohs and the closure after the 50% rule), whoever the payer was.</div>
-    <table class="calc-cards" style="margin-top:8px"><thead><tr><th>Case</th><th class="num">Cases a year</th><th class="num">The ASC, ${esc(py)}</th><th class="num">The ASC, ${esc(ry)}</th><th class="num">The surgeon, ${esc(py)}</th><th class="num">The surgeon, ${esc(ry)}</th></tr></thead>
+    <table class="calc-cards mt-2"><thead><tr><th>Case</th><th class="num">Cases a year</th><th class="num">The ASC, ${esc(py)}</th><th class="num">The ASC, ${esc(ry)}</th><th class="num">The surgeon, ${esc(py)}</th><th class="num">The surgeon, ${esc(ry)}</th></tr></thead>
     <tbody>${rows.join('') || '<tr><td colspan="6" class="muted">No case to show.</td></tr>'}</tbody></table>`;
 }
 
@@ -247,7 +247,7 @@ function ascCodesDraw(v, R){
   });
   box.innerHTML = `<h2>By code</h2>
     <div class="small muted">Medicare's rate for each code billed on the ASC's claims, before discounting: nationally and at ${esc(site.label || 'the ASC')}, wage-adjusted. Hover an indicator for what it means.</div>
-    <table class="calc-cards" style="margin-top:8px"><thead><tr><th>Code</th><th class="num">Units a year</th><th>Indicator</th><th>Discounted</th><th class="num">National</th><th class="num">${esc(site.label || 'ASC')}</th><th class="num">Change</th></tr></thead>
+    <table class="calc-cards mt-2"><thead><tr><th>Code</th><th class="num">Units a year</th><th>Indicator</th><th>Discounted</th><th class="num">National</th><th class="num">${esc(site.label || 'ASC')}</th><th class="num">Change</th></tr></thead>
     <tbody>${rows.join('') || '<tr><td colspan="7" class="muted">No code to show.</td></tr>'}</tbody></table>
     ${codes.length ? `<button class="ghost" id="ascLookCodes" style="margin-top:6px">Look these codes up in the rate calculator below</button>` : ''}`;
   const b = box.querySelector('#ascLookCodes');

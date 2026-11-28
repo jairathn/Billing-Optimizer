@@ -32,12 +32,22 @@ function dtCopy(text, btn){
   done(false);
 }
 
+// the page's one line under its title: how far the remittances reach, how many, and when the site last analysed them
+function dtHeadLine(m){
+  const r = (m && m.remits) || {}, run = ((m && m.runs) || [])[0] || {};
+  const day = d => { const x = new Date(String(d || '').slice(0, 10) + 'T12:00:00'); return isNaN(x) ? '' : x.toLocaleDateString('en-US', x.getFullYear() === new Date().getFullYear() ? {month: 'short', day: 'numeric'} : {month: 'short', day: 'numeric', year: 'numeric'}); };      // "Dec 15", or "Dec 15, 2027" in another year
+  const at = run.finished_at || run.finished || run.at || '';
+  // in the practice's time zone (the brief's), "Nov 28, 7:54 AM": never an ISO date on a biller's page
+  const tz = (typeof state !== 'undefined' && state.brief && state.brief.tz) || undefined, t = new Date(at);
+  let when = ''; if(at && !isNaN(t)){ try { when = t.toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz}); } catch(e){ when = t.toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}); } }
+  return [r.last_payment ? 'Newest payment ' + day(r.last_payment) : '', r.n ? Number(r.n).toLocaleString('en-US') + (r.n === 1 ? ' remittance' : ' remittances') : '', when ? 'last analysis ' + when : ''].filter(Boolean).join(' · ');
+}
 async function dataTab(v){
   const m = state.meta;
   if(!m){ v.innerHTML = '<div class="panel"><h2>Data</h2><div class="note">The site did not answer with its settings. Reload the page in a minute.</div></div>'; return; }
   const covP = api('/api/coverage').catch(()=>null), emaP = api('/api/ema/data').catch(e=>({ready:false, error: e.message || 'no answer from the site'}));
   const anchor = state.dataAnchor; state.dataAnchor = null;
-  v.innerHTML = `<div id="dtBlind"></div><div id="dtEmaLine"></div><div id="checks"></div><div id="feedPanel"></div>
+  v.innerHTML = `<div class="secs"><div class="page-head"><h1 class="page-title">Data</h1><span class="small muted">${esc(dtHeadLine(m))}</span></div><div id="dtBlind"></div><div id="dtEmaLine"></div><div id="checks"></div><div id="feedPanel"></div>
     <div id="dtEma"><div class="panel"><h2>EMA's reports</h2><div class="muted small">loading…</div></div></div>
     <section id="ops-panels"></section>
     <div id="dtGaps"></div>
@@ -65,7 +75,7 @@ async function dataTab(v){
         <li><b>Remittances for VA community care</b>, if TriZetto can supply them. None has ever arrived, so those visits are in no count here.</li>
         <li><b>The 2026 MIPS payment adjustment file</b> (qpp.cms.gov, Performance Feedback).</li>
       </ol>
-      <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></details>`;
+      <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></details></div>`;
   // the checklist and the feeds come from the brief and the sync status: they never wait for EMA's figures
   // EMA's exports and reports in one line (moved here from Today: static/today.js tdEmaInto)
   const fixed = Promise.all([dataChecks(v.querySelector('#checks')), feedPanel(v.querySelector('#feedPanel')),
@@ -186,9 +196,9 @@ function dtReportsHtml(e){
       : `<div class="scroll"><table class="small"><thead><tr><th>Report</th><th>Covers</th><th>As of</th><th class="num">Rows</th><th>Status</th><th>From</th></tr></thead>
     <tbody id="dtFiles">${files.slice(0, DT_SHOW).map(dtFileRow).join('')}</tbody></table></div>`}
     ${files.length > DT_SHOW ? `<button class="ghost" id="dtAllFiles">Show all ${files.length}</button>` : ''}</details>
-    ${nr.length ? `<div class="small muted" style="margin-top:6px">${esc(pl(nr.length, 'file'))} the site did not read: not one of EMA's reports or weekly exports, or too big for this site${nr[0].ingested_at ? ` (the newest ${dtDay(nr[0].ingested_at)})` : ''}.</div>` : ''}
+    ${nr.length ? `<div class="small muted mt-2">${esc(pl(nr.length, 'file'))} the site did not read: not one of EMA's reports or weekly exports, or too big for this site${nr[0].ingested_at ? ` (the newest ${dtDay(nr[0].ingested_at)})` : ''}.</div>` : ''}
     ${(cat.misread_suspects||[]).length ? `<div class="small sev-medium">${esc(pl(cat.misread_suspects.length, 'earlier file'))} may be a report read as a weekly export; the maintainer can check.</div>` : ''}
-    <div class="small" style="margin-top:6px"><a href="/upload">Upload a report</a> · the Upload page lists the five exports, what each is for and how to pull it.</div></div>`;
+    <div class="small mt-2"><a href="/upload">Upload a report</a> · the Upload page lists the five exports, what each is for and how to pull it.</div></div>`;
 }
 
 // a held report: what held it, and Apply or Discard. Applying reads it as it is, so it is never the obvious button and it
@@ -202,7 +212,7 @@ function dtHeldHtml(x){
   const btns = pending ? `<button data-decide="discard" data-file="${file}">Discard it instead</button>`
     : `<button data-decide="apply" data-file="${file}">${chose ? 'Apply it again' : 'Apply it'}</button><button data-decide="discard" data-file="${file}">Discard it</button>`;
   return `<div class="warnbox" data-held="${file}"><b>${esc(name)} held${x.source_name ? ': ' + esc(x.source_name) : ''}.</b> ${esc(x.status_reason || 'It needs a decision before it is read.')}
-      ${said}<div class="actions" style="margin-top:6px">${btns}<span class="small muted dtDecideMsg"></span></div></div>`;
+      ${said}<div class="actions mt-2">${btns}<span class="small muted dtDecideMsg"></span></div></div>`;
 }
 
 function dtMissingHtml(e){
@@ -222,7 +232,7 @@ function dtMissingHtml(e){
     <details class="dfold"><summary>By cause</summary><table class="small"><thead><tr><th>Cause</th><th class="num">Checks</th><th class="num">Dollars</th></tr></thead>
       <tbody>${causes.map(([k,x])=>`<tr><td>${esc((words[k]||{}).why || k)}</td><td class="num">${Number(x.checks||0).toLocaleString()}</td><td class="num">${money(x.cents)}</td></tr>`).join('')}</tbody></table>
       ${c1.no_check_cents ? `<div class="small muted">Also ${money(c1.no_check_cents)} posted as insurance payments with no check number at all: no remittance can be matched to those.</div>` : ''}</details>
-    <div class="small" style="margin-top:6px"><a href="/api/ema/checks.csv" download>Download every check with no remittance (CSV)</a></div></div>`;
+    <div class="small mt-2"><a href="/api/ema/checks.csv" download>Download every check with no remittance (CSV)</a></div></div>`;
 }
 
 // one payer's checks of one month that came with no remittance, and the button that copies what to ask for
@@ -320,7 +330,7 @@ function dtPolicyHtml(e){
       ${dc.patterns ? `<b>${esc(pl(dc.patterns, 'code'))} a payer almost never pays</b> (${esc(pl(dc.items, 'denial'))}, <span title="${esc(bs.payer_policy || '')}">${money(dc.cents)} est.</span>) ${dc.patterns===1?'waits':'wait'} for the owner's decision: out of Work now until then.` : ''}
       ${c7.patterns ? `EMA posts ${esc(pl(c7.patterns, 'payer denial reason'))} as contractual: <span title="${esc(bs.contractual || '')}">${money(c7.written_off_cents)}</span> written off that way, in no total.` : ''}
       ${p.accepted ? esc(pl(p.accepted, 'pattern')) + ' accepted so far. ' : ''}<a href="#policy" class="dtGo" data-tab="policy">Decide them on the write-off policy page</a>.</div>` : ''}
-    ${ub.n ? `<div class="small muted" style="margin-top:4px">${esc(pl(ub.n, 'open item'))} ${ub.n===1?'has':'have'} no price, because no rate covers the line. EMA wrote off up to ${money(ub.cents)} on them (the charge less what was paid): an upper bound, left out of every total.</div>` : ''}</div>`;
+    ${ub.n ? `<div class="small muted mt-1">${esc(pl(ub.n, 'open item'))} ${ub.n===1?'has':'have'} no price, because no rate covers the line. EMA wrote off up to ${money(ub.cents)} on them (the charge less what was paid): an upper bound, left out of every total.</div>` : ''}</div>`;
 }
 
 function dtRunHtml(e){

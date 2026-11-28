@@ -199,10 +199,11 @@ function rsMoneyHtml(d){
   const qual = !m.returned_cents ? 'Nothing has come back on flagged items yet.'
     : (any.cents != null && enough ? `About ${rsM(any.cents)} of this may have come back anyway: similar items with no work were ${rsLink('lift:z:paid', 'paid at ' + rsPct(any.rate), '', 'These are the similar items with no work that were paid: the share of them is the rate.')} (${rsLink('lift:z', rsPl(any.n, 'item'), '', 'These are the similar items with no work the rate is measured on.')}).`
       : `Some of this may have come back anyway. Not enough similar items yet to say how much (${rsNum(any.n || 0)} of the 20 needed).`);
-  return `<div class="panel" id="rs-money" style="margin-top:0">
+  return `<div class="panel" id="rs-money">
     <div class="panel-head"><h2>Money returned on claims RemitWatch flagged or worked</h2><span class="small muted">since ${esc(rsDate(m.first_flag) || 'the first flag')}</span></div>
     <div class="rs-top">${rsLink('returned', `<span class="rs-big">${rsBig(m.returned_cents)}</span>`, RS_BASIS.returned + '. Exactly ' + rsM(m.returned_cents))}
       <span class="muted">on ${rsPl(m.items, 'item')}</span></div>
+    <div class="rs-chart" id="rsChart" hidden></div>
     <div class="note">${enough ? qual : esc(qual)}</div>
     <div class="grid kpis">
       ${rsTile('After RemitWatch work', rsBig(m.a_cents), rsPl(m.a_items, 'item') + ' paid inside the payer\'s answer time after the work', 'returned:a', '', '', m.a_cents)}
@@ -210,9 +211,9 @@ function rsMoneyHtml(d){
       ${rsTile('Flagged, no recorded work', rsBig(m.c_cents), rsPl(m.c_items, 'item') + '; may have come back anyway', 'returned:c', '', '', m.c_cents)}
       ${m.taken_back_cents ? rsTile('Taken back after the flag', rsBig(m.taken_back_cents), rsPl(m.taken_back_items, 'item') + ' not paid back since', 'taken_back', '', '', m.taken_back_cents) : ''}
     </div>
-    ${m.above_flagged_cents ? `<div class="small" style="margin-top:6px">${rsLink('above_flagged', rsPl(m.above_flagged_items, 'item'))} paid ${rsM(m.above_flagged_cents)} more than the amount flagged: counted above. Each item's own recovered figure stops at the amount flagged.</div>` : ''}
-    ${m.mark_taken_back_items ? `<div class="small" style="margin-top:6px">${rsLink('mark_taken_back', rsPl(m.mark_taken_back_items, 'item'))} marked Paid by a person, but the payer took the payment back: not counted.</div>` : ''}
-    <details class="small" style="margin-top:8px"><summary>How this is counted</summary>
+    ${m.above_flagged_cents ? `<div class="small mt-2">${rsLink('above_flagged', rsPl(m.above_flagged_items, 'item'))} paid ${rsM(m.above_flagged_cents)} more than the amount flagged: counted above. Each item's own recovered figure stops at the amount flagged.</div>` : ''}
+    ${m.mark_taken_back_items ? `<div class="small mt-2">${rsLink('mark_taken_back', rsPl(m.mark_taken_back_items, 'item'))} marked Paid by a person, but the payer took the payment back: not counted.</div>` : ''}
+    <details class="small mt-2"><summary>How this is counted</summary>
       <p>Every dollar a payer paid on an item's line after RemitWatch first flagged the item, plus money RemitWatch found. Money paid before the flag never counts, and money the payer paid before the flag and took back after it is paid back first by any later payment: only what comes beyond it counts. One payment counts once, on the earliest item of its line.</p>
       <p><b>After RemitWatch work</b>: paid after a fax, a claim or appeal marked Sent, a call or portal check, a payment marked posted or a bill to the patient or second payer recorded in RemitWatch on the same service, and inside that payer's usual answer time. <b>Found by RemitWatch</b>: money from a second payer nobody had billed, an 835 payment EMA never posted, a claim that never left EMA. <b>Flagged, no recorded work</b>: everything else paid after the flag. A payment the payer later took back is not counted, and a refund, fee or unposted-payment item marked Paid never is.</p>
       ${m.median_days_work_to_money != null ? `<p>From the work to the money: ${Math.round(m.median_days_work_to_money)} days at the middle.</p>` : ''}
@@ -223,7 +224,7 @@ function rsScoreHtml(s){
   if(!s) return '<div class="panel" id="rs-score"><h2>Week by week</h2><div class="note">The week by week figures could not be read just now. Reload the page in a minute.</div></div>';
   const w = (s.weeks || []).slice(-12).reverse();
   state.rsWeeks = {}; (s.weeks || []).forEach(x => { state.rsWeeks[x.week] = x; });
-  const gu = s.given_up_check ? `<div class="small muted" style="margin-top:4px">The self-check counts ${rsM(s.given_up_check.cents)} on ${rsPl(s.given_up_check.n, 'item')} by its own rule (written off at posting, any kind of item): a cross-check, its list is not kept.</div>` : '';
+  const gu = s.given_up_check ? `<div class="small muted mt-1">The self-check counts ${rsM(s.given_up_check.cents)} on ${rsPl(s.given_up_check.n, 'item')} by its own rule (written off at posting, any kind of item): a cross-check, its list is not kept.</div>` : '';
   const cell = (r) => {
     const frozen = r.frozen ? ` title="${esc('Frozen' + (r.frozen_at ? ' on ' + rsDate(r.frozen_at) : '') + ': this figure never changes')}"` : '';
     const main = r.recovered_cents ? `<span${frozen}>${rsLink('returned:week:' + r.week, rsM(r.recovered_cents))}</span>` : rsM(0);
@@ -279,7 +280,7 @@ function rsWorkHtml(d){
   const faxCost = Math.round((w.fax_pages || 0) * (costs.fax_page || 0) * 100);
   return `<div class="panel" id="rs-work"><h2>Work done in RemitWatch</h2>
     <div class="grid two"><div><table><thead><tr><th>Kind of work</th><th class="num">Items</th><th class="num">Times</th></tr></thead><tbody>${kinds || '<tr><td colspan="3" class="muted">No work recorded yet.</td></tr>'}</tbody></table>
-      <div class="small" style="margin-top:6px">Faxes sent: ${rsNum(w.faxes_sent)} (${rsNum(w.fax_pages)} pages${faxCost ? ', ' + rsM(faxCost) : ''}).
+      <div class="small mt-2">Faxes sent: ${rsNum(w.faxes_sent)} (${rsNum(w.fax_pages)} pages${faxCost ? ', ' + rsM(faxCost) : ''}).
       Let go with a reason: ${rsLink('work:let_go', rsNum(w.let_go))}. Accepted by the owner's policy or a hide rule: ${rsLink('work:policy', rsNum(w.policy))}.</div></div>
     <div><table><thead><tr><th>Who</th><th class="num">Items</th><th class="num">Times</th></tr></thead><tbody>${people || '<tr><td colspan="3" class="muted">No one yet.</td></tr>'}</tbody></table></div></div></div>`;
 }
@@ -290,7 +291,7 @@ function rsStatesHtml(d){
 }
 function rsOutcomesHtml(d){
   const o = d.outcomes;
-  const now = `<div class="small muted" style="margin-top:10px">Every item by its state right now (all items, not only the open book):</div><div class="grid kpis">${rsStatesHtml(d)}</div>`;
+  const now = `<div class="small muted mt-3">Every item by its state right now (all items, not only the open book):</div><div class="grid kpis">${rsStatesHtml(d)}</div>`;
   if(!o) return `<div class="panel" id="rs-book"><h2>The items by state</h2>${now}</div>`;
   const since = d.first_run ? ` since the first run on ${esc(rsDate(d.first_run))}` : '';
   const open = (o.open_by || []).map(c => `<tr><td>${esc(c.label)}</td><td class="num">${rsLink('book:open:' + c.key, rsNum(c.n))}</td></tr>`).join('');
@@ -299,23 +300,23 @@ function rsOutcomesHtml(d){
   const wins = (o.win_by_kind || []).map(k => `<tr><td>${esc(k.label)}</td><td class="num">${rsNum(k.won)}</td><td class="num">${rsNum(k.lost)}</td><td class="num">${rsPct(k.rate)}</td></tr>`).join('');
   return `<div class="panel" id="rs-book"><h2>The open book</h2>
     <div class="note">Every item that was ever in Work now or Waiting${since}: ${rsLink('book', rsNum(o.book))}. Still open, closed and cannot be checked add up to it.</div>
-    <div class="grid two" style="margin-top:6px"><div>
+    <div class="grid two mt-2"><div>
       <div><b>Still open</b> (${rsNum(o.still_open)}):</div>
       <table><tbody>${open || '<tr><td class="muted">None.</td></tr>'}</tbody></table>
-      <div style="margin-top:8px"><b>${rsPct(o.closed_rate)}</b> closed${since} (${rsLink('closed:any', rsNum(o.closed))}):</div>
+      <div class="mt-2"><b>${rsPct(o.closed_rate)}</b> closed${since} (${rsLink('closed:any', rsNum(o.closed))}):</div>
       <table><tbody>${closed || '<tr><td class="muted">None yet.</td></tr>'}</tbody></table>
-      <div style="margin-top:8px"><b>${rsPct(o.cant_rate)}</b> cannot be checked (${rsLink('cant:any', rsNum(o.cant_check))}), because:</div>
+      <div class="mt-2"><b>${rsPct(o.cant_rate)}</b> cannot be checked (${rsLink('cant:any', rsNum(o.cant_check))}), because:</div>
       <table><tbody>${cant || '<tr><td class="muted">None.</td></tr>'}</tbody></table></div>
     <div>
       <div>Worked and waiting with no money yet: ${rsLink('waiting_no_money', rsNum(o.waiting_no_money))} (${rsPct(o.waiting_no_money_rate)} of ${rsPl(o.worked, 'worked item')}${o.waiting_median_days != null ? `; ${Math.round(o.waiting_median_days)} days since the work, at the middle` : ''}).</div>
-      <div style="margin-top:4px">Worked and denied again: ${rsLink('denied_again', rsNum(o.denied_again))} (${rsPct(o.denied_again_rate)}).</div>
-      ${wins ? `<table style="margin-top:8px"><thead><tr><th>Kind of work</th><th class="num">Won</th><th class="num">Denied again</th><th class="num">Win rate</th></tr></thead><tbody>${wins}</tbody></table>` : ''}
+      <div class="mt-1">Worked and denied again: ${rsLink('denied_again', rsNum(o.denied_again))} (${rsPct(o.denied_again_rate)}).</div>
+      ${wins ? `<table class="mt-2"><thead><tr><th>Kind of work</th><th class="num">Won</th><th class="num">Denied again</th><th class="num">Win rate</th></tr></thead><tbody>${wins}</tbody></table>` : ''}
     </div></div>${now}</div>`;
 }
 
 function rsUnlockHtml(d, what){
   if(d.owner_open || !d.owner_locked) return '';
-  return `<form class="rs-unlock filters" style="margin-top:6px"><span class="small">The owner sets the ${what}. Owner:</span> <input type="password" autocomplete="one-time-code" data-1p-ignore data-lpignore="true" aria-label="owner's password" placeholder="owner's password" style="width:12em"> <button class="primary">Open</button> <span class="small sev-medium rs-unlock-msg" role="alert"></span></form>`;
+  return `<form class="rs-unlock filters mt-2"><span class="small">The owner sets the ${what}. Owner:</span> <input type="password" autocomplete="one-time-code" data-1p-ignore data-lpignore="true" aria-label="owner's password" placeholder="owner's password" style="width:12em"> <button class="primary">Open</button> <span class="small sev-medium rs-unlock-msg" role="alert"></span></form>`;
 }
 function rsHoursHtml(d){
   const h = d.hours; if(!h) return '<div id="rs-hours"></div>';
@@ -330,7 +331,7 @@ function rsHoursHtml(d){
     <tr><td><b>Total</b></td><td></td><td></td><td class="num rs-wide"><b>${h.hours == null ? '–' : rsNum(h.hours)}</b></td></tr></tbody></table></div>
     ${h.hours == null ? '<div class="note">Worked out by the daily run: the first one after this update fills these counts.</div>' : ''}
     <div class="note">Each thing counts at the minutes in force when it happened: a changed figure prices what happens from then on, and the earlier figures stay in the history.</div>
-    ${can ? '<div class="actions" style="margin-top:6px"><button class="primary" id="rsSaveMin">Save minutes</button><span class="small muted rs-msg" id="rsMinMsg" role="status"></span></div>'
+    ${can ? '<div class="actions mt-2"><button class="primary" id="rsSaveMin">Save minutes</button><span class="small muted rs-msg" id="rsMinMsg" role="status"></span></div>'
       : (rsUnlockHtml(d, 'minutes') || '<div class="note">The owner sets the minutes.</div>')}</div>`;
 }
 
@@ -345,7 +346,7 @@ function rsDenialsHtml(d){
   return `<div class="panel" id="rs-denials"><h2>Denials, month by month</h2><div class="note">${esc(x.definition || '')}</div>
     <div class="grid two"><div class="scroll"><table><thead><tr><th>Month</th><th class="num">Lines denied</th><th class="num">Lines</th><th class="num">Dollars denied</th></tr></thead><tbody>${months}</tbody></table></div>
     <div class="scroll"><table><thead><tr><th>Payer group</th><th class="num">Denied</th><th>Last six months</th></tr></thead><tbody>${groups}</tbody></table></div></div>
-    <div class="grid two" style="margin-top:8px"><div><b>Rising reasons</b> (last 90 days against the 90 before)<ul class="small">${reasons(x.reasons && x.reasons.rising) || '<li class="muted">None.</li>'}</ul></div>
+    <div class="grid two mt-2"><div><b>Rising reasons</b> (last 90 days against the 90 before)<ul class="small">${reasons(x.reasons && x.reasons.rising) || '<li class="muted">None.</li>'}</ul></div>
     <div><b>Falling reasons</b><ul class="small">${reasons(x.reasons && x.reasons.falling) || '<li class="muted">None.</li>'}</ul></div></div>
     ${marks ? `<div><b>Fixes recorded</b><ul class="small">${marks}</ul></div>` : '<div class="note">When someone records a credentialing, authorization or coding fix on an item, it shows here with the rate before and after.</div>'}
     <div class="small"><a href="#" id="rsClin">Denials by clinician</a> (the owner's password, when one is set)</div><div id="rsClinBox"></div></div>`;
@@ -360,10 +361,10 @@ function rsSpotSummaryHtml(s){
   const weeks = (s.by_week || []).slice(-8).reverse().map(r => `<tr><td>${esc(rsDate(r.key))}</td><td class="num">${rsPct(r.rate)}</td><td class="num">${rsNum(r.agree)} of ${rsNum(r.n)}</td></tr>`).join('');
   const L = ((state.rsData || {}).labels || {}).signals || {};
   const dis = (s.disagreements || []).slice(-10).reverse().map(x => `<li>${esc(rsDate(x.day))}: <a href="#" class="rs-item" data-id="${esc(x.finding_id)}">${esc(L[x.signal] || x.signal || 'item')}</a>, ${esc(x.reason_label || x.reason || '')}${x.note ? ': ' + esc(x.note) : ''}</li>`).join('');
-  return `<div class="grid two" style="margin-top:10px"><div><b>${rsPct(s.rate)}</b> agreement (${rsNum(s.agree)} of ${rsNum(s.answered)} answered)
+  return `<div class="grid two mt-3"><div><b>${rsPct(s.rate)}</b> agreement (${rsNum(s.agree)} of ${rsNum(s.answered)} answered)
       <table><thead><tr><th>Picked from</th><th class="num">Agreed</th><th class="num">Checks</th></tr></thead><tbody>${strata || '<tr><td colspan="3" class="muted">No answers yet.</td></tr>'}</tbody></table></div>
     <div><table><thead><tr><th>Week of</th><th class="num">Agreed</th><th class="num">Checks</th></tr></thead><tbody>${weeks || '<tr><td colspan="3" class="muted">No answers yet.</td></tr>'}</tbody></table></div></div>
-    ${dis ? `<div style="margin-top:8px"><b>Recent disagreements</b> (each goes to the people who fix the rules)<ul class="small">${dis}</ul></div>` : ''}`;
+    ${dis ? `<div class="mt-2"><b>Recent disagreements</b> (each goes to the people who fix the rules)<ul class="small">${dis}</ul></div>` : ''}`;
 }
 function rsSpotHtml(d){
   const sp = d.spot || {}, reasons = sp.reasons || {};
@@ -390,37 +391,158 @@ function rsCostsHtml(d){
   const hist = (s.history || []).slice(-8).reverse().map(h => `<li>${esc(rsWhen(h.at))} by ${esc(h.by || 'someone')}</li>`).join('');
   return `<div class="panel" id="rs-costs"><h2>Costs</h2>
     <table><tbody>${rows}</tbody></table>
-    ${can ? '<div class="actions" style="margin-top:6px"><button class="primary" id="rsSaveCost">Save costs</button><span class="small muted" id="rsCostMsg" role="status"></span></div>'
+    ${can ? '<div class="actions mt-2"><button class="primary" id="rsSaveCost">Save costs</button><span class="small muted" id="rsCostMsg" role="status"></span></div>'
       : (rsUnlockHtml(d, 'costs') || '<div class="note">The owner sets the costs.</div>')}
     ${hist ? `<details class="small"><summary>Earlier versions</summary><ul>${hist}</ul></details>` : ''}</div>`;
 }
 
 // ---------------------------------------------------------------- the page
-function rsStyle(){
-  if(document.getElementById('rsStyle')) return;
-  const el = document.createElement('style'); el.id = 'rsStyle';
-  el.textContent = '.rs-top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin:4px 0 2px}.rs-big{font-size:34px;font-weight:750;line-height:1.1}'
-    + '.rs-top a{text-decoration:none;color:var(--ink)}.rs-tile:focus-visible{outline:2px solid var(--accent)}.rs-static{cursor:default}.rs-spot .actions{flex:0 0 auto}'
-    + '.rs-narrow{display:none}.rs-due{display:flex;gap:8px;align-items:center;flex-wrap:wrap}'
-    + '@media(max-width:640px){.rs-big{font-size:28px}.rs-spot{flex-wrap:wrap}.rs-wide{display:none}.rs-narrow{display:block}}';
-  document.head.appendChild(el);
+// the page's own look lives in rw.css (section 23, "Results"); nothing is injected any more
+function rsStyle(){ const el = document.getElementById('rsStyle'); if(el) el.remove(); }
+
+// ---------------------------------------------------------------- the manager's Summary (CRITIQUE_biller change 10)
+// The phone's first screen for the owner: this week's four scoreboard figures, what only the manager can settle, and who
+// did what today. The figures are the scoreboard's own (GET /api/results/scoreboard, its current week and its live at
+// risk), so each one has the same definition here, on the board under it and on Today.
+function rsShort(iso){ const d = new Date(String(iso || '').slice(0, 10) + 'T12:00:00'); if(isNaN(d)) return '';
+  const now = new Date(); return d.toLocaleDateString('en-US', d.getFullYear() === now.getFullYear() ? {month: 'short', day: 'numeric'} : {month: 'short', day: 'numeric', year: 'numeric'}); }
+function rsSumHtml(){
+  return `<section class="rs-sum" id="rsSummary" aria-labelledby="rsSumH"><div class="sec-head"><h2 id="rsSumH">This week</h2><span class="sec-sub" id="rsSumWeek"></span></div>
+    <div class="rs-figs" id="rsSumFigs"></div><div class="rs-sum-grid"><div id="rsNeeds"></div><div id="rsTeam" hidden></div></div></section>`;
+}
+function rsSumFigsHtml(s){
+  const ws = (s && s.weeks) || [], cw = ws[ws.length - 1];
+  if(!s || !cw) return '<p class="muted">This week\'s figures could not be read just now. Reload the page in a minute.</p>';
+  const b = s.basis || {}, c = s.counts || {};
+  const fig = (label, cents, key, tone, sub, hover) => {
+    const body = `<span class="rs-fig-l">${label}</span><span class="rs-fig-v">${cents == null ? '–' : money(cents)}</span><span class="rs-fig-s">${sub}</span>`;
+    const cls = 'rs-fig' + (cents && tone ? ' is-' + tone : '');
+    return key && cents ? `<a href="#" class="${cls} rs-open" data-key="${esc(key)}" title="${esc(hover)}">${body}</a>` : `<div class="${cls}" title="${esc(hover)}">${body}</div>`; };
+  return fig('Back', cw.recovered_cents, 'returned:week:' + cw.week, '', 'paid on flagged items', b.recovered || RS_BASIS.returned)
+    + fig('Lost to deadlines', cw.lost_cents, 'lost:week:' + cw.week, 'bad', 'windows that closed', b.lost || '')
+    + fig('At risk in 14 days', s.at_risk_cents, 'at_risk', 'warn', c.at_risk == null ? 'windows closing soon' : rsPl(c.at_risk, 'item') + ' to work', b.at_risk || '')
+    + fig('Given up, no decision', cw.given_up_cents, '', 'bad', 'written off, nobody decided', (b.given_up || '') + (s.given_up_weeks ? ' This week: ' + s.given_up_weeks + '.' : ''));
+}
+// what only the manager can settle: write-off patterns nobody decided, money given up with no decision, a late feed,
+// payers with letters to send and no fax number. Each line opens the place that settles it; a part that cannot be read
+// just now is left out (the pages it links to say it in full).
+async function rsNeedsFill(el, s){
+  if(!el) return;
+  const [pol, bl, fp] = await Promise.all([api('/api/ema/policy').catch(() => null),
+    (state.blind !== undefined && state.blind !== null) ? Promise.resolve(state.blind) : api('/api/ema/blind').catch(() => null),
+    api('/api/faxes/payers').catch(() => null)]);
+  if(!el.isConnected) return;
+  const rows = [], dec = pol && pol.totals && pol.totals.decide;
+  if(dec && dec.patterns) rows.push(['#policy', '', `${rsPl(dec.patterns, 'write-off pattern')} to decide`, `${money(dec.cents)} on ${rsPl(dec.items, 'item')}`, 'warn']);
+  if(s && s.given_up_cents) rows.push(['', 'given_up', 'Given up with no decision', money(s.given_up_cents) + (s.counts && s.counts.given_up != null ? ' on ' + rsPl(s.counts.given_up, 'item') : ''), 'bad']);
+  if(bl && bl.blind) rows.push(['#data', '', 'A feed is late', bl.cents ? money(bl.cents) + ' cannot be checked' : 'what came since is not checked', 'warn']);
+  const nofax = ((fp && fp.payers) || []).filter(p => p.n && !p.by_hand && !p.no_fax && !Object.values(p.numbers || {}).some(x => x && x.number));
+  if(nofax.length) rows.push(['#faxes', '', `${rsPl(nofax.length, 'payer')} with letters and no fax number`, money(nofax.reduce((a, p) => a + (p.cents || 0), 0)) + ' waiting', 'warn']);
+  const row = ([href, key, words, amt, tone]) => {
+    const inner = `<span class="dot sev-${tone === 'bad' ? 'high' : 'medium'}"></span><span class="grow">${esc(words)}</span><span class="amt">${esc(amt)}</span>`;
+    return key ? `<a href="#" class="rs-need rs-open" data-key="${esc(key)}">${inner}</a>` : `<a href="${href}" class="rs-need">${inner}</a>`; };
+  el.innerHTML = `<h3>Needs you</h3>${rows.length ? rows.map(row).join('') : '<p class="rs-need-none">Nothing needs you this week.</p>'}`;
+  rsBind(el, state.rsData);
+}
+// who did what today and this week, by the names people chose on their computers (GET /api/people, unit ui-words): items
+// moved and what they set. Until a site has that route the part stays hidden.
+async function rsTeamFill(el){
+  if(!el) return;
+  let p; try { p = await api('/api/people?days=7'); } catch(e){ el.hidden = true; return; }
+  if(!el.isConnected) return;
+  const who = ((p && p.people) || []).filter(x => x && x.days && (x.days.items || x.days.lines));
+  const un = (p && p.unnamed) || {};
+  const said = t => { const st = (t && t.statuses) || {}; const parts = Object.keys(st).filter(k => st[k]).map(k => `${STATUS_WORDS[k] || k} ${st[k]}`);
+    if(t && t.paid_cents) parts.push(money(t.paid_cents) + ' paid'); return parts.join(', '); };
+  const row = x => `<div class="rs-need rs-person"><span class="grow"><b>${esc(x.name)}</b><span class="rs-said">${esc(said(x.today) || 'nothing yet today')}</span></span>
+    <span class="amt">${rsPl(x.today.items, 'item')} today · ${rsNum(x.days.items)} this week</span></div>`;
+  el.innerHTML = `<h3>The team</h3>${who.length ? who.slice(0, 6).map(row).join('') : '<p class="rs-need-none">No one has recorded work under their name this week.</p>'}
+    ${un.days && un.days.items ? `<p class="rs-need-none">${rsPl(un.days.items, 'item')} this week were changed with no name.</p>` : ''}`;
+  el.hidden = false;
+}
+function rsSumFill(v, s){
+  const w = v.querySelector('#rsSumWeek'), f = v.querySelector('#rsSumFigs'); if(!f) return;
+  const ws = (s && s.weeks) || [], cw = ws[ws.length - 1];
+  if(w) w.textContent = cw ? `Week of ${rsShort(cw.week)}, so far` : '';
+  f.innerHTML = rsSumFigsHtml(s);
+  rsBind(f, state.rsData);
+  rsNeedsFill(v.querySelector('#rsNeeds'), s);
+  rsTeamFill(v.querySelector('#rsTeam'));
+}
+
+// ---------------------------------------------------------------- the chart: money back by week (CRITIQUE_premium change 11)
+// One series by week: the last complete week in the accent, the weeks before it in gray, the current week outlined and
+// labeled "so far" (it is still moving, so it never reads as a drop), and a line for the money back since the first flag
+// that ends on the to-date figure. Colors are the stylesheet's --viz-* tokens through classes, so both themes follow; the
+// chart's own label says the latest weeks in words and the week-by-week table under it says every week.
+function rsChartDraw(box, s, m){
+  if(!box) return;
+  const all = ((s && s.weeks) || []).filter(w => w && w.week);
+  if(all.length < 2 || !all.some(w => w.recovered_cents)){ box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  const W = Math.max(280, Math.round(box.clientWidth || 640)), narrow = W < 560;
+  // every week from the one before the first money came back to the current week, a week with nothing at zero, so the
+  // bars stand at even steps of time (the scoreboard lists only the weeks that have a figure)
+  const by = {}; all.forEach(w => { by[w.week] = w; });
+  const day = k => Date.UTC(+k.slice(0, 4), +k.slice(5, 7) - 1, +k.slice(8, 10)), iso = t => new Date(t).toISOString().slice(0, 10);
+  const firstMoney = all.find(w => w.recovered_cents || w.now_cents), endT = day(all[all.length - 1].week);
+  const span = [];
+  for(let t = day(firstMoney.week) - 7 * 864e5; t <= endT && span.length < 400; t += 7 * 864e5){ const k = iso(t); span.push(by[k] || {week: k, recovered_cents: 0}); }
+  const weeks = span.slice(narrow ? -12 : -26), n = weeks.length;
+  const H = narrow ? 176 : 208, top = 30, bottom = 24, left = 44, right = narrow ? 8 : 96, plotW = W - right - left, plotH = H - top - bottom;
+  const val = weeks.map(w => Math.max(0, w.recovered_cents || 0));
+  const step = (mx => { const raw = mx / 3, p = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1)))); return [1, 2, 2.5, 5, 10].map(k => k * p).find(k => k >= raw) || raw; })(Math.max(100, ...val));
+  const yMax = step * 3, y = c => top + plotH - (c / yMax) * plotH, slot = plotW / n, bw = Math.max(4, Math.min(24, slot * 0.62));
+  const x = i => left + i * slot + (slot - bw) / 2;
+  // the line: today's reading of each week, from what came before the first week shown, so it ends on the to-date figure
+  const read = weeks.map(w => Math.max(0, w.now_cents != null ? w.now_cents : (w.recovered_cents || 0)));
+  const inWin = read.reduce((a, c) => a + c, 0), total = m && m.returned_cents != null ? m.returned_cents : (s && s.recovered_cents);
+  const whole = total != null && total >= inWin, base = whole ? total - inWin : 0;
+  const cum = []; read.reduce((a, c, i) => (cum[i] = a + c), base);
+  const cMax = Math.max(1, ...cum), cy = c => top + plotH - (c / cMax) * plotH * 0.92;
+  const last = n - 1, done = n - 2, since = (m && m.first_flag) ? rsShort(m.first_flag) : '';
+  const grid = [0, 1, 2, 3].map(k => `<line class="${k ? 'grid-line' : 'base-line'}" x1="${left}" x2="${left + plotW}" y1="${y(k * step).toFixed(1)}" y2="${y(k * step).toFixed(1)}"/>`
+    + `<text class="tick" x="${left - 8}" y="${(y(k * step) + 4).toFixed(1)}" text-anchor="end">${esc(money(k * step))}</text>`).join('');
+  const bars = weeks.map((w, i) => { const h = Math.max(val[i] ? 2 : 0, y(0) - y(val[i])), cls = i === last ? 'bar now' : (i === done ? 'bar' : 'bar past');
+    const tip = `Week of ${rsShort(w.week)}${i === last ? ', so far' : ''}: ${money(val[i])}`;
+    return `<rect class="${cls}" data-key="returned:week:${esc(w.week)}" x="${x(i).toFixed(1)}" y="${(y(0) - (i === last ? Math.max(h, 2) : h)).toFixed(1)}" width="${bw.toFixed(1)}" height="${(i === last ? Math.max(h, 2) : h).toFixed(1)}" rx="3"><title>${esc(tip)}</title></rect>`; }).join('');
+  const lab = (i, words) => `<text class="bar-label" x="${(x(i) + bw / 2).toFixed(1)}" y="${(y(val[i]) - 8).toFixed(1)}" text-anchor="middle">${esc(words)}</text>`;
+  const months = weeks.map((w, i) => { const d = new Date(w.week + 'T12:00:00'), p = i ? new Date(weeks[i - 1].week + 'T12:00:00') : null;
+    return (!p || p.getMonth() !== d.getMonth()) && !isNaN(d) && x(i) < left + plotW - 20 ? `<text class="tick" x="${x(i).toFixed(1)}" y="${H - 6}">${esc(d.toLocaleDateString('en-US', {month: 'short'}))}</text>` : ''; }).join('');
+  const pts = cum.map((c, i) => `${(x(i) + bw / 2).toFixed(1)},${cy(c).toFixed(1)}`).join(' ');
+  const endWords = whole ? `${money(cum[last])} since ${since || 'the first flag'}` : `${money(cum[last])} over these weeks`;
+  const end = narrow ? '' : `<text class="cum-label" x="${(x(last) + bw / 2 + 8).toFixed(1)}" y="${(cy(cum[last]) + 4).toFixed(1)}">${esc(money(cum[last]))}</text>`;
+  const said = `Money back by week. ${done >= 0 ? `Last complete week, week of ${rsShort(weeks[done].week)}: ${money(val[done])}. ` : ''}This week so far: ${money(val[last])}. ${endWords}.`;
+  box.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-labelledby="rsChartT"><title id="rsChartT">${esc(said)}</title>
+      ${grid}${bars}<polyline class="cum" points="${pts}"/><circle class="cum-dot" cx="${(x(last) + bw / 2).toFixed(1)}" cy="${cy(cum[last]).toFixed(1)}" r="3"/>${end}
+      ${done >= 0 && val[done] ? lab(done, money(val[done])) : ''}${months}</svg>
+    <div class="rs-key"><span><i class="k-bar"></i>Last complete week${done >= 0 ? ': ' + esc(money(val[done])) : ''}</span><span><i class="k-now"></i>This week so far: ${esc(money(val[last]))}</span><span><i class="k-cum"></i>${esc(endWords)}</span></div>`;
+  box.querySelectorAll('rect[data-key]').forEach(r => r.addEventListener('click', () => { if(r.getAttribute('height') !== '0.0') rsOpenList(r.dataset.key, rsTitle(r.dataset.key)); }));
+}
+function rsChartWatch(){
+  if(state.rsChartWatch) return; state.rsChartWatch = true;
+  let t = 0, wide = innerWidth;
+  addEventListener('resize', () => { clearTimeout(t); t = setTimeout(() => { if(innerWidth === wide) return; wide = innerWidth;
+    const b = document.getElementById('rsChart'); if(b && state.tab === 'results') rsChartDraw(b, state.rsScore, (state.rsData || {}).money); }, 150); });
 }
 function rsDueHtml(d){
   const due = (d.spot || {}).due || {};
   if(!due.due) return '';
-  return `<div class="panel rs-due" id="rs-due" style="margin-top:0"><b>${rsPl(due.due, 'spot check')} for today</b><span class="small muted">about ${rsPl(due.due, 'minute')}: check each against EMA and the payer, then say if RemitWatch is right</span><button id="rsGoSpot">Check them</button></div>`;
+  return `<div class="panel act rs-due" id="rs-due"><b>${rsPl(due.due, 'spot check')} for today</b><span class="small muted">about ${rsPl(due.due, 'minute')}: check each against EMA and the payer, then say if RemitWatch is right</span><button id="rsGoSpot">Check them</button></div>`;
 }
+const RS_BOARD_HEAD = '<div class="sec-head rs-board-head"><h2>Scoreboard</h2><span class="sec-sub">since the first flag; the items as they stand now</span></div>';
 function rsDraw(v, d, score){
   const head = d.as_of ? `Figures as of ${esc(rsWhen(d.as_of))}.` : 'Not worked out yet.';
   const upd = d.updating ? ` <span class="sev-medium">Updating after the analysis of ${esc(rsWhen(d.detect_run))}: reload in a minute to see the new figures.</span>` : '';
-  v.innerHTML = `<div class="page-head"><h1 class="page-title">Results</h1><span class="small muted">${head}${upd}</span></div>
-    <div id="rsBoard"></div>
+  v.innerHTML = `<div class="secs rs-page"><div class="page-head"><h1 class="page-title">Results</h1><span class="small muted rs-asof">${head}${upd}</span></div>
+    ${rsSumHtml()}${RS_BOARD_HEAD}<div id="rsBoard"></div>
     ${(d.errors || []).length ? `<div class="warnbox">Part of these figures could not be worked out: ${esc(d.errors[0])}</div>` : ''}
     ${d.update_error ? `<div class="warnbox">The figures could not be brought up to date (${esc(d.update_error)}): these are the last ones worked out.</div>` : ''}
-    ${rsDueHtml(d)}${rsMoneyHtml(d)}${rsRoiHtml(d)}${rsScoreHtml(score)}${rsLiftHtml(d)}${rsWorkHtml(d)}${rsOutcomesHtml(d)}${rsHoursHtml(d)}${rsDenialsHtml(d)}${rsSpotHtml(d)}${rsCostsHtml(d)}`;
+    ${rsDueHtml(d)}${rsMoneyHtml(d)}${rsRoiHtml(d)}${rsScoreHtml(score)}${rsLiftHtml(d)}${rsWorkHtml(d)}${rsOutcomesHtml(d)}${rsHoursHtml(d)}${rsDenialsHtml(d)}${rsSpotHtml(d)}${rsCostsHtml(d)}</div>`;
   rsBind(v, d);
-  // the money scoreboard and the items by state, at the top (moved here from Today: static/today.js tdBoard)
+  // the money scoreboard and the items by state, under the week (moved here from Today: static/today.js tdBoard)
   if(typeof tdBoard === 'function') tdBoard(v.querySelector('#rsBoard'));
+  state.rsScore = score; rsSumFill(v, score); rsChartWatch(); rsChartDraw(v.querySelector('#rsChart'), score, d.money);
 }
 // one panel drawn again in place (after a save or an unlock), never the whole page
 function rsRedraw(v, id, html){
@@ -438,9 +560,10 @@ async function resultsTab(v){
   if(v !== $('#view') && !v.isConnected) return;
   const score = sr.status === 'fulfilled' ? sr.value : null;
   if(dr.status !== 'fulfilled'){
-    v.innerHTML = `<div class="page-head"><h1 class="page-title">Results</h1></div><div id="rsBoard"></div><div class="warnbox">The figures could not be read just now (${esc(dr.reason && dr.reason.message || 'no answer')}). Reload the page in a minute.</div>${rsScoreHtml(score)}`;
+    v.innerHTML = `<div class="secs rs-page"><div class="page-head"><h1 class="page-title">Results</h1></div>${rsSumHtml()}${RS_BOARD_HEAD}<div id="rsBoard"></div><div class="warnbox">The figures could not be read just now (${esc(dr.reason && dr.reason.message || 'no answer')}). Reload the page in a minute.</div>${rsScoreHtml(score)}</div>`;
     rsBind(v, {});
     if(typeof tdBoard === 'function') tdBoard(v.querySelector('#rsBoard'));
+    state.rsScore = score; rsSumFill(v, score);
     return;
   }
   const d = dr.value;

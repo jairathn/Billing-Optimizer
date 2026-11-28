@@ -40,7 +40,7 @@ function pvTheme(){
   const root = document.documentElement, cs = getComputedStyle(root);
   const dark = root.dataset.theme === 'dark' || (root.dataset.theme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
   const v = k => cs.getPropertyValue(k).trim();
-  return {dark, series: PV_SERIES[dark ? 'dark' : 'light'], ink: v('--ink'), muted: v('--muted'), line: v('--line'), surface: v('--panel'), context: dark ? '#6b7786' : '#9aa5b1'};
+  return {dark, series: PV_SERIES[dark ? 'dark' : 'light'], ink: v('--ink'), muted: v('--muted'), line: v('--line'), surface: v('--panel'), context: v('--viz-context') || (dark ? '#6b7786' : '#9aa5b1')};
 }
 function pvAxes(t, extra){
   const axis = {grid: {color: t.line, drawTicks: false}, border: {color: t.line}, ticks: {color: t.muted, font: {size: 11}}};
@@ -259,9 +259,9 @@ function pvDraw(){
       Visits in these months are short because of it: ${short.map(m => `${monthName(m.month)} by about ${Math.max(1, Math.round(100 * m.missing_to_gaps))}%`).join(', ')}. A clinician with more of that payer's patients is short by more. The Data tab lists the weeks to ask TriZetto for.</div>` : ''}</div>
 
     <div class="panel"><h2>How busy</h2><div class="note">Per clinic day is the median, and the bar is the middle half of that clinician's clinic days on one scale. Click a row (or press Enter on it) for that clinician's months, weekdays, states and codes.</div>${volume}
-      <div class="small muted" style="margin-top:6px">A week is counted between that clinician's first and last clinic day in these months. By state: the state of the Medicare contractor that paid that day's Medicare claims, which follows the office where the visit took place; a day with no Medicare claim carries no state. New patients a clinic day is a mean.</div>
-      ${Object.keys(where).length ? `<div class="small muted" style="margin-top:6px">Under each name: where their patients were seen in the EMA charge exports (visits ${dayName(ema.first_service)} to ${dayName(ema.last_service)}), whatever months are chosen above.</div>` : ''}
-      ${minor.length ? `<div class="small muted" style="margin-top:6px">Fewer than three clinic days in these months: ${minor.map(r => `${esc(r.name)} (${[r.patients ? plural(r.patients, 'patient', 'patients') : '', r.radiation ? plural(r.radiation, 'radiation treatment', 'radiation treatments') : '', r.path_only ? plural(r.path_only, 'pathology bill', 'pathology bills') : ''].filter(Boolean).join(', ')})`).join('; ')}.</div>` : ''}</div>
+      <div class="small muted mt-2">A week is counted between that clinician's first and last clinic day in these months. By state: the state of the Medicare contractor that paid that day's Medicare claims, which follows the office where the visit took place; a day with no Medicare claim carries no state. New patients a clinic day is a mean.</div>
+      ${Object.keys(where).length ? `<div class="small muted mt-2">Under each name: where their patients were seen in the EMA charge exports (visits ${dayName(ema.first_service)} to ${dayName(ema.last_service)}), whatever months are chosen above.</div>` : ''}
+      ${minor.length ? `<div class="small muted mt-2">Fewer than three clinic days in these months: ${minor.map(r => `${esc(r.name)} (${[r.patients ? plural(r.patients, 'patient', 'patients') : '', r.radiation ? plural(r.radiation, 'radiation treatment', 'radiation treatments') : '', r.path_only ? plural(r.path_only, 'pathology bill', 'pathology bills') : ''].filter(Boolean).join(', ')})`).join('; ')}.</div>` : ''}</div>
     <div id="pvDetail"></div>
 
     <div class="panel"><h2>Over time</h2>
@@ -269,14 +269,14 @@ function pvDraw(){
         <span class="small muted"><span class="key" style="background:var(--pv1)"></span> the clinician &nbsp; <span class="key" style="background:var(--pvc)"></span> median of the others shown</span></div>
       <div class="note">One small chart per clinician, by quarter of service, all on the same scale. Quarters still filling in are left off. <span id="pvSmallNote"></span></div>
       <div class="sm" id="pvSmall"></div><div class="small muted" id="pvSmallLeft" style="margin-top:6px"></div>
-      <details class="small" style="margin-top:8px"><summary>The same numbers as a table</summary><div id="pvTrendTable"></div></details></div>
+      <details class="small mt-2"><summary>The same numbers as a table</summary><div id="pvTrendTable"></div></details></div>
 
     <div class="panel"><h2>Who comes back</h2><div class="note">Panel is the number of different patients seen in the twelve months to ${monthName((rows.find(r => r.panel_month) || {}).panel_month || ov.to)}. First-time patients return much less often than established ones whoever sees them, so a clinician with many new patients shows a lower "kept" for that reason alone. The column in bold leaves them out. Patients are told apart by name as the payer wrote it, so read these as about right, not exact.</div>${back}
-      <div class="small muted" style="margin-top:6px">† Fixed period: new patients first seen ${span(fNew)}, because each needs a year of follow-up. It does not follow the months chosen above.</div></div>
+      <div class="small muted mt-2">† Fixed period: new patients first seen ${span(fNew)}, because each needs a year of follow-up. It does not follow the months chosen above.</div></div>
 
     <div class="panel"><h2>What a visit holds</h2><div class="note">The level of a visit is easiest to compare on visits with no procedure the same day (in bold), because a procedure changes what the visit code may claim. Biopsy rates are shown within Medicare and within everyone else: age drives biopsies, and the payer is the nearest thing to age on a remittance.</div>${visits}
-      <div class="small muted" style="margin-top:6px">The bracket after "Downcoded per 100 visits" is the number of visits a payer paid at a lower level. Slides read here is the share of patients biopsied whose slide was billed by this practice the same day. Shares are left blank under 30 visits.</div>
-      <div class="small muted" style="margin-top:6px">‡ Fixed period: biopsies taken ${span(fCa)}, whatever months are chosen above. Counts first biopsies only (no biopsy in the four months before and no skin cancer treated in the year before) and asks how many were followed, within 120 days, by a skin cancer treated in this practice (Mohs, a malignant excision or destruction, radiation). It is a floor. Treatment somewhere else never shows here, a surgeon who treats their own patients will show higher than a clinician who refers, and patients biopsied at an office far from the surgeons are treated elsewhere more often. The pathology results are the direct test.</div></div>
+      <div class="small muted mt-2">The bracket after "Downcoded per 100 visits" is the number of visits a payer paid at a lower level. Slides read here is the share of patients biopsied whose slide was billed by this practice the same day. Shares are left blank under 30 visits.</div>
+      <div class="small muted mt-2">‡ Fixed period: biopsies taken ${span(fCa)}, whatever months are chosen above. Counts first biopsies only (no biopsy in the four months before and no skin cancer treated in the year before) and asks how many were followed, within 120 days, by a skin cancer treated in this practice (Mohs, a malignant excision or destruction, radiation). It is a floor. Treatment somewhere else never shows here, a surgeon who treats their own patients will show higher than a clinician who refers, and patients biopsied at an office far from the surgeons are treated elsewhere more often. The pathology results are the direct test.</div></div>
 
     ${recall.cancer_patients ? `<div class="panel"><h2>Patients to call back</h2>
       <div class="note">People who had a skin cancer treated in this practice (Mohs, a malignant excision or destruction, radiation), and how many of them have not been seen for a visit in twelve months, counted under the clinician who saw them last. It covers people treated since the remittances begin (${monthName(cov.first_month)}) and is taken as of ${dayName(recall.as_of)}, sixty days before the newest payment, so that a recent visit still waiting to be paid is not read as an absence. In all, <b>${n0(recall.overdue_12)}</b> of ${n0(recall.cancer_patients)} have not been seen for twelve months and ${n0(recall.overdue_18)} for eighteen. This does not follow the months chosen above. It is a count from the remittances, where a patient is known only by name: some will have moved, died or be followed elsewhere. The list to work from is the recall report in EMA.</div>
@@ -290,7 +290,7 @@ function pvDraw(){
 
     <div class="panel"><h2>What it brings in</h2><div class="note">Allowed is what the payer and the patient together owe under the contract. Per patient seen and "in the exam room" leave out pathology and radiation, which are not exam-room work, and skin substitute products and drugs, which are paid mostly to cover their cost. The pathology column is what the slides from that clinician's biopsies were allowed when they were read in this practice, billed under the physician who read them. It depends on where the slides are sent as much as on what is biopsied. It is there to show what a biopsy brings in, not as a basis for pay: ask counsel before tying anyone's pay to pathology or radiation.</div>${dollars}
       <h3 class="small" style="margin:14px 0 4px">Where the allowed dollars come from</h3><div class="chartbox" style="height:${Math.max(160, 34 * rows.length + 70)}px"><canvas id="pvMix"></canvas></div>
-      <details class="small" style="margin-top:8px"><summary>The same numbers as a table</summary><div id="pvMixTable"></div></details></div>
+      <details class="small mt-2"><summary>The same numbers as a table</summary><div id="pvMixTable"></div></details></div>
 
     <div class="panel"><h2>Recent weeks, from the EMA charge exports</h2><div id="pvRecent"></div></div>
 
@@ -443,7 +443,7 @@ function pvRecent(el, rc, keep){
       {h: 'Days still waiting on bills', num: 1, f: p => p.days_waiting ? `<span class="sev-medium">${n0(p.days_waiting)}</span>` : '0'},
       {h: 'At face value', num: 1, f: p => `<span class="muted">${n1(p.raw_patients_per_day)} a day over ${n0(p.raw_days)} days</span>`},
     ])}
-    <div class="small muted" style="margin-top:6px">${rc.counted_from ? `Days counted run from ${dayName(rc.counted_from)} to ${dayName(rc.counted_to)}. ` : ''}The exports cover visits from ${dayName(e.first_service)} to ${dayName(e.last_service)}${e.last_pulled ? `; the newest was pulled ${dayName(e.last_pulled)}` : ''}.
+    <div class="small muted mt-2">${rc.counted_from ? `Days counted run from ${dayName(rc.counted_from)} to ${dayName(rc.counted_to)}. ` : ''}The exports cover visits from ${dayName(e.first_service)} to ${dayName(e.last_service)}${e.last_pulled ? `; the newest was pulled ${dayName(e.last_pulled)}` : ''}.
       ${e.exports != null ? `${n0(e.exports_with_bill_dates)} of ${n0(e.exports)} carry the bill creation date, which is what the visit-to-bill columns are measured on.` : ''}
       To keep this current, each week export the full Encounter and Charge Lines layout (the one with Bill Creation Date, Bill ID and Patient ID) by date of service for the last six weeks, not only the week just ended. Overlapping exports are merged, and a later export moves a day's pull date forward.</div>`;
 }
@@ -482,13 +482,13 @@ async function pvShowDetail(scroll){
     <div class="grid two">
       <div><h3 class="small" style="margin:4px 0">Patients per clinic day, by month</h3><div class="chartbox" style="height:220px"><canvas id="pvMonths"></canvas></div>
         ${low.size ? '<div class="small muted">Months marked * are not complete yet, or a payer\'s remittances are missing for part of them.</div>' : ''}
-        <details class="small" style="margin-top:6px"><summary>The same numbers as a table</summary><div class="scroll"><table class="small"><thead><tr><th>Month</th><th class="num">Clinic days</th><th class="num">Patients</th><th class="num">Per clinic day</th><th class="num">New</th><th class="num">Allowed in the exam room</th></tr></thead>
+        <details class="small mt-2"><summary>The same numbers as a table</summary><div class="scroll"><table class="small"><thead><tr><th>Month</th><th class="num">Clinic days</th><th class="num">Patients</th><th class="num">Per clinic day</th><th class="num">New</th><th class="num">Allowed in the exam room</th></tr></thead>
           <tbody>${d.months.map(m => `<tr><td>${monthName(m.month)}${low.has(m.month) ? ' *' : ''}</td><td class="num">${n0(m.clinic_days)}</td><td class="num">${n0(m.patients)}</td><td class="num">${n1(m.per_day)}</td><td class="num">${n0(m.new_visits)}</td><td class="num">${money(m.clinic_allowed_cents)}</td></tr>`).join('')}</tbody></table></div></details></div>
       <div><h3 class="small" style="margin:4px 0">Clinic days by the number of patients seen</h3><div class="chartbox" style="height:220px"><canvas id="pvHist"></canvas></div>
-        <details class="small" style="margin-top:6px"><summary>The same numbers as a table</summary><div class="scroll"><table class="small"><thead><tr><th>Patients that day</th><th class="num">Clinic days</th></tr></thead>
+        <details class="small mt-2"><summary>The same numbers as a table</summary><div class="scroll"><table class="small"><thead><tr><th>Patients that day</th><th class="num">Clinic days</th></tr></thead>
           <tbody>${d.histogram.map(h => `<tr><td>${h.from >= 60 ? '60 or more' : `${n0(h.from)} to ${n0(h.from + 4)}`}</td><td class="num">${n0(h.days)}</td></tr>`).join('')}</tbody></table></div></details></div>
     </div>
-    <div class="grid two" style="margin-top:8px">
+    <div class="grid two mt-2">
       <div><h3 class="small" style="margin:4px 0">By weekday</h3><div class="scroll"><table class="small"><thead><tr><th>Day</th><th class="num">Clinic days</th><th class="num">Patients a day (mean)</th><th style="width:45%"></th></tr></thead>
         <tbody>${wk.map(w => `<tr><td>${esc(w.day)}</td><td class="num">${n0(w.clinic_days)}</td><td class="num">${n1(w.per_day)}</td><td><div class="bar"><i style="width:${Math.round(100 * (w.per_day || 0) / maxWk)}%;background:var(--pv1)"></i></div></td></tr>`).join('')}</tbody></table></div>
         ${places.length ? `<h3 class="small" style="margin:12px 0 4px">By state of the office</h3><div class="scroll"><table class="small"><thead><tr><th title="the state of the Medicare contractor that paid that day's Medicare claims">State</th><th class="num">Clinic days</th><th class="num">Patients a day, median</th><th class="num">Mean</th></tr></thead>

@@ -189,3 +189,6 @@ def test_the_shell_in_a_browser(tmp_path):
     ph = out["phone"]
     assert ph["tabs"] == ["Today", "Work", "Results", "Find", "More"] and not ph["sidebar_shown"] and ph["overflow"] <= 1
     assert ph["find_opens"] and ph["more_opens"] and ph["more_closes"]
+    bell = out["bell"]          # the five newest alerts under the bell, See all, and the page stays where it is (unit ui-pages)
+    assert bell["shown"] and bell["items"] == [f"Invented alert {i}" for i in (7, 6, 5, 4, 3)] and bell["all"] == "#alerts"
+    assert bell["inside"] and bell["focus"] and bell["hash"] == "#today" and bell["closes"]
