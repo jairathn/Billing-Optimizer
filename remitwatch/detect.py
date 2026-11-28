@@ -11347,6 +11347,232 @@ class Detector:
             self.conn.execute("DROP TABLE IF EXISTS temp.dt_keys")
         return out
 
+    # the evidence a SECONDARY_NOT_BILLED item keeps from its listing when a person billed it and the second payer answered
+    SNB_KEEP = ("first_payer", "first_paid_cents", "patient_share_cents", "share", "second_payer", "second_payer_kind",
+                "ema_patient_paid_cents", "crossover", "ema_link", "ema_wrote_off_share", "ema_line_on_file", "basis")
+
+    def _snb_billed_rows(self) -> dict[str, dict]:
+        """The SECONDARY_NOT_BILLED items a person billed (the page's Mark billed sets Sent; a person's own Started counts
+        too), and those the run closed as Paid after that, by the first payer's line (replay-fix-2a A4). A Started the run
+        handed on from a claim's chase is no person's billing (states.person_started): the rule judges it as To do."""
+        c = self.conn
+        cols = {r[1] for r in c.execute("PRAGMA table_info(findings)")}
+        if not {"signal", "line_key", "status", "evidence", "shortfall_cents", "appeal_deadline"} <= cols:
+            return {}
+        auto = "f.auto_note" if "auto_note" in cols else "NULL"
+        was = "f.prev_status" if "prev_status" in cols else "NULL"
+        legal = "f.legal_deadline" if "legal_deadline" in cols else "NULL"
+        link = "f.ema_link" if "ema_link" in cols else "NULL"
+        from .ema_reports import bill_of_claim
+        basis = "f.deadline_basis" if "deadline_basis" in cols else "NULL"
+        has_ev = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_events'").fetchone() is not None
+        newest = ("(SELECT e.to_status FROM finding_events e WHERE e.finding_id = f.finding_id AND e.kind = 'manual' "
+                  "ORDER BY e.at DESC, e.id DESC LIMIT 1)") if has_ev else "NULL"
+        out: dict[str, dict] = {}
+        for fid, lk, st, prev, short, ev, ad, ld, db, by, el, pcn, svc, code in c.execute(
+                f"""SELECT f.finding_id, f.line_key, f.status, {was}, f.shortfall_cents, f.evidence, f.appeal_deadline, {legal},
+                           {basis}, {newest}, {link}, f.patient_control_number, f.service_date, f.procedure_code
+                    FROM findings f WHERE f.signal = 'SECONDARY_NOT_BILLED' AND f.line_key IS NOT NULL
+                     AND (f.status IN ('appealed', 'in_progress')
+                          OR (f.status = 'resolved' AND {auto} IS NOT NULL AND {was} IN ('appealed', 'in_progress')))"""):
+            if (prev if st == "resolved" else st) == "in_progress" and by != "in_progress":
+                continue
+            out[lk] = {"finding_id": fid, "status": st, "shortfall_cents": short, "evidence": ev, "appeal_deadline": ad,
+                       "legal_deadline": ld, "deadline_basis": db, "ema_link": el,
+                       "key": (bill_of_claim(pcn), svc, code) if pcn else None}
+        return out
+
+    def _snb_second_postings(self, e: dict, key: tuple) -> list[tuple]:
+        """What payers other than the line's first payer posted in EMA for the service, on its EMA claim or on another of
+        the patient's EMA claims for the same date and code (a second claim EMA keeps apart): (posted, payer, payer group,
+        check tail, cents, EMA claim), oldest first; a takeback is a negative amount. Whatever its posting date, as the
+        rule reads another payer's money on the line (other_paid): the line was listed with none, so it came since, even
+        where the first payer paid the line again after it (a later payment date). The patient's other claims are found by
+        the patient's keyed name AND date of birth (ema_lines.person), never by the name alone: another patient of the same
+        name seen the same day for the same code is another patient, and his payer's money is never this item's answer
+        (review r1 of replay-fix-2a). No date of birth, no other claim: a name alone proves nothing."""
+        from . import ema_checks as ec
+        svc, cpt, link = key[1], key[2], e.get("link")
+        links = {link}
+        pk = self.conn.execute("SELECT person FROM ema_lines WHERE link=? AND svc=? AND cpt=?", (link, svc, cpt)).fetchone()
+        if pk and pk[0] is not None:
+            links.update(r[0] for r in self.conn.execute("SELECT link FROM ema_lines WHERE person=? AND svc=? AND cpt=? "
+                                                         "AND COALESCE(facility,0) = 0 AND (COALESCE(flags,0) & 17) = 0",
+                                                         (pk[0], svc, cpt)))
+        out = []
+        for lk in sorted(x for x in links if x is not None):
+            for posted, payer, grp, check, cents in self.conn.execute(
+                    "SELECT posted, payer, payer_group, check_no, COALESCE(ins_paid,0) FROM ema_line_payments "
+                    "WHERE link=? AND svc=? AND cpt=? AND COALESCE(ins_paid,0) <> 0", (lk, svc, cpt)):
+                if not grp or ec._same_payer(grp, e.get("payer_group")):
+                    continue
+                out.append((posted, payer or grp, grp, str(check or "")[-4:], int(cents), lk))
+        return sorted(out)
+
+    def _snb_ema_line_of(self, link: int, key: tuple) -> dict | None:
+        """EMA's line for the service on the item's own EMA claim, where the link map no longer pairs the bill with it (a
+        vote split, a claim mapped again): the person billed this claim's line, so its postings are still its answer. The
+        fields run_secondary_not_billed reads (_ema_lines_for's shape, with no answers of its own)."""
+        r = self.conn.execute("""SELECT link, secondary_payer, primary_payer, payer_group, COALESCE(balance,0), COALESCE(pat_paid_joined,0),
+                                        COALESCE(charges,0) FROM ema_lines WHERE link=? AND svc=? AND cpt=?
+                                 AND (COALESCE(flags,0) & 17) = 0 AND COALESCE(facility,0) = 0""", (link, key[1], key[2])).fetchone()
+        if r is None:
+            return None
+        return {"link": r[0], "secondary_payer": r[1], "primary_payer": r[2], "payer_group": r[3], "balance": r[4], "pat_paid": r[5],
+                "charges": r[6], "other_paid": 0, "answers": [], "by_item_link": True}
+
+    def _snb_billed_answer(self, key: tuple, l: dict, e: dict | None, row: dict, seconds: list, ans: list) -> bool:
+        """A SECONDARY_NOT_BILLED line a person billed, once the second payer answered or the patient paid the share
+        (replay-fix-2a A4). The rule lists a line only while nobody answered it, so the run in which the answer showed used
+        to drop it: the worked row was kept stale, on no list, still Sent, its 'mark it Paid' never shown and its payment
+        never counted as Paid. Now:
+          - what is owed is paid, to $1 (the floor the rule lists a share at): closed as Paid in the run with the payment
+            as its proof (the payer's 835 lines, else EMA's postings, and the patient's payment beside it where the patient
+            paid the rest); the recovery is what arrived from that payer (the owner's decision 3), at most the share;
+          - the patient paid the share and no payer paid: closed as paid by the patient, EMA's figure as its proof;
+          - the payer paid less, or answered without paying: kept listed at what is left, its answer in the evidence
+            (second_answer), for a person to work (states._billed_second: 'work its answer').
+        What the payer owes is the share billed to it, or, where its own 835 answer gives its allowed amount, what it owes
+        for the service as second payer (archive_rules.owed_in_second_role, decision 3), never more than the share. Returns
+        False when nobody answered and the patient paid nothing since: the rule's own path decides the line."""
+        from .archive_rules import owed_in_second_role
+        at = lambda o: (o.get("payment_date") or o.get("txn_payment_date") or "")[:10]      # noqa: E731
+        paid_on = at(l)
+        ev0 = json.loads(row["evidence"]) if row.get("evidence") else {}
+        billed = int(ev0.get("billed_share_cents") or row.get("shortfall_cents") or 0)
+        if billed <= 0:
+            return False
+        # the other payers' 835 answers on the line, as the rule reads an answer above: a payment that stands, a processing
+        # as second payer ($0 and reversals included), another payer group's answer after the first payer's
+        answers = [x for x in seconds if (self.standing.get(x["line_key"]) or 0) > 0
+                   or x.get("claim_status_code") in ("2", "3", "20", "21", "22")
+                   or (x.get("payer_group") != l.get("payer_group") and at(x) >= paid_on)]
+        paying = [x for x in answers if (self.standing.get(x["line_key"]) or 0) > 0]
+        paid_835 = sum(self.standing.get(x["line_key"]) or 0 for x in paying)
+        if e is None and row.get("ema_link") is not None:
+            e = self._snb_ema_line_of(row["ema_link"], key)
+        posts = self._snb_second_postings(e, key) if e else []
+        paid_ema = sum(p[4] for p in posts)
+        pat_since = max(0, int(e.get("pat_paid") or 0) - int(ev0.get("ema_patient_paid_cents") or 0)) if e else 0
+        answered = bool(answers or posts or ans)
+        if not answered and pat_since <= 0:
+            return False
+        sgrp = ev0.get("second_payer") or "the second payer"
+        owed, owed_words = billed, f"the {_usd(billed)} billed to it"
+        if paid_835 > 0 and paid_835 >= paid_ema:
+            src, paid = "835", paid_835
+            if all((x.get("allowed_cents") or 0) > 0 for x in paying):
+                pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
+                due = owed_in_second_role([{"allowed": x.get("allowed_cents"), "charge": x.get("charge_cents"),
+                                            "paid": self.standing.get(x["line_key"]) or 0, "adj": self.adj.get(x["line_key"], [])}
+                                           for x in paying], self.standing.get(l["line_key"]) or 0, None, pr)
+                if due is not None and due["owed_cents"] < billed:
+                    owed = due["owed_cents"]
+                    owed_words = (f"the {_usd(owed)} it owes as second payer by its own allowed amount "
+                                  f"({_usd(due['allowed_cents'] or due['base_cents'])}, less {_usd(due['prior_cents'])} the first "
+                                  f"payer paid" + (f" and {_usd(due['patient_cents'])} it put on the patient" if due["patient_cents"] else "")
+                                  + f"; {_usd(billed)} was billed)")
+        elif paid_ema > 0:
+            src, paid = "ema", paid_ema
+        else:
+            src, paid = None, 0
+        left = max(owed - paid - pat_since, 0)
+        # who answered, when, and with what reasons
+        if src == "835" or (src is None and answers):
+            lines_ = paying if src == "835" else answers
+            payer = lines_[0].get("payer_group") or lines_[0].get("payer_name") or sgrp
+            day_ = max(at(x) for x in lines_) or None
+        elif src == "ema" or posts:
+            payer, day_ = posts[-1][2] or sgrp, posts[-1][0]
+        elif ans:
+            payer, day_ = ans[-1][1] or sgrp, ans[-1][0]
+        else:
+            payer, day_ = sgrp, None
+        codes = sorted({f"{g}-{rc}" for x in answers for g, rc, _a in self.adj.get(x["line_key"], [])
+                        if g != "PR" or rc not in ("1", "2", "3")}
+                       | {a[3] for a in ans if a[3] not in ("payment", "same_check")})
+        if src == "835":
+            proof = self._answer_rows(paying, None, "answer")
+        elif src == "ema" or posts:
+            proof = [{"date": p[0], "source": "production", "kind": "payment" if p[4] > 0 else "takeback", "payer": p[1],
+                      "amount_cents": abs(p[4]), "codes": [], "decisive": True,
+                      "text": f"EMA posted {_usd(p[4])} from {p[1]} on a check ending {p[3]}"} for p in posts]
+        else:
+            proof = self._answer_rows(answers, None, "answer")
+        pat_day = None
+        if pat_since > 0 and e:
+            r = self.conn.execute("SELECT last_posted, as_of FROM ema_lines WHERE link=? AND svc=? AND cpt=?",
+                                  (e.get("link"), key[1], key[2])).fetchone()
+            pat_day = (r[0] or r[1]) if r else None
+            proof.append({"date": pat_day, "source": "production", "kind": "patient_payment", "payer": "the patient",
+                          "amount_cents": pat_since, "codes": [], "decisive": True,
+                          "text": f"EMA shows {_usd(pat_since)} more paid by the patient on the line since it was billed to {sgrp}"
+                                  + (f" (the line's newest posting on {pat_day})" if pat_day else "")})
+        first = l.get("payer_group")
+        share = ev0.get("share") or "share"
+        ev = {k: ev0[k] for k in self.SNB_KEEP if k in ev0}
+        ev["billed_share_cents"] = billed
+        if e:
+            ev["ema_balance_cents"], ev["ema_patient_paid_now_cents"] = e.get("balance"), e.get("pat_paid")
+        closes = left <= 100 and (paid > 0 or bool(pat_since > 0 and pat_day))
+        if not closes and not answered:
+            return False            # the patient paid part of the share and nobody answered: the rule's own path sizes the rest
+        size = billed if closes else left
+        if closes:
+            title = (f"{l.get('procedure_code')}: {first} paid and left {_usd(billed)} ({share}); billed to {sgrp}, "
+                     + (f"which paid {_usd(paid)}" if paid > 0 else "and the patient paid it"))
+        else:
+            title = (f"{l.get('procedure_code')}: {first} paid and left {_usd(billed)} ({share}); billed to {sgrp}, which "
+                     + (f"paid {_usd(paid)}" if paid > 0 else "answered without paying") + f": {_usd(left)} left")
+        self._emit("SECONDARY_NOT_BILLED", "denial", "medium" if size >= 5000 else "low", "review", title, l, size, size, None, None, ev)
+        f = self.findings.get(_fid("SECONDARY_NOT_BILLED", l["line_key"]))
+        if f is None:
+            return True
+        f["appeal_deadline"], f["legal_deadline"], f["deadline_basis"] = row.get("appeal_deadline"), row.get("legal_deadline"), row.get("deadline_basis")
+        if e and e.get("link") is not None:
+            f["ema_link"] = e["link"]
+        f["source"], f["hint"] = "835", None
+        if closes and paid > 0:
+            note = (f"Paid by {payer} as second payer on {day_}: {_usd(paid)}, against {owed_words}"
+                    + (f"; the patient paid {_usd(pat_since)} more" if pat_since else "") + ".")
+            detail = {"payment_date": day_, "paid_cents": paid, "how": "paid as second payer", "payer": payer, "proof": proof,
+                      "billed_cents": billed, "owed_cents": owed}
+            if pat_since:
+                detail["patient_paid_cents"] = pat_since
+            if src == "835":
+                x0 = paying[0]
+                detail.update(claim=x0.get("patient_control_number"), trace=x0.get("trace_number"),
+                              claim_status=x0.get("claim_status_code"), source="835")
+                self._mark_paid(f, day_, paid, note, detail, recovery=self._credit_lines(paying, cap=f.get("shortfall_cents")))
+            else:
+                p0 = posts[0]
+                detail.update(claim=l.get("patient_control_number"), trace=f"EMA check ending {p0[3]}", source="EMA Production",
+                              ema_link=p0[5])
+                self._mark_paid(f, day_, paid, note, detail, used=("ema", p0[0], p0[3], p0[5], key[1], key[2]))
+            self.ema_counts["snb_billed_paid"] += 1
+            return True
+        if closes:
+            # the patient paid the share billed to the second payer: no payer's money, nothing left to ask it for
+            note = (f"Paid by the patient: EMA shows {_usd(pat_since)} more paid by the patient on the line since it was billed "
+                    f"to {sgrp}, the {_usd(billed)} share it was billed for" + (f" ({sgrp} answered without paying)" if answered else ""))
+            ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+            ev["paid_later"] = {"payment_date": pat_day, "paid_cents": 0, "patient_paid_cents": pat_since, "how": "settled by the patient",
+                                "claim": l.get("patient_control_number"), "source": "EMA Production", "payer": "the patient",
+                                "ema_link": e.get("link") if e else None, "billed_cents": billed, "proof": proof}
+            f["evidence"] = json.dumps(ev, default=str)
+            f["recovered_cents"], f["recovered_date"] = 0, pat_day
+            f["auto_status"], f["auto_notes"] = "resolved", note
+            self.ema_counts["snb_billed_patient"] += 1
+            return True
+        # paid less than it owes, or answered without paying: the rest stays listed with the answer, for a person to work
+        ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+        ev["second_answer"] = {"payer": payer, "date": day_, "source": "835" if src == "835" or (src is None and answers) else "production",
+                               "paid_cents": paid, "owed_cents": owed, "owed_words": owed_words, "billed_cents": billed,
+                               "patient_since_cents": pat_since, "left_cents": left, "codes": codes, "proof": proof}
+        f["evidence"] = json.dumps(ev, default=str)
+        self.ema_counts["snb_billed_answered"] += 1
+        return True
+
     def run_secondary_not_billed(self) -> None:
         """The primary paid and left the patient's share (deductible, coinsurance, copay), a second insurer is on file in
         EMA, and the second payer never answered: no remittance from it as second payer (at any amount, $0 included), no
@@ -11357,14 +11583,21 @@ class Detector:
         usual time has passed, to be chased rather than billed; one whose EMA line the store does not hold is listed from
         the remittance alone (the carrier it names). Medicaid as the second payer is never listed: it pays the share only
         up to its own rate and the member cannot be billed (the answer key's R3). Every line left out is counted (meta
-        ema:wiring)."""
+        ema:wiring). A line a person billed is never dropped when the second payer answers: it closes as Paid with that
+        payment as its proof, or stays listed to work the answer (_snb_billed_answer)."""
         from . import ema_reports as er
         from . import ema_checks as ec
         cands: dict[tuple, Line] = {}
         other_paid: set[tuple] = set()
+        billed = self._snb_billed_rows()                        # first payer's line key -> the item a person billed
+        billed_keys = {r["key"]: lk for lk, r in billed.items() if r.get("key")}    # its service -> its own line key
+        own_lines: dict[str, Line] = {}                         # the billed items' own lines
+        seconds: dict[tuple, list] = defaultdict(list)          # (bill, date, code) of a billed line -> other payers' lines
         second_835: dict[tuple, list] = defaultdict(list)       # (bill, date, code) -> second payers' remittances: (date, payer)
         crossed_nil: dict[tuple, str] = {}                      # (bill, date, code) -> first crossover that carried no share of it
         for l in self.lines:
+            if l["line_key"] in billed:
+                own_lines[l["line_key"]] = l
             code, dos = l.get("procedure_code"), l.get("service_date")
             if not code or not dos or code in ("99024", "G2211"):
                 continue
@@ -11398,6 +11631,14 @@ class Detector:
         for l in self.lines:
             key = (er.bill_of_claim(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code"))
             c = cands.get(key)
+            own = own_lines.get(billed_keys[key]) if key in billed_keys else None
+            if own is not None and l["line_key"] != own["line_key"] \
+                    and (l.get("payer_id") or l.get("payer_name")) != (own.get("payer_id") or own.get("payer_name")) \
+                    and not ec._same_payer(l.get("payer_group") or "", own.get("payer_group") or ""):
+                # another payer's line of a line a person billed: its answer, read below. The first payer's own group under
+                # another payer id or name (a reprocessing, a plan's other name) is never the second payer's answer, as on
+                # EMA's side (_snb_second_postings; review r1 of replay-fix-2a)
+                seconds[key].append(l)
             if c is None or l["line_key"] == c["line_key"] or key in other_paid \
                     or (l.get("payer_id") or l.get("payer_name")) == (c.get("payer_id") or c.get("payer_name")):
                 continue
@@ -11407,7 +11648,21 @@ class Detector:
                     and (l.get("payment_date") or l.get("txn_payment_date") or "") >= (c.get("payment_date") or c.get("txn_payment_date") or ""):
                 other_paid.add(key)
                 self.ema_counts["snb_second_answered_835"] += 1
-        keys = [k for k in cands if k not in other_paid]
+        keys = [k for k in cands if k not in other_paid or cands[k]["line_key"] in billed or k in billed_keys]
+        # a line a person billed whose service has no candidate line any more (the first payer took its payment back, or
+        # paid the line again with no share left on it): its own line is still read for the second payer's answer, so the
+        # answer closes or lists the person's item instead of leaving it stale
+        orphans = [(lk0, r0) for lk0, r0 in billed.items() if r0.get("key") and r0["key"] not in cands and lk0 in own_lines]
+        if orphans:
+            oema = self._ema_lines_for([r0["key"] for _lk, r0 in orphans])
+            for lk0, r0 in orphans:
+                own, key0 = own_lines[lk0], r0["key"]
+                e0 = oema.get(key0)
+                on = (own.get("payment_date") or own.get("txn_payment_date") or "")[:10]
+                ans0 = [a for a in (e0.get("answers") or []) if (a[0] or "") >= on] if e0 else []
+                if ans0 and own.get("claim_status_code") != "19" and crossed_nil.get(key0, "9999") < on:
+                    ans0 = [a for a in ans0 if a[3] != "same_check"]       # as for a candidate's line, below
+                self._snb_billed_answer(key0, own, e0, r0, seconds.get(key0) or [], ans0)
         if not keys:
             return
         ema = self._ema_lines_for(keys)
@@ -11417,6 +11672,24 @@ class Detector:
             e = ema.get(key)
             l = cands[key]
             paid_on = l.get("payment_date") or l.get("txn_payment_date") or ""
+            row = billed.get(l["line_key"])
+            if row is None and key in billed_keys and billed_keys[key] in own_lines:
+                # the item a person billed keeps its own line where the rule's candidate moved to another line of the
+                # service (the first payer paid it again later, or another payer answered it as primary): one item, the
+                # person's, never a new one beside it
+                l = own_lines[billed_keys[key]]
+                row = billed[l["line_key"]]
+                paid_on = l.get("payment_date") or l.get("txn_payment_date") or ""
+            if row is not None:
+                # a line a person billed: once the second payer answers (or the patient pays the share) it is closed or kept
+                # listed with that answer, never dropped as an unworked line is (replay-fix-2a A4)
+                ans = [a for a in (e.get("answers") or []) if (a[0] or "") >= paid_on[:10]] if e else []
+                if ans and l.get("claim_status_code") != "19" and crossed_nil.get(key, "9999") < paid_on[:10]:
+                    ans = [a for a in ans if a[3] != "same_check"]
+                if self._snb_billed_answer(key, l, e, row, seconds.get(key) or [], ans):
+                    continue
+            if key in other_paid:
+                continue                    # another payer answered it (only a billed line with no answer read reaches here)
             crossed = l.get("claim_status_code") == "19" or bool(self.crossover_carrier(l["claim_key"]))
             pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
             if not e:
@@ -12720,6 +12993,13 @@ class Detector:
         # every item's state, decided in one place (remitwatch.states) on the status just settled; an item a person set
         # back to work after an automatic closure is judged without the payment that closure rested on (they rejected it)
         self._overridden = overridden
+        if moved:
+            # a person's own lines (their Started or Sent, their notes) and the item's faxes go with the line's money to its
+            # new id BEFORE the states are decided, so the heir is judged on them in this very run, as the old id was: never
+            # as To do for one run with a hand-off's words (review r1 of replay-fix-2a). carry_to_heirs moves the rest below
+            for table in ("finding_events", "faxes"):
+                if table in have_tables:
+                    c.executemany(f"UPDATE {table} SET finding_id=? WHERE finding_id=?", [(n, o) for o, n in moved])
         self._set_states(out_rows)
         rows = [tuple(r.get(k) for k in cols) for r in out_rows]
         # (the EMA line summary keeps every line, whatever this run lists: no refresh waits on the items saved here)

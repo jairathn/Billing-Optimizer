@@ -75,6 +75,12 @@ STATE_SPOT = "results/spot_checks_{year}.json"   # serverless: each day's picks 
 
 RETURN_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")    # items whose line can bring money back
 REGISTER_CATEGORIES = RETURN_CATEGORIES + ("fees", "refund")               # items the registry keeps
+# a clinician's rate gap (category 'contract') stands for claims with filing windows like a routine-rate review, and expires
+# when the last closes (states.WINDOWED_CONTRACT): the registry keeps it too, so its dollars are counted lost to the deadline.
+# It brings no money of its own back (not returnable), so no other figure counts it
+REGISTER_SIGNALS = ("PROVIDER_RATE_GAP",)
+# items that stand for claims, each with its own filing window: lost to the deadline claim by claim (_lost_of)
+WINDOWED_SIGNALS = ("SECOND_RATE", "PROVIDER_RATE_GAP")
 STATE_CATEGORIES = ("downcoding", "bundling", "denial", "underpayment", "fees", "contract")   # = api.MONEY_CATEGORIES
 FOUND_SIGNALS = ("SECONDARY_NOT_BILLED", "REMIT_NOT_POSTED", "NOT_SENT")
 OPEN_STATES = ("work_now", "waiting")
@@ -491,11 +497,100 @@ def _flag_info(f: dict) -> str:
     return json.dumps(keep, separators=(",", ":"))
 
 
+def _windowed_lines(f: dict) -> list[tuple] | None:
+    """The claims of a routine-rate review or a clinician's rate gap as (line key, the claim's filing deadline, its dollars
+    short) from the item's evidence (detect._emit_pattern, emit_provider_gaps), or None when the evidence does not list
+    them. A review's dollars are its usual rate less what was allowed, claim by claim (its shortfall's own sum). A rate gap
+    keeps its dollars by deadline only (evidence 'deadlines': [day, claims, cents]): each claim carries its share of its
+    day's cents, the day's total kept to the cent."""
+    ev = _json(f.get("evidence"))
+    keys = ev.get("line_keys") if isinstance(ev.get("line_keys"), list) else []
+    claims = ev.get("claims") if isinstance(ev.get("claims"), list) else []
+    rows = [(keys[i] if i < len(keys) else None, str(c[3] or "")[:10] or None, c) for i, c in enumerate(claims)
+            if isinstance(c, list) and len(c) >= 4]
+    if not rows:
+        return None
+    if f.get("signal") == "SECOND_RATE":
+        rate = int(ev.get("usual_cents") or 0)
+        return [(lk, due, max(rate - int(c[2] or 0), 0)) for lk, due, c in rows]
+    days: dict = defaultdict(list)
+    for lk, due, _c in rows:
+        days[due].append(lk)
+    out = []
+    for d in ev.get("deadlines") or []:
+        if not (isinstance(d, list) and len(d) == 3):
+            continue
+        day, cents = (str(d[0])[:10] if d[0] else None), int(d[2] or 0)
+        lks = days.pop(day, [])
+        for i, lk in enumerate(lks):
+            out.append((lk, day, cents // len(lks) + (1 if i < cents % len(lks) else 0)))
+    return out
+
+
+def _counted_lost(conn: sqlite3.Connection) -> dict[str, str]:
+    """The lines whose dollars the registry already counts as lost to a deadline, {line key: the item that counted them}:
+    a line item's own line, and the claims an expired routine-rate review or clinician's rate gap counted (its flag_info
+    'lost_lines')."""
+    out: dict[str, str] = {}
+    for fid, item, info, cents in conn.execute("""SELECT finding_id, item, flag_info, lost_cents FROM results_items
+                                                 WHERE expired_on IS NOT NULL"""):
+        fi = _json(info)
+        if fi.get("lost_elsewhere"):
+            continue
+        for lk in fi.get("lost_lines") or []:
+            out.setdefault(str(lk), fid)
+        lk = _json(item).get("line_key")
+        if lk and int(cents or 0) > 0:
+            out.setdefault(str(lk), fid)
+    return out
+
+
+def _lost_of(f: dict, first: str, counted: dict[str, str]) -> tuple[int, list[str], str | None]:
+    """What an item that expired while Work now lost to its deadline: (cents, the lines it counts, the item that already
+    counted them all, or None). Each line's dollars are counted once, whichever item lists the line when its window closes
+    (rule 5's scoreboard): a line another item already counted lost (`counted`, _counted_lost) adds nothing again. A routine-
+    rate review or a clinician's rate gap stands for claims, each with its own window: it counts the claims whose window
+    closed on or after its first flag (`first`), the ones it was listed for while they could still be raised (a claim
+    already past its window when it was found was never listed as work), less those counted. Any other item counts its
+    dollars short, unless its line was counted."""
+    lk = f.get("line_key")
+    if f.get("signal") in WINDOWED_SIGNALS:
+        got = _windowed_lines(f)
+        if got is None:     # evidence of an older shape: its dollars short, as before
+            return int(f.get("shortfall_cents") or 0), [], None
+        live = [(k, c) for k, due, c in got if due and due >= first]
+        mine = [(k, c) for k, c in live if not (k and k in counted)]
+        if live and not mine:
+            return 0, [], counted.get(live[0][0])
+        return sum(c for _k, c in mine), sorted({k for k, _c in mine if k}), None
+    if lk and lk in counted:
+        return 0, [], counted[lk]
+    return int(f.get("shortfall_cents") or 0), [lk] if lk else [], None
+
+
+def _lost_parts_of(fi: dict, lost_on: Any, lost_cents: Any) -> list[tuple]:
+    """An item's losses to its deadlines as (day, cents): one, on lost_on, unless a routine-rate review or rate gap expired
+    again after it was listed for new claims (flag_info 'lost_parts', update_registry), each loss with its own day. A
+    loss of no dollars of its own (every line counted by another item) is no part."""
+    parts = fi.get("lost_parts") if isinstance(fi, dict) else None
+    if isinstance(parts, list) and parts:
+        return [(p[0], int(p[1] or 0)) for p in parts if isinstance(p, (list, tuple)) and len(p) == 2 and int(p[1] or 0) > 0]
+    return [(lost_on, int(lost_cents or 0))] if int(lost_cents or 0) > 0 else []
+
+
+def _info_with(info: str, **kw: Any) -> str:
+    """The registry row's kept facts (flag_info) with these added."""
+    d = _json(info)
+    d.update({k: v for k, v in kw.items() if v})
+    return json.dumps(d, separators=(",", ":"))
+
+
 def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
     """Keep the registry of every item RemitWatch ever flagged up to date with the findings just saved: a new item is
     written with its first-flag date (the item's own first_seen); a listed one keeps the earliest first-flag date ever
     seen; one no longer listed is marked gone (it stays, so money that comes on it later still counts); an item that went
-    from Work now to Expired is recorded as lost to its deadline, with its dollars. Returns the counts."""
+    from Work now to Expired is recorded as lost to its deadline, with its dollars, each line's dollars once (_lost_of).
+    Returns the counts."""
     from .runtime import practice_date
     ensure_schema(conn)
     t = _today(today)
@@ -510,9 +605,12 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
     fc = _cols(conn, "findings")
     sel = [c for c in FINDING_FIELDS if c in fc]
     cats = ",".join("?" * len(REGISTER_CATEGORIES))
+    sigs = ",".join("?" * len(REGISTER_SIGNALS))
     rows, seen = [], set()
     n_new = n_lost = 0
-    for r in conn.execute(f"SELECT {', '.join(sel)} FROM findings WHERE category IN ({cats})", REGISTER_CATEGORIES):
+    counted: dict[str, str] | None = None          # the lines already counted lost (_counted_lost), read at the first loss
+    for r in conn.execute(f"SELECT {', '.join(sel)} FROM findings WHERE category IN ({cats}) OR signal IN ({sigs})",
+                          REGISTER_CATEGORIES + REGISTER_SIGNALS):
         f = dict(zip(sel, r))
         fid = f["finding_id"]
         seen.add(fid)
@@ -535,8 +633,36 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
             flagged = prev[7] if prev[7] is not None else f.get("shortfall_cents")
             info = prev[9] or _flag_info(f)
             if prev[2] == "work_now" and ws == "expired" and not expired_on:
-                expired_on, lost_on, lost_cents = t, _deadline_of(f) or t, int(f.get("shortfall_cents") or 0)
+                if counted is None:
+                    counted = _counted_lost(conn)
+                lost_cents, mine, elsewhere = _lost_of(f, first, counted)
+                expired_on, lost_on = t, _deadline_of(f) or t
+                for k in mine:
+                    counted.setdefault(k, fid)
+                if elsewhere or (f.get("signal") in WINDOWED_SIGNALS and mine):
+                    info = _info_with(info, lost_lines=mine if f.get("signal") in WINDOWED_SIGNALS else None,
+                                      lost_elsewhere=elsewhere)
                 n_lost += 1
+            elif prev[2] == "work_now" and ws == "expired" and f.get("signal") in WINDOWED_SIGNALS:
+                # a review or rate gap listed again after its loss, for claims the payer paid the same way since, that
+                # expired again unworked: the claims it was listed for since are lost too (rule 5: no dollar drops
+                # silently), each line once (the lines it counted before are in `counted`), and in the week their own
+                # window closed: the earlier loss keeps its week (a frozen week is never counted again) (review r1 of A1)
+                if counted is None:
+                    counted = _counted_lost(conn)
+                more, mine, _elsewhere = _lost_of(f, first, counted)
+                if more > 0:
+                    day = _deadline_of(f) or t
+                    fi = _json(info)
+                    parts = [[str(p[0]), int(p[1])] for p in _lost_parts_of(fi, lost_on or expired_on, lost_cents)] + [[day, more]]
+                    for k in mine:
+                        counted.setdefault(k, fid)
+                    fi.pop("lost_elsewhere", None)      # the item now holds a loss of its own
+                    fi["lost_lines"] = sorted(set(fi.get("lost_lines") or []) | set(mine))
+                    fi["lost_parts"] = parts
+                    info = json.dumps(fi, separators=(",", ":"))
+                    lost_cents, lost_on = sum(p[1] for p in parts), day
+                    n_lost += 1
         rows.append((fid, first, t, None, ever_open, f.get("signal"), f.get("category"), f.get("payer_group"), f.get("payer_kind"),
                      f.get("procedure_code"), f.get("carc"), f.get("service_date"), flagged, f.get("shortfall_cents"), ws,
                      f.get("status"), expired_on, lost_on, lost_cents, info, _item_json(f, prev[10] if prev else None)))
@@ -1708,13 +1834,18 @@ def _work_done(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tu
 
 def _closure(r: dict, f: dict | None, money: int) -> str | None:
     """Why an item of the open book is closed now, or None while it is open: paid, patient, second payer, owner policy,
-    let go by a person, expired, otherwise settled, or no longer listed."""
+    let go by a person, expired, otherwise settled, or no longer listed. A row the detection run keeps stale is on no list
+    (every list asks for live rows): whatever state it was stored with, it is no longer listed, closed as paid when money
+    came back on it, else gone; never still open (replay-fix-2a A4: a second payer's bill a person sent, kept stale once the
+    payer paid, was counted 'Still open: Work now' with no list holding it)."""
     if f is None:
         return "paid" if money > 0 else "gone"
     ws, st = f.get("work_state"), f.get("status")
     basis = str(f.get("state_basis") or "").lower()
     outcome = str(f.get("ema_outcome") or "")
     if ws in OPEN_STATES or ws == "cant_check" or ws is None:
+        if f.get("stale"):
+            return "paid" if money > 0 else "gone"
         return None
     if st == "resolved" and not money and basis.startswith("marked done by"):
         return "done"           # a person's Done on a patient-group denial (the owner's decision 2): no money, never a payment
@@ -1748,7 +1879,7 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
     cur: dict[str, dict] = {}
     if book and _fx(conn):
         fc = _cols(conn, "findings")
-        sel = [c for c in ("finding_id", "work_state", "status", "state_basis", "ema_outcome", "follow_up_on") if c in fc]
+        sel = [c for c in ("finding_id", "work_state", "status", "state_basis", "ema_outcome", "follow_up_on", "stale") if c in fc]
         for part in _chunks(sorted(book)):
             _temp_ids(conn, "rs_o", part)
             for r in conn.execute(f"SELECT {', '.join(sel)} FROM findings WHERE finding_id IN (SELECT id FROM temp.rs_o)"):
@@ -1772,7 +1903,8 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
             still[(f or {}).get("work_state") if (f or {}).get("work_state") in OPEN_STATES else "unknown"].append(fid)
         ws = real_work(att["work"].get(fid))
         # worked and still open with nothing back yet; an item denied again after the work had its answer (counted apart)
-        if ws and f and f.get("work_state") in OPEN_STATES and not money.get(fid) and fid not in att["denied_again"]:
+        if ws and f and f.get("work_state") in OPEN_STATES and not f.get("stale") and not money.get(fid) \
+                and fid not in att["denied_again"]:
             waiting_no_money.append(fid)
             waited.append(_days(ws[-1]["date"], today))
     n = len(book)
@@ -1906,17 +2038,26 @@ def _credits(conn: sqlite3.Connection, today: str) -> dict:
 
 
 def _lost(reg: dict) -> tuple[dict, dict]:
-    """Items that expired while they were Work now (lost to the deadline), recorded by the registry when the state changed."""
-    rows = sorted(((fid, r) for fid, r in reg.items() if r.get("expired_on")), key=lambda x: (-(x[1].get("lost_cents") or 0), x[0]))
+    """Items that expired while they were Work now (lost to the deadline), recorded by the registry when the state changed.
+    An item whose every line another item already counted lost (flag_info 'lost_elsewhere', update_registry) is that
+    item's loss, never a second one."""
+    rows = sorted(((fid, r) for fid, r in reg.items() if r.get("expired_on") and not (r.get("flag_info") or {}).get("lost_elsewhere")),
+                  key=lambda x: (-(x[1].get("lost_cents") or 0), x[0]))
     weeks: dict = defaultdict(lambda: [0, 0])
+    by_week: dict = defaultdict(list)
     for fid, r in rows:
-        w = week_of(r.get("lost_on") or r.get("expired_on"))
-        weeks[w][0] += 1
-        weeks[w][1] += int(r.get("lost_cents") or 0)
+        # a routine-rate review that expired twice (listed again for new claims) has two losses, each in its own week
+        fi = r.get("flag_info") or {}
+        parts = _lost_parts_of(fi, r.get("lost_on") or r.get("expired_on"), r.get("lost_cents")) if fi.get("lost_parts") else \
+            [(r.get("lost_on") or r.get("expired_on"), int(r.get("lost_cents") or 0))]
+        for day, cents in parts:
+            w = week_of(day)
+            weeks[w][0] += 1
+            weeks[w][1] += cents
+            by_week[w].append([fid, cents])
     lists = {"lost": [[fid, int(r.get("lost_cents") or 0)] for fid, r in rows]}
     for w in weeks:
-        lists[f"lost:week:{w}"] = [[fid, int(r.get("lost_cents") or 0)] for fid, r in rows
-                                   if week_of(r.get("lost_on") or r.get("expired_on")) == w]
+        lists[f"lost:week:{w}"] = sorted(by_week[w], key=lambda x: (-x[1], x[0]))
     return {"n": len(rows), "cents": sum(int(r.get("lost_cents") or 0) for _f, r in rows),
             "weeks": [{"week": w, "n": v[0], "cents": v[1]} for w, v in sorted(weeks.items()) if w]}, lists
 
@@ -2112,6 +2253,26 @@ def live_sql(key: str, today: str) -> tuple[str, list]:
 LIVE_KEYS = tuple([f"state:{s}" for s in STATE_LABELS] + ["at_risk", "given_up", "given_up:recoverable", "given_up:past"])
 
 
+def live_cents(key: str, today: str) -> tuple[str, list]:
+    """The dollars one item adds to a live figure, as an expression over `findings f` with its parameters: the figure and
+    the list it opens add the same dollars (live_figures, list_entries). Given up counts what was written off; every other
+    figure the item's dollars short, except at risk: a routine-rate review or a clinician's rate gap stands for claims,
+    each with its own window (evidence 'deadlines': [day, claims, cents]), and only those still inside their window are at
+    risk; a claim whose window closed is lost to its deadline (the registry counts it when the item expires) and is never
+    at risk again, as it was for a review listed again for new claims after its loss (review r1 of replay-fix-2a A1). A
+    window not known counts as open (detect._emit_pattern)."""
+    if key.startswith("given_up"):
+        return "f.written_off_cents", []
+    if key == "at_risk":
+        sigs = ",".join(f"'{s}'" for s in WINDOWED_SIGNALS)
+        # nested CASE: the JSON is read only on a windowed item whose evidence parses
+        return (f"(CASE WHEN f.signal IN ({sigs}) AND json_valid(f.evidence) THEN (CASE WHEN json_type(f.evidence, '$.deadlines') = 'array' "
+                f"THEN MIN(COALESCE(f.shortfall_cents, 0), (SELECT COALESCE(SUM(CAST(json_extract(d.value, '$[2]') AS INTEGER)), 0) "
+                f"FROM json_each(f.evidence, '$.deadlines') d WHERE COALESCE(json_extract(d.value, '$[0]'), '9999-12-31') >= ?)) "
+                f"ELSE f.shortfall_cents END) ELSE f.shortfall_cents END)", [today])
+    return "f.shortfall_cents", []
+
+
 def live_figures(conn: sqlite3.Connection, today: Any = None) -> dict:
     """The figures counted on the findings table at the moment of asking (both hosts): items by state, money at risk in
     the next 14 days, money given up without a decision (with the part still inside its window)."""
@@ -2127,16 +2288,19 @@ def live_figures(conn: sqlite3.Connection, today: Any = None) -> dict:
         if key.startswith("given_up") and (not has_ev or "written_off_cents" not in fc):
             continue
         w, p = live_sql(key, t)
-        n, c = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(f.shortfall_cents),0) FROM findings f WHERE {w}" if not key.startswith("given_up")
-                            else f"SELECT COUNT(*), COALESCE(SUM(f.written_off_cents),0) FROM findings f WHERE {w}", p).fetchone()
+        ce, cp = live_cents(key, t)
+        n, c = conn.execute(f"SELECT COUNT(*), COALESCE(SUM({ce}),0) FROM findings f WHERE {w}", cp + p).fetchone()
         if key.startswith("state:"):
             out["states"][key.split(":", 1)[1]] = {"n": n, "cents": c}
         else:
             out[key.replace(":", "_")] = {"n": n, "cents": c}
     if "expected_value_cents" in fc:    # the self-check's ranking (brief_3a), where the run has written it: what the at-risk items are likely worth
         w, p = live_sql("at_risk", t)
-        n_ev, c_ev = conn.execute(f"SELECT COUNT(f.expected_value_cents), COALESCE(SUM(f.expected_value_cents),0) FROM findings f WHERE {w}",
-                                  p).fetchone()
+        ce, cp = live_cents("at_risk", t)
+        # an item at risk for part of its dollars (a review's claims still inside their windows) is worth that part's share
+        ev = f"(CASE WHEN COALESCE(f.shortfall_cents,0) > 0 THEN f.expected_value_cents * ({ce}) / f.shortfall_cents ELSE f.expected_value_cents END)"
+        n_ev, c_ev = conn.execute(f"SELECT COUNT(f.expected_value_cents), COALESCE(SUM({ev}),0) FROM findings f WHERE {w}",
+                                  cp + p).fetchone()
         if n_ev:
             out["at_risk"].update(expected_cents=int(c_ev), expected_n=n_ev)
     out["given_up"]["source"] = "results"
@@ -2555,9 +2719,12 @@ def list_entries(conn: sqlite3.Connection, key: str, today: Any = None, lists: d
             return sorted(g["ids"], key=lambda x: (-x[1], x[0]))
     if key in LIVE_KEYS:
         w, p = live_sql(key, t)
-        col = "f.written_off_cents" if key.startswith("given_up") else "f.shortfall_cents"
-        order = "f.appeal_deadline, f.finding_id" if key == "at_risk" else f"COALESCE({col},0) DESC, f.finding_id"
-        return [[r[0], int(r[1] or 0)] for r in conn.execute(f"SELECT f.finding_id, {col} FROM findings f WHERE {w} ORDER BY {order}", p)]
+        col, cp = live_cents(key, t)        # the same dollars the figure adds (live_figures)
+        if key == "at_risk":
+            sql, args = f"SELECT f.finding_id, {col} FROM findings f WHERE {w} ORDER BY f.appeal_deadline, f.finding_id", cp + p
+        else:
+            sql, args = f"SELECT f.finding_id, {col} FROM findings f WHERE {w} ORDER BY COALESCE({col},0) DESC, f.finding_id", cp + p + cp
+        return [[r[0], int(r[1] or 0)] for r in conn.execute(sql, args)]
     got = lists if lists is not None else _meta(conn, LISTS_KEY, {}) or {}
     m = FROZEN_RE.fullmatch(key)
     if m:
@@ -2698,7 +2865,8 @@ def scoreboard(conn: sqlite3.Connection, today: Any = None) -> dict:
                                   "at_risk": live["at_risk"]["n"], "given_up": gu.get("n")},
            "basis": {"recovered": "Money paid on items after RemitWatch first flagged them, plus money it found (some may have come back anyway: see Results).",
                      "lost": "Items that expired while they were in Work now, with their dollars.",
-                     "at_risk": f"Work now items whose filing date is in the next {AT_RISK_DAYS} days.",
+                     "at_risk": f"Work now items whose filing date is in the next {AT_RISK_DAYS} days (a routine-rate review: "
+                                "its claims still inside their windows).",
                      "given_up": (gu.get("basis") or "Dollars written off with no person's decision and no owner-approved policy.")},
            "given_up_source": gu.get("source")}
     if gu.get("check"):

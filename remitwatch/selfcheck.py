@@ -1200,10 +1200,13 @@ def _grace_days() -> int:
 
 
 def _automatic_open(row: dict) -> bool:
-    """The item is Work now by states.py's own 'nobody has worked it' rule (state_rule when the store keeps it)."""
+    """The item is Work now by one of states.py's rules for work nobody has done (state_rule when the store keeps it): its
+    'nobody has worked it' rule, or the owner's question on an item that carries an appeal_deadline (a routine-rate review
+    or a clinician's rate gap stands for claims with filing windows, and states.py expires it the day after the last one
+    closes: replay-fix-2a A1)."""
     rule = row.get("state_rule")
     if rule:
-        return rule == "open"
+        return rule == "open" or (rule == "owner_decision" and bool(row.get("appeal_deadline")))
     basis = str(row.get("state_basis") or "")
     return basis.startswith(OPEN_BASIS)
 
@@ -1219,15 +1222,23 @@ def check_past_window(conn: sqlite3.Connection, today: str) -> dict:
     basis = "state_basis" if "state_basis" in cols else "NULL"
     offs, within = [], 0
     ema_only = ",".join(f"'{s}'" for s in EMA_ONLY)
-    for fid, cents, ad, ld, r, b in conn.execute(
-            f"""SELECT finding_id, COALESCE(shortfall_cents, 0), appeal_deadline, {legal}, {rule}, {basis} FROM findings
-                WHERE COALESCE(stale, 0) = 0 AND status = 'open' AND work_state = 'work_now'
-                  AND (category IN ('denial','bundling','downcoding','underpayment') OR signal IN ({ema_only}))
+    # a Started no person set (the run handed it on from a claim's chase: no status line of a person's on the item names it,
+    # states.person_started) is decided by the automatic states, so it is checked as To do is (replay-fix-2a A2)
+    handed = ("COALESCE((SELECT e.to_status FROM finding_events e WHERE e.finding_id = findings.finding_id AND e.kind = 'manual' "
+              "ORDER BY e.at DESC, e.id DESC LIMIT 1), '') <> 'in_progress'") if _has_table(conn, "finding_events") else "0"
+    # a contract question with a filing window of its own (a routine-rate review, a clinician's rate gap: _automatic_open)
+    for fid, cents, ad, ld, r, b, st in conn.execute(
+            f"""SELECT finding_id, COALESCE(shortfall_cents, 0), appeal_deadline, {legal}, {rule}, {basis}, status FROM findings
+                WHERE COALESCE(stale, 0) = 0 AND (status = 'open' OR (status = 'in_progress' AND {handed}))
+                  AND work_state = 'work_now'
+                  AND (category IN ('denial','bundling','downcoding','underpayment') OR signal IN ({ema_only})
+                       OR (category = 'contract' AND appeal_deadline IS NOT NULL))
                   AND COALESCE(appeal_deadline, {legal}) IS NOT NULL"""):
         last = max(str(x)[:10] for x in (ad, ld) if x)
         if last >= today:
             continue
-        if not _automatic_open({"state_rule": r, "state_basis": b}):
+        # a handed-on Started kept as a person's (rule person_started with no person's status line) is nobody's work either
+        if not (_automatic_open({"state_rule": r, "state_basis": b, "appeal_deadline": ad}) or (st == "in_progress" and r == "person_started")):
             continue
         if last < cut:
             offs.append((fid, cents, fid))

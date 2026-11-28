@@ -137,7 +137,41 @@ with the errors. To do: the bundle, a copy, a failing test, the fix, the four en
 **Items changed and nobody knows why.** Every automatic change to an item is in item_decisions with its rule, the rule
 version (the rules hash of detect.py and the files it reads), the evidence keys, and before and after: raised, closed
 with proof, reopened, hidden by a rule, signal changed, folded into another, no longer raised, state, outcome,
-deadline, dollars or follow-up day moved. A change a person made stays in their own history (finding_events).
+deadline, dollars or follow-up day moved. A change a person made stays in their own history (finding_events): a person's
+change is a status line written after the run took its 'before' (its id is newer than the snapshot's newest), so a line
+written before the run began is already in the 'before' and the run's own changes on that item are logged. An item the
+rules no longer list is a 'state' row with the rule detect:no_longer_listed (detect:listed_again when it comes back);
+when a person pressed a status on it while the run ran, the row is kind 'stale' and holds the stale mark and the state
+only, never the person's status (never written up as a hide rule or as a payment that no longer stands).
+
+**An item a person worked changed state, or left the list.** A Started counts as a person's only when a person set it on
+that item (a status line in its history). A Started the run handed on from a claim's chase (the payer's answer to a
+claim someone was chasing starts Started) keeps its label, but the rules judge it as To do: it expires past its window,
+waits on EMA's follow-up, is done when paid, and its basis says where the Started came from (states.person_started). A
+person's own Started (or Sent, with its faxes) carried to a line's new id (a new signal on the same line, or the same
+claim under its other key) moves to the new id before the states are decided, so it decides the item in the very run that
+carries it (Detector.save). A second payer's bill a person sent (Mark billed sets Sent; their own Started counts too) is never dropped when the second
+payer answers. Paid what it owes, to $1, the run closes it as Paid with that payment as its proof (the payer's 835
+lines, else EMA's posting), recovered at what arrived, and the decision log says paid_later:paid_as_second_payer
+(paid_later:settled_by_the_patient when the patient paid the share). Paid less, or nothing, it stays listed at what is
+left with "work its answer". What it owes is the share billed, or less where its own 835 gives its allowed amount (the
+owner's decision 3). The bill is read on the line the person billed even when the first payer later took its payment
+back or paid the line again, at any posting date EMA gives the second payer's money, and on the item's own EMA claim
+when the link map no longer pairs the bill with it. Only the second payer's answer counts: the patient's other EMA claims
+for the date and code are found by name and date of birth together (another patient of the same name is never read),
+and the first payer paying the line again under another payer name of its group is never the second payer's answer. A
+person who moves it off that closure keeps their status. A row
+the run keeps stale is on no list: the Results tab's open book counts it closed (paid when money came back on it, else
+no longer listed), never still open.
+
+**A routine-rate review or a clinician's rate gap expired.** SECOND_RATE and PROVIDER_RATE_GAP items stand for claims
+with their own filing windows. When nobody worked one and the last claim's window has closed, it expires (Expired, the
+day after), its next step says when that window closed, and the Results scoreboard counts as lost the claims whose
+windows closed after it was first flagged, each line once (a one-off item of the same line counts that line, not both).
+A review the payer's later claims list again counts those claims lost when it expires again, in the week their windows
+closed (the first loss keeps its week); while it is listed again, 'at risk in the next 14 days' counts only its claims
+still inside their windows. A person's Started or Sent keeps it listed. The self-check past_window names one still Work
+now past its last window.
 
 **A feed is stale.** STALE_FEED (no new 835 file for more than ten days) and EMA_STALE (a report more than eight days old)
 alerts, and the pages say in dollars what cannot be checked. To do: the weekly EMA routine (docs/OPERATIONS.md), the

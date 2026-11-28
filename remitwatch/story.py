@@ -2153,6 +2153,8 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         who = "Owner"
         buttons += ["copy_instructions"]
         deadline, basis = None, "the agreement's renewal or notice date"
+        if sig in S.WINDOWED_CONTRACT:
+            steps.append(_claim_windows_words(f, st, t))
     elif route == "repricing":
         ev = S._ev(f)
         year, prev = ev.get("year") or f.get("year") or "its new", ev.get("previous_year") or "its earlier"
@@ -2360,6 +2362,24 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
     if f.get("recovery_basis") and rec is not None:
         out["recovery"] = dict(rec, basis=f["recovery_basis"])
     return out
+
+
+def _claim_windows_words(f: dict, st: dict, today: str) -> str:
+    """Where the claims of a routine-rate review or a clinician's rate gap stand against their filing windows (each claim
+    has its own; the item is dated by the last, states.WINDOWED_CONTRACT): how many can still be raised and until when, or
+    that every window has closed and none can be raised any more (replay-fix-2a A1)."""
+    ev = S._ev(f)
+    grp = f.get("payer_group") or "the payer"
+    last = (st.get("last_window") or {}).get("date") or S._later(f.get("appeal_deadline"), f.get("legal_deadline"))
+    if last and today > last:
+        return (f"Every claim it lists is past its filing window (the last closed on {day(last)}): none of them can be raised "
+                f"with {grp} any more. What is left is the rate itself, for the claims to come.")
+    claims = [c for c in ev.get("claims") or [] if isinstance(c, list) and len(c) >= 4]
+    if not claims:
+        return f"Each claim has its own filing window; the last closes on {day(last)}." if last else "Each claim has its own filing window."
+    still = sum(1 for c in claims if not c[3] or str(c[3])[:10] >= today)
+    return (f"{still} of its {len(claims)} claims {'are' if still != 1 else 'is'} still inside {'their' if still != 1 else 'its'} "
+            f"filing window" + (f"; the last closes on {day(last)}: raise them with {grp} before then." if last else "."))
 
 
 def _pattern_words(pattern: str) -> str:
