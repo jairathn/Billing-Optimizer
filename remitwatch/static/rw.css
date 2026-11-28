@@ -1655,3 +1655,15 @@ a.rs-need:hover .grow { text-decoration: underline; text-underline-offset: 3px; 
   .rs-narrow { display: block; }
   .secs .panel:not(.act) { margin-top: var(--sp-6); padding-top: var(--sp-5); }
 }
+/* the bell's short list (static/shell.js bellMenu, CRITIQUE_premium change 17): the five newest alerts and See all */
+.bell-menu { position: fixed; width: min(360px, calc(100vw - 16px)); padding: var(--sp-2); }
+.bell-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-1) var(--sp-2) var(--sp-2); }
+.bell-head span { font-size: var(--fs-xs); color: var(--text-3); }
+.menu .bell-item { height: auto; min-height: 44px; align-items: flex-start; padding: var(--sp-2); }
+.bell-item .dot { margin-top: 6px; }
+.bell-t { display: flex; flex-direction: column; min-width: 0; text-align: left; }
+.bell-t > span:first-child { overflow-wrap: anywhere; }
+.bell-s { font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-3); }
+.bell-none { margin: var(--sp-2); color: var(--text-2); }
+.menu .bell-all { justify-content: center; align-items: center; height: 44px; margin-top: var(--sp-1); border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--r-sm) var(--r-sm); font-weight: var(--fw-medium); }

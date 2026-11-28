@@ -109,6 +109,41 @@
   function menu(btn, box, open){ if(!btn || !box) return; const on = open == null ? box.hidden : open; box.hidden = !on; btn.setAttribute('aria-expanded', String(on));
     if(on){ const f = box.querySelector('button, a'); if(f) f.focus(); } }
 
+  // ---------------------------------------------------------------- the bell: the five newest alerts and "See all"
+  // (CRITIQUE_premium change 17). A short list under the bell instead of leaving the page; each alert in plain words
+  // (its kind as the Alerts page names it, never a code), its payer and the day it was last seen. An alert that has lines
+  // to see opens them (features.js seeAlert); the others, and "See all", open the Alerts page.
+  const ALERT_SEEN = a => String((a && (a.last_seen || a.first_seen)) || '');
+  function bellMenu(open){
+    const bell = document.getElementById('bellBtn'); if(!bell) return;
+    let m = document.getElementById('bellMenu');
+    if(!m){ m = document.createElement('div'); m.id = 'bellMenu'; m.className = 'menu bell-menu'; m.hidden = true;
+      m.setAttribute('role', 'dialog'); m.setAttribute('aria-label', 'New alerts'); document.body.appendChild(m);
+      m.addEventListener('keydown', e => { if(e.key === 'Escape'){ e.stopPropagation(); bellMenu(false); bell.focus(); } });
+      document.addEventListener('click', e => { if(!m.hidden && !m.contains(e.target) && !bell.contains(e.target)) bellMenu(false); }); }
+    const on = open == null ? m.hidden : open;
+    m.hidden = !on; bell.setAttribute('aria-expanded', String(on)); bell.setAttribute('aria-haspopup', 'dialog');
+    if(!on) return;
+    const all = last.alerts || [], five = all.slice().sort((a, b) => ALERT_SEEN(b).localeCompare(ALERT_SEEN(a))).slice(0, 5);
+    const words = a => (typeof ALERT_KIND !== 'undefined' && ALERT_KIND[a.kind]) || '';
+    const day = a => { const t = new Date(ALERT_SEEN(a)); return isNaN(t) ? '' : t.toLocaleDateString('en-US', {month: 'short', day: 'numeric'}); };
+    const href = opts.page === 'app' ? '#alerts' : '/#alerts';
+    m.innerHTML = `<div class="bell-head"><b>Alerts</b><span>${all.length ? all.length + ' new' : 'nothing new'}</span></div>`
+      + (five.length ? five.map((a, i) => `<a class="bell-item" href="${href}" data-i="${i}"><span class="dot${a.severity === 'high' ? ' sev-high' : (a.severity === 'medium' ? ' sev-medium' : '')}"></span>
+          <span class="bell-t"><span>${escH(a.title || 'An alert')}</span><span class="bell-s">${escH([words(a), a.payer_group, day(a)].filter(Boolean).join(' · '))}</span></span></a>`).join('')
+        : '<p class="bell-none">No new alerts. Each analysis looks again.</p>')
+      + `<a class="bell-all" href="${href}">See all alerts</a>`;
+    const r = bell.getBoundingClientRect();
+    m.style.top = Math.round(r.bottom + 6) + 'px'; m.style.right = Math.max(8, Math.round(innerWidth - r.right)) + 'px';
+    const go = () => { bellMenu(false); if(opts.page === 'app' && typeof opts.go === 'function'){ opts.go('alerts'); return true; } return false; };
+    m.querySelectorAll('.bell-item').forEach(it => it.addEventListener('click', e => { const a = five[+it.dataset.i];
+      const can = a && (a.kind === 'DEADLINE' || (a.family && !['feed', 'rate', 'reason_code', 'swing'].includes(a.family)));
+      if(opts.page === 'app' && can && typeof seeAlert === 'function'){ e.preventDefault(); bellMenu(false); seeAlert(a); return; }
+      if(go()) e.preventDefault(); }));
+    const sa = m.querySelector('.bell-all'); sa.addEventListener('click', e => { if(go()) e.preventDefault(); });
+    const f = m.querySelector('.bell-item, .bell-all'); if(f) f.focus();
+  }
+
   // ---------------------------------------------------------------- the health pill: what the app cannot check, in dollars
   const money = c => (c == null ? '' : (c < 0 ? '-' : '') + '$' + Math.round(Math.abs(c) / 100).toLocaleString('en-US'));
   function longDay(d){ const x = new Date(String(d || '').slice(0, 10) + 'T00:00:00Z'); return isNaN(x) ? String(d || '') : x.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC'}); }
@@ -264,6 +299,7 @@
       hm.addEventListener('click', () => menu(hb, hm, false));
       document.addEventListener('click', e => { if(!hm.hidden && !hm.contains(e.target) && e.target !== hb) menu(hb, hm, false); });
     }
+    const bb = document.getElementById('bellBtn'); if(bb) bb.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); bellMenu(); });
     const fb = document.getElementById('findBtn'); if(fb) fb.addEventListener('click', () => palette());
     const sb = document.getElementById('searchBtn'); if(sb) sb.addEventListener('click', () => palette());      // Upload and Setup: no claim search there
     const fk = document.getElementById('findKey'); if(fk) fk.textContent = MAC ? '⌘ K' : 'Ctrl K';
@@ -291,5 +327,5 @@
     update({brief, exports});
   }
 
-  window.RWShell = {mount, setActive, update, pill, title, palette, closePalette, setTheme, themeIsDark, live, names: NAMES, groups: GROUPS};
+  window.RWShell = {mount, setActive, update, pill, title, palette, closePalette, setTheme, themeIsDark, live, bellMenu, names: NAMES, groups: GROUPS};
 })();
