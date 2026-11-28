@@ -1838,13 +1838,15 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
     (a $0 row under a check that carries its proof: zero_answer_sql) or a payer's non-routine reason, posted after the
     claim was sent, on that EMA claim. A bare $0 row answers nothing: the first one after the send is kept for the item's
     note ('bare_zero'). Payments under the ASC's separate-payee checks never count, and a status alone never answers.
-    Returns {claim_id: {'answered', 'how', 'on', 'paid_cents', 'link', 'bridge', 'bare_zero'}}."""
+    Returns {claim_id: {'answered', 'how', 'on', 'paid_cents', 'link', 'bridge', 'bare_zero'}}, and 'candidates' (how many
+    EMA claims share its content) for a claim the content bridge could not choose among several."""
     _prepare(conn)
     out: dict = {}
     items = [c for c in claims if c.get("claim_id")]
     _separate_checks(conn)
     for part in _chunks(items):
         found: dict[str, tuple] = {}
+        several: dict[str, int] = {}        # claim id -> EMA claims of its content when none could be chosen ('candidates')
         _temp(conn, "ec_ca", ["cid TEXT PRIMARY KEY", "sent TEXT", "grp TEXT"],
               [(c["claim_id"], c.get("sent"), c.get("payer_group")) for c in part])
         agg: dict[tuple, int] = defaultdict(int)       # (claim id, date, code) -> charge: EMA keeps one line per date and code
@@ -1905,11 +1907,15 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
                             (not (persons and who_of.get(lk, (set(), set()))[0]) and who_of.get(lk, (set(), set()))[1] & names)]
                     if len(mine) == 1:
                         found[cid] = (mine[0], "content_patient")
+                if cid not in found and len(lks) > 1:
+                    several[cid] = len(lks)
         for c in part:
             cid = c["claim_id"]
             got = found.get(cid)
             res = {"answered": False, "how": None, "on": None, "paid_cents": 0, "link": got[0] if got else None,
                    "bridge": got[1] if got else None, "bare_zero": None}
+            if not got and several.get(cid):
+                res["candidates"] = several[cid]       # EMA claims of its content, none chosen (the unseen count's 'ambiguous')
             out[cid] = res
         _temp(conn, "ec_al", ["cid TEXT", "link INTEGER", "sent TEXT"],
               [(cid, lk, next((c.get("sent") for c in part if c["claim_id"] == cid), None) or "")

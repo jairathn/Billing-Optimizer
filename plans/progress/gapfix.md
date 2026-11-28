@@ -9,8 +9,8 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
 | item | state | where |
 |---|---|---|
 | G8 one claim, one item | done, tests green, break and restore done | detect.py: `_item_links`, `save()` (same_link heir), `_note_waiting(cd=)`, `_waiting_ema_claims`, `_note_waiting_report`, `run_ema_report_claims` (waiting skip); tests/test_gap_one_claim.py |
-| G3 archive holds unseen bills | next | archive.py `_held_bills` and the plan |
-| G2 unseen count by reason, dollars, Data tab | to do | detect.py `_837_ema_answers`, `_ema_check_open_claims`, `_save_ema_wiring`; insights `_feeds_837`; api_ema; data.js |
+| G3 archive holds unseen bills | done, tests green, break and restore done | archive.py `_held_bills` (HELD_UNSEEN, reads meta ema:unanswered_unseen 'claims'); tests/test_gap_unseen.py::test_the_archive_keeps_* |
+| G2 unseen count by reason, dollars, Data tab | half: the count (reasons, value, totals, claims) done; the pages to do | detect.py `_count_unseen`, `_finish_unseen`, `_ema_reports_from`, `_unseen_ema_lines`, `_save_ema_wiring`; ema_checks.claim_answers 'candidates'; next: insights `_feeds_837`, api_ema (list/CSV), data.js |
 | G1 print-batch hand-off (fixed_b + never early) | to do | detect.py `_ema_check_open_claims`, `run_ema_report_claims` |
 | G4 ERA start/stop window | to do | detect.py `_run_837` no_era_ids |
 | G5 A/R held-open line | to do | detect.py `_837_ema_answers` (or ema_checks) |
@@ -32,6 +32,22 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
   ids that meet on one EMA claim keep the old behaviour (a bill made again is a new matter, notes handed on).
 - Tests (both store kinds): tests/test_gap_one_claim.py, 5 tests x 2. Break and restore: heir disabled -> the 3 identity
   tests fail (6); waiting skip disabled -> the 2 waiting tests fail (4); restored, md5 identical.
+
+## G2/G3: what was built
+
+- detect.UNSEEN_KEY (meta ema:unanswered_unseen) is now written from one place (`_finish_unseen`): every claim the passes
+  count unseen goes through `_count_unseen` (the exports' `export_waits_unfound`, the 837 pass's `837_waits_unfound`, and,
+  with no EMA report in the store, a no-ERA payer's due claims, reason `no_ema_reports`). Each claim is valued as
+  `_emit_open_claim` values a listed one (a send to a second or later payer at what the payer before it left; not counted
+  when it left nothing: ema_counts `unseen_second_send_nothing_left`), and given a reason in UNSEEN_REASONS order:
+  no_ema_reports, ambiguous (claim_answers' new 'candidates'), before_ema_reports (service before `ema_reports_from`, the
+  first service date any EMA source covers), second_payer_not_matched (837 SBR01 S/T, or EMA's line for the patient's day
+  and code names this payer as secondary), voided_in_ema, ema_claim_not_found. The fixed 'cannot be told apart' text is gone.
+- The meta keeps n, cents (valued), billed_cents, by_reason and by_group ({n, cents}), ema_reports_from, first_service,
+  years_before, due_from/due_to, overdue_30, and `claims` [[claim id, 837 key, reason, group, cents, first service, sent,
+  due]] most dollars first. The meta is not in diagnose.SAFE_META (the bundle shows its length and hash only).
+- archive._held_bills holds the bill of every claim in that list (HELD_UNSEEN "counted unseen"), at any horizon.
+- `_save_ema_wiring` now logs its sqlite error (runlog.caught) instead of `pass`.
 
 ## Next command
 

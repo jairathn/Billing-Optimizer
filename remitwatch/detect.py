@@ -288,7 +288,16 @@ AUTO_NOTE_PREFIX = "Paid on a later remittance"
 EMA_NATIVE_SIGNALS = ("NOT_SENT", "REMIT_NOT_POSTED", "EMA_DENIAL_AS_CONTRACTUAL", "SECONDARY_NOT_BILLED",
                       "CREDIT_BALANCE")
 EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's reports (counts by step, failed steps)
-UNSEEN_KEY = "ema:unanswered_unseen"        # meta: unanswered claims no source can check yet (count, billed $, due days)
+# meta: the never-answered claims no source can show the answer to yet (Detector._finish_unseen): never listed, never dropped
+# silently. {"n", "cents" (at stake: a claim sent to a second or later payer at what the payer before it left), "billed_cents",
+# "due_from", "due_to", "overdue_30", "overdue_30_cents", "by_reason": {reason: {"n", "cents"}}, "by_group": {group: {"n",
+# "cents"}}, "ema_reports_from" (the first service date any EMA source in the store covers), "first_service", "years_before"
+# (the service years before it), "claims": [[claim id, 837 claim key or None, reason, group, cents, first service, sent, due]]
+# (most dollars first: what the Data tab lists and the archive holds), "at", "newest_835"}
+UNSEEN_KEY = "ema:unanswered_unseen"
+# why a claim is counted unseen, in the order they are decided (_finish_unseen)
+UNSEEN_REASONS = ("no_ema_reports", "ambiguous", "before_ema_reports", "second_payer_not_matched", "voided_in_ema",
+                  "ema_claim_not_found")
 PAYER_POLICY_KEY = "ema:payer_policy"       # meta: codes a payer never pays, folded out of the work (835 and EMA-only items)
 POLICY_SUMMARY_KEY = "ema:policy_summary"   # meta: the write-off pattern table for the owner's policy (O11), from the run
 PAYMENT_OUTCOMES = ("paid_after", "paid_after_other")   # the line outcomes an EMA closure (C6, rebilled) rests on
@@ -7969,6 +7978,10 @@ class Detector:
                 ne["since"] = min(ne["since"], sent)
                 if not self.ema_on:
                     ne["unchecked"] += 1
+                    # with no EMA report in the store nothing can show its answer: counted unseen with that reason, so its
+                    # dollars are on the Data tab and the archive keeps its bill (never a silent drop)
+                    self._count_unseen({"pcn": pcn, "s837": r, "grp": grp, "sent": sent, "due": due, "source": "837"}, items, None,
+                                       reason="no_ema_reports")
                     continue
             else:
                 last = payer_last.get(grp) or name_last.get(normalize_payer(grp)[0]) or (name_last.get(normalize_payer(r[5])[0]) if r[5] else None)
@@ -9490,22 +9503,137 @@ class Detector:
                 self.ema_counts["837_waits_unfound"] += 1
                 if ne is not None:
                     ne["unchecked"] += 1
-                w = self.__dict__.setdefault("_unseen", {"n": 0, "billed_cents": 0, "due_from": None, "due_to": None,
-                                                         "overdue_30": 0, "overdue_30_cents": 0, "by_group": {}})
-                billed = sum(x[2] or 0 for x in cd["items"])
-                w["n"] += 1
-                w["billed_cents"] += billed
-                w["due_from"] = min(w["due_from"] or cd["due"], cd["due"])
-                w["due_to"] = max(w["due_to"] or cd["due"], cd["due"])
-                g = w["by_group"].setdefault(cd.get("grp") or "Unknown", {"n": 0, "billed_cents": 0})
-                g["n"] += 1
-                g["billed_cents"] += billed
-                if (_days_between(cd["due"], self.today) or 0) > 30:
-                    w["overdue_30"] += 1
-                    w["overdue_30_cents"] += billed
+                self._count_unseen(cd, cd["items"], a)
                 continue
             out.append(dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"),
                             ema_bare_zero=a.get("bare_zero")))
+        return out
+
+    def _count_unseen(self, cd: dict, items: list, a: dict | None, reason: str | None = None) -> None:
+        """A never-answered claim no source can show the answer to yet: counted, never listed, never dropped silently (meta
+        UNSEEN_KEY, written by _finish_unseen). Kept with what the Data tab and the archive need: its claim id and 837 key,
+        payer group, billed dollars, services, send and due days, and what the bridges saw (several EMA claims of its content:
+        the reason 'ambiguous'); `reason` when the caller knows it."""
+        r8 = cd.get("s837")
+        svcs = sorted({x[1] for x in items if x[1]})
+        self.__dict__.setdefault("_unseen_rows", []).append({
+            "pcn": cd["pcn"], "key": r8[7] if r8 is not None and len(r8) > 7 and r8[7] else None, "grp": cd.get("grp") or "Unknown",
+            "billed": sum(int(x[2] or 0) for x in items), "svc": svcs[0] if svcs else None, "sent": cd.get("sent"),
+            "due": cd.get("due"), "lines": sorted({(x[0], x[1]) for x in items if x[0] and x[1]}),
+            "candidates": int((a or {}).get("candidates") or 0), "reason": reason})
+
+    def _ema_reports_from(self) -> str | None:
+        """The first service date any EMA source in the store covers (Production's lines, the A/R, the weekly exports): a
+        claim whose service is older has no EMA row of any kind to bridge to, whatever its payer."""
+        c = self.conn
+        have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        got = []
+        for table, col in (("ema_lines", "svc"), ("ema_ar", "svc"), ("ema_rows", "service_date")):
+            if table in have:
+                v = c.execute(f"SELECT MIN(substr({col}, 1, 10)) FROM {table} WHERE COALESCE({col}, '') <> ''").fetchone()[0]
+                if v:
+                    got.append(v)
+        return min(got) if got else None
+
+    def _finish_unseen(self) -> dict:
+        """The unseen count (UNSEEN_KEY) from the claims _count_unseen kept: each valued as _emit_open_claim values a listed
+        claim (sent to a second or later payer: at most what the payer before it left, and not counted when it left
+        nothing), and given its reason, the first that holds: no EMA report in the store (no_ema_reports); several EMA
+        claims of its content and nothing to choose between them (ambiguous); a service before the first one any EMA source
+        covers (before_ema_reports: exporting EMA's Production and A/R for those services would let the bridges run); sent
+        to the visit's second or later payer (its 837's SBR01), or EMA holds the patient's day and code with this payer as
+        the secondary payer (second_payer_not_matched: the content bridge compares the claim's payer with EMA's primary);
+        EMA holds the patient's day and code voided (voided_in_ema); else EMA's claim was not found (ema_claim_not_found).
+        Never the fixed text that EMA's claim 'cannot be told apart from others' unless the bridge really found several."""
+        from .x12_837 import later_payers_send
+        rows = list(self.__dict__.get("_unseen_rows") or [])
+        info = self._837_send_info([r["key"] for r in rows if r["key"]]) if rows else {}
+        kept = []
+        for r in rows:
+            got = info.get(r["key"]) or {}
+            resp = (got.get("payer_resp") or "").strip().upper()
+            r["cents"], r["resp"], r["patient_key"] = r["billed"], resp or None, got.get("patient_key")
+            if got.get("read_version") and later_payers_send(resp, got):
+                left = got["other_left_cents"] if got.get("other_left_cents") is not None else got.get("other_pr_cents")
+                if left is not None and left <= 0:
+                    # the payer before it left the patient nothing: nothing is owed, as _emit_open_claim leaves such a claim
+                    self.ema_counts["unseen_second_send_nothing_left"] += 1
+                    continue
+                if left is not None:
+                    r["cents"] = min(r["cents"], int(left)) if r["cents"] else int(left)
+                r["second"] = True
+            kept.append(r)
+        frm = self._ema_reports_from() if kept else None
+        seen = self._unseen_ema_lines([r for r in kept if not r["reason"] and r["patient_key"] is not None
+                                       and not (frm and r["svc"] and r["svc"] < frm)]) if kept else {}
+        for r in kept:
+            if r["reason"]:
+                continue
+            ema = seen.get(r["pcn"]) or {}
+            if r["candidates"] > 1:
+                r["reason"] = "ambiguous"
+            elif frm and r["svc"] and r["svc"] < frm:
+                r["reason"] = "before_ema_reports"
+            elif r.get("second") or r["resp"] in ("S", "T") or any(ema.get("secondary") and self._same_group(g, r["grp"])
+                                                                   for g in ema.get("secondary") or ()):
+                r["reason"] = "second_payer_not_matched"
+            elif ema.get("voided"):
+                r["reason"] = "voided_in_ema"
+            else:
+                r["reason"] = "ema_claim_not_found"
+        out: dict = {"n": 0, "cents": 0, "billed_cents": 0, "due_from": None, "due_to": None, "overdue_30": 0, "overdue_30_cents": 0,
+                     "by_reason": {}, "by_group": {}, "ema_reports_from": frm, "first_service": None, "years_before": []}
+        years: set[str] = set()
+        for r in kept:
+            out["n"] += 1
+            out["cents"] += r["cents"]
+            out["billed_cents"] += r["billed"]
+            if r["due"]:
+                out["due_from"] = min(out["due_from"] or r["due"], r["due"])
+                out["due_to"] = max(out["due_to"] or r["due"], r["due"])
+                if (_days_between(r["due"], self.today) or 0) > 30:
+                    out["overdue_30"] += 1
+                    out["overdue_30_cents"] += r["cents"]
+            if r["svc"]:
+                out["first_service"] = min(out["first_service"] or r["svc"], r["svc"])
+            for name, key in (("by_reason", r["reason"]), ("by_group", r["grp"])):
+                g = out[name].setdefault(key, {"n": 0, "cents": 0})
+                g["n"] += 1
+                g["cents"] += r["cents"]
+            if r["reason"] == "before_ema_reports" and r["svc"]:
+                years.add(r["svc"][:4])
+        out["years_before"] = sorted(years)
+        out["claims"] = [[r["pcn"], r["key"], r["reason"], r["grp"], r["cents"], r["svc"], r["sent"], r["due"]]
+                         for r in sorted(kept, key=lambda r: (-r["cents"], r["svc"] or "", r["pcn"]))]
+        return out
+
+    def _same_group(self, a: str | None, b: str | None) -> bool:
+        from . import ema_checks as ec
+        return bool(a and b and ec._same_payer(a, b))
+
+    def _unseen_ema_lines(self, rows: list[dict]) -> dict[str, dict]:
+        """What EMA's Production lines hold for unseen claims' patients (the 837's keyed name, as EMA keys its patients),
+        days and codes: the groups EMA names as the secondary payer there, and whether such a line is voided (Inactive or
+        Voided, or its charge now $0). {claim id: {'secondary': {groups}, 'voided': bool}}."""
+        c = self.conn
+        if not rows or not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ema_lines'").fetchone():
+            return {}
+        want = [(r["pcn"], int(r["patient_key"]), d, code) for r in rows for code, d in r["lines"]]
+        c.execute("DROP TABLE IF EXISTS temp.d_unseen")
+        c.execute("CREATE TEMP TABLE d_unseen (pcn TEXT, nk INTEGER, svc TEXT, cpt TEXT)")
+        c.executemany("INSERT INTO temp.d_unseen VALUES (?, ?, ?, ?)", want)
+        out: dict[str, dict] = {}
+        for pcn, second, cls, charges in c.execute(
+                """SELECT u.pcn, l.secondary_payer, l.status_class, l.charges FROM temp.d_unseen u
+                   JOIN ema_lines l ON l.name_key = u.nk AND l.svc = u.svc AND l.cpt = u.cpt"""):
+            o = out.setdefault(pcn, {"secondary": set(), "voided": False})
+            if second and str(second).strip().lower() not in ("none", "-", ""):
+                g = self._ema_group(second)
+                if g:
+                    o["secondary"].add(g)
+            if cls == "void" or not (charges or 0):
+                o["voided"] = True
+        c.execute("DROP TABLE IF EXISTS temp.d_unseen")
         return out
 
     def _send_weeks(self) -> dict:
@@ -9940,19 +10068,7 @@ class Detector:
                 # claim waits until the remittances reach its due day. Never a silent drop: counted with its billed dollars
                 # and due day (meta ema:unanswered_unseen), which the Data tab and Today show as money no source can check
                 self.ema_counts["export_waits_unfound"] += 1
-                w = self.__dict__.setdefault("_unseen", {"n": 0, "billed_cents": 0, "due_from": None, "due_to": None,
-                                                         "overdue_30": 0, "overdue_30_cents": 0, "by_group": {}})
-                billed = sum(x[2] or 0 for x in items)
-                w["n"] += 1
-                w["billed_cents"] += billed
-                w["due_from"] = min(w["due_from"] or cd["due"], cd["due"])
-                w["due_to"] = max(w["due_to"] or cd["due"], cd["due"])
-                g = w["by_group"].setdefault(cd.get("grp") or "Unknown", {"n": 0, "billed_cents": 0})
-                g["n"] += 1
-                g["billed_cents"] += billed
-                if (_days_between(cd["due"], self.today) or 0) > 30:
-                    w["overdue_30"] += 1
-                    w["overdue_30_cents"] += billed
+                self._count_unseen(cd, items, a)
                 continue
             st = statuses.get(cd["pcn"])
             export_at = str((cd["k"].get("status_at") or ("",))[0] or "")[:10]
@@ -11248,18 +11364,17 @@ class Detector:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                               (EMA_WIRING_KEY, json.dumps({"at": self.now, "on": self.ema_on, "counts": dict(self.ema_counts),
                                                            "errors": self.ema_errors[:20]}, sort_keys=True)))
-            unseen = dict(self.__dict__.get("_unseen") or {"n": 0, "billed_cents": 0})
+            unseen = self._finish_unseen()
             # the day the never-answered passes judged these claims against: the feed date (answers-2), not one stray file
             newest = feed_date(self.conn) or self.conn.execute(
                 "SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
-            unseen.update(at=self.now, newest_835=newest,
-                          why=("Due only by EMA's postings, and EMA's own claim for each cannot be told apart from others with the "
-                               "same date, code and charge: no 835 since the newest remittance shows its answer. Check the payer "
-                               "portal for these claims."))
+            unseen.update(at=self.now, newest_835=newest)
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (UNSEEN_KEY, json.dumps(unseen, sort_keys=True)))
             self.conn.commit()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            from . import runlog
+            runlog.caught(exc, "ema_wiring_meta", level="warning")
+            self.conn.rollback()        # the analysis is saved; the Data tab shows the last count it could write
 
     # ------------------------------------------------------------------ aggregate rules
     def _taken_back_items(self) -> set[tuple]:
