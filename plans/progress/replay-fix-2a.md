@@ -74,9 +74,7 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
 
 ## Next command
 
-The fix round (review r1) is being finished: see "Review round 1" below. When its State list is all ticked, nothing is
-left for this unit; a later unit takes the items under "Left for a later unit".
-
+None: the unit and its fix round (review r1) are done. A later unit takes the items under "Left for a later unit".
 
 ## Review round 1 (fix round, 2026-11-28)
 
@@ -110,6 +108,24 @@ replay-fix eef678f, then the ported tests). Each finding was verified by its tes
   only its claims still inside their windows (evidence 'deadlines', JSON1); live_figures and list_entries use the same
   expression; the at-risk worth is that part's share. Breaks: each of the three parts fails its case.
 - Docs: TROUBLESHOOTING (the four rules) and the at-risk basis on the scoreboard (621e43b).
+
+State of the fix round (all done):
+- [x] merged the integration tip fa0aafa (gapfix cdd3463, routes, replay-fix eef678f) into the branch, no conflict;
+      fetched again before the last push: gapfix and replay-fix unchanged, nothing new on the integration tip
+- [x] the review's 7 tests ported and seen failing on that base (86be34c), then each fix with its own extra tests
+- [x] break and restore for every part (A2: events only, neither; A4: name_key, no group test; A3: time rule, whole
+      diff; A1: no second loss, one week per item, whole shortfall at risk), each restored exactly (git diff clean)
+- [x] measurements, read only (below) and the release effect
+- [x] touched files' tests (27 files: the unit's four, test_hotfix2d and the rules they touch), four environments, at
+      293c93d: python3 1668 passed, 1 skipped; newest libraries 1668 passed, 1 skipped; 3.12/SQLite 3.45 1668 passed, 1
+      skipped; 3.11.1/SQLite 3.40 1504 passed, 74 skipped, 72 failed or errors, every one the missing
+      Connection.serialize. The skip: test_docs' private words (with REMITWATCH_PRIVATE_WORDS: 40 passed).
+- [x] full suite, python3 (3 shards): 4,806 passed, 29 skipped, 1 xfailed, 0 failed
+- [x] full suite, 3.11.1/SQLite 3.40 (3 shards): 4,524 passed, 75 skipped, 1 xfailed, 217 failed or errors: the same
+      217 tests as the unit's earlier run, every one the missing serialize (the many-requests self-test included)
+- [x] trial merge with origin/wip/replay-fix-2b e4a6df4 (not pushed): conflict-free; both halves' unit tests,
+      test_runlog, test_hotfix2d and test_ema_ledger: 493 passed. Its newer tip e51cf03 changes its progress file only
+      (merge-tree conflict-free).
 
 Routed, not changed (outside this unit): detect._ema_lines_for's 'elsewhere' (other_paid) still finds the patient's other
 EMA claims by name_key, so an unworked second-payer line can be dropped on a namesake's payment (14 namesake services on
