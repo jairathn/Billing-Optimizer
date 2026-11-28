@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from remitwatch import archive  # noqa: E402
+from remitwatch import actions, archive  # noqa: E402
 from remitwatch.detect import Detector  # noqa: E402
 from remitwatch.detect import ensure_schema as detect_schema  # noqa: E402
 from remitwatch.state import LocalState  # noqa: E402
@@ -1243,16 +1243,27 @@ def _covering(conn) -> dict:
     return out
 
 
+def _started_by_a_person(store: Store, at: str) -> None:
+    """A person marks the year's routine-rate finding Started: it stays open by that person's status after its claims'
+    windows close (one nobody worked expires the day after its last claim's window, replay-fix-2a A1), so the archive keeps
+    its bills."""
+    fid = store.conn.execute("SELECT finding_id FROM findings WHERE signal='SECOND_RATE'").fetchone()[0]
+    assert actions.apply_status(store.conn, fid, "in_progress", actor="Owner One", at=at)
+    store.conn.commit()
+
+
 def test_late_underpayments_of_a_locked_year_are_listed_once_beside_the_kept_pattern(tmp_path, frozen_hook, monkeypatch):
-    """2022: 24 visits paid the usual $117.60 and 5 paid $100.00 (85%: a routine second rate, one SECOND_RATE finding).
-    The archive at the floor takes the 24 usual bills (the pattern's own five stay while it is open) and locks 2022. A
-    remittance in October 2026 pays 5 more 2022 visits at $100.00: their windows are open from then. Each new line is
-    listed exactly once (in a routine-rate finding that continues the year's kept one), and every old line too."""
+    """2022: 24 visits paid the usual $117.60 and 5 paid $100.00 (85%: a routine second rate, one SECOND_RATE finding),
+    which a person marked Started. The archive at the floor takes the 24 usual bills (the pattern's own five stay while it
+    is open) and locks 2022. A remittance in October 2026 pays 5 more 2022 visits at $100.00: their windows are open from
+    then. Each new line is listed exactly once (in a routine-rate finding that continues the year's kept one), and every
+    old line too."""
     _wired_save(monkeypatch)
     store = Store(":memory:", compact=True)
     ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 5, "20220315", paid="100.00"), "20220415"),
                              (visits(100, 6, NEW), "20260415")])
     detect(store, "r0", today="2022-05-02")    # found while its windows were open (no new rate item is born past them: T-N4)
+    _started_by_a_person(store, "2022-05-03T15:00:00")
     detect(store)
     pat = store.conn.execute("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'").fetchall()
     assert len(pat) == 1
@@ -1294,15 +1305,16 @@ def test_control_the_same_late_lines_are_listed_when_the_year_is_not_locked(tmp_
 
 def test_a_kept_pattern_and_the_one_off_items_of_its_own_lines_are_never_both_listed(tmp_path, frozen_hook, monkeypatch):
     """2022: 24 visits paid the usual $117.60 (March) and 6 paid $82.32 from September on: a routine second rate whose
-    reason is a rate change (every line after the last usual visit). The finding is open, so its six bills stay; the 24
-    usual bills leave and 2022 is locked. The next analysis can no longer see the reason (the usual visits it compares
-    with left), so it lists the six lines as one-off underpayments: they are left out, the kept finding speaks for them,
-    and the money is counted once."""
+    reason is a rate change (every line after the last usual visit). A person marked the finding Started, so it is open
+    and its six bills stay; the 24 usual bills leave and 2022 is locked. The next analysis can no longer see the reason
+    (the usual visits it compares with left), so it lists the six lines as one-off underpayments: they are left out, the
+    kept finding speaks for them, and the money is counted once."""
     _wired_save(monkeypatch)
     store = Store(":memory:", compact=True)
     ingest(store, tmp_path, [(visits(1, 24, OLD) + visits(60, 6, "20220915", paid="82.32"), "20221015"),
                              (visits(100, 6, NEW), "20260415")])
     detect(store, "r0", today="2022-11-01")    # found while its windows were open (no new rate item is born past them: T-N4)
+    _started_by_a_person(store, "2022-11-02T15:00:00")
     detect(store)
     pat = store.conn.execute("SELECT finding_id, work_state, shortfall_cents, evidence FROM findings WHERE signal='SECOND_RATE'").fetchall()
     assert len(pat) == 1 and pat[0][1] in archive.OPEN_STATES

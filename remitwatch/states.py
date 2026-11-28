@@ -66,6 +66,12 @@ EMA_ONLY = ("EMA_DENIED", "NO_ANSWER", "REJECTED_PRE_PAYER", "NOT_SENT", "REMIT_
 INFO_ONLY = ("MIPS_ADJUSTMENT", "SEQUESTRATION")
 CONTRACT = ("CONTRACT_RATE_GAP", "MA_BELOW_MEDICARE", "MPPR_POLICY", "CHARGE_BELOW_RATE", "SECOND_RATE", "PROVIDER_RATE_GAP",
             "EMA_DENIAL_AS_CONTRACTUAL", "G2211_DENIED")
+# the contract items that stand for claims, each with its own filing window, dated by the last of them (detect._emit_pattern,
+# emit_provider_gaps): a routine-rate review and a clinician's rate gap. Their work is raising those claims with the payer,
+# so one nobody worked expires the day after its last claim's window closes, as the one-off underpayment of the same money
+# does (a month-by-month replay of real data kept them Work now for good; replay-fix-2a A1). The other contract questions
+# carry no claim window
+WINDOWED_CONTRACT = ("SECOND_RATE", "PROVIDER_RATE_GAP")
 # one request to the payer for many claims it priced alike, money it owes (not a contract question): its own work, a
 # repricing request, kept out of the bulk appeal like the contract items
 BATCH = ("OLD_FEE_SCHEDULE",)
@@ -3050,6 +3056,10 @@ def _decide(fx: dict, today: str) -> dict:
             return put("accepted", "policy", f"The owner's write-off policy accepts {words}" + (
                 f" (set by {pol.get('by')} on {day(pol.get('at'))})" if pol.get("by") else ""))
     if sig in CONTRACT:
+        if sig in WINDOWED_CONTRACT and past_all:
+            # every claim it stands for is past its window, and nobody worked it (a person's Started or Sent is decided
+            # above): no claim of it can be raised any more
+            return expired("Every claim it lists is past its filing window")
         res["appeal_block"] = "owner"
         return put("work_now", "owner_decision", "A contract or billing-policy question for the owner, not a claim to appeal")
     if sig in BATCH:
