@@ -220,7 +220,8 @@ COMPONENTS = ("26", "TC")                      # the parts of a service a line c
 NO_ERA_MIN_CLAIMS = 10
 NO_ERA_MAX_SHARE = 0.05
 # ... judged for each claim on the claims sent under the same payer id in the 90 days before and after its own send (180 days
-# around it): never over every claim the payer was ever sent, so an ERA enrollment that starts or stops moves only the claims
+# around it; a payer with fewer claims than NO_ERA_MIN_CLAIMS there, on its that many claims sent nearest the claim): never
+# over every claim the payer was ever sent, so an ERA enrollment that starts or stops moves only the claims
 # sent around then (gapfix G4)
 NO_ERA_WINDOW_DAYS = 90
 # [{"payer", "payer_id", "claims", "billed_cents", "since", "listed", "answered_in_ema", "unchecked", and each of the last three's
@@ -7831,6 +7832,19 @@ class Detector:
                 days, got = era_days[pid], era_got[pid]
                 i = bisect_left(days, _add_days(day, -NO_ERA_WINDOW_DAYS) or day)
                 j = bisect_right(days, _add_days(day, NO_ERA_WINDOW_DAYS) or day)
+                if j - i < NO_ERA_MIN_CLAIMS <= len(days):
+                    # a payer sent few claims around then: its NO_ERA_MIN_CLAIMS claims sent nearest the claim's own send
+                    # decide, so a small plan that never sends ERAs is judged as it always was, and one that started or
+                    # stopped is judged by its claims of that time
+                    i = j = bisect_left(days, day)
+                    d0 = date.fromisoformat(day[:10]) if real_day(day) else None
+                    while j - i < NO_ERA_MIN_CLAIMS:
+                        left = abs((d0 - date.fromisoformat(days[i - 1][:10])).days) if i > 0 and d0 and real_day(days[i - 1]) else None
+                        right = abs((date.fromisoformat(days[j][:10]) - d0).days) if j < len(days) and d0 and real_day(days[j]) else None
+                        if j >= len(days) or (i > 0 and (right is None or (left is not None and left <= right))):
+                            i -= 1
+                        else:
+                            j += 1
                 n = j - i
                 answered = (got[j - 1] - (got[i - 1] if i else 0)) if n else 0
                 no_era_cache[key] = n >= NO_ERA_MIN_CLAIMS and answered <= NO_ERA_MAX_SHARE * n

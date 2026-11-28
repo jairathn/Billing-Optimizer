@@ -382,3 +382,27 @@ def test_the_first_payers_payment_after_the_send_does_not_answer_the_second_paye
         assert listed[F.claim_id(73)]["ema_link"] == F.link_no(73), listed[F.claim_id(73)]
         assert 0 < (listed[F.claim_id(73)]["shortfall_cents"] or 0) <= 2666, listed[F.claim_id(73)]["shortfall_cents"]
     s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_small_plan_that_never_sends_eras_is_judged_by_its_nearest_claims(tmp_path, kind):
+    """A small plan (payer id SP001) sent no ERA for any of its twelve claims, two a month from January to June: around any
+    one send fewer than ten of its claims fall within 90 days, so its ten claims sent nearest each claim's own send decide,
+    and none got an 835: its claims are counted with the claims no source can check, never listed as never answered. (On
+    the real data, judging such plans by the 180 days alone listed 104 old claims of small plans as never answered, and
+    let 15 others go, until the nearest claims decided.)"""
+    from tests.test_837_sends import _chased, _remits, _visits
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    claims = []
+    for m in range(1, 7):
+        for k in range(2):
+            claims.append((f"CB0000S{m}{k}C017", f"2026{m:02d}{10 + k:02d}"))
+    for cid, day in claims:
+        send(s, tmp_path, [clm837(cid, [("99214", "100.00", day)], payer=("SMALL PLAN", "SP001"), member=f"S{cid[7:9]}000")], day)
+    found = _chased(s, "sp", today="2026-11-12")
+    assert not {c for c, _d in claims} & set(found), sorted(set(found) & {c for c, _d in claims})
+    no_era = json.loads((s.conn.execute("SELECT value FROM meta WHERE key='feed:no_era_837'").fetchone() or ["[]"])[0])
+    sp = [p for p in no_era if p.get("payer_id") == "SP001"]
+    assert len(sp) == 1 and sp[0]["unchecked"] == 12, no_era
+    s.close()
