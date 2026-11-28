@@ -107,8 +107,10 @@ function dtGapsHtml(cov){
 // ---------------------------------------------------------------- EMA's reports and what they show
 function dtEmaHtml(e){
   if(!e || !e.ready){
+    // the claims no source can show an answer to are counted with no EMA report too: shown in dollars all the same
     return `<div class="panel"><h2>EMA's reports</h2><div class="note">${e && e.error ? 'The EMA figures did not come back: ' + esc(e.error) + '. Reload in a minute.'
-      : 'No A/R or Production report from EMA has been read yet. The <a href="/upload">Upload page</a> lists what to pull and how.'}</div></div>`;
+      : 'No A/R or Production report from EMA has been read yet. The <a href="/upload">Upload page</a> lists what to pull and how.'}</div></div>`
+      + (e && e.unseen ? dtUnseenHtml(e) : '');
   }
   return [dtReportsHtml(e), dtMissingHtml(e), dtUnseenHtml(e), dtUnpostedHtml(e), dtCreditsHtml(e), dtArHtml(e), dtPolicyHtml(e), dtRunHtml(e)].join('');
 }
@@ -129,8 +131,9 @@ function dtUnseenHtml(e){
       <tbody>${(u.reasons || []).map(r => row(r.words, r.n, r.cents)).join('')}</tbody></table></div>
     <div class="scroll"><table class="small"><thead><tr><th>Payer</th><th class="num">Claims</th><th class="num">Dollars</th></tr></thead>
       <tbody>${top.map(g => row(g.payer, g.n, g.cents)).join('')}${rest.length ? row(pl(rest.length, 'more payer'), rest.reduce((t, g) => t + (g.n||0), 0), rest.reduce((t, g) => t + (g.cents||0), 0)) : ''}</tbody></table></div></div>
-    <div class="small"><button class="ghost small" id="dtUnseenList">List the claims, most dollars first</button> · <a href="/api/ema/unseen.csv" download>Download the list (CSV)</a></div>
-    <div id="dtUnseenRows"></div></div>`;
+    ${u.listed === false ? `<div class="small muted">${esc(u.list_note || 'The next analysis lists these claims.')}</div>`
+      : `<div class="small"><button class="ghost small" id="dtUnseenList">List the claims, most dollars first</button> · <a href="/api/ema/unseen.csv" download>Download the list (CSV)</a></div>
+    <div id="dtUnseenRows"></div>`}</div>`;
 }
 
 async function dtUnseenRows(v, page){

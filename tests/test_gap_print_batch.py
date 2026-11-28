@@ -161,3 +161,55 @@ def test_the_waiting_view_counts_the_claims_it_does_not_name_with_their_dollars(
     h = next(x for x in insights.data_health(s.conn, "2026-11-10", "2026-11-12") if x.get("key") == "waiting_837")
     assert "The list names the first 2 by due day; 1 more ($223.65" in h["detail"], h["detail"]
     s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_print_batch_claim_with_no_ema_claim_number_is_on_some_list(tmp_path, kind, ema_env):
+    """Erin's visit of April 21 (88305 at $180, Blue Cross), in EMA's print batch, never sent: the weekly exports list it
+    Batched for Printing (no submission date, no bill date) and reach May 24; it is due by their rule (30 days after the
+    visit). EMA's A/R of May 9 calls claim 81 Batched for Printing too, but names no EMA claim number for it, and no
+    Production line holds its content: no bridge finds its EMA claim. The A/R is 16 days old on May 25, so not_sent does
+    not list it (a status over 14 days old says nothing); the exports' pass hands it on all the same, and it must then be
+    listed or put on the waiting view, never on no list. In the same run not_sent lists another patient's print-batch
+    claim under its EMA claim number alone ('link:85', no claim id) (review gapfix-r2-5).
+    Before: that item's missing claim id put None in the set of claims not_sent listed, claim 81's missing EMA claim number
+    matched it, and claim 81 was taken for listed: on no list and in no count."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, load, remit as raw_remit
+    from tests.test_workable import ema
+    from remitwatch.detect import UNSEEN_KEY
+    s, lg = _ema_store(tmp_path, kind)
+    visit, ar_day = D(2026, 4, 21), D(2026, 5, 9)
+    raw_remit(s, trace=F.check_no(80), paid_on="2026-05-20",
+              claims=[{"pcn": F.claim_id(80), "last": "OTHERTEST", "first": "OLIVE", "member": "MEMBEROLIVE1",
+                       "lines": [("2026-04-28", "99213", 150, 90, [("CO", "45", 60)])]}])
+    rows = [charge(F.link_no(80), cpt="99213", amount=150, patient="Othertest, Olive", svc=D(2026, 4, 28), posted=D(2026, 5, 21)),
+            charge(F.link_no(85), cpt="99214", amount=210, patient="Holdtest, Hal", svc=D(2026, 3, 30), posted=D(2026, 4, 1),
+                   status="Batched for Printing")]
+    ar = [F.ar_row(claim=F.claim_id(81), link=None, status="Batched for Printing", current=180.0, cpt="88305", svc=visit,
+                   aging=ar_day, patient="Batchtest, Erin")]
+    load(s, lg, tmp_path, rows, ar)
+    bc = dict(payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA081")
+    ema(s.conn, F.claim_id(81), cpt="88305", service_date=visit.isoformat(), bill_created=None, charges_cents=18000, **bc)
+    ema(s.conn, F.claim_id(81), family="claim_status", claim_status="Batched for Printing", cpt="88305",
+        service_date=visit.isoformat(), **bc)
+    ema(s.conn, F.claim_id(82), service_date="2026-05-22", bill_created="2026-05-24", payer=F.PAYERS["bcbs"], payer_id="BCT01",
+        patient_id="EMA082")
+    s.conn.commit()
+    det = Detector(s, run_id="g1", today="2026-05-25")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    counts = {k: v for k, v in det.ema_counts.items() if k.startswith(("export_not_sent", "NOT_SENT", "REJECTED"))}
+    items = [(r[0], r[1] or f"link:{r[2]}") for r in s.conn.execute(
+        "SELECT signal, patient_control_number, ema_link FROM findings WHERE COALESCE(stale,0)=0 "
+        "AND signal IN ('NO_ANSWER','REJECTED_PRE_PAYER','NOT_SENT')")]
+    w = json.loads((s.conn.execute("SELECT value FROM meta WHERE key=?", (WAITING_837_META,)).fetchone() or ["{}"])[0])
+    waiting = [r[0] for r in w.get("claims") or []]
+    unseen = json.loads((s.conn.execute("SELECT value FROM meta WHERE key=?", (UNSEEN_KEY,)).fetchone() or ["{}"])[0])
+    s.close()
+    assert counts.get("export_not_sent") == 1, counts                      # handed to not_sent
+    assert ("NOT_SENT", f"link:{F.link_no(85)}") in items, items            # the link-only print-batch claim is listed
+    on_a_list = any(k == F.claim_id(81) for _sig, k in items) or F.claim_id(81) in waiting \
+        or F.claim_id(81) in [r[0] for r in unseen.get("claims") or []]
+    assert on_a_list, f"claim 81, in EMA's print batch and due, is on no list and in no count (items {items}, counts {counts})"

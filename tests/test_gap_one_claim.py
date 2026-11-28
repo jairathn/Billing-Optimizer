@@ -322,3 +322,132 @@ def test_an_item_listed_before_its_claim_began_waiting_stays_listed_until_the_cl
     assert old["finding_id"] in {x.get("finding_id") if isinstance(x, dict) else x for x in folded}, folded
     lg.close()
     s.close()
+
+
+# ------------------------------------------------------------- the orders the first tests left out, and a bill sent again
+def _exports(s, sub: int = 1, submitted: str = "2026-03-09") -> None:
+    """EMA's weekly exports list claim 74 (submission `sub`) to Blue Cross: its 11102 of March 5 at $86.66, Submitted."""
+    from tests import ema_fixtures as F
+    from tests.test_workable import ema
+    bc = dict(payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA074")
+    cid = F.claim_id(N, sub=sub)
+    ema(s.conn, cid, cpt="11102", service_date="2026-03-05", bill_created="2026-03-05", charges_cents=8666, **bc)
+    ema(s.conn, cid, family="claim_status", claim_status="Submitted", cpt="11102", service_date="2026-03-05",
+        claim_submission_date=submitted, **bc)
+    s.conn.commit()
+
+
+def _all_subs(s) -> list[dict]:
+    """Every item of the visit, under any submission of claim 74 or under EMA claim 74."""
+    from tests import ema_fixtures as F
+    s.conn.row_factory = None
+    cols = [r[1] for r in s.conn.execute("PRAGMA table_info(findings)")]
+    rows = s.conn.execute("""SELECT * FROM findings WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER','NOT_SENT')
+                             AND (patient_control_number LIKE ? OR ema_link = ?) ORDER BY finding_id""",
+                          (F.claim_id(N)[:-3] + "%", F.link_no(N))).fetchall()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_worked_under_its_ema_claim_number_is_not_new_work_once_the_weekly_exports_list_it(tmp_path, kind, monkeypatch):
+    """Month 1: only Production shows EMA's claim 74 (no answer): listed under its EMA claim number, and a biller records
+    Sent with a note. Month 2: EMA's weekly exports list claim 74 (Submitted March 9), and the exports' pass lists it under
+    its claim id. One claim: one item, with the biller's Sent and the day it was first listed (review gapfix-r2, an order
+    the first tests did not cover)."""
+    s, lg = _world(tmp_path, kind, monkeypatch, _visit())
+    _run(s, "m1")
+    first = _listed(s)
+    assert len(first) == 1 and first[0]["patient_control_number"] is None, first
+    old = first[0]
+    _work(s, old["finding_id"])
+    _exports(s)
+    _run(s, "m2")
+    now = [r for r in _all_subs(s) if not r.get("stale")]
+    assert len(now) == 1, [(r["signal"], r["patient_control_number"], r["ema_link"], r["status"]) for r in now]
+    assert (now[0]["status"], now[0]["first_seen"]) == ("appealed", old["first_seen"]), (now[0]["status"], now[0]["first_seen"])
+    lg.close()
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_worked_under_its_claim_id_by_the_exports_is_not_new_work_once_only_production_shows_it(tmp_path, kind,
+                                                                                                        monkeypatch):
+    """Month 1: EMA's weekly exports list claim 74 (Submitted March 9), no answer: listed under its claim id, and a biller
+    records Sent with a note. Month 2: the weekly exports no longer carry the claim (their window moved on); Production
+    still shows EMA's claim 74 with no answer, under its EMA claim number. One claim: one item, with the biller's Sent
+    (review gapfix-r2, the other order)."""
+    s, lg = _world(tmp_path, kind, monkeypatch, _visit())
+    _exports(s)
+    _run(s, "m1")
+    first = [r for r in _all_subs(s) if not r.get("stale")]
+    assert len(first) == 1, [(r["signal"], r["patient_control_number"], r["ema_link"]) for r in first]
+    old = first[0]
+    _work(s, old["finding_id"])
+    s.conn.execute("DELETE FROM ema_rows")
+    s.conn.commit()
+    _run(s, "m2")
+    now = [r for r in _all_subs(s) if not r.get("stale")]
+    assert len(now) == 1, [(r["signal"], r["patient_control_number"], r["ema_link"], r["status"]) for r in now]
+    assert (now[0]["status"], now[0]["first_seen"]) == ("appealed", old["first_seen"]), (now[0]["status"], now[0]["first_seen"])
+    lg.close()
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("decision", ["dismissed", "resolved"])
+def test_a_bill_sent_again_after_a_decision_on_its_ema_claim_is_a_new_matter(tmp_path, kind, monkeypatch, decision):
+    """Month 1: only Production shows EMA's claim 74 (no answer): listed under its EMA claim number, and a biller decides it
+    on April 25: Let go (dismissed) or Paid (resolved). Month 2: the practice sends the bill again under a new claim id
+    (submission 2, May 1, to Blue Cross: the 837s show it), and by June 15 no payer answered the resend. The resend is a
+    new matter, as the house rule for a bill sent again says ('it starts To do ... never Sent, Paid or Let go from the
+    earlier item'): its item is work, To do, with the notes handed on (review gapfix-r2-1).
+    Before: the same-EMA-claim heir handed the month-1 decision to the resend whole: born Let go (or Paid), on no work
+    list, though no payer ever answered it."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, load, pay
+    s, lg = _world(tmp_path, kind, monkeypatch, _visit())
+    _run(s, "m1")
+    first = _listed(s)
+    assert len(first) == 1 and first[0]["patient_control_number"] is None, first
+    old = first[0]
+    _work(s, old["finding_id"], status=decision, note="Decided on the first claim")
+    sub2 = F.claim_id(N, sub=2)
+    send(s, tmp_path, [clm837(sub2, [("11102", "86.66", "20260305")], payer=BC, member="MEMBER000074")], "20260501")
+    load(s, lg, tmp_path, [charge(F.link_no(59), cpt="99212", amount=120, patient=2, svc=D(2026, 5, 20), posted=D(2026, 5, 21)),
+                           pay(F.link_no(59), "PAPER-59", 60, cpt="99212", patient=2, svc=D(2026, 5, 20), posted=D(2026, 6, 5)),
+                           charge(F.link_no(98), cpt="99212", patient=3, svc=D(2026, 6, 1), posted=D(2026, 6, 10),
+                                  status="Payment Pending")])
+    _run(s, "m2", today="2026-06-15")
+    resend = [r for r in _all_subs(s) if r["patient_control_number"] == sub2]
+    assert resend, [(r["signal"], r["patient_control_number"], r["ema_link"], r["status"], r["stale"]) for r in _all_subs(s)]
+    it = resend[0]
+    assert it["finding_id"] == _fid(OPEN_837_ID, sub2), it["finding_id"]
+    assert it["status"] in ("open", "in_progress") and not it["stale"], (
+        f"the resend (submission 2, never answered) was born '{it['status']}', the decision a person made on the first "
+        f"claim's EMA claim number (folded: {'same_ema_claim' in (it['evidence'] or '')})")
+    # Let go hands its notes on, as a bill sent again takes them; Paid is a recovery on the record and hands nothing on
+    assert ("Decided on the first claim" in (it["notes"] or "")) == (decision == "dismissed"), it["notes"]
+    old_row = [r for r in _all_subs(s) if r["finding_id"] == old["finding_id"]]
+    assert old_row and old_row[0]["status"] == decision, "the person's decision on the first claim stays on its own item"
+    lg.close()
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_sent_before_a_decision_on_its_ema_claim_keeps_that_decision(tmp_path, kind, monkeypatch):
+    """The other side of the rule. Month 1: only Production shows EMA's claim 74, listed under its EMA claim number, and a
+    biller lets it go on April 25. Month 2: the 837 files arrive and show claim 74 itself sent March 9, before that
+    decision: the claim the biller decided, under its claim id at last. It keeps the decision (one claim, one item)."""
+    from tests import ema_fixtures as F
+    s, lg = _world(tmp_path, kind, monkeypatch, _visit())
+    _run(s, "m1")
+    first = _listed(s)
+    assert len(first) == 1 and first[0]["patient_control_number"] is None, first
+    old = first[0]
+    _work(s, old["finding_id"], status="dismissed", note="Let go: the payer has no record")
+    _send(s, tmp_path, "20260309")
+    _run(s, "m2")
+    mine = [r for r in _claim_items(s) if r["patient_control_number"] == F.claim_id(N)]
+    assert len(mine) == 1 and mine[0]["status"] == "dismissed", [(r["finding_id"], r["status"], r["stale"]) for r in _claim_items(s)]
+    lg.close()
+    s.close()

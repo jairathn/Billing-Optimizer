@@ -575,11 +575,17 @@ def data(user: str = Depends(_user)):
     """The Data tab's EMA panels: the reports on file, freshness, the reconcile summary (payments with no remittance,
     835 payments EMA never posted, credits, the A/R accounted for), the re-send requests, what the run noted, and the
     write-off patterns waiting for the owner. A panel whose figures cannot be read says so by the fault's kind."""
+    from .insights import unseen_summary
     with _conn() as c:
         if not _reports_arrived(c):
-            return {"ready": False}
+            # the claims no source can show an answer to are counted with no EMA report too (the reason no_ema_reports): the
+            # panel shows them in dollars before any report arrives (gapfix review r2-8). It reads only the meta
+            try:
+                u = unseen_summary(c)
+            except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+                u = {"error": _fault(exc)}
+            return {"ready": False, "unseen": u} if u else {"ready": False}
         out: dict = {"ready": True, "today": _today(), "fresh": _freshness(c), "blind": blind_spot(c)}
-        from .insights import unseen_summary
         for name, fn in (("catalog", _catalog), ("reconcile", _reconcile), ("resend", lambda cc: _c1_rows(cc, {})),
                          ("upper_bound", _upper_bound), ("unseen", unseen_summary)):
             try:
@@ -809,11 +815,16 @@ def _unseen_rows(conn: sqlite3.Connection) -> list[dict]:
 def unseen(page: int = Query(1, ge=1, le=100000), user: str = Depends(_user)):
     """One page of the claims sent that no source can show an answer to, most dollars first (the unseen count's list).
     Never writes."""
+    from .detect import UNSEEN_KEY
     with _conn() as c:
         rows = _unseen_rows(c)
+        u = _meta(c, UNSEEN_KEY, {}) or {}
     start = (page - 1) * UNSEEN_PAGE
+    # listed: whether the analysis that made the count kept its claims (an analysis before this release kept none: the list
+    # comes with the next one, and the panel says so rather than offer an empty list)
     return {"page": page, "size": UNSEEN_PAGE, "count": len(rows), "cents": sum(r["cents"] for r in rows),
-            "names": bool(_api().SHOW_PHI), "rows": rows[start:start + UNSEEN_PAGE]}
+            "names": bool(_api().SHOW_PHI), "rows": rows[start:start + UNSEEN_PAGE],
+            "listed": isinstance(u, dict) and isinstance(u.get("claims"), list)}
 
 
 def _unseen_csv_rows(conn: sqlite3.Connection) -> Iterator[list]:
