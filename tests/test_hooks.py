@@ -161,7 +161,9 @@ def test_the_serverless_save_goes_through_the_one_block_image(tmp_path, monkeypa
     monkeypatch.setattr(Store, "to_bytes", lambda self: (_ for _ in ()).throw(AssertionError("to_bytes at the save")))
     meta = cloud.save_raw(state, store, log=lambda *a: None)
     assert used == [True] and meta[cloud.IMAGE_KEY]["size"] > 0
+    scratch = os.environ["REMITWATCH_TMP"]
     monkeypatch.undo()
+    monkeypatch.setenv("REMITWATCH_TMP", scratch)       # undo also dropped conftest's private scratch folder
     loaded, existed = cloud.load_raw(state)
     assert existed and _meta_rows(loaded.conn) == 50
     loaded.close()
@@ -805,7 +807,9 @@ def test_the_weekly_self_audit_takes_the_first_idle_serverless_run_and_a_journal
     """needs_G section 3: the self-audit runs in a run that did not analyse and saves its lists with the store; the next
     idle run uploads nothing; a request from the Data tab (journaled on Vercel) runs it again in the next run."""
     from remitwatch import cloud, selfcheck
+    scratch = os.environ["REMITWATCH_TMP"]
     monkeypatch.undo()                                  # the box fixture leaves the audit out: here it is the subject
+    monkeypatch.setenv("REMITWATCH_TMP", scratch)       # undo also dropped conftest's private scratch folder
     root, client, state = box
     write_remits(root / DATA, visits_with_downcodes())
     assert "self_audit" not in _cloud(state, client)    # it analysed: the audit waits
