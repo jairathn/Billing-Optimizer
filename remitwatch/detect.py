@@ -392,17 +392,21 @@ def _item_links(r: dict) -> set[int]:
     if isinstance(ev, str):
         try:
             ev = json.loads(ev or "{}")
-        except ValueError:
-            ev = {}
+        except ValueError as exc:
+            from . import runlog
+            runlog.caught(exc, "item_links.evidence", level="warning")
+            ev = {}                         # an item's damaged evidence names no EMA claim
     ev = ev if isinstance(ev, dict) else {}
     if str(ev.get("ema_bridge") or "").endswith("_secondary"):
         return out                          # a claim to the visit's second payer: its EMA claim's own items are another matter
     for x in [r.get("ema_link"), ev.get("ema_link")] + list(ev.get("ema_links") or []):
-        try:
-            if x is not None and str(x).strip():
-                out.add(int(x))
-        except (TypeError, ValueError):
-            continue                        # a damaged number names no claim
+        if isinstance(x, bool) or x is None:
+            continue
+        if isinstance(x, float):
+            x = int(x) if x.is_integer() else None
+        t = str(x).strip() if x is not None else ""
+        if t.isdigit():
+            out.add(int(t))                 # (a damaged number names no claim)
     return out
 
 
@@ -7502,6 +7506,7 @@ class Detector:
                     # the first payer left nothing (its payment and contractual adjustment cover the charge): nothing for
                     # the second payer to pay; counted for the maintainers (meta ema:wiring)
                     self.ema_counts["open_claim_second_nothing_left"] += 1
+                    self._retire(_fid(cd.get("id_signal") or "EMA_OPEN_CLAIM", pcn), "open_claim_second_nothing_left")
                     return False
                 # what the patient paid on the visit's lines comes off: the practice holds that part of the share already,
                 # and the second payer's answer could only turn it into a refund to the patient. All of it paid (to within a
@@ -7514,6 +7519,7 @@ class Detector:
                     if owed <= 100:
                         self.ema_counts["open_claim_second_patient_paid"] += 1
                         self.ema_counts["open_claim_second_patient_paid_cents"] += left
+                        self._retire(_fid(cd.get("id_signal") or "EMA_OPEN_CLAIM", pcn), "open_claim_second_patient_paid")
                         return False
                 if expected is None or owed < expected:
                     expected = owed         # (with no rate to price it, what the first payer left, less the patient's, is its size)
@@ -9780,17 +9786,37 @@ class Detector:
             "candidates": int((a or {}).get("candidates") or 0), "reason": reason})
 
     def _ema_reports_from(self) -> str | None:
-        """The first service date any EMA source in the store covers (Production's lines, the A/R, the weekly exports): a
-        claim whose service is older has no EMA row of any kind to bridge to, whatever its payer."""
+        """The first service date EMA's reports cover, for the claims older than it (before_ema_reports) and the export that
+        would let the bridges check them: where Production is read, the first day its current files cover (a file pulled
+        by service dates from its first one; one pulled by posting dates from its first posting day: an older service's
+        earlier postings are not in it); else the first service of the ledger's lines; on a host that reads only the A/R, the
+        first day of the earliest service year its snapshots were pulled for; with none of these, the weekly exports' first
+        service date. Never the single oldest row of an A/R, which lists open balances of any age and so covers no span of
+        service days (gapfix review r2-6: one old open line moved the day back a year, and the export was no longer named)."""
         c = self.conn
         have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        got = []
-        for table, col in (("ema_lines", "svc"), ("ema_ar", "svc"), ("ema_rows", "service_date")):
-            if table in have:
-                v = c.execute(f"SELECT MIN(substr({col}, 1, 10)) FROM {table} WHERE COALESCE({col}, '') <> ''").fetchone()[0]
-                if v:
-                    got.append(v)
-        return min(got) if got else None
+
+        def first(sql: str) -> str | None:
+            v = c.execute(sql).fetchone()[0]
+            return str(v)[:10] if v and real_day(str(v)[:10]) else None
+        if "ema_report_files" in have:
+            got = [d for scope, svc_lo, posted_lo in c.execute(
+                       """SELECT scope, svc_lo, posted_lo FROM ema_report_files
+                          WHERE report = 'production' AND status IN ('current', 'partly_replaced')""")
+                   for d in [str((posted_lo if scope == "posted" else svc_lo) or "")[:10]] if real_day(d)]
+            if got:
+                return min(got)
+        if "ema_lines" in have:
+            got = first("SELECT MIN(svc) FROM ema_lines WHERE COALESCE(svc, '') <> ''")
+            if got:
+                return got
+        if "ema_ar" in have:
+            year = c.execute("SELECT MIN(svc_year) FROM ema_ar WHERE svc_year GLOB '[12][0-9][0-9][0-9]'").fetchone()[0]
+            if year:
+                return f"{year}-01-01"
+        if "ema_rows" in have:
+            return first("SELECT MIN(substr(service_date, 1, 10)) FROM ema_rows WHERE COALESCE(service_date, '') <> ''")
+        return None
 
     def _finish_unseen(self) -> dict:
         """The unseen count (UNSEEN_KEY) from the claims _count_unseen kept: each valued as _emit_open_claim values a listed
@@ -10921,7 +10947,7 @@ class Detector:
                 if self._emit_proto(p):
                     cid = (p.get("claim") or {}).get("patient_control_number")
                     if name == "not_sent":
-                        listed |= links | {cid}
+                        listed |= (links | {cid}) - {None}     # (an item keyed by its EMA claim number has no claim id)
                     if cid:
                         skip.add(cid)
             if name == "not_sent" and self.__dict__.get("_left_to_not_sent"):
@@ -10959,7 +10985,9 @@ class Detector:
                     first[lk] = str(fc)[:10]
         for cd, items, newest in handed:
             pcn, lk = cd["pcn"], cd.get("ema_link")
-            if {pcn, lk} & listed or _fid(cd.get("id_signal") or "EMA_OPEN_CLAIM", pcn) in self.findings:
+            # (a claim whose EMA claim was not found has no number: None names no claim, never another item's missing claim id;
+            # gapfix review r2-5)
+            if ({pcn, lk} - {None}) & listed or _fid(cd.get("id_signal") or "EMA_OPEN_CLAIM", pcn) in self.findings:
                 continue                    # not_sent listed it (or its own pass did, under another id)
             if cd.get("source") == "837":
                 if self._emit_open_claim(cd, items, newest):
@@ -11011,6 +11039,14 @@ class Detector:
                 if f is not None and f.get("signal") == "NO_ANSWER" and _fid(p.get("id_signal") or p["signal"], *p["key_parts"]) in self.findings:
                     del self.findings[fid]
                     self.ema_counts["export_answered_by_ema_denial"] += 1
+
+    def _retire(self, fid: str, counter: str) -> None:
+        """An item this run stops raising on purpose, named with the counter that holds it (meta ema:wiring), for the
+        self-check's route out and the decision log's rule: Detector.retired, where this build carries that hand-off (unit
+        replay-fix-2b); a no-op where it does not."""
+        retired = self.__dict__.get("retired")
+        if isinstance(retired, dict):
+            retired.setdefault(fid, counter)
 
     def _second_remainder_once(self) -> int:
         """A claim to the visit's second payer (gapfix G6) is worth what the first payer left on the visit's lines. When the
@@ -12480,7 +12516,9 @@ class Detector:
                 return False
             try:
                 ev = json.loads(f.get("evidence") or "{}")
-            except ValueError:
+            except ValueError as exc:
+                from . import runlog
+                runlog.caught(exc, "save.sent_after_decision", level="warning")
                 return False            # (an item's own evidence, written by this run as JSON: never damaged)
             first = str((ev.get("sent_837") or {}).get("first") or ev.get("sent") or "")[:10]
             decided = str(w.get("status_changed_at") or w.get("first_seen") or "")[:10]

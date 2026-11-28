@@ -814,6 +814,25 @@ def test_a_second_payers_share_the_patient_paid_is_not_listed_as_never_answered_
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_a_second_payers_claim_left_off_for_the_patients_payment_is_named_retired_on_purpose(tmp_path, kind, monkeypatch):
+    """Where this build carries the self-check's hand-off of the items a run stops raising on purpose (Detector.retired,
+    from unit replay-fix-2b), the claim to the second payer the patient paid is named there with the counter that holds it,
+    so an item listed for it by an earlier release leaves the list with its reason, never kept by the self-check as gone
+    without one."""
+    from remitwatch.detect import OPEN_837_ID, _fid
+    from tests import ema_fixtures as F
+    orig = Detector.__init__
+
+    def init(self, *a, **k):
+        orig(self, *a, **k)
+        self.__dict__.setdefault("retired", {})
+    monkeypatch.setattr(Detector, "__init__", init)
+    got, det, listed, unseen = _patient_paid_world(tmp_path, kind, monkeypatch, 20.00)
+    assert F.claim_id(75) not in listed
+    assert det.retired.get(_fid(OPEN_837_ID, F.claim_id(75))) == "open_claim_second_patient_paid", det.retired
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_a_second_payers_share_the_patient_paid_in_part_is_listed_at_the_rest(tmp_path, kind, monkeypatch):
     """The patient paid $12.00 of the $20.00 the first payer left, and Blue Cross never answered: $8.00 of the share is
     still owed. The claim is listed at $8.00 (what the first payer left, less what the patient paid), never at the whole
@@ -941,7 +960,8 @@ def test_a_small_plan_that_never_sends_eras_is_judged_by_its_nearest_claims(tmp_
 GAP_FUNCTIONS = {
     "remitwatch/detect.py": ("_item_links", "_waiting_claim", "_waiting_ema_claims", "_note_waiting_report", "_ar_held_open",
                              "_count_unseen", "_ema_reports_from", "_finish_unseen", "_same_group", "_unseen_ema_lines",
-                             "_listed_before", "_left_unsent"),
+                             "_listed_before", "_left_unsent", "_second_remainder_once", "sent_after_decision", "none_answered",
+                             "visit_of"),
     "remitwatch/insights.py": ("_d", "unseen_summary", "_unseen_837", "_usd_words"),
     "remitwatch/api_ema.py": ("_unseen_rows", "unseen", "_unseen_csv_rows", "unseen_csv"),
     "remitwatch/ema_checks.py": ("_second_group",),
