@@ -31,8 +31,10 @@ real data was copied or read by this unit.
 - [x] Tests `tests/test_routes.py` (55) and `tests/routes_card_page.js` (Playwright on both hosts, 1400 and 390 px).
 - [x] Screenshots (demo store, invented): `$S/tk/units/routes/shots/`, 10 items x 1400 and 390 px, panel and card.
 - [x] Measurements and hand-trace on the demo store (below).
-- [ ] Full suite python3 and 3.11.1 (`$S/fix/venv_sqlite340/bin/python`), test_docs with the private words: see the
-      final report or `$S/tk/units/routes/runs/`.
+- [x] Suites (2026-11-28, at 2950594..6dd3e39): full python3 (3.13, SQLite 3.5x) 4368 passed, 29 skipped, 1 xfailed, 0
+      failed; full 3.11.1 / SQLite 3.40.0: 4166 passed, 217 failed or errored, every one on the missing
+      Connection.serialize of that build (allowed), none in test_routes; test_routes.py 55 passed on the newest
+      libraries and on 3.12 / SQLite 3.45; test_docs with the private words 40 passed; both node checks pass.
 
 ## Next command
 
