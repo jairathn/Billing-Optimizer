@@ -79,6 +79,13 @@ The unit: the words (DESIGN P14) and CRITIQUE_biller change 5 (know who is worki
   name, the status line says "Started by <name>". Screenshots stay in the private folder.
 - Break and restore: the words pass off fails 27 story tests; the started-by lookup off fails its test. Both restored.
 - Node checks: calc_model_check 79 of 79, lab_review_check 143 of 143.
+- Full suite, python3 (after merging the newest integration tip and wip/ui-a): 4713 passed, 29 skipped, 1 xfailed, 4
+  failed, all this unit's: two tests and review3's read the weekly summary's old grammar ("1 items", "findings are
+  due"), and ui-a's inline style ratchet (275) failed on two style= the integration tip brought (data.js, features.js'
+  print sheet). Fixed (two classes; the tests moved) and those three files rerun: 77 passed.
+- Python 3.11.1 with SQLite 3.40.0, the tests of every file this unit touched (22 files): 1110 passed; the 66 that fail
+  (test_cloud, test_hooks, the serverless halves of test_runlog, test_swing and test_staff_names_private) all stop on
+  `Connection.serialize`, which that build lacks (CLAUDE.md: the one failure allowed there); none fails otherwise.
 
 ## Left (honestly)
 
@@ -97,7 +104,7 @@ The unit: the words (DESIGN P14) and CRITIQUE_biller change 5 (know who is worki
 
 ## Next command
 
-    cd $S/tk/wt/ui-words && python3 -m pytest -q -p no:cacheprovider tests/test_who_is_working.py tests/test_story.py
+    (none: the unit is pushed; the integrator runs the four environments at release)
 
 ## Open questions
 
