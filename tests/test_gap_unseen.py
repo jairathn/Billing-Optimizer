@@ -667,6 +667,9 @@ def _second_payer_world(tmp_path, kind, monkeypatch, *, eaf, contractual, writte
     s, lg = _world(tmp_path, kind, monkeypatch, rows)
     send(s, tmp_path, [clm837_second(F.claim_id(75), [("11102", "86.66", "20260305")], BC, "MEMBER000075", left=eaf)], "20260309")
     det, listed, unseen = _run(s, lg)
+    # the denials EMA alone shows on the visit's EMA claim (the first payer's CO-206), listed apart
+    det.denials = [dict(r) for r in s.query("SELECT finding_id, shortfall_cents FROM findings WHERE signal='EMA_DENIED' "
+                                            "AND ema_link=? AND COALESCE(stale,0)=0", (F.link_no(75),))]
     s.close()
     return det, listed, unseen
 
@@ -694,10 +697,13 @@ def test_a_second_payers_claim_whose_remainder_ema_wrote_off_is_listed_at_what_t
     # the first payer's payment, posted the day the claim went to Blue Cross, and the write-off settle EMA's claim: that is
     # the first payer's settlement, never this claim's answer, so the claim is work, not done
     assert item["work_state"] == "work_now", (item["work_state"], item["state_rule"])
-    assert item["shortfall_cents"] == 2000, item["shortfall_cents"]
     ev = json.loads(item["evidence"])
     assert ev.get("second_payer_left_cents") == 2000 and ev.get("ema_open_cents") == 0, ev
     assert "has posted nothing" in (item["hint"] or ""), item["hint"]
+    # the CO-206 under Medicare's name is listed apart as a denial only EMA saw: the $20.00 is counted once, on it, and the
+    # claim to Blue Cross counts what is left after it (review gapfix-r1-4)
+    on_denial = sum(d["shortfall_cents"] or 0 for d in det.denials)
+    assert item["shortfall_cents"] == max(0, 2000 - on_denial), (item["shortfall_cents"], det.denials)
     assert (unseen.get("n") or 0) == 0, unseen
 
 
@@ -820,6 +826,43 @@ def test_a_second_payers_share_the_patient_paid_in_part_is_listed_at_the_rest(tm
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_one_remainder_is_counted_once_when_the_first_payers_denial_of_it_is_listed_too(tmp_path, kind, monkeypatch):
+    """Visit March 5 (11102 at $86.66): EMA's claim 73 has Medicare Test Region first and Blue Cross second. Medicare paid
+    $60 (March 6); the 837s show submission 2 of the bill sent March 9 to Blue Cross as the second payer (Medicare left
+    $26.66); on April 12 EMA shows a CO-206 of $26.66 under Medicare's name, a denial only EMA saw, so the first payer's
+    denial is listed (EMA_DENIED) beside the second payer's never-answered claim. Both are about the one $26.66 the first
+    payer left: the Work-now money counts it once. The denial keeps its dollars; the claim to Blue Cross stays listed (Blue
+    Cross never answered) with what is left after the denial, and says where the rest is (review gapfix-r1-4: on the real
+    data a $251.79 remainder was counted twice in Work now, once on each item)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import adj, charge, pay
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    both = {"primary": MED, "secondary": BCP}
+    v = {"cpt": "11102", "patient": 1, "svc": D(2026, 3, 5)}
+    rows = [charge(F.link_no(73), amount=86.66, posted=D(2026, 3, 5), **v, **both),
+            pay(F.link_no(73), "PAPER-73A", 60, posted=D(2026, 3, 6), payer=MED, **v, **both),
+            adj(F.link_no(73), "CO-206", 26.66, posted=D(2026, 4, 12), payer=MED, **v, **both)]
+    ar = [F.ar_row(claim=F.claim_id(73, sub=1), link=F.link_no(73), coverage="Secondary", current=26.66, cpt="11102",
+                   svc=D(2026, 3, 5), patient=1, aging=D(2026, 4, 25), primary=MED, secondary=BCP)]
+    s, lg = _world(tmp_path, kind, monkeypatch, rows, ar)
+    sub2 = F.claim_id(73, sub=2)
+    send(s, tmp_path, [clm837_second(sub2, [("11102", "86.66", "20260305")], BC, "MEMBER000073")], "20260309")
+    det, listed, unseen = _run(s, lg)
+    denial = [dict(r) for r in s.query("SELECT finding_id, shortfall_cents FROM findings WHERE signal='EMA_DENIED' "
+                                       "AND ema_link=? AND COALESCE(stale,0)=0", (F.link_no(73),))]
+    s.close()
+    assert sub2 in listed and len(denial) == 1, (sorted(listed), denial)
+    mine = listed[sub2]
+    total = (mine["shortfall_cents"] or 0) + (denial[0]["shortfall_cents"] or 0)
+    assert (mine["shortfall_cents"] or 0) == max(0, 2666 - (denial[0]["shortfall_cents"] or 0)), (
+        f"the $26.66 the first payer left is counted twice: ${(mine['shortfall_cents'] or 0) / 100:.2f} on the claim to Blue Cross "
+        f"and ${(denial[0]['shortfall_cents'] or 0) / 100:.2f} on Medicare's denial (${total / 100:.2f} in Work now)")
+    ev = json.loads(mine["evidence"])
+    assert [x["finding_id"] for x in ev.get("remainder_also_on") or []] == [denial[0]["finding_id"]], ev
+    assert "counted there" in (mine["hint"] or ""), mine["hint"]
+
+
+@pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("after", ["payment", "write_off"])
 def test_the_first_payers_posting_never_answers_a_second_payers_claim_found_by_its_bill(tmp_path, kind, monkeypatch, after):
     """The guard of G6 when the claim's EMA claim is found by its bill rather than its content (review gapfix-r2-4). Visit
@@ -857,7 +900,10 @@ def test_the_first_payers_posting_never_answers_a_second_payers_claim_found_by_i
     if sub2 in listed:
         item = listed[sub2]
         assert item["ema_link"] is None and json.loads(item["evidence"]).get("visit_ema_claim") == F.link_no(73), item
-        assert 0 < (item["shortfall_cents"] or 0) <= 2666, item["shortfall_cents"]
+        # worth what Medicare left ($26.66); after the write-off, the CO-206 is listed apart as Medicare's denial only EMA
+        # saw, and the remainder is counted there once (the next test)
+        assert (0 < (item["shortfall_cents"] or 0) <= 2666) if after == "payment" else (item["shortfall_cents"] or 0) <= 2666, (
+            item["shortfall_cents"])
     s.close()
 
 

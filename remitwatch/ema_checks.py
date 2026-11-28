@@ -1843,12 +1843,16 @@ def _separate_checks(conn: sqlite3.Connection) -> None:
 
 def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
     """C3e: whether EMA shows each claim answered after it was sent. claims: [{'claim_id', 'sent', 'lines': [(svc, cpt,
-    charge cents)], 'payer_group'}]. The claim's EMA claim is found by its claim id (the A/R's pairs), else its bill (the
-    map), else the content bridge: the claim's (date, code, charge) rows equal the charge rows of exactly one link that
-    is not the ASC's facility claim, with the payer group agreeing (E8). Answered means a net insurance payment, a $0 answer
-    (a $0 row under a check that carries its proof: zero_answer_sql) or a payer's non-routine reason, posted after the
-    claim was sent, on that EMA claim. A bare $0 row answers nothing: the first one after the send is kept for the item's
-    note ('bare_zero'). Payments under the ASC's separate-payee checks never count, and a status alone never answers.
+    charge cents)], 'payer_group', 'later_payer'}]. The claim's EMA claim is found by its claim id (the A/R's pairs), else
+    its bill (the map), else the content bridge: the claim's (date, code, charge) rows equal the charge rows of exactly one
+    link that is not the ASC's facility claim, with the payer group agreeing (E8). Answered means a net insurance payment, a
+    $0 answer (a $0 row under a check that carries its proof: zero_answer_sql) or a payer's non-routine reason, posted after
+    the claim was sent, on that EMA claim. A bare $0 row answers nothing: the first one after the send is kept for the
+    item's note ('bare_zero'). Payments under the ASC's separate-payee checks never count, and a status alone never answers.
+    A claim sent to the visit's second payer (its 837 sent it as a later payer's, 'later_payer', or its payer is its EMA
+    claim's secondary payer and not its first), whichever bridge found its EMA claim, is answered only by that payer's own
+    postings, and comes with 'second_payer' and what the first payer left, what EMA leaves open and what the patient paid on
+    the visit (gapfix G6 and its review r1-1, r2-4).
     Returns {claim_id: {'answered', 'how', 'on', 'paid_cents', 'link', 'bridge', 'bare_zero'}}, and 'candidates' (how many
     EMA claims share its content) for a claim the content bridge could not choose among several."""
     _prepare(conn)
@@ -1877,6 +1881,27 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
                                        AND COALESCE(m.conflict, 0) = 0 AND COALESCE(m.facility, 0) = 0 GROUP BY a.cid"""):
             if cid not in found and lk is not None:
                 found[cid] = (lk, "bill")
+        # a claim found by its claim id or its bill that went to the visit's second payer: its 837 sent it as a later payer's,
+        # or its payer is its EMA claim's secondary payer and not its first. Whichever bridge found the EMA claim, the first
+        # payer's postings there never answer it (gapfix review r2-4: the bill bridge handed such a claim its EMA claim with
+        # no mark, and the first payer's payment, or the practice's write-off under its name, answered the claim to the
+        # second payer, which left every list and count)
+        by_id = [(cid, lk) for cid, (lk, b) in found.items() if b in ("claim_id", "bill")]
+        if by_id:
+            heads: dict[int, tuple] = {}
+            for lpart in _chunks(sorted({lk for _c, lk in by_id})):
+                _temp(conn, "ec_sl", ["link INTEGER PRIMARY KEY"], [(x,) for x in lpart])
+                for lk, grp, second in conn.execute("""SELECT link, MAX(payer_group), MAX(secondary_payer) FROM ema_lines
+                                                       WHERE link IN (SELECT link FROM temp.ec_sl) GROUP BY link"""):
+                    heads[lk] = (grp, second)
+            mine_of = {c["claim_id"]: c for c in part}
+            for cid, lk in by_id:
+                c, (grp, second) = mine_of[cid], heads.get(lk, (None, None))
+                mine = c.get("payer_group")
+                if c.get("later_payer") or (mine and grp and second and not _same_payer(grp, mine)
+                                            and _same_payer(_second_group(conn, second, groups_of), mine)):
+                    second_of.add(cid)
+                    found[cid] = (lk, found[cid][1] + "_secondary")
         need = {c["claim_id"]: c for c in part if c["claim_id"] not in found}
         if need:
             n_keys = Counter(r[0] for r in rows if r[0] in need)
@@ -1946,12 +1971,14 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
             if got and cid in second_of:
                 res["second_payer"] = True             # found through its EMA claim's second payer: only its postings answer it
                 # what the first payer left (the charge less insurance's payments and contractual adjustments: the second
-                # payer's share), and what EMA leaves open now, after any write-off the practice made, which says nothing
-                # of what the second payer owes
-                left, bal = conn.execute("""SELECT COALESCE(SUM(COALESCE(charges, 0) - COALESCE(ins_paid, 0) - COALESCE(contractual, 0)), 0),
-                                                   COALESCE(SUM(COALESCE(balance, 0)), 0) FROM ema_lines WHERE link = ?""",
-                                         (got[0],)).fetchone()
+                # payer's share), what EMA leaves open now, after any write-off the practice made, which says nothing of
+                # what the second payer owes, and what the patient paid on the visit's lines (the share the practice holds
+                # already: review r1-1)
+                left, bal, pat = conn.execute("""SELECT COALESCE(SUM(COALESCE(charges, 0) - COALESCE(ins_paid, 0) - COALESCE(contractual, 0)), 0),
+                                                        COALESCE(SUM(COALESCE(balance, 0)), 0), COALESCE(SUM(COALESCE(pat_paid_joined, 0)), 0)
+                                                 FROM ema_lines WHERE link = ?""", (got[0],)).fetchone()
                 res["first_left_cents"], res["open_cents"] = max(0, int(left or 0)), int(bal or 0)
+                res["pat_paid_cents"] = max(0, int(pat or 0))
             out[cid] = res
         _temp(conn, "ec_al", ["cid TEXT", "link INTEGER", "sent TEXT", "sec INTEGER"],
               [(cid, lk, next((c.get("sent") for c in part if c["claim_id"] == cid), None) or "", 1 if cid in second_of else 0)

@@ -7503,13 +7503,26 @@ class Detector:
                     # the second payer to pay; counted for the maintainers (meta ema:wiring)
                     self.ema_counts["open_claim_second_nothing_left"] += 1
                     return False
-                if expected is None or left < expected:
-                    expected = left         # (with no rate to price it, what the first payer left is its size)
-                if ev.get("ema_open_cents") is not None and ev["ema_open_cents"] < left:
+                # what the patient paid on the visit's lines comes off: the practice holds that part of the share already,
+                # and the second payer's answer could only turn it into a refund to the patient. All of it paid (to within a
+                # dollar, as the rule for a second payer never billed reads it): nothing is owed, not listed (gapfix review
+                # r1-1: four claims to a second payer whose share the patient had paid, listed as Work-now work)
+                pat = max(0, int(cd.get("ema_patient_paid_cents") or 0))
+                owed = left - pat
+                if pat:
+                    ev["ema_patient_paid_cents"] = pat
+                    if owed <= 100:
+                        self.ema_counts["open_claim_second_patient_paid"] += 1
+                        self.ema_counts["open_claim_second_patient_paid_cents"] += left
+                        return False
+                if expected is None or owed < expected:
+                    expected = owed         # (with no rate to price it, what the first payer left, less the patient's, is its size)
+                if ev.get("ema_open_cents") is not None and ev["ema_open_cents"] < owed:
+                    paid_ = f", the patient paid ${pat / 100:,.2f}" if pat else ""
                     second_note = (f"EMA names {grp} as this visit's second payer, and {grp} has posted nothing on it. The first "
-                                   f"payer left ${left / 100:,.2f}; EMA leaves ${max(0, ev['ema_open_cents']) / 100:,.2f} open (the "
-                                   "rest was written off or paid by the patient with no answer from this payer): check the payer's "
-                                   "portal before you send it again or let it go")
+                                   f"payer left ${left / 100:,.2f}{paid_}; EMA leaves ${max(0, ev['ema_open_cents']) / 100:,.2f} open "
+                                   "(the rest was written off with no answer from this payer): check the payer's portal before "
+                                   "you send it again or let it go")
         # only another payer answered (trace finding T-C2): what it paid comes off the item's size, and the item says that the
         # primary's remittance is missing
         sec = cd.get("secondary") or []
@@ -8897,12 +8910,21 @@ class Detector:
         # who each claim's patient is (its own evidence: the 837, its bill's remittances, EMA's patient): the content bridge
         # chooses by it among EMA claims of the same content that day
         who = self._ema_step(step + "_who", self._who, cds, {}) or {}
+        # the claims the 837 sent as a later payer's (SBR01 S or T, or the loop of the payer before it shows its answer):
+        # whichever bridge finds their EMA claim, only that payer's own postings answer them (gapfix review r2-4)
+        from .x12_837 import later_payers_send
+        keys = [cd["s837"][7] for cd in cds if cd.get("s837") is not None and len(cd["s837"]) > 7 and cd["s837"][7]]
+        info = self._837_send_info(keys) if keys else {}
         for cd in cds:
             own = cd.get("match_group") or self._ema_group(cd.get("ema_payer")) or cd.get("grp")
             w = who.get(cd["pcn"]) or {}
+            r8 = cd.get("s837")
+            got = (info.get(r8[7]) or {}) if r8 is not None and len(r8) > 7 and r8[7] else {}
+            later = bool(got.get("read_version")) and later_payers_send((got.get("payer_resp") or "").strip().upper(), got)
             claims.append({"claim_id": cd["pcn"], "sent": cd["sent"], "payer_group": own,
                            "lines": [(x[1], x[0], x[2]) for x in cd["content"] if x[1]],
-                           "persons": sorted(w.get("persons") or ()), "names": sorted(w.get("names") or ())})
+                           "persons": sorted(w.get("persons") or ()), "names": sorted(w.get("names") or ()),
+                           "later_payer": later})
             old = (normalize_payer(cd["ema_payer"])[0] if cd.get("grp") == VA_GROUP[0] and cd.get("ema_payer") else cd.get("grp"))
             if old and old != own:
                 alt[cd["pcn"]] = old
@@ -9669,7 +9691,7 @@ class Detector:
                 continue
             out.append(dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"),
                             ema_bare_zero=a.get("bare_zero"), ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents"),
-                            ema_first_left_cents=a.get("first_left_cents")))
+                            ema_first_left_cents=a.get("first_left_cents"), ema_patient_paid_cents=a.get("pat_paid_cents")))
         # a claim no bridge finds whose line EMA's own A/R holds open for insurance past its due day (the same keyed patient,
         # day and code, in any bucket: "held for insurance, no claim created" too): EMA's books say the money is open and the
         # 837 says the claim went out, so it is listed as never answered, the A/R row its evidence (gapfix G5)
@@ -10316,7 +10338,7 @@ class Detector:
                     cd = dict(cd, gave_up=True, status=st.get("status") or cd["status"])
             cd = dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"), ema_bare_zero=a.get("bare_zero"),
                       ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents"),
-                      ema_first_left_cents=a.get("first_left_cents"))
+                      ema_first_left_cents=a.get("first_left_cents"), ema_patient_paid_cents=a.get("pat_paid_cents"))
             if a.get("link") is not None and not a.get("second_payer"):
                 self._export_links.add(a["link"])   # (a second payer's claim leaves its EMA claim to the report checks: G6)
             # EMA claims that are this claim or another listed one (send-day twins): the Production check leaves them
@@ -10958,6 +10980,9 @@ class Detector:
         protos = self._ema_step("ema_denials", ec.ema_denials, self.conn, today=self.today, rate=self._rate, ratio=self._ratio,
                                 has_835_finding=self._has_835_finding, paid_share=self._paid_share) or []
         self._emit_protos("ema_denials", protos)
+        # a claim to the visit's second payer and the first payer's denial EMA posted on the same lines are about one
+        # remainder: counted once (gapfix review r1-4)
+        self._ema_step("second_remainder_once", self._second_remainder_once)
         # a claim listed as unanswered whose denial EMA posted: C5's item is the claim's answer (it inherits the chase's work
         # through its heir keys), so the chase is not listed beside it
         for p in protos:
@@ -10967,6 +10992,57 @@ class Detector:
                 if f is not None and f.get("signal") == "NO_ANSWER" and _fid(p.get("id_signal") or p["signal"], *p["key_parts"]) in self.findings:
                     del self.findings[fid]
                     self.ema_counts["export_answered_by_ema_denial"] += 1
+
+    def _second_remainder_once(self) -> int:
+        """A claim to the visit's second payer (gapfix G6) is worth what the first payer left on the visit's lines. When the
+        visit's EMA claim also carries an item of its own on those lines (the first payer's denial only EMA saw, C5's
+        EMA_DENIED), both are about that one remainder: the denial keeps its dollars, and the second payer's claim stays
+        listed (its payer never answered) at what is left after them, its evidence naming the denial items
+        ('remainder_also_on') and its hint saying where the money is counted (gapfix review r1-4: one $251.79 remainder
+        counted twice in Work now). A denial on more lines than the claim's counts by the share of its charges on the
+        claim's lines. Returns how many claims were valued down."""
+        denials: dict[int, list[str]] = defaultdict(list)
+        for fid, f in self.findings.items():
+            if f.get("signal") == "EMA_DENIED" and f.get("ema_link") is not None and (f.get("shortfall_cents") or 0) > 0:
+                denials[int(f["ema_link"])].append(fid)
+        if not denials:
+            return 0
+        n = 0
+        for f in list(self.findings.values()):
+            if f.get("signal") != "NO_ANSWER" or not (f.get("shortfall_cents") or 0) > 0 or '"visit_ema_claim"' not in (f.get("evidence") or ""):
+                continue
+            ev = json.loads(f.get("evidence") or "{}")
+            lk = ev.get("visit_ema_claim")
+            if lk is None or int(lk) not in denials:
+                continue
+            mine = {(str(x[1])[:10], str(x[0])) for x in ev.get("lines") or [] if isinstance(x, (list, tuple)) and len(x) > 1}
+            taken, on = 0, []
+            for dfid in sorted(denials[int(lk)]):
+                d = self.findings[dfid]
+                dl = [x for x in json.loads(d.get("evidence") or "{}").get("lines") or [] if isinstance(x, (list, tuple)) and len(x) > 2]
+                both = [x for x in dl if (str(x[1])[:10], str(x[0])) in mine]
+                if not both:
+                    continue
+                whole = sum(max(0, int(x[2] or 0)) for x in dl)
+                share = sum(max(0, int(x[2] or 0)) for x in both) / whole if whole > 0 else 1.0
+                cents = int(round(int(d["shortfall_cents"]) * share))
+                if cents > 0:
+                    taken += cents
+                    on.append({"finding_id": dfid, "signal": d["signal"], "cents": cents})
+            if not taken:
+                continue
+            was = int(f["shortfall_cents"])
+            f["shortfall_cents"] = max(0, was - taken)
+            ev.update(remainder_also_on=on, second_payer_value_before_cents=was)
+            f["evidence"] = json.dumps(ev, default=str)
+            note = (f"The first payer's denial of these services is listed apart ({_usd(taken)} of it on them): the same money the "
+                    f"first payer left, counted there once, so this claim counts {_usd(f['shortfall_cents'])}. Work the denial "
+                    "first; this payer's answer is still missing")
+            f["hint"] = f"{f['hint']}. {note}" if f.get("hint") else note
+            self.ema_counts["open_claim_second_remainder_on_denial"] += 1
+            self.ema_counts["open_claim_second_remainder_on_denial_cents"] += min(was, taken)
+            n += 1
+        return n
 
     def run_ema_contractual(self) -> None:
         """Step 7 (C7): a payer's denials EMA posts as contractual adjustments (outside the money totals)."""
