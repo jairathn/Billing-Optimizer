@@ -414,10 +414,13 @@ function rsDraw(v, d, score){
   const head = d.as_of ? `Figures as of ${esc(rsWhen(d.as_of))}.` : 'Not worked out yet.';
   const upd = d.updating ? ` <span class="sev-medium">Updating after the analysis of ${esc(rsWhen(d.detect_run))}: reload in a minute to see the new figures.</span>` : '';
   v.innerHTML = `<div class="page-head"><h1 class="page-title">Results</h1><span class="small muted">${head}${upd}</span></div>
+    <div id="rsBoard"></div>
     ${(d.errors || []).length ? `<div class="warnbox">Part of these figures could not be worked out: ${esc(d.errors[0])}</div>` : ''}
     ${d.update_error ? `<div class="warnbox">The figures could not be brought up to date (${esc(d.update_error)}): these are the last ones worked out.</div>` : ''}
     ${rsDueHtml(d)}${rsMoneyHtml(d)}${rsRoiHtml(d)}${rsScoreHtml(score)}${rsLiftHtml(d)}${rsWorkHtml(d)}${rsOutcomesHtml(d)}${rsHoursHtml(d)}${rsDenialsHtml(d)}${rsSpotHtml(d)}${rsCostsHtml(d)}`;
   rsBind(v, d);
+  // the money scoreboard and the items by state, at the top (moved here from Today: static/today.js tdBoard)
+  if(typeof tdBoard === 'function') tdBoard(v.querySelector('#rsBoard'));
 }
 // one panel drawn again in place (after a save or an unlock), never the whole page
 function rsRedraw(v, id, html){
@@ -435,8 +438,9 @@ async function resultsTab(v){
   if(v !== $('#view') && !v.isConnected) return;
   const score = sr.status === 'fulfilled' ? sr.value : null;
   if(dr.status !== 'fulfilled'){
-    v.innerHTML = `<div class="page-head"><h1 class="page-title">Results</h1></div><div class="warnbox">The figures could not be read just now (${esc(dr.reason && dr.reason.message || 'no answer')}). Reload the page in a minute.</div>${rsScoreHtml(score)}`;
+    v.innerHTML = `<div class="page-head"><h1 class="page-title">Results</h1></div><div id="rsBoard"></div><div class="warnbox">The figures could not be read just now (${esc(dr.reason && dr.reason.message || 'no answer')}). Reload the page in a minute.</div>${rsScoreHtml(score)}`;
     rsBind(v, {});
+    if(typeof tdBoard === 'function') tdBoard(v.querySelector('#rsBoard'));
     return;
   }
   const d = dr.value;

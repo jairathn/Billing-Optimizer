@@ -13,7 +13,8 @@ const base = `http://127.0.0.1:${port}`;
   page.on('pageerror', e => out.errors.push(`pageerror: ${e.message}`));
   page.on('response', r => { if (r.status() >= 400) out.failed.push(`${r.status()} ${r.url()}`); });
   await page.goto(`${base}/#today`);
-  await page.waitForFunction(() => { const v = document.querySelector('#view'); return v && /Today's plan|Nothing analysed/.test(v.innerText); },
+  // Today has drawn: its plan (#tdPlan; the page's title is "Today" since the premium pass), or the first-run note
+  await page.waitForFunction(() => { const v = document.querySelector('#view'); return v && (v.querySelector('#tdPlan') || /Nothing analysed/.test(v.innerText)); },
     null, { timeout: 20000 }).catch(() => {});
   // Today draws the page, then holds the feed's check back from its health banner until the blind spot is known (the
   // counts' answer, static/today.js seen()); both banners are final from that moment. Read once the health banner says

@@ -16,9 +16,9 @@ const [port, user, pass, dueToday, faxed] = process.argv.slice(2);
     page.on('dialog', async d => { dialogs.push(d.message()); await d.accept(); });
     const base = `http://127.0.0.1:${port}/`;
     await page.goto(base + '#today');
-    await page.waitForFunction(() => /Today's plan/.test((document.querySelector('#view') || {}).innerText || ''), null, { timeout: 30000 });
+    await page.waitForFunction(() => !!document.querySelector('#view #tdPlan'), null, { timeout: 30000 });       // Today has drawn its plan
     const r = await page.evaluate(() => ({
-      header: (document.querySelector('.today-head .muted') || {}).innerText || '',
+      header: (document.querySelector('.today-head .eyebrow') || {}).innerText || '',              // the day, above the title
       site: siteDay(), today: closesText('2026-11-24').text, tomorrow: closesText('2026-11-25').text,
       followup: [...document.querySelectorAll('.plan .step')].map(s => s.innerText.replace(/\s+/g, ' ')).find(t => /Follow up on what you sent/.test(t)) || '',
       overflow: document.documentElement.scrollWidth - window.innerWidth,

@@ -1142,9 +1142,12 @@ def test_the_page_and_its_guide_need_the_login(site, monkeypatch):
     # the file's name always goes in a header, never in the address a log keeps (not even before GET /api/uploads answers)
     assert "x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));" in js.text
     assert "{name: file.name}" not in js.text and "q.set('name'" not in js.text and "?name=" not in js.text
-    # the dashboard links the page where uploads are taken: visit notes on a server, EMA's reports on both hosts
+    # the dashboard links the page where uploads are taken: visit notes on a server, EMA's reports on both hosts (the
+    # link is a place in the sidebar static/shell.js draws, hidden until /api/meta says this host takes uploads)
     index = open(os.path.join(os.path.dirname(api.__file__), "static", "index.html")).read()
-    assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !(m.uploads || m.report_uploads);" in index
+    shell = open(os.path.join(os.path.dirname(api.__file__), "static", "shell.js")).read()
+    assert "{href: '/upload', id: 'uploadLink', label: 'Upload from EMA', icon: 'upload', hidden: true}" in shell
+    assert "$('#uploadLink').hidden = !(m.uploads || m.report_uploads);" in index
     monkeypatch.setattr(api, "PASSWORD", "")
     assert site.c.get("/api/meta").json()["report_uploads"] is True
 
