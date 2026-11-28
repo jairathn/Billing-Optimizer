@@ -437,6 +437,26 @@ def test_the_first_check_after_the_release_catches_a_loss_another_groups_gain_of
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_the_first_check_after_the_release_catches_an_offset_by_a_name_that_did_not_move(tmp_path, kind):
+    """Review rf-r1-1. As above, but the gain is all a VA name has in that month: the name also has money in a February
+    service, where its group did not change. A name that changed group takes all its money with it, in every month, so
+    this one did not move: the March loss is caught with its $100 and the run held."""
+    rows = _wide() + _pay(11, VA_TWO, 40.0, 10.0, D(2026, 3, 19), svc=D(2026, 2, 12), cpt="99212", patient=1)
+    w = World(kind, tmp_path)
+    try:
+        w.start_wide(rows)
+        w.forget_groups()
+        w.read(_after(_offset(rows, VA_TWO), D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 10000, _show(pm)
+        assert _groups(pm) == {"Optum (UHC)"} and "regrouped" not in pm["info"], _show(pm)
+        assert w.run("r2")["held"]
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_the_month_totals_stand_in_for_one_check_only(tmp_path, kind):
     """Review rf-r1-1. The first check after the release finds a real loss (a February service's $60 and $20 at Blue
     Cross) that nobody accepts. The groups are recorded at that check all the same, so every later check compares each
