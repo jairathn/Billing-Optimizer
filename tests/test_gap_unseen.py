@@ -328,3 +328,57 @@ def test_a_claim_whose_line_emas_ar_holds_open_is_listed_not_counted_unseen(tmp_
     assert "holds this service open for insurance ($64.00" in listed[F.claim_id(71)]["hint"]
     assert (unseen.get("n") or 0) == 0, unseen
     s.close()
+
+
+# ------------------------------------------------------------------------------- G6: a claim sent to the visit's second payer
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_sent_to_the_visits_second_payer_is_found_by_its_ema_claims_secondary_payer(tmp_path, kind, monkeypatch):
+    """Claim 70: a visit March 5 (11102 at $86.66). Medicare Test Region is its first payer and paid $60 on March 6 (posted
+    in EMA; no 835 for it). The 837s show claim 70 sent March 9 to Blue Cross, the visit's second payer; no 835 from Blue
+    Cross reaches its due day (the remittances on file stop March 28). EMA's claim 70 has Medicare as its primary payer and
+    Blue Cross as its secondary, and Blue Cross's $15 is posted on it April 10, after the send. EMA's postings answered the
+    claim: it is neither listed nor counted with the claims no source can show an answer to.
+    Before: the content bridge compared the claim's payer with the group on EMA's lines (the primary's) only, found no EMA
+    claim, and counted the claim unseen (on the real data: 11 claims, $3,021.64, 4 of them answered by the second payer's
+    own payment after the send)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, pay
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    both = {"primary": MED, "secondary": BCP}
+    rows = [charge(F.link_no(70), cpt="11102", amount=86.66, patient=1, svc=D(2026, 3, 5), posted=D(2026, 3, 5), **both),
+            pay(F.link_no(70), "PAPER-70A", 60, cpt="11102", patient=1, svc=D(2026, 3, 5), posted=D(2026, 3, 6), payer=MED, **both),
+            pay(F.link_no(70), "PAPER-70B", 15, cpt="11102", patient=1, svc=D(2026, 3, 5), posted=D(2026, 4, 10), payer=BCP, **both)]
+    s, lg = _world(tmp_path, kind, monkeypatch, rows)
+    send(s, tmp_path, [clm837(F.claim_id(70), [("11102", "86.66", "20260305")], payer=BC, member="MEMBER000070")], "20260309")
+    det, listed, unseen = _run(s, lg)
+    assert F.claim_id(70) not in listed, "EMA shows the second payer's answer after the send: nothing to chase"
+    assert (unseen.get("n") or 0) == 0, (
+        f"counted unseen ({unseen.get('n')} claim): EMA's claim 70 names Blue Cross as its secondary payer, and the content "
+        "bridge must accept it")
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_first_payers_payment_after_the_send_does_not_answer_the_second_payers_claim(tmp_path, kind, monkeypatch):
+    """The guard. Claim 73: a visit March 5 (11102 at $86.66). The 837s show it sent March 9 to Blue Cross, the visit's
+    second payer. EMA's claim 73 has Medicare Test Region as its first payer and Blue Cross as its second; Medicare's $60 is
+    posted March 12, after the send, and Blue Cross has posted nothing. Nothing shows Blue Cross answered: the claim is
+    listed (or counted with the claims no source can show an answer to), never dropped as answered. On the real data the
+    investigation's first what-if dropped such claims: a claim to Medicaid as second payer was 'answered' by the first
+    payer's reasons posted 31 days after the send, with no posting by Medicaid at all."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, pay
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    both = {"primary": MED, "secondary": BCP}
+    rows = [charge(F.link_no(73), cpt="11102", amount=86.66, patient=1, svc=D(2026, 3, 5), posted=D(2026, 3, 5), **both),
+            pay(F.link_no(73), "PAPER-73A", 60, cpt="11102", patient=1, svc=D(2026, 3, 5), posted=D(2026, 3, 12), payer=MED, **both)]
+    s, lg = _world(tmp_path, kind, monkeypatch, rows)
+    send(s, tmp_path, [clm837(F.claim_id(73), [("11102", "86.66", "20260305")], payer=BC, member="MEMBER000073")], "20260309")
+    det, listed, unseen = _run(s, lg)
+    assert F.claim_id(73) in listed or (unseen.get("n") or 0) == 1, (
+        "dropped as answered: the only posting after the send is the FIRST payer's, and Blue Cross never answered")
+    if F.claim_id(73) in listed:
+        # found through its EMA claim's second payer, and valued at what EMA leaves open after the first payer ($26.66)
+        assert listed[F.claim_id(73)]["ema_link"] == F.link_no(73), listed[F.claim_id(73)]
+        assert 0 < (listed[F.claim_id(73)]["shortfall_cents"] or 0) <= 2666, listed[F.claim_id(73)]["shortfall_cents"]
+    s.close()

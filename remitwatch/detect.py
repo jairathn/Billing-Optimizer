@@ -6663,6 +6663,11 @@ class Detector:
             if (cd["pcn"] in primary) if cd.get("secondary") else a.get("answered"):
                 out[cd["pcn"]] = []
                 continue
+            if a.get("second_payer"):
+                # found through its EMA claim's second payer: only that payer's own postings answer it (claim_answers), never
+                # the first payer's payment or settlement of the patient's service (gapfix G6, the guard)
+                out[cd["pcn"]] = list(cd["items"])
+                continue
             done = (by_patient.get(cd["pcn"]) or set()) | (by_name.get(cd["pcn"]) or set())
             out[cd["pcn"]] = [x for x in cd["items"] if (x[1], x[0], item_part(x)) not in done]
         return out
@@ -7469,6 +7474,16 @@ class Detector:
                     # the payer before it left the patient nothing: this payer owes nothing on the claim
                     self.ema_counts["open_claim_second_send_nothing_left"] += 1
                     return False
+        if cd.get("ema_second") and cd.get("ema_open_cents") is not None:
+            # found through its EMA claim's second payer and not answered by it: worth at most what EMA leaves open after the
+            # first payer (gapfix G6), as a send to a later payer is worth what the payer before it left
+            left = int(cd["ema_open_cents"] or 0)
+            ev["second_payer_open_cents"] = left
+            if left <= 0:
+                self.ema_counts["open_claim_second_nothing_open"] += 1
+                return False                # EMA shows nothing left open on the visit: nothing for the second payer to pay
+            if expected is None or left < expected:
+                expected = left             # (with no rate to price it, what is left is its size)
         # only another payer answered (trace finding T-C2): what it paid comes off the item's size, and the item says that the
         # primary's remittance is missing
         sec = cd.get("secondary") or []
@@ -9566,7 +9581,7 @@ class Detector:
                 pending.append((cd, a, ne))
                 continue
             out.append(dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"),
-                            ema_bare_zero=a.get("bare_zero")))
+                            ema_bare_zero=a.get("bare_zero"), ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents")))
         # a claim no bridge finds whose line EMA's own A/R holds open for insurance past its due day (the same keyed patient,
         # day and code, in any bucket: "held for insurance, no claim created" too): EMA's books say the money is open and the
         # 837 says the claim went out, so it is listed as never answered, the A/R row its evidence (gapfix G5)
@@ -10210,7 +10225,8 @@ class Detector:
                     cd = dict(cd, rejected=True, status=st.get("status") or cd["status"])
                 elif cls == "gave_up":
                     cd = dict(cd, gave_up=True, status=st.get("status") or cd["status"])
-            cd = dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"), ema_bare_zero=a.get("bare_zero"))
+            cd = dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"), ema_bare_zero=a.get("bare_zero"),
+                      ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents"))
             if a.get("link") is not None:
                 self._export_links.add(a["link"])
             # EMA claims that are this claim or another listed one (send-day twins): the Production check leaves them

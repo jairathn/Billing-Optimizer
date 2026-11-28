@@ -15,7 +15,7 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
 | G4 ERA start/stop window | done, tests green, break and restore done | detect.py `_run_837` (`no_era_at`, NO_ERA_WINDOW_DAYS = 90: 180 days around each claim's send, same min count and share); tests/test_gap_unseen.py::test_claims_sent_before_*, ::test_claims_sent_after_* |
 | G5 A/R held-open line | done, tests green, break and restore done | detect.py `_837_ema_answers` (pending unseen, then `_ar_held_open`), `_ar_held_open`, `_emit_open_claim` (evidence 'ar_open' and hint); count 837_ar_held_open; tests/test_gap_unseen.py::test_a_claim_whose_line_emas_ar_holds_open_* |
 | G7 waiting view names all or the remainder in dollars | done, tests green, break and restore done | detect.py `_finish_waiting` ('unnamed', 'ema_reports' from the notes); insights `_waiting_837` (remainder and notes in the detail); tests/test_gap_print_batch.py::test_the_waiting_view_counts_* |
-| G6 second-payer bridge | only if safe | ema_checks.claim_answers |
+| G6 second-payer bridge | done in the content bridge, with the guard; tests green, break and restore done | ema_checks.claim_answers (`by_second`, `second_of`, `_second_group`, answers only by role 'secondary' postings and the second payer's reasons, 'second_payer' and 'open_cents' in the answer); detect `_answered_rule` (no patient or name answer for a second-payer claim), `_emit_open_claim` (valued at EMA's open balance; not listed when nothing is open: open_claim_second_nothing_open); tests/test_gap_unseen.py::test_a_claim_sent_to_the_visits_second_payer_*, ::test_the_first_payers_payment_* |
 
 ## G8: what was built
 
@@ -70,6 +70,20 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
 - The waiting view is rebuilt at the end of run_ema_report_claims (the notes and the hand-off's rows in it); `_finish_waiting`
   counts the notes by check ('ema_reports') and the claims past WAITING_LIST_MAX ('unnamed': n, dollars, due days), and the
   Data tab's waiting line says both.
+
+## G6: what was built, and what was left
+
+- The content bridge (ema_checks.claim_answers) also accepts an EMA claim whose SECOND payer's group is the claim's payer,
+  when no EMA claim of the claim's own payer has its content (chosen as any other: one, or the patient's one among several).
+  Such a claim is answered only by that payer's own postings: payments EMA files under the line's secondary payer (role
+  'secondary'), $0 answers with proof under it, reasons posted under its name. The one answered rule gives it no answer by
+  the patient's other postings or by name (the first payer's payment or settlement never answers it). A found, unanswered
+  second-payer claim is valued at what EMA leaves open after the first payer (ema_lines balance), not listed when nothing is
+  left open (counted open_claim_second_nothing_open).
+- Left, by choice (not safe in this unit): the send-day twin and unanswered-before-send bridges still compare EMA's primary
+  group only. Extending them needs `_links_answered` and `_unanswered_before_send`'s 'nothing answered' test restricted to
+  the second payer's postings for such links; until then a second-payer claim only those bridges could find stays counted
+  unseen with reason second_payer_not_matched.
 
 ## Next command
 
