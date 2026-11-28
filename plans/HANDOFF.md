@@ -38,9 +38,27 @@ payer's accepted channel, easiest first, with the fields prefilled; and say whet
 - Held before main: 131 of the accepted never-answered/rejected items ($20,113) have no answer the new code can see (no EMA
   answer, no 835 after the send) and the new run lists nothing for them. Also 1,557 sent claims ($629,759 billed, 1,237 of
   them VA Community Care) whose answer no source shows are only counted (meta ema:unanswered_unseen), never listed.
-- Workflows running: wf_620ce5d4-0af (why the 131 are off the list; how to make the unseen claims workable),
-  wf_9cc2ebed-acb (January to November replay with simulated billers, private folder `$S/tk/replay`), wf_c3711a72-b66
-  (payer routes per request type with sources, verified). Next: fix what the first finds (failing test first), then main.
+- Done since: the gap investigation (wf_620ce5d4-0af, private notes `$S/tk/gap/q1.md`, `q2.md`): 129 of the 131 are
+  right to be off the list (EMA shows the payer's answer, or inside the payer's answer time on the waiting view, or billed
+  at $0); 2 VA print-batch claims ($260) are on no list (G1). Of the 1,557 unseen, 1,542 are 2023-2024 visits no EMA
+  report in the store reaches; the Data tab shows none of it in dollars, the stated reason is wrong, and the archive would
+  drop them silently (G2, G3). The payer routes research is done (wf_c3711a72-b66; private `$S/tk/routes/research_raw.json`,
+  public facts only). The replay ran all 11 months before a container restart; its analysis is being finished.
+- Running (2026-11-28, 08:30 UTC): wf_1b05bad9-f47 builds two units, each reviewed twice then fixed: `wip/gapfix`
+  (plans/briefs/2026-11-28_gapfix.md; G1 to G8 built, tests green, measuring) and `wip/routes`
+  (plans/briefs/2026-11-28_routes.md; payer_routes.json with 189 routes, routes.py, the drawer's route card, suites
+  running). wf_0ffb49e5-5fe finished the replay's analysis (private `$S/tk/replay/`, its report is in the workflow's
+  journal) and checks three suspect classes; two are confirmed code bugs so far (one claim keyed two ways, fixed by
+  gapfix G8; safe mode's posted_money check falls falsely when a payer alias is learned). wf_24badb46-8b5 checks the ten
+  suspect classes the first pass did not reach (proposed failing tests in `$S/tk/replay/proposed_tests/`).
+  wf_922f5636-97c builds unit `wip/ui-a` (plans/briefs/2026-11-28_ui.md: the stylesheet, the app shell, Today, the brand;
+  designer and biller reviews, then a fix round). The design system and both critiques are private in `$S/tk/ui/`.
+- Vercel's /api/health answers (commit 330f4b5 at 08:07 UTC). The server's address is not in this session's notes; find
+  it before the release check (never write it into the repository).
+- Next: merge wip/gapfix then wip/routes into the integration worktree; a unit `replay-fix` for the replay's confirmed
+  code bugs (failing tests first); merge wip/ui-a; four-env suites, a private real-data run, push main, check both sites;
+  then the UI units ui-work, ui-panel, ui-pages, ui-words, ui-signin (brief section "The units after ui-a"), suites,
+  deploy.
 
 ### Before that (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
 
