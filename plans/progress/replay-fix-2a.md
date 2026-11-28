@@ -61,14 +61,20 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
 - [x] A1-A4 measured on the replay (read only) and the release effect on final_world3 (below)
 - [x] A4 follow-ups from the replay's residuals (5fc3746), TROUBLESHOOTING line (cdc0743)
 - [x] merged origin/wip/replay-fix 386f026 (no conflict); gapfix cdd3463 already in
-- [ ] touched files' tests in four environments (private touched_envs.sh; one environment at a time)
-- [ ] full suite in python3 and venv_sqlite340 (plans/tools/shard.sh, RW_RUNS in the private folder)
-- [ ] merge the newest gapfix and replay-fix tips again, rerun the touched tests, final push, report
+- [x] touched files' tests (the 23 files of this unit and the rules they touch), four environments, at 09d247a:
+      python3 1400 passed, 1 skipped; newest libraries (3.13, SQLite 3.53) 1400 passed, 1 skipped; 3.12/SQLite 3.45
+      1400 passed, 1 skipped; 3.11.1/SQLite 3.40 1275 passed, 70 skipped, 41 failed or errors, every one the missing
+      Connection.serialize (that build cannot make a store image; Vercel can). The one skip is test_docs' private
+      words test: with REMITWATCH_PRIVATE_WORDS set, test_docs is 40 passed.
+- [x] full suite, python3 (shard.sh, 3 shards): 4,666 passed, 29 skipped, 1 xfailed, 0 failed
+- [x] full suite, 3.11.1/SQLite 3.40 (shard.sh, 3 shards): 4,392 passed, 71 skipped, 1 xfailed, 217 failed or errors,
+      every traceback the missing serialize, the same 217 as the replay-fix unit's run on its tip
+- [x] merged origin/wip/replay-fix eef678f (its progress file only); gapfix cdd3463 already in
+- [x] final push and report
 
 ## Next command
 
-ENVS=python3 then the other three: private touched_envs.sh; then plans/tools/shard.sh <tree> python3 full-py3 2 and
-the same with venv_sqlite340; then fetch and merge origin/wip/gapfix and origin/wip/replay-fix again.
+None: the unit is done. A later unit takes the two items under "Left for a later unit".
 
 ## Left for a later unit (found on the replay, not fixed here)
 
