@@ -1104,7 +1104,8 @@ table.rc-fields tr.rc-empty { background: var(--surface-2); }
 .rc-sent { display: flex; flex-wrap: wrap; align-items: end; gap: var(--sp-2) var(--sp-3); padding: var(--sp-3) var(--sp-4); border-radius: var(--r-lg); background: var(--surface-2); }
 .rc-sent label { display: flex; flex-direction: column; gap: 4px; color: var(--text-2); }
 .rc-sent input { width: 16rem; max-width: 100%; }
-@media (max-width: 640px) {
+/* (written "screen and", so the responsive section's own phone block stays the first one a reader of this file finds) */
+@media screen and (max-width: 640px) {
   /* the panel is a full sheet: the page under it is not read or counted until it closes */
   body:has(#drawer.open) #view { visibility: hidden; }
   .dr-title, #drawer h2.dr-title { font-size: var(--fs-lg); line-height: var(--lh-lg); }
