@@ -145,7 +145,10 @@ FINDING_FIELDS = ("finding_id", "signal", "category", "status", "stale", "line_k
                   "patient_control_number", "service_date", "payment_date", "procedure_code", "original_procedure_code",
                   "billed_code", "ema_link", "payer_group", "payer_kind", "carc", "shortfall_cents", "expected_cents", "first_seen",
                   "work_state", "appeal_deadline", "legal_deadline", "evidence", "auto_note", "recovered_cents", "recovered_date",
-                  "status_changed_at", "state_basis", "ema_outcome", "written_off_cents", "written_off_on", "notes")
+                  "status_changed_at", "state_basis", "ema_outcome", "written_off_cents", "written_off_on", "notes", "state_rule")
+# the rules of a done state that bring or prove no money: a person's Done (nothing recovered, the owner's decision 2) and an
+# item no longer listed (stale). An item lost to its deadline that turns done by one of these stays lost (_lost)
+DONE_NO_MONEY = ("person_done", "stale")
 ITEM_KEYS = ("finding_id", "signal", "category", "status", "line_key", "claim_key", "transaction_key", "patient_control_number",
              "service_date", "payment_date", "procedure_code", "original_procedure_code", "billed_code", "ema_link", "payer_group",
              "payer_kind", "carc")
@@ -663,6 +666,18 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
                     info = json.dumps(fi, separators=(",", ":"))
                     lost_cents, lost_on = sum(p[1] for p in parts), day
                     n_lost += 1
+            if expired_on:
+                # a loss's item that turns done: the rule that made it done is kept beside the loss (flag_info 'done_rule'),
+                # and dropped when it is no longer done, so the figure can tell money that came after all from a person's
+                # Done or a stale row (_lost)
+                fi = _json(info)
+                rule = (f.get("state_rule") or "unknown") if ws == "done" else None
+                if fi.get("done_rule") != rule:
+                    if rule:
+                        fi["done_rule"] = rule
+                    else:
+                        fi.pop("done_rule", None)
+                    info = json.dumps(fi, separators=(",", ":"))
         rows.append((fid, first, t, None, ever_open, f.get("signal"), f.get("category"), f.get("payer_group"), f.get("payer_kind"),
                      f.get("procedure_code"), f.get("carc"), f.get("service_date"), flagged, f.get("shortfall_cents"), ws,
                      f.get("status"), expired_on, lost_on, lost_cents, info, _item_json(f, prev[10] if prev else None)))
@@ -2037,11 +2052,22 @@ def _credits(conn: sqlite3.Connection, today: str) -> dict:
     return out
 
 
+def _settled_after_loss(r: dict) -> bool:
+    """A registry row lost to its deadline whose item is now done by a rule that brought or proved money (update_registry
+    keeps the rule as flag_info 'done_rule'; a rule it could not read, 'unknown', proves nothing)."""
+    rule = (r.get("flag_info") or {}).get("done_rule")
+    return r.get("last_state") == "done" and bool(rule) and rule not in DONE_NO_MONEY + ("unknown",)
+
+
 def _lost(reg: dict) -> tuple[dict, dict]:
     """Items that expired while they were Work now (lost to the deadline), recorded by the registry when the state changed.
     An item whose every line another item already counted lost (flag_info 'lost_elsewhere', update_registry) is that
-    item's loss, never a second one."""
-    rows = sorted(((fid, r) for fid, r in reg.items() if r.get("expired_on") and not (r.get("flag_info") or {}).get("lost_elsewhere")),
+    item's loss, never a second one. An item done since by money (its last state done by a rule that proves a payment or a
+    person's Paid: say paid before by another payer once the link map gave a visit's denial its EMA claim back) lost
+    nothing: the registry keeps its expiry, the figure leaves it out. One a person let go or marked Done (nothing
+    recovered), or that left the list, after it expired stays lost: the loss came at the deadline."""
+    rows = sorted(((fid, r) for fid, r in reg.items() if r.get("expired_on") and not (r.get("flag_info") or {}).get("lost_elsewhere")
+                   and not _settled_after_loss(r)),
                   key=lambda x: (-(x[1].get("lost_cents") or 0), x[0]))
     weeks: dict = defaultdict(lambda: [0, 0])
     by_week: dict = defaultdict(list)
