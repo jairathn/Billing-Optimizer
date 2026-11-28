@@ -44,6 +44,11 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
   part paid, denied, patient, paid by EMA and 835 with the decision log row and a second run, person's Started, takeback
   reopens, person moved off the closure, decision 3 owed, handed-on Started, results unit, stale chase in the open book;
   file, compact and image). Break-and-restore done for 7 parts (private break_a4.py).
+  Follow-ups from the replay (each with a test on file, compact and image, break-and-restore B8-B11): the item keeps its
+  own line where the candidate moved to the first payer's later line; EMA's second-payer money is read at any posting
+  date; the item's own EMA claim is read where the link map let go of the bill; a billed item whose service has no
+  candidate any more (the first payer took its payment back) is still read (and nothing changes with no answer: control
+  test). The test file has 57 tests.
 
 ## State
 
@@ -52,11 +57,29 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
 - [x] A2 fixed, tests green in python3 (745 related tests pass)
 - [x] A3 fixed, tests green in python3 (runlog, diagnose, hooks, swing, selfcheck, results pass)
 - [x] merged the newest origin/wip/gapfix (4f5d8b1) and origin/wip/replay-fix (995abe7) before A4 (no conflict)
-- [x] A4 fixed, its test file green in python3; related files running
+- [x] A4 fixed, its test file green in python3
+- [x] A1-A4 measured on the replay (read only) and the release effect on final_world3 (below)
+- [x] A4 follow-ups from the replay's residuals (5fc3746), TROUBLESHOOTING line (cdc0743)
+- [x] merged origin/wip/replay-fix 386f026 (no conflict); gapfix cdd3463 already in
+- [ ] touched files' tests in four environments (private touched_envs.sh; one environment at a time)
+- [ ] full suite in python3 and venv_sqlite340 (plans/tools/shard.sh, RW_RUNS in the private folder)
+- [ ] merge the newest gapfix and replay-fix tips again, rerun the touched tests, final push, report
 
 ## Next command
 
-Measure A1-A4 on the replay's data, read only (verdict reproductions with this tree), and the release effect on final_world3 (read only); then the four environments for the touched files' tests and the full suite in python3 and venv_sqlite340; merge the newest gapfix and replay-fix tips again before the final push.
+ENVS=python3 then the other three: private touched_envs.sh; then plans/tools/shard.sh <tree> python3 full-py3 2 and
+the same with venv_sqlite340; then fetch and merge origin/wip/gapfix and origin/wip/replay-fix again.
+
+## Left for a later unit (found on the replay, not fixed here)
+
+- Two billed items on one service (bill, date, code): 3 on the replay ($38.93), each a pair where the first payer paid
+  two lines of the code (or paid, took back and paid the line again) and a person marked both items billed. The rule
+  answers the item on its candidate line; the other stays stale, as before this unit (the open book counts it closed).
+  A fix has to tell a second bill of the same share (close it with the first, no second recovery) from two lines of the
+  service (split the second payer's money between them, never counted twice).
+- Billed, no answer, past the second payer's limit: 3 on the replay ($75.19) are dropped by the rule's past-limit branch
+  (replay-fix-2b's retired line names them to the vanished check). Whether a line a person billed in time should stay
+  listed for its follow-up past that limit is a decision for the owner.
 
 ## Measured (read only; aggregates)
 
