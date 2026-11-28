@@ -564,20 +564,23 @@ def test_a_claim_whose_line_emas_ar_holds_open_is_listed_not_counted_unseen(tmp_
 
 
 @pytest.mark.parametrize("kind", KINDS)
-@pytest.mark.parametrize("held_for", ["secondary", "other_payer"])
+@pytest.mark.parametrize("held_for", ["secondary", "other_payer", "same_payer_as_secondary"])
 def test_a_line_the_ar_holds_for_another_coverage_does_not_make_the_claims_payer_never_answered(tmp_path, kind, monkeypatch,
                                                                                                held_for):
     """Claim 71 again (88305 at $64, March 5), sent March 9 to Blue Cross as the PRIMARY payer (the 837's SBR01 P); no 835
     answers it and no Production line holds it. EMA's A/R holds the same patient's 88305 of March 5 open for insurance:
     'secondary', under the SECONDARY coverage (Blue Cross primary, Medicare secondary: EMA moves a balance to the second
     coverage once the first payer has answered); 'other_payer', under the primary coverage of another payer (Medicare
-    primary, no secondary). Neither row is Blue Cross's balance as the claim's payer: nothing says Blue Cross left the claim
+    primary, no secondary); 'same_payer_as_secondary', under the secondary coverage, which EMA gives Blue Cross (Medicare
+    primary): EMA holds Blue Cross's balance as the second payer's, after a first payer's answer, not the claim the 837 sent
+    Blue Cross as its first payer. None is Blue Cross's balance as the claim's payer: nothing says Blue Cross left the claim
     unanswered, so it stays counted unseen (review gapfix-r2-3). Before: G5 took any insurance row of the patient's day
     and code, and listed the claim as never answered on the strength of another coverage's balance."""
     from tests import ema_fixtures as F
     MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
-    cover = (dict(coverage="Secondary", primary=BCP, secondary=MED) if held_for == "secondary" else
-             dict(coverage="Primary", primary=MED, secondary="None"))
+    cover = {"secondary": dict(coverage="Secondary", primary=BCP, secondary=MED),
+             "other_payer": dict(coverage="Primary", primary=MED, secondary="None"),
+             "same_payer_as_secondary": dict(coverage="Secondary", primary=MED, secondary=BCP)}[held_for]
     ar = [F.ar_row(claim=None, link=None, party="Insurance", current=64.0, cpt="88305", svc=D(2026, 3, 5), patient="Sample, Pat",
                    status=None, aging=D(2026, 4, 25), **cover)]
     s, lg = _world(tmp_path, kind, monkeypatch, [], ar)

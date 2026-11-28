@@ -9712,17 +9712,27 @@ class Detector:
     def _ar_held_open(self, cds: list[dict]) -> dict[str, dict]:
         """For never-answered 837 claims no bridge found: the line EMA's A/R holds open for insurance with a balance, for the
         claim's patient (its 837's keyed name, as EMA keys the A/R's patients), day and code, on an A/R dated after the
-        claim's due day. {claim id: {'balance_cents', 'as_of', 'bucket', 'status', 'coverage', 'lines'}}."""
+        claim's due day, and for the claim's own payer: the row's coverage is the claim's place on its 837 (Primary for
+        SBR01 P, Secondary for S, Tertiary for T, where the 837 says it) and the payer EMA names for that coverage is the
+        claim's payer group. A balance EMA holds for another coverage says nothing of this payer's answer: EMA moves a
+        balance to the second coverage once the first payer has answered (gapfix review r2-3).
+        {claim id: {'balance_cents', 'as_of', 'bucket', 'status', 'coverage', 'lines'}}."""
         c = self.conn
         if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ema_ar'").fetchone():
             return {}
         info = self._837_send_info([cd["s837"][7] for cd in cds if cd.get("s837") is not None and cd["s837"][7]])
         want = []
+        place: dict[str, str | None] = {}
+        groups: dict[str, set] = {}
         for cd in cds:
             r8 = cd.get("s837")
-            pk = (info.get(r8[7]) or {}).get("patient_key") if r8 is not None and r8[7] else None
+            got = (info.get(r8[7]) or {}) if r8 is not None and r8[7] else {}
+            pk = got.get("patient_key")
             if pk is None or not cd.get("due"):
                 continue
+            resp = (got.get("payer_resp") or "").strip().upper()
+            place[cd["pcn"]] = {"P": "primary", "S": "secondary", "T": "tertiary"}.get(resp) if got.get("read_version") else None
+            groups[cd["pcn"]] = {g for g in (cd.get("grp"), cd.get("match_group")) if g and g != "Unknown"}
             want += [(cd["pcn"], int(pk), x[1], x[0], cd["due"]) for x in cd["items"] if x[0] and x[1]]
         if not want:
             return {}
@@ -9730,13 +9740,22 @@ class Detector:
         c.execute("CREATE TEMP TABLE d_aropen (pcn TEXT, nk INTEGER, svc TEXT, cpt TEXT, due TEXT)")
         c.executemany("INSERT INTO temp.d_aropen VALUES (?, ?, ?, ?, ?)", want)
         out: dict[str, dict] = {}
-        for pcn, cents, as_of, cid, lk, st, cov, svc, cpt in c.execute(
+        for pcn, cents, as_of, cid, lk, st, cov, svc, cpt, row_grp in c.execute(
                 """SELECT u.pcn, COALESCE(a.exposure_cents, a.balance_cents), a.as_of, a.claim_id, a.link, a.claim_status, a.coverage,
-                          a.svc, a.cpt
+                          a.svc, a.cpt, a.payer_group
                    FROM temp.d_aropen u JOIN ema_ar a ON a.name_key = u.nk AND a.svc = u.svc AND a.cpt = u.cpt
                    WHERE lower(COALESCE(a.party, '')) LIKE 'insur%' AND COALESCE(a.exposure_cents, a.balance_cents, 0) > 0
                      AND SUBSTR(a.as_of, 1, 10) > u.due
                    ORDER BY u.pcn, a.as_of, a.svc, a.cpt"""):
+            # the payer EMA holds the balance for (ema_reports: the coverage's own payer) is the claim's, under the coverage
+            # the 837 sent it as; else the row is another payer's matter
+            if not any(self._same_group(row_grp, g) for g in groups.get(pcn) or ()):
+                self.ema_counts["837_ar_open_other_payer"] += 1
+                continue
+            want_cov = place.get(pcn)
+            if want_cov and not str(cov or "").strip().lower().startswith(want_cov):
+                self.ema_counts["837_ar_open_other_coverage"] += 1
+                continue
             o = out.setdefault(pcn, {"balance_cents": 0, "as_of": None, "bucket": None, "status": None, "coverage": None, "lines": []})
             o["balance_cents"] += int(cents or 0)
             o["as_of"] = max(o["as_of"] or "", str(as_of or "")[:10]) or None
@@ -12452,6 +12471,21 @@ class Detector:
                 same_link.setdefault(lk, prev)
         first_cache: dict[str, str] = {}
 
+        def sent_after_decision(f: dict, w: dict) -> bool:
+            """Whether item f's claim first went out after a person's work on w, an item keyed by its EMA claim number alone
+            (the report checks', before the A/R or the 837s named its claim id): then f is the bill sent again, a new matter,
+            not the claim w was about, and never takes w's Let go, Paid or Sent whole (gapfix review r2-1). A claim sent on
+            or before that day is the claim w was about, under its claim id at last; one whose send is not known is too."""
+            if w.get("patient_control_number") or not worked(w):
+                return False
+            try:
+                ev = json.loads(f.get("evidence") or "{}")
+            except ValueError:
+                return False            # (an item's own evidence, written by this run as JSON: never damaged)
+            first = str((ev.get("sent_837") or {}).get("first") or ev.get("sent") or "")[:10]
+            decided = str(w.get("status_changed_at") or w.get("first_seen") or "")[:10]
+            return bool(real_day(first) and real_day(decided) and first > decided)
+
         def first_paid(pcn: str) -> str:
             """A claim's first remittance date: its own answer, as against a reprocessing months later (a new matter)."""
             if pcn not in first_cache:
@@ -12520,6 +12554,17 @@ class Detector:
                         if (w is not None and w["finding_id"] not in inherited
                                 and (not w.get("patient_control_number") or not f.get("patient_control_number")
                                      or w["patient_control_number"] == f["patient_control_number"])):
+                            if sent_after_decision(f, w):
+                                # the bill sent again after a person's work on the EMA claim's item: a new matter, handed
+                                # the notes as a bill sent again is (via_bill below); the old item keeps its decision, stale,
+                                # and is named here so the self-check sees where its claim went. An item a person marked
+                                # Paid is a recovery on the record: it stays as it is and hands nothing on
+                                if w["status"] != "resolved":
+                                    via_bill = w
+                                    self._fold_into(fid, w["finding_id"], "ema_claim_sent_again",
+                                                    f"The bill was sent again after the work on EMA claim {lk}: a new matter, "
+                                                    "with its notes", signal=w.get("signal") or "NO_ANSWER", gone_item=w)
+                                break
                             heir = w        # the same EMA claim, keyed by its number in one run and its claim id in the other
                             # named on the heir as folded into it: the self-check that keeps an item no rule explains,
                             # the decision log and Results read where the old id went (it has no bill to match by)
@@ -12527,7 +12572,7 @@ class Detector:
                                             f"The same claim was listed before under {'EMA claim ' + str(lk) if not w.get('patient_control_number') else 'its claim id'}: "
                                             "its work carries on here", signal=w.get("signal") or "NO_ANSWER", gone_item=w)
                             break
-            if prev is None and heir is None and f.get("patient_control_number"):
+            if prev is None and heir is None and via_bill is None and f.get("patient_control_number"):
                 pcn_f = f["patient_control_number"]
                 paid_on = f.get("payment_date") or f.get("txn_payment_date") or ""
                 own = f.get("signal") in EMA_CLAIM_SIGNALS or paid_on == first_paid(pcn_f)    # a claim's chase, or its first answer

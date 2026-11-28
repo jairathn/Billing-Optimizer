@@ -425,7 +425,10 @@ def test_a_bill_sent_again_after_a_decision_on_its_ema_claim_is_a_new_matter(tmp
     assert it["status"] in ("open", "in_progress") and not it["stale"], (
         f"the resend (submission 2, never answered) was born '{it['status']}', the decision a person made on the first "
         f"claim's EMA claim number (folded: {'same_ema_claim' in (it['evidence'] or '')})")
-    assert "Decided on the first claim" in (it["notes"] or ""), it["notes"]
+    # Let go hands its notes on, as a bill sent again takes them; Paid is a recovery on the record and hands nothing on
+    assert ("Decided on the first claim" in (it["notes"] or "")) == (decision == "dismissed"), it["notes"]
+    old_row = [r for r in _all_subs(s) if r["finding_id"] == old["finding_id"]]
+    assert old_row and old_row[0]["status"] == decision, "the person's decision on the first claim stays on its own item"
     lg.close()
     s.close()
 
