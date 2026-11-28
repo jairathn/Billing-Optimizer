@@ -75,7 +75,7 @@ def test_a_claim_older_than_emas_reports_is_counted_with_that_reason_and_the_rep
     reports in the store start with services on March 2 (Production) and hold no line for it. It stays unlisted (nothing
     can show its answer), but the count says why: no EMA report covers its service date, and EMA's reports start on March
     2, so exporting EMA's Production and A/R for the earlier services would let the bridges run. (On the real data: 1,542
-    of the 1,557 claims, $626,251.87, services in 2023 and 2024, while EMA's reports start with services on 2025-01-02.)
+    of the 1,557 claims, $626,251.87, services in 2023 and 2024, while EMA's reports start with services in January 2025.)
     Before: the count's reason said EMA's claim 'cannot be told apart from others with the same date, code and charge',
     which is not what happened, and named no report to export."""
     from tests import ema_fixtures as F
