@@ -213,3 +213,17 @@ def test_every_change_a_page_sends_carries_the_name_chosen_on_this_computer(stor
     out = subprocess.run([shutil.which("node"), "-e", SHELL_FETCH, os.path.join(ROOT, "remitwatch", "static", "shell.js"),
                           stored or ""], capture_output=True, text=True, check=True, timeout=60)
     assert json.loads(out.stdout) == [first, None, None, "set%20by%20call"]
+
+
+def test_the_verdict_names_who_started_an_item_before_the_next_analysis(server):
+    """(ui-words) An item a person marks Started says who in its verdict at once ("Started by <name> on <day>"), as the
+    states write it after the next analysis; never "a person" when the history names one."""
+    fid = _todo(server)[0]
+    assert server.c.post(f"/api/findings/{fid}/status", json={"status": "in_progress"}, headers=as_person(STAFF)).status_code == 200
+    conn = sqlite3.connect(server.db)
+    try:
+        from remitwatch import story
+        v = story.explain(conn, fid)["verdict"]["sentence"]
+    finally:
+        conn.close()
+    assert f"Started by {STAFF} on " in v and "Started by a person" not in v, v

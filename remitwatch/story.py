@@ -1340,7 +1340,7 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
 
     def done(text: str, marks: list[int], strength: str = "one_source", why: str | None = None):
         if started:
-            text = f"{_started_words(st)}. {text}"
+            text = f"{_started_words(st, conn, fx['item'].get('finding_id'))}. {text}"
         if late:
             text = f"{late} {text}"
         return text, marks, strength, why
@@ -1494,10 +1494,23 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
     return done(f"{head}: {f.get('payer_group') or 'the payer'} answered {carcs} {_refs(ns)}.{window}", ns)
 
 
-def _started_words(st: dict) -> str:
-    """'Started by <who> on <date>' from a person-started state."""
+def _started_words(st: dict, conn: sqlite3.Connection | None = None, finding_id: str | None = None) -> str:
+    """'Started by <who> on <date>' from a person-started state. Before the next analysis has written that basis, the
+    item's newest Started in its history says who (ui-words: the name the person chose, else the sign-in), as the states
+    write it after the analysis; "a person" only when the history has none."""
     b = str(st.get("state_basis") or "")
-    return b.split(".", 1)[0] if b.startswith("Started by") else "Started by a person"
+    if b.startswith("Started by"):
+        return b.split(".", 1)[0]
+    if conn is not None and finding_id:
+        try:
+            e = conn.execute("SELECT actor, at FROM finding_events WHERE finding_id=? AND kind='manual' AND to_status='in_progress' "
+                             "ORDER BY at DESC, id DESC LIMIT 1", (finding_id,)).fetchone()
+        except sqlite3.Error:
+            e = None
+        if e and e[0]:
+            when = S._pday(e[1])            # the practice's day of the moment kept (a 9 PM Eastern start is that day's)
+            return f"Started by {e[0]} on {day(when)}" if when else f"Started by {e[0]}"
+    return "Started by a person"
 
 
 def _secondary_sentence(fx: dict, story: dict, st: dict, today: str) -> tuple[str, list[int]]:
