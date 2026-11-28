@@ -141,3 +141,24 @@ fixed when the change is one safe line, else they wait with the reason.
   390x844; 0 px row change and 0 px bar change when the panel opens; What happened keeps 13 to 27 characters beside the
   docked panel; 0 panel buttons under 44 px on a phone's first screen.
 - claude/ecstatic-fermi-orfcgo moved by aeb4bb6 (the same HANDOFF tree as 17b2e24): merged, nothing to resolve.
+- The full python3 suite at 8b87181 found 30 failures the page tests had not: 28 from the d-6 listener (features.js
+  added a visibilitychange listener at load; the node harnesses load features.js in a bare context with no
+  addEventListener) and 2 in test_swing (swing.js asks inline since fac5098, its harness still waited for a confirm box).
+  2a78800 guards the listener and moves three harnesses with the same guarantee (swing_page.js, clock_page.js,
+  hook_accept_page.js read the question beside the button and answer yes, as they answered the box; a browser box is an
+  error now).
+
+## Suites (at 2a78800)
+
+- python3, the full suite in three shards: 5,095 passed, 29 skipped, 1 xfailed, 0 failed.
+- The tests of every touched file (28 files: test_staff_names_private, test_hotfix2, test_features, test_last_day,
+  test_one_definition, test_ema_pages2, test_desk, test_ema_pages, test_headlines, test_routes, test_shell, test_story,
+  test_style, test_docs, test_runlog, test_cloud, test_insights, test_results, test_states, test_modmed,
+  test_api_review, test_ui_pages, test_upload_chunks, test_uploads, test_who_is_working, test_practice_day,
+  test_panel, test_diagnose) plus the three whose harnesses moved (test_swing, test_hook_review, test_hotfix2c):
+  newest libraries 1,200 + 123 passed, 1 skipped; Python 3.12 with SQLite 3.45 the same; Python 3.11.1 with SQLite
+  3.40.0 1,153 + 82 passed, 1 skipped, 88 failed or errored, every one from the missing Connection.serialize (50 name
+  it directly, 37 errors at setup, 1 through runtime.selftest reporting it), as allowed.
+- Node: calc_model_check 79 of 79, lab_review_check 143 of 143. test_docs with the private word list: 41 passed.
+- claude/ecstatic-fermi-orfcgo checked again before the final push: still aeb4bb6, merged.
+- The demo (port 8771) is stopped and its site folder deleted.
