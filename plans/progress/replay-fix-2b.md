@@ -5,8 +5,10 @@ plans/HANDOFF.md. The verdicts behind each bug are private: `$S/tk/replay/verify
 B2 = 2, B3 = 7, B4 = 10, B5 = 8). The proposed failing tests (invented data) are in `$S/tk/replay/proposed_tests/`.
 
 Base: origin/claude/ecstatic-fermi-orfcgo (ed245a1) with origin/wip/gapfix (89acb3c) and origin/wip/replay-fix (0cd46c8)
-merged in; their newest tips merged again after B5 (gapfix 4f5d8b1, replay-fix 995abe7), both clean. Worktree
-`$S/tk/wt/replay-fix-2b`, branch `wip/replay-fix-2b`, private folder `$S/tk/units/replay-fix-2b`.
+merged in; their newest tips merged again after B5 (gapfix 4f5d8b1, replay-fix 995abe7), during the suites (gapfix
+cdd3463, replay-fix 386f026) and at the end (the integration tip fa0aafa: gapfix and routes merged there, replay-fix
+eef678f), each clean. Worktree `$S/tk/wt/replay-fix-2b`, branch `wip/replay-fix-2b`, private folder
+`$S/tk/units/replay-fix-2b`.
 
 Files this unit owns: remitwatch/selfcheck.py (check_vanished, _no_route, _sent_again, _facts_of, later_payments,
 after_detection's ctx), remitwatch/detect.py (the retired hand-off, settled(), _after_save_checks),
@@ -77,19 +79,31 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
 
 ## Next command
 
-Suites: the full suite in python3, then the touched files' tests in venv2_compat and venv2_compat312, then the full
-suite in venv_sqlite340 (one environment at a time; `$U/suite.sh <python> <out> [tests]` strips the feeds' settings).
+None in this unit: the work is done and reported to the workflow. For the integrator: trial merges (`git merge-tree`) of
+this tip with wip/replay-fix-2a, wip/ui-words and wip/ui-signin are clean; wip/ui-a conflicts in
+remitwatch/static/index.html, as the integration tip itself does (the routes card against ui-a's shell; this unit
+changes nothing under static/).
 
-## Tests (after the merges of gapfix 4f5d8b1 and replay-fix 995abe7)
+## Tests
 
-- python3 (3.13.18, SQLite 3.53.1), the full suite: 4,432 passed, 29 skipped, 1 xfailed; 3 failed and 162 errors, every
-  one "No space left on device" or "disk is full" (the shared disk filled during the run); the 3 files they were in
-  (test_fx_ledger, test_fx_hosts, test_hooks) run again once space was back: 320 passed.
-- The touched files' tests (17 files: the five added, test_ema_ledger, test_selfcheck, test_replay_selfcheck,
-  test_runlog, test_docs, test_gap_unseen, test_gap_one_claim, test_ema_wiring, test_837_sends, test_fx_exports,
-  test_fx_ema, test_archive): venv2_compat (newest libraries) 971 passed, 1 skipped; venv2_compat312 (Python 3.12.3,
-  SQLite 3.45.1) 971 passed, 1 skipped.
-- venv_sqlite340 (Python 3.11.1, SQLite 3.40.0), the full suite: see below.
+- python3 (3.13.18, SQLite 3.53.1), the full suite on the merge of gapfix 4f5d8b1 and replay-fix 995abe7: 4,432 passed,
+  29 skipped, 1 xfailed; 3 failed and 162 errors, every one "No space left on device" or "disk is full" (the shared disk
+  filled during the run); the 3 files they were in (test_fx_ledger, test_fx_hosts, test_hooks) run again once space was
+  back: 320 passed.
+- venv_sqlite340 (Python 3.11.1, SQLite 3.40.0), the full suite on 85d135f (gapfix cdd3463 and replay-fix 386f026
+  merged): 4,381 passed, 81 skipped, 1 xfailed; 169 failed and 48 errors, all 217 tracebacks that build's missing
+  Connection.serialize or deserialize (the store image; CLAUDE.md allows it there), as many as the gapfix and
+  replay-fix runs report on their tips. None is in this unit's five test files (their image cases skip there).
+- After the last merge (205b0bf: the integration tip fa0aafa), the touched files' tests (17 files: the five added,
+  test_ema_ledger, test_selfcheck, test_replay_selfcheck, test_runlog, test_docs, test_gap_unseen, test_gap_one_claim,
+  test_ema_wiring, test_837_sends, test_fx_exports, test_fx_ema, test_archive) and the merge's own (test_routes,
+  test_routes_review, test_hooks, test_m1_exports), 1,221 tests: python3 1,220 passed, 1 skipped; venv2_compat (newest
+  libraries) 1,220 passed, 1 skipped; venv2_compat312 (Python 3.12.3, SQLite 3.45.1) 1,220 passed, 1 skipped;
+  venv_sqlite340 1,100 passed, 80 skipped, 36 failed and 5 errors, all 41 the serialize limit (test_hooks 30,
+  test_archive 4, test_runlog 4, test_ema_ledger 3; each among the full suite's 217).
+- Node checks on the merged tree: calc_model_check 79 of 79, lab_review_check 143 of 143 (static/ changed by the routes
+  merge; this unit changes nothing there).
+- Each run with pytest's temp folders in a private folder deleted after it (`$U/suite.sh`), one environment at a time.
 
 ## Measurements (replay data, read only)
 
@@ -173,4 +187,23 @@ this unit merged (gapfix, replay-fix) without its changes, after = this branch. 
 
 - B2: a second payer's share raised already past its last day (never Work now) and then retired has its dollars only in
   meta ema:wiring (snb_past_limit, snb_past_limit_cents): no page shows that counter. Not changed here (pages are the UI
-  units'); measured on the replay below.
+  units'). On the replay, the 56 unlisted past-limit departures ($1,880.30, Measurements, B2) bound them from above.
+- Results keeps a loss it recorded: once an item went from Work now to expired, the registry's expired_on and lost_cents
+  stay when the item later turns done (results.py `_lost` lists every row with expired_on). The B5 denial the release
+  moves from expired to done ($50.33, paid before by the other payer) stays counted as lost to its deadline if Results
+  recorded it so. results.py is not this unit's file (replay-fix-2a edits it).
+- B3: the replay's last guard offender ($127.80, DENIED_DUPLICATE_UNPAID, work_answered: another payer's later 835
+  covers a duplicate denial a person worked) was not traced. The own-payer rule covers downcoding and underpayment items
+  only, as the brief says; a denial still counts any payer's later money.
+- B4: only codes a person let go settle. An add-on code with no item of its own (G2211 beside a let-go 99214) stays
+  listed as the claim's denial, and an item that already lists a let-go code keeps it (the review5 exclusion): the rule
+  stops new duplicates, it does not take back one already listed.
+- The world's vanished check keeps 2 NO_ANSWER ($121.10) in both runs: no rule of this unit retires them.
+- FACTS_VERSION 3 -> 4: the first run after the release compares no stored fingerprints, so an item that leaves that run
+  on new facts alone is kept once and waits for Accept on the Data tab (docs/TROUBLESHOOTING.md says so).
+- B5 on Vercel: the map is redone (rule "2") at the first run that applies an EMA report or reads a new 835 (meta
+  ema:map_dirty); the server's cycle refreshes every cycle, so it redoes the map at its next cycle.
+- Measurement limits: detection was not re-run on the replay's month states (copying a state file needs more than 3 GB
+  free; the disk had 2.5 to 3.6 GB then). The month counts come from the replay's snapshots; the in-run figures come
+  from one run at the replay's last day and one at the world's day, each on a copy held in memory (sqlite backup of the
+  store opened mode=ro; nothing written to disk).
