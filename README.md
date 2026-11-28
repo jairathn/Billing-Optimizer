@@ -178,6 +178,15 @@ deploy/           container entrypoint, Caddyfile, cron example (only for a host
 tests/            synthetic-fixture tests (no patient data); stand-ins: fakes.py (Dropbox), fake_sftp.py (TriZetto), fake_fax.py (SRFax), fake_modmed.py (ModMed's sign-in and FHIR API)
 ```
 
+## Who is working
+
+Each person picks a name once per computer (the card at the foot of the sidebar; a first name is enough). The name is
+kept with what they do, in the item's history, and shows as "by <name>" on Work, in the item's panel, in its history and
+in the team lines on Results. It is a label, not a sign-in: nothing checks it, anyone signed in can type any name (a
+colleague's too), and it gives no right. The owner's actions still need the owner's password, whatever name is chosen.
+Scripts may send the name in the `X-RemitWatch-Person` header (URI-encoded). Names are never written to a log, a run
+manifest or a diagnostic bundle (the scrubber in remitwatch/runlog.py masks them, one-word names too).
+
 ## PHI
 
 The store, the Dropbox mirror, the uploads, the backups and the appeal packets contain patient names, member numbers and dates of service. `data/` is git-ignored. Every site serves no data until `REMITWATCH_PASSWORD` is set; run it behind HTTPS with the shared login and keep the host under a BAA. With `REMITWATCH_SHOW_PHI` off (the default) the screens show initials and placeholders, the CSV export has no patient column, and each finding carries the claim ID to look the patient up in EMA. With `REMITWATCH_SHOW_PHI=1` the work queue, the search box, the claim detail and the CSV export show the patient's name and member number to everyone who can sign in. Off is a setting for the screens, not a barrier: the packet PDF carries the name and member number for every login, because the payer needs them, and dates of service and claim numbers are served either way. So the long random password and the BAA are needed in both settings.

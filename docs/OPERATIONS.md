@@ -437,6 +437,15 @@ The Faxes page shows all of it: the follow-ups due (with a button to send them n
 
 **Suggested templates.** Each note Claude's review found short is kept, by code: what the note lacked and what to document next time. Bigger wins lists them, with what the note for that kind of service must carry; "Write the EMA template" has Claude turn them into the fields an EMA template should make required, the prompt each field gives the clinician, and the line the clinician signs. Only the code, the payers and the gaps go to Claude for that, nothing about a patient. Which clinicians' notes fell short is shown only where the Providers tab would show it.
 
+## Who is working (the name on each change)
+
+Each person picks a name once per computer (the card at the foot of the sidebar; a first name is enough). The name is
+kept with what they do, in the item's history, and shows as "by <name>" on Work, in the item's panel, in its history and
+in the team lines on Results. It is a label, not a sign-in: nothing checks it, anyone signed in can type any name (a
+colleague's too), and it gives no right. The owner's actions still need the owner's password, whatever name is chosen.
+Scripts may send the name in the `X-RemitWatch-Person` header (URI-encoded). Names are never written to a log, a run
+manifest or a diagnostic bundle (the scrubber in remitwatch/runlog.py masks them, one-word names too).
+
 ## 7. Daily and weekly routine
 
 Every day (whoever works the claims):

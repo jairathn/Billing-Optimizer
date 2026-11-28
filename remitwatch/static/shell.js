@@ -176,7 +176,7 @@
     const n = person();
     card.innerHTML = `<div class="person-card-head"><b>Who is working here?</b>
         <button type="button" class="icon-btn" data-person="close" aria-label="Close">${ICON('x')}</button></div>
-      <p>Your name goes beside each change you make, so the team sees who has an item. It stays on this computer.</p>
+      <p>Your name goes beside each change you make, so the team sees who has an item. It stays on this computer. This is not a sign-in: anyone using this computer can change it.</p>
       <div class="person-names" id="personNames"></div>
       <form class="person-form" id="personForm" autocomplete="off">
         <label for="personIn">Your name</label>

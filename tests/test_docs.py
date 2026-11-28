@@ -714,3 +714,12 @@ def test_the_readme_says_where_patient_data_goes():
     for words in ("SRFax (its own BAA", "Anthropic (the practice's BAA", "ModMed EMA", "`APPEAL_EMAIL_DOMAINS`", "`REMITWATCH_NOTE_SCRUB=1`",
                   "`REMITWATCH_NOTE_SEND_SCANS=1`", "never contain patient data"):
         assert words in phi, words
+
+
+def test_the_docs_say_the_chosen_name_is_a_label_not_a_sign_in():
+    """Review e-4: the name on each change is described where the owner reads (README, OPERATIONS) and on the card."""
+    for doc in ("README.md", os.path.join("docs", "OPERATIONS.md")):
+        text = open(os.path.join(ROOT, doc), encoding="utf-8").read()
+        assert "X-RemitWatch-Person" in text and "not a sign-in" in text, doc
+    shell = open(os.path.join(ROOT, "remitwatch", "static", "shell.js"), encoding="utf-8").read()
+    assert "This is not a sign-in" in shell
