@@ -1696,15 +1696,31 @@ def test_today_shows_a_banner_only_for_a_late_feed_and_leaves_the_self_checks_to
     assert "dtMissing" in out["today_links"]                      # How to fix lands on the payments with no remittance
 
 
-def test_the_route_counts_what_closes_in_7_days_inside_work_now(server):
+def test_the_route_counts_what_closes_in_7_days_inside_work_now(worlds, tmp_path, monkeypatch):
     """/api/ema/today's Work now carries what in it closes within 7 days, the number the Worklist shows for state todo
-    and deadline week: Today's strip shows it as a part of the whole, so it can never be more than the whole."""
-    c = server.c
-    t = c.get("/api/ema/today").json()
-    whole = t["states"]["todo"]
+    and deadline week: Today's strip shows it as a part of the whole, so it can never be more than the whole. The window
+    is today and the next 6 days, as the Worklist counts it. The same answer on both hosts (the dashboard's copy holds
+    every column the count reads)."""
+    db = copied(worlds, tmp_path)
+    conn = sqlite3.connect(db)
+    # the two denials in Work now: one whose last day is today (inside), one whose last day is the 7th day (outside)
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_MISSING_INFO'", (TODAY,))
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-7),))
+    conn.commit()
+    conn.close()
+    want = (1, 12000)
+    assert sql_count(db, "work_state='work_now' AND appeal_deadline >= ? AND appeal_deadline < ?", TODAY, iso(-7)) == want
+    srv = _site(monkeypatch, db)
+    whole = srv.get("/api/ema/today").json()["states"]["todo"]
     due = whole["due7"]
-    listed = c.get("/api/findings", params=dict(due["go"], live=1, limit=500)).json()
-    assert due["n"] == listed["total"] and due["n"] <= whole["n"] and due["cents"] <= whole["cents"]
+    assert (due["n"], due["cents"]) == want and due["go"] == {"state": "todo", "status": "all", "deadline": "week"}
+    assert _list_total(srv, due["go"]) == want                               # the list a click opens, its count line
+    assert (whole["n"], whole["cents"]) == (2, 21000)                         # the part is inside the whole
+    (tmp_path / "vercel").mkdir()
+    cloud_c = _site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel")
+    got = cloud_c.get("/api/ema/today").json()["states"]["todo"]
+    assert got["due7"] == due and (got["n"], got["cents"]) == (whole["n"], whole["cents"])
+    assert _list_total(cloud_c, due["go"]) == want
 
 
 def test_today_stays_blind_and_ticks_nothing_when_its_counts_do_not_come_back(page_run):

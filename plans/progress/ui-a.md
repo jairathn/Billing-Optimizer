@@ -57,7 +57,8 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
    - Tests moved: test_ema_pages2 (the tiles, titles, clicks, compact phone lines and scoreboard read Results' board;
      the exports line and its links read the Data tab; load order); feed_page.js and clock_page.js wait for #tdPlan and
      read the date from the eyebrow. New: the strip adds up and opens its lists, the route's due7 equals the Worklist's
-     count, the late-feed-only banner, the board and line placements (tests/test_shell.py).
+     count on both hosts (one denial whose last day is today counts, one whose last day is the 7th day does not), the
+     late-feed-only banner, the board and line placements (tests/test_shell.py).
    - Inline `style=` count: 275.
 4. Brand finish: DONE (commit "ui-a brand").
    - The mark: a remittance slip with a check, one flat color on an inverse tile (shell.js markSvg; static/brand/icon.svg
@@ -74,8 +75,8 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
    from the first design. No screenshots, no demo password, no em dashes. plans/tools/ui/checks.js now also fails Work
    on its row limits (first row at most 220 px at 1400x900, at least 7 rows at 1366x650 and 7 cards at 390x844, no row
    moving when the panel opens with --panel): Work fails them today, which is ui-work's job.
-6. Final checks: next (every page at four sizes in both themes; touched tests in four environments; full suite in
-   python3 and in Python 3.11.1 with SQLite 3.40; both node checks).
+6. Final checks: DONE (see Numbers measured). Also: Work is marked in the sidebar's rail while one of its views is open
+   (commit "ui-a: Work is marked ..."). The demo site is deleted; the screenshots stay in `$S/tk/units/ui-a/shots/final`.
 
 ## Numbers measured
 
@@ -89,12 +90,35 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
 - P4, Today at 1366x650, 1536x730, 1400x900 and 390x844, light and dark: sizes 5 to 6, accent 2, one filled button,
   no overflow, no error. Start (N) on the first screen at every size. Results keeps 7 sizes (its own page: ui-pages).
 
+- Final, every page at 1366x650, 1536x730, 1400x900 and 390x844, light and dark (176 runs of
+  plans/tools/ui/checks.js): no overflow, no script error, no dialog and no low-contrast text on any page. Today, Data,
+  Setup, Faxes' and Upload's shells, and every other page within 6 sizes and 8 accent elements. 50 runs fail, all on
+  pages the later units own: Work and its views fail the row limits (first row at 523 to 821 px at 1400x900; 0 to 5
+  rows on a laptop or phone screen: ui-work); downcoding, faxes and /upload show 2 filled buttons (their own content:
+  ui-work, ui-pages); Results shows 7 sizes (its 34 px hero beside the board's 28 px figures: ui-pages).
+- Tests: see the unit's report (four environments for the touched files; the full suite in python3 and in Python
+  3.11.1 with SQLite 3.40; both node checks).
+
 ## Next command
 
-    cd $S/tk/wt/ui-a && NODE_PATH=$(npm root -g) node plans/tools/ui/checks.js --base http://127.0.0.1:8771 --user <demo user> \
-      --pass <demo password> --owner <demo owner password> --shots $S/tk/units/ui-a/shots/now
-    (the demo's sign-in is in the docstring of $S/tk/ui/demo/serve_demo.py; never in the repository)
+    cd $S/tk/wt/ui-a && NODE_PATH=$(npm root -g) node plans/tools/ui/checks.js --base http://127.0.0.1:<port> --user <demo user> \
+      --pass <demo password> --owner <demo owner password> --shots $S/tk/units/<unit>/shots/now
+    (start a demo with $S/tk/ui/demo/serve_demo.py; its sign-in is in that file's docstring, never in the repository)
+
+## Notes for the units after ui-a
+
+- ui-work: Today still shows "Not on today's list" (#tdMoreSlot, today.js tdMoreHtml) and the batches (#batchList);
+  DESIGN P4 moves both to Work. The phone's list cards keep the box that picks a row (rw.css: table.wl td:first-child
+  in grid area sel). checks.js now fails Work on its row limits.
+- ui-panel: on a phone the item sheet covers the tab bar (z-index 30 over 15); Escape closes it first. features.js
+  refreshHeader now only fetches the alerts and the sync status and calls index.html's shellHeader; the pill's words
+  live in shell.js (RWShell.pill), tested in tests/test_shell.py.
+- ui-pages: Results' board is `#rsBoard`, drawn by today.js tdBoard (the nine tiles, unchanged); Data's first line is
+  `#dtEmaLine`, drawn by today.js tdEmaInto. Charts take `--viz-*`.
+- ui-words: the person's name and menu belong in the sidebar's foot (`.nav-foot`), beside the theme.
+- ui-signin: the sign-in page should link `/static/rw.css?v=...`, preload the Latin font and use `static/brand/icon.svg`.
+- /api/ema/today gained `states.todo.due7` (api_ema.py), counted with the Worklist's own filter.
 
 ## Open questions
 
-- none yet
+- none
