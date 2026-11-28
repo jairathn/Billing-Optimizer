@@ -2865,7 +2865,8 @@ def scoreboard(conn: sqlite3.Connection, today: Any = None) -> dict:
                                   "at_risk": live["at_risk"]["n"], "given_up": gu.get("n")},
            "basis": {"recovered": "Money paid on items after RemitWatch first flagged them, plus money it found (some may have come back anyway: see Results).",
                      "lost": "Items that expired while they were in Work now, with their dollars.",
-                     "at_risk": f"Work now items whose filing date is in the next {AT_RISK_DAYS} days.",
+                     "at_risk": f"Work now items whose filing date is in the next {AT_RISK_DAYS} days (a routine-rate review: "
+                                "its claims still inside their windows).",
                      "given_up": (gu.get("basis") or "Dollars written off with no person's decision and no owner-approved policy.")},
            "given_up_source": gu.get("source")}
     if gu.get("check"):
