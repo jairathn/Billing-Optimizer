@@ -70,16 +70,6 @@
     <div class="row"><span class="val" id="hookUrl"></span> <button data-copy="hookUrl">Copy</button></div>
   </div>
 
-  <div class="panel" id="modmed" style="display:none"><h2>ModMed EMA</h2>
-    <div class="small">Reads the visit note behind each appeal straight from EMA, through ModMed's certified FHIR API. Read only: nothing is written to EMA.</div>
-    <ol class="small">
-      <li>Make the app's key: <code>python -m remitwatch.cli modmed-key</code>. Put the private key in the host's settings as <code>MODMED_PRIVATE_KEY</code> (on the server, with configure.sh; on Vercel, then redeploy).</li>
-      <li>Register the app with ModMed (portal.api.modmed.com) as a Bulk FHIR backend app. Give it the public key printed with the private one, or this address: <span class="val" id="jwksUrl"></span> <button data-copy="jwksUrl">Copy</button></li>
-      <li>In EMA: Admin, Manage Bulk FHIR, add the app's client ID. Then set <code>MODMED_CLIENT_ID</code> the same way.</li>
-    </ol>
-    <div class="row"><button id="mmTest">Test the ModMed connection</button><span id="mmMsg" class="small muted"></span></div>
-    <table id="mmSteps"></table>
-  </div>
 
   <div class="panel" id="tzp" style="display:none"><h2>TriZetto direct</h2>
     <div class="small">Reads the payers' remittances straight from TriZetto every hour, with a login of RemitWatch's own, so nobody has to copy files into Dropbox and paid claims leave the lists within hours. Read only: nothing on TriZetto's server is moved or deleted.</div>
@@ -106,6 +96,18 @@
     <div class="row"><button id="fxTest">Test the fax line</button><span id="fxMsg" class="small muted"></span></div>
     <table id="fxSteps"></table>
   </div>
+  <div class="panel" id="modmed" style="display:none"><h2>ModMed EMA connection (optional)</h2>
+    <div class="small">Optional. Visit notes come in by hand: export the note from EMA as a PDF and upload it on Upload from EMA or in the item's appeal step. Connect EMA here only if the practice decides to use ModMed's API (read only: nothing is written to EMA).</div>
+    <details class="mm-fold"><summary class="small">Set up the ModMed connection</summary>
+    <ol class="small">
+      <li>Make the app's key: <code>python -m remitwatch.cli modmed-key</code>. Put the private key in the host's settings as <code>MODMED_PRIVATE_KEY</code> (on the server, with configure.sh; on Vercel, then redeploy).</li>
+      <li>Register the app with ModMed (portal.api.modmed.com) as a Bulk FHIR backend app. Give it the public key printed with the private one, or this address: <span class="val" id="jwksUrl"></span> <button data-copy="jwksUrl">Copy</button></li>
+      <li>In EMA: Admin, Manage Bulk FHIR, add the app's client ID. Then set <code>MODMED_CLIENT_ID</code> the same way.</li>
+    </ol>
+    <div class="row"><button id="mmTest">Test the ModMed connection</button><span id="mmMsg" class="small muted"></span></div>
+    <table id="mmSteps"></table>
+    </details>
+  </div>
 
   <div class="panel" id="load" style="display:none"><h2>First load</h2>
     <div class="small muted">Reads every remittance file in the Dropbox folder. It runs by itself and continues on its own until it is done. You can close this page.</div>
@@ -130,6 +132,8 @@ async function mmTest(){
   const b = $('#mmTest'); b.disabled = true; $('#mmMsg').textContent = 'Testing…'; $('#mmSteps').innerHTML = '';
   try {
     const r = await api('/api/modmed/test', {method:'POST', body: '{}'});
+    // nothing set up is the expected state (notes come in by hand): said in quiet words, with no cross and no red
+    if(r.configured === false){ $('#mmMsg').innerHTML = '<span class="muted">Not set up. Notes are attached by hand.</span>'; b.disabled = false; return; }
     $('#mmSteps').innerHTML = r.steps.map(x => { const cls = x.ok===true?'ok':(x.ok===false?'no':'opt'); const mark = x.ok===true?'✓':(x.ok===false?'✗':'–');
       return `<tr><td class="mark ${cls}">${mark}</td><td><b>${esc(x.step)}</b><div class="small muted">${esc(x.detail||'')}</div></td></tr>`; }).join('');
     $('#mmMsg').innerHTML = r.ok ? `<span class="ok">Connected${r.mode==='export'?' (notes come from Bulk FHIR exports)':''}.</span>` : '<span class="no">Not connected yet: fix the first ✗.</span>';

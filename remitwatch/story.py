@@ -3307,14 +3307,27 @@ def explain(conn: sqlite3.Connection, finding_id: str, *, ledger: Any = None, to
             "why_unpaid": why}
 
 
+HEADLINE_WORDS = 20        # the most words of the line a biller reads first (DESIGN rule 7)
+
+
 def _headline(text: Any) -> tuple[str, str]:
     """A verdict or a step as its first sentence and the rest: ("Unpaid and nobody has worked it: Humana answered CO-50
     (row 1).", "You can still appeal until Dec 31, 2027."). One sentence is all headline; nothing is cut inside one."""
     t = str(text or "").strip()
     cut = S.sentence_end(t, semicolon=False)
-    if cut is None:
-        return t, ""
-    return t[:cut + 1].strip(), t[cut + 1:].strip()
+    head, rest = (t, "") if cut is None else (t[:cut + 1].strip(), t[cut + 1:].strip())
+    if len(head.split()) > HEADLINE_WORDS:
+        # DESIGN rule 7 (review d-7): a first sentence longer than the line a biller reads first is cut at its first
+        # clause, a colon or a semicolon, and the rest of it leads the why; nothing is dropped and no word is changed
+        # a state's own label first ("Work now:", "Overpaid:") stays with the clause after it
+        m0 = re.match(r"([^:;]{1,24}):\s+", head)
+        label = head[:m0.end()] if (m0 and len(m0.group(1).split()) < 3) else ""
+        body = head[len(label):]
+        m = re.search(r"[:;]\s+", body)
+        if m and len(body[:m.start()].split()) >= 3:
+            after = body[m.end():]
+            head, rest = label + body[:m.start()].rstrip(" ,") + ".", (after[:1].upper() + after[1:] + (" " + rest if rest else "")).strip()
+    return head, rest
 
 
 def _why_unpaid(conn: sqlite3.Connection, f: dict) -> list[dict]:

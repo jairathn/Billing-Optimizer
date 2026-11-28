@@ -435,6 +435,77 @@
     update({brief, exports});
   }
 
+  // ---------------------------------------------------------------- no browser boxes (CRITIQUE_biller change 4, review d-3)
+  // A page never opens alert, confirm or prompt: such a box stops the whole page, takes none of its look and words, and a
+  // browser may stop showing it. say: a toast at the foot of the page (error: red, stays longer). ask: a question beside
+  // the button that asked it, answered with a second button there (Cancel or Esc is a no); it resolves true or false.
+  // askText: the same with a text field (a reason, kept in the item's history) and optional reason chips; an empty answer
+  // is refused with a plain sentence; it resolves the text, or null when cancelled.
+  function say(text, o) {
+    o = o || {};
+    if (typeof document === 'undefined' || !document.body) return;
+    let box = document.getElementById('rwToasts');
+    if (!box) { box = document.createElement('div'); box.id = 'rwToasts'; box.className = 'toasts'; box.setAttribute('role', 'status'); box.setAttribute('aria-live', 'polite'); document.body.appendChild(box); }
+    const t = document.createElement('div');
+    t.className = 'toast' + (o.error ? ' error' : '');
+    t.innerHTML = '<span class="t-icon" aria-hidden="true"></span><span class="t-text"></span><button type="button" class="t-close" aria-label="Close">&times;</button>';
+    t.querySelector('.t-text').textContent = String(text == null ? '' : text);
+    while (box.children.length > 2) box.firstElementChild.remove();
+    box.appendChild(t);
+    const gone = () => t.remove();
+    t.querySelector('.t-close').onclick = gone;
+    if (!o.stay) setTimeout(gone, o.ms || (o.error ? 12000 : 8000));
+  }
+  function inlineBar(anchor, html) {
+    const near = anchor.parentElement;
+    if (near) near.querySelectorAll(':scope > .inline-ask').forEach(x => x.remove());
+    const bar = document.createElement('span');
+    bar.className = 'inline-ask';
+    bar.setAttribute('role', 'group');
+    bar.innerHTML = html;
+    anchor.insertAdjacentElement('afterend', bar);
+    return bar;
+  }
+  function ask(anchor, text, o) {
+    o = o || {};
+    return new Promise(resolve => {
+      if (!anchor || !anchor.isConnected) { resolve(false); return; }
+      const bar = inlineBar(anchor, '<span class="ia-text"></span><button type="button" class="ia-yes"></button><button type="button" class="ghost ia-no"></button>');
+      bar.querySelector('.ia-text').textContent = text;
+      bar.querySelector('.ia-yes').textContent = o.yes || 'Yes';
+      bar.querySelector('.ia-no').textContent = o.no || 'Cancel';
+      const esc = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } };
+      const done = v => { bar.remove(); document.removeEventListener('keydown', esc, true); resolve(v); if (!v && anchor.isConnected) anchor.focus(); };
+      document.addEventListener('keydown', esc, true);
+      bar.querySelector('.ia-yes').onclick = () => done(true);
+      bar.querySelector('.ia-no').onclick = () => done(false);
+      bar.querySelector('.ia-yes').focus();
+    });
+  }
+  function askText(anchor, o) {
+    o = o || {};
+    return new Promise(resolve => {
+      if (!anchor || !anchor.isConnected) { resolve(null); return; }
+      const chips = (o.chips || []).map((c, i) => `<button type="button" class="chip ia-chip" data-i="${i}">${escH(c)}</button>`).join('');
+      const bar = inlineBar(anchor, `<span class="ia-text"></span>${chips ? `<span class="ia-chips">${chips}</span>` : ''}`
+        + '<input type="text" class="ia-input" maxlength="500"><button type="button" class="ia-yes"></button><button type="button" class="ghost ia-no">Cancel</button><span class="ia-err small" role="alert"></span>');
+      bar.querySelector('.ia-text').textContent = o.text || '';
+      const input = bar.querySelector('.ia-input'), err = bar.querySelector('.ia-err');
+      input.setAttribute('aria-label', o.label || o.text || 'Why');
+      input.placeholder = o.placeholder || 'Why (kept in the history)';
+      bar.querySelector('.ia-yes').textContent = o.yes || 'Save';
+      bar.querySelectorAll('.ia-chip').forEach(c => c.onclick = () => { input.value = (o.chips || [])[Number(c.dataset.i)] || ''; input.focus(); });
+      const esc = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); } };
+      const done = v => { bar.remove(); document.removeEventListener('keydown', esc, true); resolve(v); if (v === null && anchor.isConnected) anchor.focus(); };
+      const yes = () => { const v = input.value.trim(); if (!v) { err.textContent = o.empty || 'Not saved: say why. The reason is kept in the history.'; input.focus(); return; } done(v); };
+      document.addEventListener('keydown', esc, true);
+      input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); yes(); } };
+      bar.querySelector('.ia-yes').onclick = yes;
+      bar.querySelector('.ia-no').onclick = () => done(null);
+      input.focus();
+    });
+  }
+
   window.RWShell = {mount, setActive, update, pill, title, palette, closePalette, setTheme, themeIsDark, live, bellMenu, names: NAMES, groups: GROUPS,
-    person, personName, setPerson, headers, initials};
+    person, personName, setPerson, headers, initials, say, ask, askText};
 })();

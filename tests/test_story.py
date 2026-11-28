@@ -87,7 +87,12 @@ def plain(out: dict) -> None:
     for part in ("verdict", "next_step"):
         head, why = out[part]["headline"], out[part]["why"]
         whole = out[part]["sentence" if part == "verdict" else "action"]
-        assert (head + (" " + why if why else "")).strip() == whole.strip(), (head, why, whole)
+        # every word of the sentence, in order, and nothing added. Moved with the same guarantee (review d-7): a first
+        # sentence over 20 words is cut at its first clause, so the clause's colon or semicolon becomes a full stop and
+        # the next word starts with a capital; the words compare without that punctuation and case
+        norm = lambda s_: " ".join(re.sub(r"[,.;:]+(?=\s|$)", "", s_).lower().split())     # noqa: E731
+        assert norm(head + (" " + why if why else "")) == norm(whole), (head, why, whole)
+        assert len(head.split()) <= 20 or not re.search(r"[:;]\s", head), head
     for s_ in out["next_step"]["steps"]:
         assert not s_.lower().startswith("review"), s_
 

@@ -16,6 +16,17 @@ fixed when the change is one safe line, else they wait with the reason.
 | d-1 | high | yes: a packet from another patient's note downloaded (200) and emailed with no warning | fixed |
 | e-1 | high | yes: the reviewer's test fails on both hosts at 233c24f | fixed |
 | d-2 | high | yes: Today's lost (insights.missed) and paid back (Paid marks) were second counts of Results' figures | fixed |
+| d-3 | high | yes: 40 alert/confirm/prompt calls (the reviewer's script) | fixed: 0 left |
+| d-4 | high | yes: ModMed first after the Checklist, red "fix the first x" with nothing set | fixed |
+| e-3 | medium | yes: the reviewer's node check exits 1 | fixed |
+| d-5 | medium | yes in code: Start called goWork (the list only) | fixed |
+| d-9 | medium | yes in code: closeDetail focused the row that opened the panel | fixed |
+| d-13 | low | yes in code: no toast; Undo toast 8 s, Undo 10 s | fixed |
+| d-7 | medium | yes: 5 of 10 headlines over 20 words on the invented world | fixed (headlines); X12 words on the card fixed |
+| d-8 | medium | yes in CSS: docked panel 36vw, Payer column kept, phone buttons 28 px | fixed in part (see log) |
+| d-6 | medium | yes in code: upload_note opened /upload in a new tab | fixed in the panel; Upload page order waits |
+| d-14 | low | yes in code | fixed (checks.js) |
+| d-11 | low | yes | fixed in part ("changed today", the filing limit's words) |
 
 ## Log
 
@@ -56,3 +67,32 @@ fixed when the change is one safe line, else they wait with the reason.
   in the last 30 days" (the e-1 test holds them equal). Tests: tests/test_one_definition.py (both hosts: score_week is
   the scoreboard's current week; the strip reads no second count). Moved with the same guarantee:
   test_ema_pages2::test_today_s_strip_adds_up (the lost figure is now the scoreboard's week). Broken on purpose: 3 fail.
+- d-3 (browser boxes). RWShell.say (a toast), RWShell.ask (a question beside the button, a second button answers it;
+  Cancel or Esc is a no) and RWShell.askText (a reason field with the six reason chips; an empty answer is refused
+  with its sentence) in shell.js, loaded first on every page; all 40 calls moved (desk.js bulk bar, Let go, Mark sent,
+  fax, export, fee letter, hide; faxes.js read-backs and confirmations; data.js, upload.js, index.html, swing.js,
+  ops.js, policy.js; today.js's second Let go question could never be asked and is gone). tests/test_style.py counts the
+  calls (BROWSER_BOXES_MAX = 0, only lowered) and checks the shell offers the three; plans/tools/ui/checks.js --bulk
+  ticks two rows and presses every bulk button with the dialog handler counting. Harnesses moved with the same
+  guarantee (the questions recorded as the boxes were): test_desk.py, test_ema_pages.py, test_ema_pages2.py,
+  hotfix2_page.js (an inline question answered yes as the confirm was). Broken on purpose: both style tests fail.
+- d-4: Setup's panel is "ModMed EMA connection (optional)", after the fax line, steps and Test folded; with nothing set
+  the Test says "Not set up. Notes are attached by hand." in quiet words (modmed.check answers configured: false);
+  Upload opens "EMA's reports and visit notes come in by hand". tests/test_shell.py; broken on purpose: both fail.
+- e-3: in a one-payer list the who cell carries the payer's can't-be-checked mark and the "by <name>" line;
+  tests/one_payer_row_check.js (the reviewer's check) runs from tests/test_desk.py; broken on purpose: exit 1.
+- d-5: Today's Start draws the step's list and opens its first item ("Step 1 · Item 1 of N"); the step title still
+  opens the list; the label clears when a list is drawn again. d-9: Esc focuses the closed item's row (or the row now
+  in its place), so j goes on from there. d-13: "I asked the payer" shows a toast and moves to the next item; an Undo
+  toast lives the 10 s Undo works.
+- d-7: story._headline cuts a first sentence over 20 words at its first clause (a state's label stays with it); the
+  panel shows the headline and the rest of the step leads its fold; route card fields that name X12 loops say EMA's
+  words (routes.ema_words). tests/test_headlines.py (every verdict and step headline on the invented world: 5 of 10
+  over 20 words before, 0 after), tests/test_routes.py. Moved with the same guarantee: test_story's plain() (every word
+  of the sentence, in order, nothing added; punctuation and case of the cut aside).
+- d-8: from 1280 to 1535 px the docked panel is 440 px and the list drops its Payer column (the payer rides in the
+  patient cell's second line); on a phone every panel control is 44 px tall at least and the next step's main button
+  sits in a bar pinned to the sheet's foot with its own Next. Waits: the toolbar's Filters and Export menu and the
+  route card's fold after three fields (a menu and a fold of their own, measured first).
+- d-6: the panel's "Upload the note" opens the appeal step's fold and focuses its file field. Waits: the Upload page's
+  order (drop zone first) and a panel redrawn when a note arrives on another tab.

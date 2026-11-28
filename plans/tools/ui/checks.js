@@ -4,7 +4,7 @@
 //
 //   NODE_PATH=$(npm root -g) node plans/tools/ui/checks.js --base http://127.0.0.1:8771 --user U --pass P \
 //     [--owner OWNER_PASSWORD] [--pages today,worklist,...] [--sizes 1366x650,1536x730,1400x900,390x844]
-//     [--themes light,dark] [--shots DIR] [--json FILE] [--panel] [--quiet]
+//     [--themes light,dark] [--shots DIR] [--json FILE] [--panel] [--bulk] [--quiet]
 //
 // For each page, size and theme, on the first screen (what shows before any scrolling):
 //   overflow   sideways scroll of the page, px (at most 1)
@@ -14,8 +14,11 @@
 //   accent     elements that carry the accent: text, fill, edge or ring (at most 8)
 //   filled     filled (primary) buttons on the screen (at most 1)
 //   contrast   text under 4.5:1 against its rendered background (3:1 for large text), with the element's path
-// and on the Work pages: the first row's top, the rows wholly on the first screen, and (with --panel) whether any row
-// changes height when an item's panel opens. Exit code 1 when a check fails.
+// and on the Work pages: the first row's top, the rows wholly on the first screen (all of them when the list is shorter
+// than the bar), and (with --panel) whether any row changes height when an item's panel opens. With --bulk, once, on the
+// Worklist at the first size: two rows ticked and every button of the bulk bar pressed (a question beside a button is
+// cancelled, a status set is set back), and any browser dialog fails the check (review d-3). It changes statuses on the
+// site it runs on: the demo only. Exit code 1 when a check fails.
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -93,14 +96,36 @@ function measure() {
     const bar = document.querySelector('.tabbar'); const barTop = bar && getComputedStyle(bar).display !== 'none' ? bar.getBoundingClientRect().top : vh;
     work.firstRowTop = Math.round(rows[0].getBoundingClientRect().top + scrollY);
     work.rowsOnScreen = rows.filter(r => { const b = r.getBoundingClientRect(); return b.top >= 0 && b.bottom <= Math.min(vh, barTop); }).length;
+    work.rowCount = rows.length;
     work.rowHeights = rows.slice(0, 12).map(r => Math.round(r.getBoundingClientRect().height));
   }
   return { overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth, sizes: [...out.sizes].sort((a, b) => a - b),
     accent: out.accent, filled: out.filled, low: out.low, work, title: document.title.replace(/[^\x20-\x7e]/g, '?').slice(0, 80) };
 }
 
+// The bulk bar, pressed button by button with two rows ticked: Mark started, then Back to To do (set back), Let go (its
+// reason form is cancelled), Mark sent, Back to To do. Returns the buttons pressed; the dialog handler counts any box.
+async function bulkStep(page) {
+  const pressed = [];
+  for (const key of ['in_progress', 'open', 'dismissed', 'appealed', 'open']) {
+    await page.waitForSelector('#view table.wl tbody tr.row .sel', { timeout: 8000 }).catch(() => {});
+    const boxes = await page.$$('#view table.wl tbody tr.row .sel');
+    if (boxes.length < 2) break;
+    for (const b of boxes.slice(0, 2)) await b.check().catch(() => {});
+    const bt = await page.$(`#bulk [data-bulk="${key}"]`);
+    if (!bt || !(await bt.isVisible())) continue;
+    await bt.click(); await sleep(600);
+    const no = await page.$('.inline-ask .ia-no');
+    if (no) await no.click();
+    pressed.push(key + (no ? ' (asked, cancelled)' : ''));
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {}); await sleep(500);
+  }
+  return pressed;
+}
+
 (async () => {
   const browser = await chromium.launch();
+  let bulkDone = false;
   const results = [], fails = [];
   for (const theme of THEMES) for (const [w, h] of SIZES) {
     const ctx = await browser.newContext({ viewport: { width: w, height: h }, deviceScaleFactor: 1, colorScheme: theme,
@@ -138,6 +163,11 @@ function measure() {
           r.work.panelRowDelta = Math.max(0, ...before.map((v, i) => Math.abs(v - (after[i] == null ? v : after[i]))));
           await page.keyboard.press('Escape').catch(() => {});
         }
+        if (name === 'worklist' && args.bulk && !bulkDone) {
+          bulkDone = true;
+          r.bulkPressed = await bulkStep(page);
+          r.dialogs = dialogs;
+        }
         if (args.shots) { fs.mkdirSync(args.shots, { recursive: true });
           await page.screenshot({ path: path.join(args.shots, `${name.replace(/\//g, '')}_${w}x${h}_${theme}.png`) }); }
         const bad = [];
@@ -150,7 +180,9 @@ function measure() {
         if (r.low) bad.push(`${r.low} low-contrast texts: ${m.low.slice(0, 4).join('; ')}`);
         if (r.work.firstRowTop != null) {
           if (w === 1400 && h === 900 && r.work.firstRowTop > WORK_LIMITS.firstRowTop) bad.push(`first row at ${r.work.firstRowTop} px (at most ${WORK_LIMITS.firstRowTop})`);
-          if (((w === 1366 && h === 650) || (w === 390 && h === 844)) && r.work.rowsOnScreen < WORK_LIMITS.rows) bad.push(`${r.work.rowsOnScreen} rows on the first screen (at least ${WORK_LIMITS.rows})`);
+          // a list shorter than the bar shows all its rows (review d-14: Fees has 5 rows on the demo)
+          const need = Math.min(WORK_LIMITS.rows, r.work.rowCount || 0);
+          if (((w === 1366 && h === 650) || (w === 390 && h === 844)) && r.work.rowsOnScreen < need) bad.push(`${r.work.rowsOnScreen} rows on the first screen (at least ${need}; the list has ${r.work.rowCount})`);
           if (r.work.panelRowDelta) bad.push(`a row moved ${r.work.panelRowDelta} px when the panel opened`);
         }
         if (bad.length) fails.push(`${name} ${w}x${h} ${theme}: ${bad.join(' | ')}`);

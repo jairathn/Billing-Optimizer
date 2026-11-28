@@ -173,7 +173,7 @@ function opBind(el, p){
   });
   el.querySelectorAll('[data-op-accept]').forEach(b => b.addEventListener('click', async () => {
     const checks = b.getAttribute('data-op-accept').split(',').filter(Boolean), run = b.getAttribute('data-op-run');
-    if(!confirm('Accept exactly what this run found? The items it lists leave the worklist as the newest analysis says.')) return;
+    if(!(await RWShell.ask(b, 'Accept exactly what this run found? The items it lists leave the worklist as the newest analysis says.', {yes: 'Yes, accept it'}))) return;
     b.disabled = true;
     const where = b.parentElement.querySelector('[data-op-owner]');
     try { const r = await opOwnerPost('/api/ops/selfcheck/accept', {checks, run_id: run}, where);

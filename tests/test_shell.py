@@ -194,3 +194,29 @@ def test_the_shell_in_a_browser(tmp_path):
     bell = out["bell"]          # the five newest alerts under the bell, See all, and the page stays where it is (unit ui-pages)
     assert bell["shown"] and bell["items"] == [f"Invented alert {i}" for i in (7, 6, 5, 4, 3)] and bell["all"] == "#alerts"
     assert bell["inside"] and bell["focus"] and bell["hash"] == "#today" and bell["closes"]
+
+
+def test_setup_says_modmed_is_optional_and_notes_come_by_hand():
+    """Review d-4: the owner asked that ModMed read as optional (visit notes come in by hand). Setup names the connection
+    optional, puts it after the fax line, keeps its steps and Test folded, and a Test with nothing set up says so in quiet
+    words, never a red cross; the Upload page says EMA's reports and notes come in by hand."""
+    html = read("setup.html")
+    head = re.search(r'<div class="panel" id="modmed"[^>]*><h2>([^<]*)</h2>', html)
+    assert head and "optional" in head.group(1).lower()
+    assert html.index('id="faxp"') < html.index('id="modmed"')
+    panel = html[html.index('id="modmed"'):html.index('id="load"')]
+    assert "<details" in panel and panel.index("<details") < panel.index('id="mmTest"') and "<details open" not in panel
+    assert "Visit notes come in by hand" in panel
+    js = html[html.index("async function mmTest"):]
+    at = js.index("r.configured === false")
+    quiet = js[at:js.index("$('#mmSteps').innerHTML", at)]
+    assert "Not set up. Notes are attached by hand." in quiet and 'class="no"' not in quiet and "sev-high" not in quiet
+    assert "come in by hand" in read("upload.html") and "Until ModMed approves" not in read("upload.html")
+
+
+def test_the_modmed_test_says_when_nothing_is_set_up(monkeypatch):
+    from remitwatch import modmed
+    for k in ("MODMED_CLIENT_ID", "MODMED_PRIVATE_KEY", "MODMED_CLIENT_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    r = modmed.check()
+    assert r["ok"] is False and r["configured"] is False

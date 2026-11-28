@@ -388,7 +388,14 @@ const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc
 const asked = [], sent = [];
 let answers = [];
 const ask = kind => text => { asked.push(kind + ': ' + text); const a = answers.length ? answers.shift() : (kind === 'prompt' ? null : false); return kind === 'alert' ? undefined : a; };
-const ctx = { console, alert: ask('alert'), confirm: ask('confirm'), prompt: ask('prompt'), state: { worklist: ['c1', 'c2'], wlTotal: 2 },
+// no browser box any more (review d-3): the questions are asked beside the button (RWShell.ask, askText) and a message is a
+// toast (RWShell.say); recorded here as the browser boxes were, so every guarantee below reads the same. askText refuses an
+// empty answer with its sentence (recorded as before) and the person then cancels.
+const shell = { say: m => { asked.push('alert: ' + m); },
+  ask: async (_at, text) => { asked.push('confirm: ' + text); return answers.length ? answers.shift() : false; },
+  askText: async (_at, o) => { asked.push('prompt: ' + o.text); const a = answers.length ? answers.shift() : null;
+    if (a === null) return null; const v = String(a).trim(); if (!v) { asked.push('alert: ' + o.empty); return null; } return v; } };
+const ctx = { console, RWShell: shell, alert: ask('alert'), confirm: ask('confirm'), prompt: ask('prompt'), state: { worklist: ['c1', 'c2'], wlTotal: 2 },
   api: async (p, o) => { sent.push({ path: p, body: o && o.body ? JSON.parse(o.body) : null }); return { ok: true }; },
   render: async () => {}, openDetail: () => {}, closeDetail: () => {}, appealByFax: ids => { sent.push({ fax: ids }); } };
 vm.createContext(ctx);
@@ -504,7 +511,7 @@ def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_step
     assert s["bar, the two denials ticked"]["got"] == {"n": "2 selected", "line": ""}
     # the list's Let go: the two denials go, the two unanswered claims stay, and the question says so; one reason, required,
     # goes with all of them (review C1: money is let go only by a person with a reason)
-    why = "\n\nWhy (kept in each item's history; required):"
+    why = " Why?"
     mixed = s["bulk let go, all four ticked"]
     assert mixed["sent"] == bulk(["d1", "d2"], "dismissed", notes="not ours to chase")
     assert mixed["asked"] == ["prompt: Let go of 2 items? They leave the list and count as let go. " + left_out + why]
@@ -524,7 +531,8 @@ def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_step
     for name in ("panel let go, unanswered, no answer", "panel let go, unanswered, blank note", "panel lost, rejected, blank note"):
         assert s[name]["sent"] == [] and s[name]["got"] == {"why": claim_why} and s[name]["asked"] == [], name
     blank_next = s["let go and next, unanswered, blank note"]
-    assert blank_next["sent"] == [] and not blank_next.get("got") and "Why (kept in the item's history):" in blank_next["asked"][0]
+    assert blank_next["sent"] == [] and not blank_next.get("got") and blank_next["asked"][0].endswith(" Why?")
+    assert "No answer from a payer is on file for it" in blank_next["asked"][0]
     assert blank_next["asked"][1:] == ["alert: " + claim_why]
     noted = s["panel let go, unanswered, with a note"]
     assert noted["got"] == {"saved": True} and noted["sent"] == one("c1", status="dismissed", notes="no record at the payer, past its limit")
@@ -535,7 +543,7 @@ def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_step
     assert s["let go and next, unanswered, with a note"]["sent"] == one("c1", status="dismissed", notes="a duplicate of a paid claim", seen_status="open")
     assert s["panel sent, unanswered"]["sent"] == one("c1", status="appealed") and s["panel sent, unanswered"]["asked"] == []
     # any other item: Let go and Lost need a reason too, and a blank or missing one changes nothing (review C1)
-    ask = ["prompt: Let go of this item? It leaves the list and counts as let go.\n\nWhy (kept in the item's history; required):"]
+    ask = ["prompt: Let go of this item? It leaves the list and counts as let go. Why?"]
     nope = "alert: Not changed. Letting an item go, or marking it lost, needs a reason."
     got = s["panel let go, a denial, with a reason"]
     assert got["sent"] == one("d2", status="dismissed", notes="the payer was right") and got["asked"] == []
@@ -658,7 +666,7 @@ const make = h => { const e = new El('div'); e.innerHTML = h; return e; };
 // the server: canned answers by the start of the address, in order; what was sent is kept
 const sent = [], replies = {};
 const ctx = { console, Promise, setTimeout: (fn) => fn(), state: { meta: { modmed: true, show_phi: true }, brief: null, filt: {}, charts: {} },
-  alert: () => {}, confirm: () => true, prompt: () => null, navigator: { clipboard: { writeText: () => {} } }, CSS: { escape: s => s }, location: {},
+  alert: () => {}, confirm: () => true, prompt: () => null, RWShell: { say() {}, ask: async () => true, askText: async () => null }, navigator: { clipboard: { writeText: () => {} } }, CSS: { escape: s => s }, location: {},
   api: async (p, o) => {
     const body = o && o.body ? JSON.parse(o.body) : null; sent.push(body ? { path: p, body } : { path: p });
     const k = Object.keys(replies).find(x => p.startsWith(x)), r = k && replies[k].length ? replies[k].shift() : undefined;
@@ -922,3 +930,17 @@ def test_a_claim_still_in_emas_print_batch_is_not_called_a_rejection(page_steps)
     assert "more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit)" in today
     for text in (label, nxt, fix["needs"], *got.values()):
         assert "—" not in text
+
+
+def test_a_row_filtered_to_one_payer_keeps_who_worked_it_and_the_cant_be_checked_mark():
+    """Review e-3: filtered to one payer, a row dropped its payer cell and with it "Sent <day> by <name>" and the mark of a
+    payer whose remittances stopped, in the very view where two people work one payer. Both now ride in the who cell."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    here = os.path.dirname(os.path.abspath(__file__))
+    r = subprocess.run([node, os.path.join(here, "one_payer_row_check.js"), os.path.join(os.path.dirname(here), "remitwatch", "static")],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr

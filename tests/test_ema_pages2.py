@@ -982,6 +982,9 @@ const ctx = { console, Date, Math, JSON, Promise, Set, Map, URLSearchParams, set
   openDetail: id => went.push({ open: id, worklist: ctx.state.worklist ? ctx.state.worklist.slice() : null, total: ctx.state.wlTotal == null ? null : ctx.state.wlTotal }),
   localStorage: { getItem: () => '1', setItem() {}, removeItem() {} },
   confirm: m => { dialogs.push(['confirm', m]); return answers.__confirm !== false; }, prompt: (q, d) => { dialogs.push(['prompt', q]); return 'Owner Test'; },
+  // review d-3: no browser box; the question beside the button is recorded as the browser's confirm was
+  RWShell: { say: m => calls.push({ alert: m }), ask: async (_at, m) => { dialogs.push(['confirm', m]); return answers.__confirm !== false; },
+             askText: async (_at, o) => { dialogs.push(['prompt', o.text]); return 'Owner Test'; } },
   alert: m => calls.push({ alert: m }), navigator: {},
   document: { querySelector: () => null, querySelectorAll: () => [] }, window: answers.__narrow ? { innerWidth: 390 } : {} };
 vm.createContext(ctx);

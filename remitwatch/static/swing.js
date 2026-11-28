@@ -34,13 +34,13 @@
       </div>`;
     }).join('');
     el.querySelectorAll('[data-swing-ack]').forEach(b => b.onclick = async () => {
-      if(!window.confirm('Acknowledge only after checking the files read since the run before. The alert then leaves every page.')) return;
+      if(!(await window.RWShell.ask(b, 'Acknowledge only after checking the files read since the run before. The alert then leaves every page.', {yes: 'Yes, I checked them'}))) return;
       b.disabled = true;
       try {
         const r = await fetch('/api/alerts/' + encodeURIComponent(b.dataset.swingAck) + '/ack',
           {method: 'POST', headers: {'X-Requested-With': 'remitwatch', 'Content-Type': 'application/json'}, body: '{}'});
         if(!r.ok) throw new Error(String(r.status));
-      } catch(e){ b.disabled = false; window.alert('Not saved: the site did not answer. Try again in a moment.'); return; }
+      } catch(e){ b.disabled = false; window.RWShell.say('Not saved: the site did not answer. Try again in a moment.', {error: true}); return; }
       if(typeof window.refreshHeader === 'function') window.refreshHeader(); else load(el);
     });
   }

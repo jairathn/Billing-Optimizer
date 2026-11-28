@@ -18,20 +18,19 @@ const leftOutLine = (n, kinds) => (kinds || []).every(k => CLAIM_CHASES.has(k))
   ? `Let go leaves out ${pl(n, 'claim')} with no answer from the payer or rejected before the payer. Open ${n===1?'it':'each one'} to let it go, with a note.`
   : `Let go leaves out ${pl(n, 'item')} that ${n===1?'is':'are'} let go one at a time (no answer from the payer, never sent, a payment not posted, a second payer never billed, or a credit). Open ${n===1?'it':'each one'} to let it go, with a note.`;
 // The reason for letting an item go, or marking it lost: money is let go only by a person with a reason (or the owner's
-// policy table), and the server holds to it. Returns the reason; null when the person gave none (nothing is changed then);
-// undefined for any other status, which needs none. Asking for it is the confirmation.
-function letGoNote(signal, status){
+// policy table), and the server holds to it. Asked beside the button that was pressed (RWShell.askText, never a browser
+// box: review d-3), with the reason chips the panel offers. Resolves the reason; null when the person gave none (nothing
+// is changed then); undefined for any other status, which needs none. Asking for it is the confirmation.
+async function letGoNote(signal, status, anchor){
   if(!['dismissed','lost'].includes(status)) return undefined;
   const claim = CLAIM_CHASES.has(signal), one = ONE_AT_A_TIME.has(signal), lost = status === 'lost';
-  const typed = prompt(claim
-    ? `${lost ? 'Mark this claim lost' : 'Let go of this claim'}?\n\nNo answer from a payer is on file for it, so this money may not have been asked for yet. It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`
-    : one ? `${lost ? 'Mark this item lost' : 'Let go of this item'}?\n\n${ONE_WHY[signal] || 'Nobody has asked for this money yet'}, so it is let go only by a person, with a note. It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`
-    : `${lost ? 'Mark this item lost' : 'Let go of this item'}? It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history; required):`);
-  if(typed === null) return null;
-  const note = String(typed).trim();
-  if(!note){ alert(claim ? 'Not changed. A claim with no answer from a payer needs a note that says why.' : one ? 'Not changed. This item needs a note that says why.'
-    : 'Not changed. Letting an item go, or marking it lost, needs a reason.'); return null; }
-  return note;
+  const what = lost ? (claim ? 'Mark this claim lost' : 'Mark this item lost') : (claim ? 'Let go of this claim' : 'Let go of this item');
+  const why = claim ? 'No answer from a payer is on file for it, so this money may not have been asked for yet.'
+    : one ? `${ONE_WHY[signal] || 'Nobody has asked for this money yet'}, so it is let go only by a person, with a note.` : '';
+  return RWShell.askText(anchor, {text: `${what}? ${why ? why + ' ' : ''}It leaves the list${lost ? '' : ' and counts as let go'}. Why?`,
+    chips: typeof ST_REASONS !== 'undefined' ? ST_REASONS : [], yes: lost ? 'Mark lost' : 'Let go',
+    empty: claim ? 'Not changed. A claim with no answer from a payer needs a note that says why.' : one ? 'Not changed. This item needs a note that says why.'
+      : 'Not changed. Letting an item go, or marking it lost, needs a reason.'});
 }
 const DESKS = {
   denials:    {cat:'denial', title:'Denials', intro:'Lines and whole claims the payer paid $0 and has not paid since. Also claims the payer never answered, and claims rejected before they reached it or still in EMA\'s print batch.'},
@@ -166,6 +165,7 @@ async function deskTab(v, key){
   if(!b || !b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
   // the drawer walks this list, and fetches the next rows by itself at the end of it
   state.worklist = res.items.map(r=>r.finding_id); state.wlTotal = res.total; state.wlKey = key;
+  state.queueLabel = null;                // the list drawn again: the panel names the list, no longer Today's step (d-5)
   state.wlNext = async () => {
     if(state.wlKey !== key) return 0;
     const seen = new Set(state.worklist||[]);
@@ -393,38 +393,38 @@ function bindBulk(v){
   v.querySelectorAll('.sel').forEach(cb=>cb.onchange=sync);
   const all = v.querySelector('#selAll'); if(all) all.onchange = e => { v.querySelectorAll('.sel').forEach(cb=>cb.checked = e.target.checked); sync(); };
   const fx = v.querySelector('#bulkFax');
-  if(fx) fx.onclick = () => { const rows = [...v.querySelectorAll('.sel:checked')].map(x=>x.closest('tr.row')).filter(Boolean);
+  if(fx) fx.onclick = async () => { const rows = [...v.querySelectorAll('.sel:checked')].map(x=>x.closest('tr.row')).filter(Boolean);
     const ok = rows.filter(tr => FAX_KINDS.has(tr.dataset.kind) && !tr.dataset.closed), out = rows.length - ok.length;
-    if(!ok.length){ alert('None of the ticked items is settled by an appeal letter inside its window (they are fixed in EMA, need a decision first, the payer has to be chased first, or their windows closed).'); return; }
-    if(out && !confirm(`${pl(out, 'ticked item')} ${out===1?'is':'are'} not settled by an appeal letter (fixed in EMA, a decision first, the payer to chase first, or the window closed) and will be left out. Fax the other ${ok.length}?`)) return;
-    if(!out && ok.length > 20 && !confirm(`Fax ${pl(ok.length, 'appeal')} now? Each takes about a minute; keep this page open.`)) return;
+    if(!ok.length){ RWShell.say('None of the ticked items is settled by an appeal letter inside its window (they are fixed in EMA, need a decision first, the payer has to be chased first, or their windows closed).', {error: true}); return; }
+    if(out && !(await RWShell.ask(fx, `${pl(out, 'ticked item')} ${out===1?'is':'are'} not settled by an appeal letter (fixed in EMA, a decision first, the payer to chase first, or the window closed) and will be left out. Fax the other ${ok.length}?`, {yes: 'Yes, fax them'}))) return;
+    if(!out && ok.length > 20 && !(await RWShell.ask(fx, `Fax ${pl(ok.length, 'appeal')} now? Each takes about a minute; keep this page open.`, {yes: 'Yes, fax them'}))) return;
     appealByFax(ok.map(tr => tr.dataset.id), {after: render}); };
   v.querySelectorAll('[data-bulk]').forEach(bt=>bt.onclick=async()=>{ let ids = picked(); if(!ids.length) return;
     if(['appealed','in_progress'].includes(bt.dataset.bulk)){
       const shut = new Set([...v.querySelectorAll('tr.row[data-closed]')].map(tr=>tr.dataset.id));
       const keep = ids.filter(id=>!shut.has(id));
-      if(keep.length < ids.length && !confirm(`${pl(ids.length-keep.length, 'item')} ${ids.length-keep.length===1?'has':'have'} a closed filing window and will be left out: nothing to send there.${keep.length?'':' Nothing else is ticked.'}`)) return;
+      if(keep.length < ids.length && !(await RWShell.ask(bt, `${pl(ids.length-keep.length, 'item')} ${ids.length-keep.length===1?'has':'have'} a closed filing window and will be left out: nothing to send there.${keep.length?'':' Nothing else is ticked.'}`, {yes: keep.length ? `Go on with ${keep.length}` : 'OK'}))) return;
       ids = keep; if(!ids.length) return;
     }
     let notes = null;
     if(bt.dataset.bulk==='dismissed'){
       const out = new Set(leftOut()), kinds = leftKinds();
       ids = ids.filter(id=>!out.has(id));
-      if(!ids.length){ alert(`Nothing let go. ${leftOutLine(out.size, kinds)}`); return; }
-      // one reason for all of them, kept in each item's history (the server refuses a Let go with none)
-      const typed = prompt(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size, kinds) : ''}\n\nWhy (kept in each item's history; required):`);
-      if(typed === null) return;
-      notes = String(typed).trim();
-      if(!notes){ alert('Not changed. Letting items go needs a reason.'); return; }
+      if(!ids.length){ RWShell.say(`Nothing let go. ${leftOutLine(out.size, kinds)}`, {error: true}); return; }
+      // one reason for all of them, kept in each item's history (the server refuses a Let go with none): the six reason
+      // chips the panel offers, a note field, Save and Cancel, beside the button (never a browser box: review d-3)
+      notes = await RWShell.askText(bt, {text: `Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size, kinds) : ''} Why?`,
+        chips: typeof ST_REASONS !== 'undefined' ? ST_REASONS : [], yes: `Let go of ${ids.length}`, empty: 'Not changed. Letting items go needs a reason.'});
+      if(notes === null) return;
     }
-    if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
+    if(bt.dataset.bulk==='appealed' && ids.length > 5 && !(await RWShell.ask(bt, `Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`, {yes: `Yes, mark ${ids.length} sent`}))) return;
     if(bt.disabled) return;
     bt.disabled = true;
     // the status each row showed when the list was drawn: an item changed since (another tab, the daily run) is left alone
     const shown = {}; v.querySelectorAll('.sel:checked').forEach(x => { const tr = x.closest('tr.row'); if(tr && tr.dataset.status) shown[x.value] = tr.dataset.status; });
     const seen = Object.fromEntries(ids.filter(i => shown[i]).map(i => [i, shown[i]]));
     let out;
-    try { out = await post('/api/findings/bulk-status', Object.assign({ids, status: bt.dataset.bulk, seen}, notes ? {notes} : {})); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    try { out = await post('/api/findings/bulk-status', Object.assign({ids, status: bt.dataset.bulk, seen}, notes ? {notes} : {})); } catch(e){ RWShell.say('Not saved: '+e.message, {error: true, stay: true}); bt.disabled = false; return; }
     bulkLeftAlone(out);
     state.brief = null; render(); });
 }
@@ -432,14 +432,14 @@ function bindBulk(v){
 function bulkLeftAlone(out){
   const ch = ((out && out.changed) || []).length, fl = ((out && out.in_flight) || []).length;
   if(!ch && !fl) return;
-  alert([ch ? `${pl(ch, 'item')} changed since this list was drawn (another tab, another person or the daily run) and ${ch === 1 ? 'was' : 'were'} left as ${ch === 1 ? 'it is' : 'they are'}.` : '',
+  RWShell.say([ch ? `${pl(ch, 'item')} changed since this list was drawn (another tab, another person or the daily run) and ${ch === 1 ? 'was' : 'were'} left as ${ch === 1 ? 'it is' : 'they are'}.` : '',
          fl ? `${pl(fl, 'item')} ${fl === 1 ? 'has' : 'have'} a fax going out now and ${fl === 1 ? 'was' : 'were'} left as ${fl === 1 ? 'it is' : 'they are'}.` : '',
-         `${pl((out && out.updated) || 0, 'item')} changed. The list now shows each one as it is.`].filter(Boolean).join('\n\n'));
+         `${pl((out && out.updated) || 0, 'item')} changed. The list now shows each one as it is.`].filter(Boolean).join(' '), {stay: true});
 }
 async function exportCsv(params, find, key){      // fetched, not linked: the search text travels in a header, never in the address
   let r;
-  try { r = await fetch('/api/findings.csv?'+qs(params), find); } catch(e){ alert('The export did not come back (no connection).'); return; }
-  if(!r.ok){ alert('The export did not come back ('+r.status+').'); return; }
+  try { r = await fetch('/api/findings.csv?'+qs(params), find); } catch(e){ RWShell.say('The export did not come back (no connection).', {error: true}); return; }
+  if(!r.ok){ RWShell.say('The export did not come back ('+r.status+').', {error: true}); return; }
   const url = URL.createObjectURL(await r.blob()), a = document.createElement('a'); a.href = url; a.download = `remitwatch-${key}.csv`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000);
 }
 // The row a biller scans (CRITIQUE_biller change 6; DESIGN 3.8): two lines in every cell, at a fixed height, so a row never
@@ -511,8 +511,8 @@ function rowHtml(b, r, o){
   const owner = OWNER_SIGNALS.has(r.signal);
   return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-status="${esc(r.status||'open')}" data-kind="${esc(kindFor(b, r))}" data-signal="${esc(r.signal)}" ${due.closed && live ? 'data-closed="1"' : ''}${owner ? ' data-owner="1"' : ''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
     <td class="day" title="${esc(due.title)}"><span class="l1 ${due.cls}">${esc(due.l1)}</span><span class="l2">${esc(due.l2)}</span></td>
-    <td class="who"><span class="l1">${who}</span><span class="l2">${[claim, dos, member].filter(Boolean).join(' · ')}</span></td>
-    ${o.onePayer ? '' : `<td class="payer"><span class="l1">${esc(r.payer_group)}${blind}</span><span class="l2">${last}</span></td>`}
+    <td class="who"><span class="l1">${who}${o.onePayer ? blind : ''}</span><span class="l2">${[claim, dos, member, o.onePayer ? last : ''].filter(Boolean).join(' · ')}${o.onePayer ? '' : `<span class="who-payer"> · ${esc(r.payer_group || '')}</span>`}</span></td>
+    ${o.onePayer ? '' /* one payer: its can't-be-checked mark and "by <name>" ride in the who cell (review e-3) */ : `<td class="payer"><span class="l1">${esc(r.payer_group)}${blind}</span><span class="l2">${last}</span></td>`}
     <td class="what" title="${esc(lb.label + (r.hint ? '. ' + r.hint : ''))}"><span class="l1">${o.oneSignal ? esc(lb.label) : `${o.oneKind ? '' : kindBadge(b, kindFor(b, r))+' '}${esc(shortOf(b, r.signal))}`}</span><span class="l2">${what2}</span></td>
     <td class="num" title="${esc(amountBasis(r))}"><span class="l1">${amt}</span><span class="l2">${under}</span></td></tr>`;
 }
@@ -680,7 +680,7 @@ async function feesDesk(v){
   v.querySelectorAll('button.fee-again').forEach(bt=>bt.onclick=()=>openFeeLetter(fp.asked[Number(bt.dataset.a)]));
   v.querySelectorAll('button.fee-undo').forEach(bt=>bt.onclick=async()=>{ const a = fp.asked[Number(bt.dataset.a)]; if(!a) return;
     bt.disabled = true;
-    let out; try { out = await post('/api/findings/bulk-status', {ids: a.ids, status: 'open', seen: a.seen || {}}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    let out; try { out = await post('/api/findings/bulk-status', {ids: a.ids, status: 'open', seen: a.seen || {}}); } catch(e){ RWShell.say('Not saved: '+e.message, {error: true, stay: true}); bt.disabled = false; return; }
     bulkLeftAlone(out);
     state.brief = null; render(); });
   v.querySelectorAll('tr.fee-row, button.fee-letter').forEach(el=>{ const fn = e => { if(e) e.stopPropagation(); openFeeLetter(fp.payers[Number(el.dataset.i)]); };
@@ -708,7 +708,7 @@ function feeListHtml(fp, older){
 // the request letter for one payer, and one filled button: Mark asked moves its fee months to Sent
 async function openFeeLetter(p){
   if(!p) return;
-  let L; try { L = await api('/api/fees/letter?'+qs({payer: p.payer_name})); } catch(e){ alert('The letter did not come back: '+e.message); return; }
+  let L; try { L = await api('/api/fees/letter?'+qs({payer: p.payer_name})); } catch(e){ RWShell.say('The letter did not come back: '+e.message, {error: true}); return; }
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Payment fees: ${esc(p.payer_name)}</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">${esc(L.evidence)} Send it through the payer's provider portal, by fax or by mail, then press Mark asked: its ${pl(p.ids.length, 'fee month')} move to Sent. Fees that keep arriving afterwards show here again.</div>
     <div class="actions">${p.asked ? `<span class="small muted">Asked ${esc(longDate(practiceDate(p.asked)))}.</span>` : '<button class="primary" id="feeAsked">Mark asked</button>'}<button id="copyL">Copy letter</button></div>
@@ -775,7 +775,7 @@ async function emaBatch(btn, box){
 // password where the site has one. Nothing is filled in for them.
 async function hideReason(payer, signal, label, after, item){
   let p;
-  try { p = await api('/api/hide/preview?' + qs({payer_group: payer, signal})); } catch(e){ alert('Could not count them: ' + e.message); return; }
+  try { p = await api('/api/hide/preview?' + qs({payer_group: payer, signal})); } catch(e){ RWShell.say('Could not count them: ' + e.message, {error: true}); return; }
   // from an item's panel: what the archive saw happen to earlier items like this one (same payer, code and payer's reason),
   // the figure to read before hiding (/api/hide?patterns=1, archive_rules.hide_patterns)
   let seen = '';
@@ -810,8 +810,8 @@ async function hideReason(payer, signal, label, after, item){
     $('#modal').classList.remove('open');
     state.brief = null; state.dirty = true;
     if(after) after(); else render();
-    setTimeout(() => alert(`${pl(r.hidden, 'item')} hidden. New ones will be hidden too.`
-      + (r.left_out ? ` ${pl(r.left_out, 'item')} with a fax going out ${r.left_out === 1 ? 'was' : 'were'} left out and stay${r.left_out === 1 ? 's' : ''} on the list.` : '')), 50);
+    RWShell.say(`${pl(r.hidden, 'item')} hidden. New ones will be hidden too.`
+      + (r.left_out ? ` ${pl(r.left_out, 'item')} with a fax going out ${r.left_out === 1 ? 'was' : 'were'} left out and stay${r.left_out === 1 ? 's' : ''} on the list.` : ''));
   };
   box.querySelector('#hdNote').focus();
 }
@@ -834,7 +834,7 @@ function hiddenManage(rules){
     const r = rules[+b.dataset.unhide];
     // the rule as the list shows it, at its own grain (code, modifier, the payer's reason code): never only payer and reason
     try { await post('/api/hide', {payer_group: r.payer_group, signal: r.signal, code: r.code || '*', modifier: r.modifier || '*', reason: r.reason || '*', remove: true}); }
-    catch(e){ alert('Not saved: ' + e.message); return; }
+    catch(e){ RWShell.say('Not saved: ' + e.message, {error: true, stay: true}); return; }
     $('#modal').classList.remove('open'); state.brief = null; state.dirty = true; render();
   });
 }

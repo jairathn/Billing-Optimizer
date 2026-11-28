@@ -922,12 +922,12 @@
     el.querySelectorAll('[data-pick]').forEach(b => b.onclick = async () => {
       try { const r = await apiCall(`/api/uploads/notes/${b.dataset.note}/match`, {method: 'POST', body: JSON.stringify({pick: Number(b.dataset.pick)})});
         b.closest('.card').querySelector('ul').innerHTML = (r.lines || []).map(l => `<li>${esc(l)}</li>`).join(''); b.parentNode.querySelectorAll('[data-pick]').forEach(x => x.remove()); refresh(); }
-      catch (e) { alert('Not saved: ' + e.message); }
+      catch (e) { RWShell.say('Not saved: ' + e.message, {error: true, stay: true}); }
     });
     el.querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => {
-      if (!confirm('Take this note back? Its file is deleted from the server. A packet built from it is not faxed from now on. The next appeal builds it again from the note in its place.')) return;
+      if (!(await RWShell.ask(b, 'Take this note back? Its file is deleted from the server. A packet built from it is not faxed from now on. The next appeal builds it again from the note in its place.', {yes: 'Yes, take it back'}))) return;
       try { await apiCall(`/api/uploads/notes/${b.dataset.remove}/remove`, {method: 'POST', body: '{}'}); b.closest('.card').remove(); refresh(); }
-      catch (e) { alert('Not removed: ' + e.message); }
+      catch (e) { RWShell.say('Not removed: ' + e.message, {error: true, stay: true}); }
     });
   }
 

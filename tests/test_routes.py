@@ -863,3 +863,14 @@ def test_the_card_in_a_browser_on_the_serverless_site_from_the_dashboards_copy(s
     # the dashboard's copy is read-only: I sent it waits in the journal for the next run, with its channel and reference
     acts = [a for _name, a in cloud.read_actions(st)]
     assert len(acts) == 1 and f"Sent {want['sent_words']} by Portal: {want['best']['name']}. Reference REF-TEST-1" in json.dumps(acts[0]), acts
+
+
+def test_a_route_field_names_no_x12_loop_or_segment_on_a_billers_page():
+    """Review d-7: the route card said 'Loop 2300 CLM05-3 ...'; it says what EMA calls them."""
+    from remitwatch import routes
+    labels = ["Loop 2300 CLM05-3 Claim Frequency Type Code: 7 (replacement) or 8 (void/cancel)", "Loop 2300 REF01: F8",
+              "Loop 2300 REF02: original payer claim number", "Loop 2300 CLM claim frequency code: 7"]
+    shown = [f["label"] for f in routes.fill(labels, {})[0]]
+    assert shown and not any(re.search(r"(?i)loop\s*2300|clm0?5|ref0?[12]", s) for s in shown), shown
+    assert shown[0] == "Resubmission code: 7 replaces, 8 voids"
+    assert routes.ema_words("Member ID") == "Member ID"

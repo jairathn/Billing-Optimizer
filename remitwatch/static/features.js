@@ -345,6 +345,10 @@ function xpNoteChecked(packetId){
   const d = document.querySelector('#drawer');
   if(r && d && typeof xpRedrawBox === 'function') xpRedrawBox(state.detailId, d);
 }
+// the phone's pinned bar has its own Next (review d-8): it presses the panel's own Next
+if(typeof document !== 'undefined' && document && typeof document.addEventListener === 'function')
+  document.addEventListener('click', e => { const b = e.target && e.target.closest && e.target.closest('#drawer .ph-next'); if(!b) return;
+    const n = document.querySelector('#drawer #nextItem'); if(n && !n.disabled) n.click(); });
 function showPacket(out, p){
   if(p.note_hold){
     out.innerHTML = noteHoldHtml(p);
@@ -608,7 +612,7 @@ function xpBoxHtml(f, x, r){
   const primary = xpPrimary(nx, hasPacket);
   const url = xpEmaUrl(f, x, nx);
   const more = xpButtons(nx).concat(url && !(nx.buttons || []).includes('open_in_ema') ? ['open_in_ema'] : []).filter(k => k !== primary && XP_BUTTON[k]);
-  const steps = (nx.steps || []).filter(Boolean);
+  const steps = [nx.why].concat(nx.steps || []).filter(Boolean);       // the rest of the step's sentence leads its fold (d-7)
   const sib = (nx.siblings || []).length;
   const card = xpRouteShown(f, x);
   // the route leads once nothing is left to prepare: its button (call, open the portal, start the fax) is the one filled
@@ -620,14 +624,14 @@ function xpBoxHtml(f, x, r){
   const key = k => ({mark_sent: 's', let_go: 'l', mark_billed: 'b', billed_patient: 'b', log_outcome: 'n', open_in_ema: 'e'})[k];
   return `<div class="todo-box xp-box next" id="xpBox">
     <div class="next-label">Next step${nx.who ? ` <span>· ${esc(nx.who)}</span>` : ''}</div>
-    ${nx.action ? `<p class="next-text todo-next">${esc(nx.action)}</p>` : ''}
+    ${nx.action ? `<p class="next-text todo-next">${esc(nx.headline || nx.action)}</p>` : ''}
     ${due ? `<div class="small next-due">${due}</div>` : ''}
     ${steps.length ? `<details class="xp-steps"><summary class="small">${steps.length === 1 ? 'The step' : `The ${steps.length} steps`}</summary><ol class="small">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
     ${leads ? route : ''}
     ${(nx.needs || []).length ? `<div class="small muted">It needs: ${esc(nx.needs.join('; '))}</div>` : ''}
     ${sib ? `<div class="small muted">${pl(sib, 'other open item')} on this visit: work them together.</div>` : ''}
     <div class="todo-err sev-high small" id="xpErr" role="alert"></div>
-    <div class="actions todo-actions next-actions">${primary ? `<button${leads ? '' : ' class="primary"'} data-xp="${primary}" title="${esc(XP_BUTTON[primary])} (Enter)" id="xpMain">${esc(XP_BUTTON[primary])}</button>` : ''}
+    <div class="actions todo-actions next-actions">${primary ? `<button${leads ? '' : ' class="primary"'} data-xp="${primary}" title="${esc(XP_BUTTON[primary])} (Enter)" id="xpMain">${esc(XP_BUTTON[primary])}</button>` : ''}<button type="button" class="ph-next" aria-label="Next item">Next</button>
       ${more.length ? `<details class="xp-more"><summary class="small">More</summary><div class="actions">${more.map(k => `<button class="ghost" data-xp="${k}"${key(k) ? ` title="Key ${key(k)}"` : ''}>${esc(XP_BUTTON[k])}</button>`).join('')}</div></details>` : ''}</div>
     <div id="xpMsg" class="small"></div>${leads ? '' : route}</div>
     ${vd.sentence || strength || worth ? `<details class="why" id="xpWhyLine"><summary><span class="why-label">Why</span> <span class="xp-verdict">${esc(rowsCited.length ? xpUncited(vd.sentence) : (vd.sentence || 'How sure the site is'))}</span></summary>
@@ -825,6 +829,9 @@ function xpRouteBind(f, x, r, d, h){
         // payer said is logged with Log what happened
         await h.event('asked', `${how}${ref ? '. Reference ' + ref : ''}`);
         h.say('Noted in its history. When the payer answers, log what it said with Log what happened.');
+        // said where the person looks, and on to the next item as Sent does (review d-13)
+        if(typeof panelToast === 'function') panelToast('Noted in its history: asked the payer. Log what it says with n.');
+        if(typeof panelWalk === 'function') panelWalk(f.finding_id, state.detailSeq);
       } else {
         await h.status('appealed', `Sent ${c.sent_words || 'it'} by ${how}${ref ? '. Reference ' + ref : ''}`);
       }
@@ -932,7 +939,12 @@ function xpBind(f, x, r, d, done){
     build_packet: () => { if(d.querySelector('#noteGo') && ['note'].includes(kindFor(state.brief || {}, f))) fold('#builderFold'); else { const b = d.querySelector('#btnAppeal'); if(b) b.click(); else fold('#builderFold'); } },
     attach_note: () => { fold('#builderFold'); const i = d.querySelector('#noteFile'); if(i) i.focus(); },
     find_note: () => { fold('#builderFold'); if(d.querySelector('#noteEma')) noteFromEma(f.finding_id, d); },
-    upload_note: () => { window.open('/upload', '_blank', 'noopener'); },
+    // the note goes in here, in the item's own appeal step (review d-6): its fold opens and its file field takes the focus;
+    // the Upload page in a new tab only when this panel has no note field
+    upload_note: () => { const fi = d.querySelector('#noteFile');
+      if(!fi){ window.open('/upload', '_blank', 'noopener'); return; }
+      const fold = fi.closest('details'); if(fold) fold.open = true;
+      fi.scrollIntoView({block: 'center'}); fi.focus(); },
     fax_payer: () => xpFaxPreview(f, r.packets, d),
     copy_instructions: async () => { if(await copy(nx.instructions || nx.action || '', 'The steps')) await logged('instructions', 'The steps'); },
     request_era: async () => { if(!eraText){ err('No ERA request for this item.'); return; } if(await copy(eraText, 'The ERA request')) await logged('era_requested', 'The ERA request'); },
@@ -1413,7 +1425,7 @@ function panelToast(text, o){
   const gone = () => t.remove();
   t.querySelector('.t-close').onclick = gone;
   const u = t.querySelector('.t-undo'); if(u) u.onclick = () => { gone(); panelUndo(); };
-  if(!o.stay) setTimeout(gone, o.ms || 8000);
+  if(!o.stay) setTimeout(gone, o.ms || (o.undo ? 10000 : 8000));      // an Undo toast lives as long as Undo works (panelUndo)
 }
 // the head's buttons: the status menu (arrow keys move in it, Esc closes it), Previous and Next, the claim ID's copy
 function panelBindHead(f, d, seq){

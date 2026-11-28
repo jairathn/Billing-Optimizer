@@ -16,6 +16,8 @@ FONTS = ("inter-latin-opsz-wght.woff2", "inter-latin-ext-opsz-wght.woff2")
 # the inline style= attributes in remitwatch/static (pages and scripts). It may only go down: lower it when a change
 # removes some, never raise it (a new look goes in rw.css as a class).
 STYLE_ATTRS_MAX = 184
+# browser boxes (alert, confirm, prompt) in the pages: none (CRITIQUE_biller change 4, review d-3). Only ever lowered.
+BROWSER_BOXES_MAX = 0
 
 
 def read(name: str) -> str:
@@ -148,3 +150,36 @@ def test_the_inline_styles_in_the_pages_only_go_down():
         if name.endswith((".html", ".js")):
             n += len(pattern.findall(read(name)))
     assert n <= STYLE_ATTRS_MAX, f"{n} inline style= attributes; at most {STYLE_ATTRS_MAX}: give the look a class in rw.css"
+
+
+def browser_boxes() -> list[str]:
+    """Every call of alert, confirm or prompt in the pages' scripts (comments left out), as file:line."""
+    call = re.compile(r"(?<![\w.$])(?:window\.)?(alert|confirm|prompt)\s*\(")
+    hits = []
+    for name in sorted(os.listdir(STATIC)):
+        if not name.endswith((".html", ".js")):
+            continue
+        for n, line in enumerate(read(name).splitlines(), 1):
+            code = line if line.lstrip().startswith("<") else line.split("//")[0]
+            if call.search(code):
+                hits.append(f"{name}:{n}")
+    return hits
+
+
+def test_no_page_opens_a_browser_box():
+    """A question is asked beside the button that asked it (RWShell.ask, askText) and a message is a toast (RWShell.say):
+    a browser box stops the page, takes none of its words or look, and some browsers stop showing it. The count can only
+    go down; it is 0."""
+    hits = browser_boxes()
+    assert len(hits) <= BROWSER_BOXES_MAX, hits
+
+
+def test_the_shell_offers_the_inline_question_on_every_page():
+    js = read("shell.js")
+    for name in ("say", "ask", "askText"):
+        assert re.search(rf"function {name}\(", js), name
+    assert "say, ask, askText" in js                              # exported on RWShell
+    for page in SHELLS:                                          # every page loads the shell before its own scripts
+        html = read(page)
+        assert html.index("/static/shell.js") < min(i for i in (html.find("/static/" + x) for x in ("upload.js", "swing.js", "features.js", "desk.js")) if i >= 0)
+    assert ".inline-ask" in read("rw.css")

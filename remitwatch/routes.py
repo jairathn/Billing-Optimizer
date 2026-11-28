@@ -927,6 +927,24 @@ REQUEST_HINTS = {"overpayment_refund": {"reason": "why the money is owed back"},
                  "claim_status_or_reprocess": {"reason": "what you ask the payer"}}
 
 
+# X12 loop and segment names are not a biller's words (DESIGN rule 7, review d-7): the card says what EMA calls them, the
+# claim's resubmission code and the first claim's number. The research file keeps its sources' own words.
+_X12_WORDS = (
+    (re.compile(r"(?i)\bloop\s*2300\b.*\b(clm0?5(-3)?|frequency)\b.*\b8\b"), "Resubmission code: 7 replaces, 8 voids"),
+    (re.compile(r"(?i)\bloop\s*2300\b.*\b(clm0?5(-3)?|frequency)\b"), "Resubmission code: 7 (it replaces the claim)"),
+    (re.compile(r"(?i)\bloop\s*2300\b.*\bref0?1\b"), "Original claim number: say it is the payer's claim number"),
+    (re.compile(r"(?i)\bloop\s*2300\b.*\bref(0?2)?\b"), "Original claim number: the payer's number for the first claim"),
+)
+
+
+def ema_words(label: str) -> str:
+    """A route field's label in EMA's words where its source names an X12 loop or segment; any other label as it is."""
+    for rx, words in _X12_WORDS:
+        if rx.search(label or ""):
+            return words
+    return label
+
+
 def fill(fields: list[str], vals: dict[str, str], hints: dict | None = None) -> tuple[list[dict], list[str]]:
     """(the fields to type, each with its value or what to fill; the steps where to click). hints: what an empty field
     asks for when the request words it differently (REQUEST_HINTS)."""
@@ -937,12 +955,12 @@ def fill(fields: list[str], vals: dict[str, str], hints: dict | None = None) -> 
             steps.append(label)
             continue
         if kind == "set":
-            out.append({"label": label, "value": "", "keys": [], "fill": "", "set": True})
+            out.append({"label": ema_words(label), "value": "", "keys": [], "fill": "", "set": True})
             continue
         got = [vals.get(k, "") for k in keys]
         value = " · ".join(x for x in got if x)
         missing = [(hints or {}).get(k) or HINTS.get(k, OTHER_FILL) for k, x in zip(keys, got) if not x] if keys else [OTHER_FILL]
-        out.append({"label": label, "value": value, "keys": list(keys), "fill": "; ".join(missing) if missing else "",
+        out.append({"label": ema_words(label), "value": value, "keys": list(keys), "fill": "; ".join(missing) if missing else "",
                     "names": bool(set(keys) & NAME_KEYS)})
     return out, steps
 

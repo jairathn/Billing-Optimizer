@@ -45,6 +45,18 @@ function closesText(d){
 function rwMonth(m){ const x = new Date((m||'')+'-15T00:00:00Z'); return isNaN(x) ? esc(m||'') : x.toLocaleDateString('en-US', {month:'long', year:'numeric', timeZone:'UTC'}); }
 function longDate(d){ const x = new Date((d||'')+'T00:00:00Z'); return isNaN(x) ? esc(d||'') : x.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}); }
 function goWork(filt){ state.tab = 'worklist'; location.hash = 'worklist'; state.filt.worklist = Object.assign({status:'open,in_progress', deadline:'valid'}, filt||{}); state.page.worklist = 0; if(state.lim) state.lim.worklist = 0; render(); }
+// Today's Start (CRITIQUE_premium change 1, review d-5): the step's list is drawn behind and its first item opens in the
+// panel at once, the panel saying where the person is ("Step 1 · Item 1 of 9"); j and k walk the step's list. The step's
+// title still opens the list alone.
+async function goWorkFirst(filt, label){
+  state.tab = 'worklist'; location.hash = 'worklist'; state.filt.worklist = Object.assign({status:'open,in_progress', deadline:'valid'}, filt||{});
+  state.page.worklist = 0; if(state.lim) state.lim.worklist = 0;
+  await render();
+  const ids = state.worklist || [];
+  if(state.tab !== 'worklist' || !ids.length || typeof openDetail !== 'function') return;
+  state.queueLabel = label;
+  openDetail(ids[0], {walk: true});
+}
 // the kind of work an item takes, as insights.work_type decides it: a whole claim denied goes by its action and reason
 function kindFor(b, r){
   if(r.signal === 'CLAIM_DENIED_UNPAID'){
@@ -211,7 +223,7 @@ function tdSteps(b, look){
       count: wo.n, cents: wo.cents, btn: true, go:{handling:'written_off', sort:'shortfall'}});
   // claims EMA shows sent and unpaid that no remittance answers: nobody is chasing them, and their filing limit runs
   const na = (b.no_answer || {}).chase || {}, rj = (b.no_answer || {}).rejected || {};
-  if(na.n) steps.push({n:steps.length+1, title:'Chase claims the payer never answered', line:`Sent and never answered: look ${na.n===1?'it':'them'} up on the payer's portal or call${na.first_deadline ? `; the first one's date is ${esc(longDate(na.first_deadline))}` : ''}.${rj.n ? ` ${Number(rj.n).toLocaleString()} more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit).` : ''}`,
+  if(na.n) steps.push({n:steps.length+1, title:'Chase claims the payer never answered', line:`Sent and never answered: look ${na.n===1?'it':'them'} up on the payer's portal or call${na.first_deadline ? `; the soonest must be filed by ${esc(longDate(na.first_deadline))}` : ''}.${rj.n ? ` ${Number(rj.n).toLocaleString()} more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit).` : ''}`,
       chips: kindBadge(b, 'chase'), count: na.n, cents: na.cents, unit: 'claim', btn: true, go:{kind:'chase', sort:'deadline'}});
   if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`Sent more than ${fu.days} days ago and still unpaid. Check the portal or call.${fu.note ? ' <b>' + esc(fu.note) + '</b>' : ''}`, count: fu.n, cents: fu.cents, btn: true, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
   if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}, on ${pl(top.claims, 'claim')}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
@@ -240,7 +252,8 @@ function tdBindPlan(v, b, look, redraw){
   const el = v.querySelector('#tdPlan'); if(!el) return;
   const steps = tdSteps(b, look);
   if(redraw){ el.innerHTML = tdPlanHtml(steps); const h = v.querySelector('#tdPlanHead'); if(h) h.innerHTML = tdPlanHead(steps); }
-  el.querySelectorAll('[data-step]').forEach(bt=>bt.onclick=e=>{ if(e && e.preventDefault) e.preventDefault(); const s = steps.find(x=>String(x.n)===bt.dataset.step); if(s) goWork(s.go); });
+  el.querySelectorAll('[data-step]').forEach(bt=>bt.onclick=e=>{ if(e && e.preventDefault) e.preventDefault(); const s = steps.find(x=>String(x.n)===bt.dataset.step); if(!s) return;
+    if(bt.tagName === 'BUTTON') goWorkFirst(s.go, 'Step ' + s.n); else goWork(s.go); });
   el.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'older', status:'open,in_progress', sort:'shortfall'}); });
 }
 // A feed that is late, when the blind spot does not already say it in dollars: the one banner Today shows of its own (the
@@ -489,9 +502,8 @@ function bindWhatToDo(f, d, seq){
   const walk = [...d.querySelectorAll('#sentNext, #letGoNext, #prevItem, #nextItem')];
   const decideAndGo = (bt, status) => async () => {
     if(bt.disabled || (typeof walkGuarded === 'function' && walkGuarded())) return;      // a second click, or a double click's second half
-    const why = letGoNote(f.signal, status);          // a claim no payer answered is let go only with a note (desk.js)
+    const why = await letGoNote(f.signal, status, bt);   // let go only with a reason, asked beside the button (desk.js)
     if(why === null) return;
-    if(why === undefined && status === 'dismissed' && !confirm('Let go of this item? It leaves the list and counts as let go.')) return;
     walk.forEach(x => x.disabled = true);             // one decision per click: nothing else in the walk until the answer is back
     const body = why === undefined ? {status} : {status, notes: why};
     body.seen_status = f.status;                      // the status this panel shows: a change made elsewhere since is not undone

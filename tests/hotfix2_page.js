@@ -181,7 +181,10 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
   answers.length = 0; answers.push(true, true);
   await page.check(`tr.row[data-id="${ids[0]}"] input.sel`); await page.check(`tr.row[data-id="${ids[1]}"] input.sel`);
   const before = posts.length;
-  await page.click('#view [data-bulk="in_progress"]'); await sleep(1200);
+  await page.click('#view [data-bulk="in_progress"]'); await sleep(400);
+  // a question beside the button (review d-3: never a browser box), answered yes as the browser's confirm was
+  const yes = await page.$('.inline-ask .ia-yes'); if (yes) { await yes.click(); }
+  await sleep(800);
   out.bulk = posts.slice(before).filter(x => /bulk-status$/.test(x.url)).map(x => x.body);
 
   // ---------------------------------------------------------------- push 2's panel: Log what happened (H4, H1; review people-1)

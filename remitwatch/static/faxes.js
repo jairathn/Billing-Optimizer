@@ -83,9 +83,11 @@ async function faxOwnerPost(path, body, where){
   }
 }
 // the number read back, with the payer and what goes to it, before anything is saved or sent
-function faxReadBack(payer, purpose, digits, extra){
-  return confirm(`${digits ? `Save ${fax10(digits)} as the ${purpose === 'level_2' ? 'second-level' : 'appeal'} fax number of ${payer}?` : `Remove the ${purpose === 'level_2' ? 'second-level' : 'appeal'} fax number of ${payer}?`}`
-    + (extra ? `\n\n${extra}` : '') + (digits ? '\n\nCheck each digit against the payer\'s own papers. A fax with a patient\'s record must not go to a wrong number.' : ''));
+function faxReadBack(anchor, payer, purpose, digits, extra){
+  const kind = purpose === 'level_2' ? 'second-level' : 'appeal';
+  return RWShell.ask(anchor, `${digits ? `Save ${fax10(digits)} as the ${kind} fax number of ${payer}?` : `Remove the ${kind} fax number of ${payer}?`}`
+    + (extra ? ` ${extra}` : '') + (digits ? ' Check each digit against the payer\'s own papers: a fax with a patient\'s record must not go to a wrong number.' : ''),
+    {yes: digits ? 'Yes, save it' : 'Yes, remove it'});
 }
 
 // ---------------------------------------------------------------- send: each item through /api/appeals/send, three at a time
@@ -162,7 +164,7 @@ function faxSummary(el, res, notTried, opts){
     const p = b.dataset.fxsave, input = el.querySelector(`[data-fxnum="${CSS.escape(p)}"]`), msg = el.querySelector(`[data-fxmsg="${CSS.escape(p)}"]`);
     const d = faxDigits(input.value), items = by.no_number.filter(r => (r.payer_group||'') === p);
     if(!d){ msg.textContent = 'Type the ten digits of the payer\'s fax number.'; msg.className = 'small sev-high'; return; }
-    if(!faxReadBack(p, 'appeal', d, `Then ${pl(items.length, 'appeal')} ${items.length === 1 ? 'is' : 'are'} faxed to it.`)) return;
+    if(!(await faxReadBack(b, p, 'appeal', d, `Then ${pl(items.length, 'appeal')} ${items.length === 1 ? 'is' : 'are'} faxed to it.`))) return;
     try { await faxOwnerPost('/api/faxes/payer', {payer_group: p, number: d}, msg); }
     catch(e){ msg.textContent = e.message; msg.className = 'small sev-high'; return; }
     appealByFax(items.map(r => r.finding_id), opts);
@@ -206,7 +208,7 @@ async function appealEverything(opts){
     const p = b.dataset.fxsave, input = box.querySelector(`[data-fxnum="${CSS.escape(p)}"]`), msg = box.querySelector(`[data-fxmsg="${CSS.escape(p)}"]`);
     const d = faxDigits(input.value);
     if(!d){ msg.textContent = 'Type the ten digits of the payer\'s fax number.'; msg.className = 'small sev-high'; return; }
-    if(!faxReadBack(p, 'appeal', d)) return;
+    if(!(await faxReadBack(b, p, 'appeal', d))) return;
     try { await faxOwnerPost('/api/faxes/payer', {payer_group: p, number: d}, msg); appealEverything(opts); }
     catch(e){ msg.textContent = e.message; msg.className = 'small sev-high'; }
   });
@@ -215,8 +217,8 @@ async function appealEverything(opts){
   if(lf) lf.onclick = e => { e.preventDefault(); const el = box.querySelector('#fxLeftList'); if(el.innerHTML){ el.innerHTML = ''; return; }
     el.innerHTML = `<table class="small"><tbody>${(lo.items||[]).map(x=>`<tr class="row" tabindex="0" data-left="${esc(x.finding_id)}"><td>${esc(x.payer_group||'')}</td><td>${esc(x.words||x.reason)}</td><td class="num">${money2(x.cents)}</td></tr>`).join('')}</tbody></table>${lo.n > (lo.items||[]).length ? `<div class="small muted">The first ${num((lo.items||[]).length)} of ${num(lo.n)}.</div>` : ''}`;
     el.querySelectorAll('[data-left]').forEach(tr => tr.onclick = () => { $('#modal').classList.remove('open'); openDetail(tr.dataset.left); }); };
-  box.querySelector('#fxGo').onclick = () => {
-    if(ready.length > 20 && !confirm(`Fax ${pl(ready.length, 'appeal')} now? Each takes about a minute; keep this page open.`)) return;
+  box.querySelector('#fxGo').onclick = async () => {
+    if(ready.length > 20 && !(await RWShell.ask(box.querySelector('#fxGo'), `Fax ${pl(ready.length, 'appeal')} now? Each takes about a minute; keep this page open.`, {yes: 'Yes, fax them'}))) return;
     appealByFax(ready.map(i => i.finding_id), {title: 'Appealing everything appealable', after: opts.after});
   };
 }
@@ -381,8 +383,8 @@ async function faxesTab(v){
   v.querySelectorAll('[data-send]').forEach(b => b.onclick = async () => {
     const msg = v.querySelector('#fxPersonMsg');
     const stale = b.dataset.stale === '1';
-    if(!confirm(stale ? `You checked EMA or the payer's portal and this claim is still unpaid? Fax its follow-up to ${b.dataset.number}.`
-                      : `Fax this item's follow-up to ${b.dataset.number}?`)) return;
+    if(!(await RWShell.ask(b, stale ? `You checked EMA or the payer's portal and this claim is still unpaid? Fax its follow-up to ${b.dataset.number}.`
+                      : `Fax this item's follow-up to ${b.dataset.number}?`, {yes: 'Yes, fax it'}))) return;
     b.disabled = true;
     try { const r = await post('/api/faxes/follow_up', Object.assign({finding_ids: [b.dataset.send], number: b.dataset.number}, stale ? {stale_ok: true} : {}));
       const one = (r.results||[])[0] || {};
@@ -393,13 +395,14 @@ async function faxesTab(v){
   });
   v.querySelectorAll('[data-settle]').forEach(b => b.onclick = async () => {
     const went = b.dataset.went === '1';
-    if(!confirm(went ? 'You found this fax in SRFax\'s sent faxes: it went out?' : 'This fax is not in SRFax\'s sent faxes: it did not go out? The line then tries it again.')) return;
+    if(!(await RWShell.ask(b, went ? 'You found this fax in SRFax\'s sent faxes: it went out?' : 'This fax is not in SRFax\'s sent faxes: it did not go out? The line then tries it again.',
+                           {yes: went ? 'Yes, it went' : 'Yes, it did not go'}))) return;
     try { await post('/api/faxes/settle', {fax_key: b.dataset.settle, went}); render(); }
-    catch(e){ alert(e.message); }
+    catch(e){ RWShell.say(e.message, {error: true, stay: true}); }
   });
   v.querySelectorAll('[data-tie]').forEach(b => b.onclick = async () => {
     const msg = v.querySelector('#fxTieMsg'), sel = v.querySelector(`[data-says="${CSS.escape(b.dataset.tie)}"]`);
-    if(!confirm('Tie this fax to that item? From then on it counts as the payer\'s answer about it.')) return;
+    if(!(await RWShell.ask(b, 'Tie this fax to that item? From then on it counts as the payer\'s answer about it.', {yes: 'Yes, tie it'}))) return;
     try { await post('/api/faxes/match', Object.assign({fax_key: b.dataset.tie, finding_id: b.dataset.to}, sel && sel.value ? {says: sel.value} : {})); render(); }
     catch(e){ msg.className = 'small sev-high'; msg.textContent = e.message; }
   });
@@ -407,7 +410,7 @@ async function faxesTab(v){
     const p = b.dataset.psave, purpose = b.dataset.purpose, input = [...v.querySelectorAll('[data-pfax]')].find(x => x.dataset.pfax === p && x.dataset.purpose === purpose);
     const msg = v.querySelector('#pfMsg'), d = faxDigits(input.value);
     if(input.value.trim() && !d){ msg.className = 'small sev-high'; msg.textContent = `${p}: type the ten digits of the fax number.`; return; }
-    if(!faxReadBack(p, purpose, d)) return;
+    if(!(await faxReadBack(b, p, purpose, d))) return;
     try { const r = await faxOwnerPost('/api/faxes/payer', {payer_group: p, purpose, number: d}, msg);
       msg.className = 'small ok'; msg.textContent = r.number ? `${p}: ${purpose === 'appeal' ? 'appeal' : 'second level'} fax saved as ${r.number}.` : `${p}: removed.`;
       if(r.needs_confirm) msg.textContent += ` It replaced ${r.previous}: retries and follow-ups wait until someone confirms it.`;
@@ -416,7 +419,7 @@ async function faxesTab(v){
   });
   v.querySelectorAll('[data-pconfirm]').forEach(b => b.onclick = async () => {
     const p = b.dataset.pconfirm, purpose = b.dataset.purpose, msg = v.querySelector('#pfMsg');
-    if(!confirm(`Retries and follow-ups for ${p} go to ${b.dataset.number} from now on, each with the patient's records. Is that the payer's number, from its own papers?`)) return;
+    if(!(await RWShell.ask(b, `Retries and follow-ups for ${p} go to ${b.dataset.number} from now on, each with the patient's records. Is that the payer's number, from its own papers?`, {yes: 'Yes, it is'}))) return;
     try { await faxOwnerPost('/api/faxes/payer/confirm', {payer_group: p, purpose, number: b.dataset.number}, msg); render(); }
     catch(e){ msg.className = 'small sev-high'; msg.textContent = `${p}: ${e.message}`; }
   });

@@ -172,7 +172,7 @@ function polBindSegs(v, el, pats, t){
   el.querySelectorAll('[data-dec]').forEach(b=>b.onclick=async()=>{
     const i = Number(b.dataset.i), p = pats[i], dec = b.dataset.dec, err = v.querySelector('#polErr');
     if(!p || p.decision === dec) return;
-    if(dec === 'accept' && !confirm(polAcceptWords(p))) return;
+    if(dec === 'accept' && !(await RWShell.ask(b, polAcceptWords(p), {yes: 'Yes, accept'}))) return;
     const nameBox = v.querySelector('#polName'), name = (nameBox ? nameBox.value : polName()).trim().slice(0, 40);
     polRemember(name);
     const cell = v.querySelector(`.polDec[data-i="${i}"]`);

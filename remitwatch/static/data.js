@@ -350,8 +350,8 @@ function dtBind(v, ema){
   v.querySelectorAll('[data-decide]').forEach(b=>b.onclick=async()=>{
     const box = b.closest('.warnbox'), msg = box && box.querySelector('.dtDecideMsg'), what = b.dataset.decide;
     const x = files.find(f => f.file_id === b.dataset.file) || {};
-    if(what === 'discard' && !confirm('Discard this report? It is not read, and nothing it holds reaches the site.')) return;
-    if(what === 'apply' && !confirm(dtApplyWords(x))) return;
+    if(what === 'discard' && !(await RWShell.ask(b, 'Discard this report? It is not read, and nothing it holds reaches the site.', {yes: 'Yes, discard it'}))) return;
+    if(what === 'apply' && !(await RWShell.ask(b, dtApplyWords(x), {yes: 'Yes, read it'}))) return;
     if(box) box.querySelectorAll('button').forEach(x=>x.disabled = true);
     try { await api('/api/ema/reports/'+encodeURIComponent(b.dataset.file)+'/decision', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision: what})});
       if(msg) msg.textContent = what === 'apply' ? 'Saved: the next run reads it.' : 'Saved: discarded.'; setTimeout(()=>render(), 1200); }
@@ -363,7 +363,7 @@ function dtBind(v, ema){
     const x = rows[Number(b.dataset.i)]; if(!x) return;
     b.disabled = true;
     try { const text = await dtRequestText(x); const ta = v.querySelector('#dtAskText'); if(ta){ ta.hidden = false; ta.value = text; } dtCopy(text, b); }
-    catch(err){ alert('The checks did not come back: ' + (err.message || 'no answer from the site')); }
+    catch(err){ RWShell.say('The checks did not come back: ' + (err.message || 'no answer from the site'), {error: true}); }
     finally { b.disabled = false; }
   });
   bindAsk();

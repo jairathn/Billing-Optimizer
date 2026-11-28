@@ -381,14 +381,14 @@ async function findingsTable(v, container, base, opts={}){
   container.querySelector('.csvBtn').onclick=async()=>{      // fetched, not linked, for the same reason the search text is not in the address
     let r;
     try { r = await fetch('/api/findings.csv?'+qs(Object.assign({},base,chosen,{year:state.year,status:state.status})), find); }
-    catch(e){ alert('The export did not come back (no connection). Try again in a moment.'); return; }
-    if(!r.ok){ alert('The export did not come back ('+r.status+'). Try again in a moment.'); return; }
+    catch(e){ RWShell.say('The export did not come back (no connection). Try again in a moment.', {error: true}); return; }
+    if(!r.ok){ RWShell.say('The export did not come back ('+r.status+'). Try again in a moment.', {error: true}); return; }
     const url = URL.createObjectURL(await r.blob()), a = document.createElement('a');
     a.href = url; a.download = 'remitwatch-findings.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000); };
   const b = container.querySelector('#bulkAppealed'); if(b) b.onclick=async()=>{ const ids=[...container.querySelectorAll('.sel:checked')].map(x=>x.value); if(!ids.length || b.disabled) return;
     const seen = {}; container.querySelectorAll('.sel:checked').forEach(x=>{ const tr = x.closest('tr.row'); if(tr && tr.dataset.status) seen[x.value] = tr.dataset.status; });
     b.disabled = true;
-    try { const out = await post('/api/findings/bulk-status', {ids, status:'appealed', seen}); bulkLeftAlone(out); } catch(e){ alert('Not saved: ' + e.message); }
+    try { const out = await post('/api/findings/bulk-status', {ids, status:'appealed', seen}); bulkLeftAlone(out); } catch(e){ RWShell.say('Not saved: ' + e.message, {error: true, stay: true}); }
     render(); };
 }
 async function trendChart(id, params, label){
@@ -456,12 +456,17 @@ async function data(v){
 // ---------------------------------------------------------------- detail drawer and appeal packet
 function closeDetail(){
   const d = $('#drawer'); if(!d.classList.contains('open')) return;
+  // the row of the item just worked, or the row now in its place when it left the list: j goes on from there (review d-9)
+  const was = state.detailId, at = (state.worklist || []).indexOf(was);
+  const rowFor = () => (was && document.querySelector(`#view tr.row[data-id="${CSS.escape(was)}"]`)) || (at >= 0 ? document.querySelectorAll('#view tr.row')[at] : null);
+  const land = r => { if(!r) return false; r.focus(); if(r.scrollIntoView) r.scrollIntoView({block: 'nearest'}); return true; };
   d.classList.remove('open'); d.inert = true;
   state.detailSeq = (state.detailSeq||0) + 1; state.detailId = null;
   if(/^#item=/.test(location.hash)) history.replaceState(null, '', '#' + state.tab);       // the address names the page again
   const back = state.detailFrom; state.detailFrom = null;
   if(state.dirty){ state.dirty = false; if(state.tab==='today' || state.tab==='fees' || DESKS[state.tab]){       // statuses changed: redraw the list behind
-    render().then(()=>{ const r = document.querySelector('#view tr.row') || document.querySelector('#view button'); if(r) r.focus(); }); return; } }
+    render().then(()=>{ if(!land(rowFor())){ const r = document.querySelector('#view tr.row') || document.querySelector('#view button'); if(r) r.focus(); } }); return; } }
+  if(land(rowFor())) return;
   if(back && back.isConnected) back.focus();
 }
 // Escape closes what is on top: a window (the shortcuts, a fax preview, a letter, a bulk send) first, then the item's panel

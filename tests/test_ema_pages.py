@@ -987,11 +987,7 @@ const out = {
     ctx.xpPacketBuilt('other', {}, { packet_id: 'p2' });                       // a panel since closed or moved on: nothing
     return { packets: ctx.state.detailR.packets.map(p => p.packet_id), redrawn,
              main: primary('appeal', ['build_packet', 'fax_payer', 'mark_sent'], ctx.state.detailR.packets) }; })(),
-  // review C1: every Let go and Lost asks why, and nothing changes without an answer (desk.js letGoNote)
-  let_go: (() => { const said = []; ctx.alert = m => said.push(m);
-    const ask = (answer, signal, status) => { ctx.prompt = () => answer; const r = ctx.letGoNote(signal, status); return r === undefined ? 'no question' : r; };
-    return { given: ask('  The payer never pays these  ', 'DENIED_AUTH', 'dismissed'), blank: ask('   ', 'UNDERPAID', 'lost'),
-             cancelled: ask(null, 'DENIED_AUTH', 'dismissed'), claim: ask('', 'NO_ANSWER', 'dismissed'), sent: ask('x', 'DENIED_AUTH', 'appealed'), said }; })(),
+  let_go: null,
 };
 (async () => {
   // review C1: the Hidden list's Show again posts the rule as the list shows it, at its own grain (desk.js hiddenManage)
@@ -1004,6 +1000,15 @@ const out = {
                     { payer_group: 'Plan B', signal: 'DENIED_AUTH', code: null, modifier: null, reason: null, label: 'Denied', n: 1, cents: 50 }]);
   for (const b of btns) await b.onclick();
   out.unhide = sent;
+  // review C1: every Let go and Lost asks why, and nothing changes without an answer (desk.js letGoNote). Moved with the same
+  // guarantee from the browser's prompt to the question beside the button (RWShell.askText, review d-3): an empty answer
+  // is refused with its sentence (recorded in said, as the alert was) and the person cancels.
+  out.let_go = await (async () => { const said = []; let answer = null;
+    ctx.RWShell = { say: m => said.push(m), ask: async () => false,
+      askText: async (_at, o) => { if (answer === null) return null; const v = String(answer).trim(); if (!v) { said.push(o.empty); return null; } return v; } };
+    const ask = async (a, signal, status) => { answer = a; const r = await ctx.letGoNote(signal, status, {}); return r === undefined ? 'no question' : r; };
+    return { given: await ask('  The payer never pays these  ', 'DENIED_AUTH', 'dismissed'), blank: await ask('   ', 'UNDERPAID', 'lost'),
+             cancelled: await ask(null, 'DENIED_AUTH', 'dismissed'), claim: await ask('', 'NO_ANSWER', 'dismissed'), sent: await ask('x', 'DENIED_AUTH', 'appealed'), said }; })();
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e); process.exit(1); });
 """

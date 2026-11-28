@@ -40,7 +40,9 @@ const [port, user, pass, fid, mode] = process.argv.slice(2);
     await page.fill('#rcRef', 'REF-TEST-2');
     await page.click('#rcSent');
     await page.waitForTimeout(1200);
-    out.msg = await page.evaluate(() => (document.querySelector('#xpMsg') || {}).textContent || '');
+    // the panel's own line, and its toast (review d-13: the panel moves on after "I asked the payer"; the toast says it saved)
+    out.msg = await page.evaluate(() => ((document.querySelector('#xpMsg') || {}).textContent || '') + ' '
+      + [...document.querySelectorAll('#rwToasts .t-text')].map(x => x.textContent).join(' '));
   }
   out.err = await page.evaluate(() => (document.querySelector('#xpErr') || {}).textContent || '');
   out.modal = await page.evaluate(() => { const m = document.querySelector('#modal'); return m && m.classList.contains('open') ? (document.querySelector('#modalBox') || {}).innerText.slice(0, 160) : ''; });

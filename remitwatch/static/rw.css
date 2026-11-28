@@ -1893,3 +1893,31 @@ table.wl.wk tr.group-row td { height: auto; padding: 7px var(--sp-4); }
   table.wl.wk tr.group-row { display: block; margin: var(--sp-2) 0 var(--sp-1); padding: 0; background: none; border: 0; }
   table.wl.wk tr.group-row td { display: block; padding: var(--sp-1) var(--sp-1); background: none; }
 }
+
+/* 25. A question beside the button that asked it (RWShell.ask and askText): never a browser box (review d-3) */
+.inline-ask { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: var(--sp-1) 0 var(--sp-1) var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  font-size: var(--fs-sm); line-height: var(--lh-sm); max-width: 100%; }
+.inline-ask .ia-text { flex: 1 1 260px; color: var(--text); }
+.inline-ask .ia-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); flex-basis: 100%; }
+.inline-ask .ia-input { flex: 1 1 220px; min-width: 0; }
+.inline-ask .ia-err { flex-basis: 100%; color: var(--danger); }
+.inline-ask .ia-err:empty { display: none; }
+.toast .t-text { white-space: pre-line; }
+
+/* 26. The panel on a laptop and on a phone (review d-8). From 1280 to 1535 px the docked panel is narrower and the list
+   drops its Payer column (the payer rides in the patient cell's second line), so What happened keeps its words. On a
+   phone every control in the sheet is 44 px tall at least, and the next step's main button sits in a bar pinned to the
+   foot of the sheet with Next beside it. */
+.who-payer, .ph-next { display: none; }
+@media (min-width: 1280px) and (max-width: 1535px) {
+  body:has(#drawer.open), body.drawer-open { --drawer-w: 440px; }
+  body:has(#drawer.open) table.wl :is(th.c-payer, td.payer), body.drawer-open table.wl :is(th.c-payer, td.payer) { display: none; }
+  body:has(#drawer.open) table.wl .who-payer, body.drawer-open table.wl .who-payer { display: inline; }
+}
+@media (max-width: 640px) {
+  #drawer :is(.st-btn, #prevItem, #nextItem, #closeD, .copy-btn, .ph-next, .next-actions button) { min-height: 44px; min-width: 44px; }
+  #drawer .next-actions { position: sticky; bottom: 0; z-index: 2; margin-left: 0 !important; margin-right: 0 !important;
+    padding: var(--sp-2) var(--sp-4); background: var(--surface); border-top: 1px solid var(--border); }
+  #drawer .next-actions .ph-next { display: inline-flex; align-items: center; justify-content: center; }
+}

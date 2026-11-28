@@ -1126,7 +1126,8 @@ def check(settings: Settings | None = None, session: Any = None) -> dict:
 
     if not s.configured():
         step("Settings", False, "MODMED_CLIENT_ID and MODMED_PRIVATE_KEY (or MODMED_CLIENT_SECRET) are not set.")
-        return {"ok": False, "steps": steps, "mode": None}
+        # nothing set up: the expected state while notes come in by hand (Setup says so quietly, review d-4)
+        return {"ok": False, "configured": False, "steps": steps, "mode": None}
     step("Settings", True, f"client ID set; {'signed key' if s.private_key else 'client secret'}; FHIR server {s.fhir_base}")
     if s.private_key:
         try:
