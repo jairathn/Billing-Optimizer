@@ -185,6 +185,17 @@ hover, 200 ms panel) and off for people who ask their system for less motion.
   steps say `Start`. A done step is one line with a check and a quiet Review link.
 - **Rows and lists**: the due date before the amount; the amount right-aligned in tabular digits; the open row on
   `--surface-3` with the selection rule.
+- **Sections** (`.secs`): on the long pages (Results, Data, Faxes, Upload, Setup) a page's panels are sections: a
+  heading, a hairline and space. A card stays only for something to act on (`.panel.act`) and for figure tiles that
+  open a list.
+- **The week** (`.rs-figs`, `.rs-fig`): Results opens on this week's four scoreboard figures in a row split by
+  hairlines, each opening the list it counts, then "Needs you" and the team. One definition with the board under it.
+- **Charts**: Results draws money back by week itself (`.rs-chart`, SVG): the last complete week in `--viz-accent`,
+  earlier weeks in `--viz-context`, the current week outlined and labeled "so far", the money back since the first
+  flag as a line in `--text-2`. Chart.js charts read `--viz-1` to `--viz-4` and the context grays through index.html's
+  `palette`, take their font, ink and grid from the tokens, and are drawn again when the theme changes. Months read
+  "Jan 2026", "Feb"; no label is turned on its side. Every chart has a text equivalent (its label and a table).
+- **The bell** (`.bell-menu`): the five newest alerts in plain words, newest first, and See all.
 - **Icons**: one set of plain 24 px stroke icons drawn for RemitWatch, shown at 16 to 22 px. Pages draw them from the
   sprite (`<svg class="i"><use href="/static/icons.svg#i-search"/></svg>`); the stylesheet draws state marks, kinds of
   work and small marks as masks that take the text color. A pseudo-element draws a mark, never words.
@@ -223,6 +234,5 @@ The first design (kept privately with its critiques) was measured against its ow
 - "One filled button per view" was broken on Work with the panel and on Send to payer; the checks now count them.
 - "Cards sit almost flat" had shadows on buttons, cards and tiles; resting things are now flat.
 - "Color means state" had the accent on about 15 things per screen; it now has three jobs.
-- "Chart pages take the same tokens" was not wired; the `--viz-*` tokens exist for the charts' unit to use.
-- "Dark mode: cheap" left the banners, charts and the theme control undone; the banners and the theme are done, the
-  charts belong to the pages' unit.
+- "Chart pages take the same tokens" was not wired; now every chart takes the `--viz-*` tokens in both themes.
+- "Dark mode: cheap" left the banners, charts and the theme control undone; all three are done.

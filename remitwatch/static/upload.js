@@ -496,6 +496,7 @@
   const arrivedHtml = e => `<div>${esc(e.last_line)}</div><div class="status-line ${FLAG_TONE[rowFlag(e)] || ''}">${esc(e.state_line)}</div>`
     + (e.host_line ? `<div class="small warn" data-host>${esc(e.host_line)}</div>` : '');
 
+  let leadKey = null;
   function exportRow(e) {
     const cols = e.columns.map(c => `<li><b>${esc(c.column)}</b>${c.why ? ': ' + esc(c.why) : ''}</li>`).join('');
     const h = e.howto || {};
@@ -519,7 +520,7 @@
           <div class="small muted">${who}${h.versions ? ` <a href="#" data-hist>${h.versions} earlier version${h.versions === 1 ? '' : 's'}</a>` : ''}</div>
           <div class="hist" hidden></div>
         </div>
-        <div class="row mt-3"><span class="attach"><button type="button" class="primary" data-pick>Upload the ${esc(e.title)}</button>
+        <div class="row mt-3"><span class="attach"><button type="button"${e.key === leadKey ? ' class="primary"' : ''} data-pick>Upload the ${esc(e.title)}</button>
           <input type="file" tabindex="-1" data-upload="${esc(e.key)}" accept=".xlsx,.csv,.tsv,.txt,.zip" aria-label="Upload the ${esc(e.title)}"></span></div>
         <div class="row-now"></div>
       </div>
@@ -537,6 +538,8 @@
     try { EX = await apiCall('/api/ema/exports'); }
     catch (e) { $('#exports').innerHTML = `<div class="no small mt-3">${esc(e.message)}</div>`; return; }
     info.show_phi = EX.show_phi;
+    // one filled button on the page: the export most overdue first (else the first), the others plain
+    leadKey = ((EX.exports.find(e => rowFlag(e) === 'overdue') || EX.exports[0]) || {}).key;
     $('#exports').innerHTML = EX.exports.map(exportRow).join('');
     exportsNote(EX.exports);
     if (EX.mode === 'serverless') $('#dropHint').textContent = "EMA's reports and exports (Excel or CSV, any size), remittance (835) and claim (837) files and a .zip of those. Visit notes are uploaded on the practice's own server.";

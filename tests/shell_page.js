@@ -15,6 +15,16 @@ const base = `http://127.0.0.1:${port}`;
   await page.goto(`${base}/#today`);
   await page.waitForSelector('#nav .nav-item', { timeout: 20000 });
   await page.waitForTimeout(800);
+  // the bell (CRITIQUE_premium change 17): seven invented alerts, the five newest listed, See all, Escape closes it
+  await page.evaluate(() => RWShell.update({ alerts: [1, 2, 3, 4, 5, 6, 7].map(i => ({ alert_id: 'a' + i, kind: 'RISING', severity: i === 7 ? 'high' : 'medium',
+    title: 'Invented alert ' + i, payer_group: 'Plan A', last_seen: `2026-11-0${i}T12:00:00+00:00` })) }));
+  await page.click('#bellBtn'); await page.waitForTimeout(250);
+  out.bell = await page.evaluate(() => { const m = document.querySelector('#bellMenu'), r = m.getBoundingClientRect();
+    return { shown: !m.hidden, items: [...m.querySelectorAll('.bell-item .bell-t > span:first-child')].map(s => s.textContent),
+      all: m.querySelector('.bell-all').getAttribute('href'), inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0,
+      focus: document.activeElement && document.activeElement.classList.contains('bell-item'), hash: location.hash }; });
+  await page.keyboard.press('Escape'); await page.waitForTimeout(150);
+  out.bell.closes = await page.evaluate(() => document.querySelector('#bellMenu').hidden && document.activeElement && document.activeElement.id === 'bellBtn');
   out.places = await page.$$eval('#nav a.nav-item', as => as.map(a => a.dataset.tab || a.getAttribute('href')));
   out.title_today = await page.title();
   out.icons = await page.evaluate(async () => {

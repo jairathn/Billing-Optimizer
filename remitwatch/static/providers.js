@@ -40,7 +40,7 @@ function pvTheme(){
   const root = document.documentElement, cs = getComputedStyle(root);
   const dark = root.dataset.theme === 'dark' || (root.dataset.theme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
   const v = k => cs.getPropertyValue(k).trim();
-  return {dark, series: PV_SERIES[dark ? 'dark' : 'light'], ink: v('--ink'), muted: v('--muted'), line: v('--line'), surface: v('--panel'), context: dark ? '#6b7786' : '#9aa5b1'};
+  return {dark, series: PV_SERIES[dark ? 'dark' : 'light'], ink: v('--ink'), muted: v('--muted'), line: v('--line'), surface: v('--panel'), context: v('--viz-context') || (dark ? '#6b7786' : '#9aa5b1')};
 }
 function pvAxes(t, extra){
   const axis = {grid: {color: t.line, drawTicks: false}, border: {color: t.line}, ticks: {color: t.muted, font: {size: 11}}};

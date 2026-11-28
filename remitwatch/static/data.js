@@ -32,12 +32,20 @@ function dtCopy(text, btn){
   done(false);
 }
 
+// the page's one line under its title: how far the remittances reach, how many, and when the site last analysed them
+function dtHeadLine(m){
+  const r = (m && m.remits) || {}, run = ((m && m.runs) || [])[0] || {};
+  const day = d => { const x = new Date(String(d || '').slice(0, 10) + 'T12:00:00'); return isNaN(x) ? '' : x.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'}); };
+  const at = run.finished_at || run.finished || run.at || '';
+  const when = !at ? '' : (typeof practiceTime === 'function' ? practiceTime(at) : String(at).replace('T', ' ').slice(0, 16));      // the practice's time zone
+  return [r.last_payment ? 'Newest payment ' + day(r.last_payment) : '', r.n ? Number(r.n).toLocaleString('en-US') + (r.n === 1 ? ' remittance' : ' remittances') : '', when ? 'last analysis ' + when : ''].filter(Boolean).join(' · ');
+}
 async function dataTab(v){
   const m = state.meta;
   if(!m){ v.innerHTML = '<div class="panel"><h2>Data</h2><div class="note">The site did not answer with its settings. Reload the page in a minute.</div></div>'; return; }
   const covP = api('/api/coverage').catch(()=>null), emaP = api('/api/ema/data').catch(e=>({ready:false, error: e.message || 'no answer from the site'}));
   const anchor = state.dataAnchor; state.dataAnchor = null;
-  v.innerHTML = `<div id="dtBlind"></div><div id="dtEmaLine"></div><div id="checks"></div><div id="feedPanel"></div>
+  v.innerHTML = `<div class="secs"><div class="page-head"><h1 class="page-title">Data</h1><span class="small muted">${esc(dtHeadLine(m))}</span></div><div id="dtBlind"></div><div id="dtEmaLine"></div><div id="checks"></div><div id="feedPanel"></div>
     <div id="dtEma"><div class="panel"><h2>EMA's reports</h2><div class="muted small">loading…</div></div></div>
     <section id="ops-panels"></section>
     <div id="dtGaps"></div>
@@ -65,7 +73,7 @@ async function dataTab(v){
         <li><b>Remittances for VA community care</b>, if TriZetto can supply them. None has ever arrived, so those visits are in no count here.</li>
         <li><b>The 2026 MIPS payment adjustment file</b> (qpp.cms.gov, Performance Feedback).</li>
       </ol>
-      <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></details>`;
+      <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></details></div>`;
   // the checklist and the feeds come from the brief and the sync status: they never wait for EMA's figures
   // EMA's exports and reports in one line (moved here from Today: static/today.js tdEmaInto)
   const fixed = Promise.all([dataChecks(v.querySelector('#checks')), feedPanel(v.querySelector('#feedPanel')),

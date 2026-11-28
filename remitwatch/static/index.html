@@ -299,7 +299,7 @@ async function overview(v){
     ${kpi('Downcoded', money(cat.downcoding), 'code or level reduced', 'downcoding')}
     ${kpi('Fees and takebacks', money(cat.fees), 'PLB withholds', 'fees')}
     ${kpi('Due in 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' appeals · expired '+money((dl.expired||{}).shortfall_cents), 'appeals')}
-    ${kpi('Recovered on later remits', money((s.resolved_by_later_remit||{}).shortfall_cents), ((s.resolved_by_later_remit||{}).n||0)+' lines paid after rework (auto-resolved)', 'denials')}
+    ${kpi('Paid on a later remittance', money((s.resolved_by_later_remit||{}).shortfall_cents), ((s.resolved_by_later_remit||{}).n||0)+' lines paid after rework, closed by the rules (Results counts what came back on flagged items)', 'denials')}
   </div>
   <div class="grid two">
     <div class="panel"><h2>Leakage by month of service</h2><canvas id="cMonth"></canvas></div>
