@@ -3,14 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RemitWatch setup</title>
+<title>Setup · RemitWatch</title>
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0d11" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/static/brand/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/brand/icon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/brand/icon-180.png">
+<script>
+// the theme and the sidebar a person chose on this computer, before the first paint (static/shell.js keeps them)
+(function(){ try { var t = localStorage.getItem('rw:theme'); if(t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  if(localStorage.getItem('rw:sidebar') === 'rail') document.documentElement.setAttribute('data-sidebar', 'rail'); } catch(e){} })();
+</script>
 <link rel="preload" href="/static/fonts/inter-latin-opsz-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/rw.css?v=2026-11-28">
 </head>
 <body>
-<main>
+<a class="skip-link" href="#main">Skip to the page</a>
+<div class="app" id="app">
+<nav id="nav"></nav>
+<div class="app-main">
+<header class="topbar" id="topbar">
+  <span class="topbar-title" id="pageTitle" aria-hidden="true">Setup</span>
+  <button type="button" class="search search-btn" id="searchBtn" aria-label="Search and go to"><span>Search</span><kbd>/</kbd></button>
+  <span class="grow"></span>
+  <a class="health" id="health" href="/#data"><span id="feedChip">Setup</span></a>
+  <a class="icon-btn" id="bellBtn" href="/#alerts" aria-label="Alerts" title="Alerts"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-bell"/></svg><span class="dot-count" hidden></span></a>
+  <div class="menu-wrap"><button class="icon-btn" id="helpBtn" aria-label="Help" title="Help" aria-haspopup="menu" aria-expanded="false"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-help"/></svg></button>
+    <div class="menu" id="helpMenu" role="menu" hidden>
+      <a role="menuitem" href="/#today" id="guideLink"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-info"/></svg>How RemitWatch works</a>
+      <button role="menuitem" id="findBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg>Search and go to<kbd class="kbd-right" id="findKey">Ctrl K</kbd></button>
+    </div></div>
+</header>
+<main class="page doc" id="main">
   <div id="swingBar" hidden></div>
-  <h1>RemitWatch setup</h1>
+  <div class="page-head"><div><h1 class="page-title">Setup</h1></div></div>
   <div id="pressLine" class="small" hidden></div>
   <div class="muted">Every setting this site needs, checked live. Work from the top. After you change a setting, apply it (on the server, with configure.sh; on Vercel, redeploy), then press Check again.</div>
 
@@ -87,6 +113,11 @@
     <div id="loadMsg" class="small"></div>
   </div>
 </main>
+</div>
+</div>
+<nav class="tabbar" id="tabbar" aria-label="Places"></nav>
+<script src="/static/shell.js"></script>
+<script>RWShell.mount({page: 'setup', link: '/#'});</script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -150,6 +181,7 @@ async function check(){
   $('#jwksUrl').textContent = location.origin + '/.well-known/jwks.json';
   $('#ready').innerHTML = s.locked ? '<span class="no">This site is locked until a dashboard password is set.</span>' : (s.ready ? '<span class="ok">Required settings are complete.</span>' : '<span class="muted">Fix the items marked ✗ from the top down.</span>');
   if(s.ready) loadStatus(s);
+  if(!s.locked && window.RWShell && !check.live){ check.live = true; RWShell.live(); }      // the header's pill and bell, once the site is set up
 }
 function describe(lc){
   if(!lc) return 'No run yet.';

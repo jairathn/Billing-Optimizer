@@ -173,8 +173,9 @@ def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path
     assert h["note_prefilled"] == "" and "Type" in h["wrong_count"] and h["asked_owner"] is True, h
     assert h["posts"][-1]["owner"] is True and h["posts"][-1]["body"]["note"] == "This payer does not pay these"
     assert h["posts"][-1]["body"]["confirm"] == int(h["text"].split("lets go ")[1].split(" ")[0]) and h["status_after"] == "dismissed"
-    # H8: how far the remittances reach for most payers, beside the newest payment
-    assert "remittances reach 2026-09-01 for most payers" in out["header"], out["header"]
+    # H8: how far the remittances reach for most payers (the health pill), and the newest payment beside it (its hover)
+    assert "Remittances reach Sep 1, 2026 for most payers" in out["header"], out["header"]
+    assert "Newest payment Nov 10, 2026 (83 days ago)." in out["header_title"], out["header_title"]
     # H10: a partial copy says so; the server keeps its words, and the serverless site's own answer says its copy is partial
     assert "holds only the claims that have items" in out["find_partial"] and "Nothing in the remittance files" not in out["find_partial"]
     if host == "server":

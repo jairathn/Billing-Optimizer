@@ -2,33 +2,53 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>RemitWatch</title>
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0d11" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/static/brand/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/brand/icon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/brand/icon-180.png">
+<script>
+// the theme and the sidebar a person chose on this computer, before the first paint, so nothing flashes (static/shell.js
+// keeps them; a browser that refuses storage gets the system's theme and the full sidebar)
+(function(){ try { var t = localStorage.getItem('rw:theme'); if(t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  if(localStorage.getItem('rw:sidebar') === 'rail') document.documentElement.setAttribute('data-sidebar', 'rail'); } catch(e){} })();
+</script>
 <link rel="preload" href="/static/fonts/inter-latin-opsz-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/rw.css?v=2026-11-28">
 </head>
 <body>
-<header>
-  <a class="brand" href="#today">RemitWatch</a>
-  <div class="fresh"><div id="feedChip"></div><div id="fresh">loading…</div></div>
-  <input id="claimFind" type="search" maxlength="200" placeholder="Find a claim" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line">
-  <button id="guideBtn" class="ghost" title="What this site does and how to use it">How this works</button>
-  <button id="keysBtn" class="ghost" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
-  <a id="uploadLink" href="/upload" hidden class="small" title="Bring EMA's exports, remittance files and visit notes in by hand">Upload from EMA</a>
-  <button id="bellBtn" title="alerts">Alerts</button>
-  <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
-  <label class="small">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
-  <button id="lockBtn" style="display:none" title="forget the owner's password on this page: the Providers and Calculator tabs and lines billed by provider close again">Lock</button>
-  <button id="themeBtn" title="theme">◐</button>
-</header>
+<a class="skip-link" href="#view">Skip to the page</a>
+<div class="app" id="app">
 <nav id="nav"></nav>
+<div class="app-main">
+<header class="topbar" id="topbar">
+  <span class="topbar-title" id="pageTitle" aria-hidden="true"></span>
+  <div class="search" role="search"><input id="claimFind" type="search" maxlength="200" placeholder="Search" autocomplete="off" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line"><kbd>/</kbd></div>
+  <label class="small analysis-only">Year <select id="yearSel"><option value="">All</option></select></label>
+  <label class="small analysis-only">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
+  <span class="grow"></span>
+  <a class="health" id="health" href="#data"><span id="feedChip">Checking the feeds</span></a>
+  <button class="icon-btn" id="bellBtn" aria-label="Alerts" title="Alerts"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-bell"/></svg><span class="dot-count" hidden></span></button>
+  <div class="menu-wrap"><button class="icon-btn" id="helpBtn" aria-label="Help" title="Help" aria-haspopup="menu" aria-expanded="false"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-help"/></svg></button>
+    <div class="menu" id="helpMenu" role="menu" hidden>
+      <button role="menuitem" id="guideBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-info"/></svg>How RemitWatch works</button>
+      <button role="menuitem" id="keysBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-keyboard"/></svg>Keyboard shortcuts<kbd class="kbd-right">?</kbd></button>
+      <button role="menuitem" id="findBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg>Search and go to<kbd class="kbd-right" id="findKey">Ctrl K</kbd></button>
+    </div></div>
+</header>
 <div id="swingBar" hidden></div>
-<div id="scBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
-<div id="blindBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
+<div id="scBar"></div>
+<div id="blindBar"></div>
 <main id="view"></main>
-<div id="drawer"></div>
+</div>
+</div>
+<nav class="tabbar" id="tabbar" aria-label="Places"></nav>
+<div id="drawer" tabindex="-1"></div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="/static/shell.js"></script>
 <script src="/static/swing.js"></script>
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
@@ -47,11 +67,10 @@
 <script src="/static/asc.js"></script>
 <script src="/static/faxes.js"></script>
 <script>
-// Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
-// right in smaller type. The analysis pages are under More (and open by their address).
+// The app's routes (the sidebar, static/shell.js, draws the places): Today, Work's views (the category pages and the
+// Worklist), Faxes, Bigger wins, Results and the rest. The keys are the addresses (#today, #denials ...) and never change.
 const TABS = [['today','Today'],['denials','Denials'],['bundling','Bundling & modifiers'],['downcoding','Downcoding'],['contracts','Contracts & underpayment'],
   ['fees','Fees & takebacks'],['worklist','Worklist'],['faxes','Faxes'],['wins','Bigger wins'],['results','Results'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
-const REF_TABS = new Set(['results','progress','data','providers','calculator','more']);
 // pages opened by their address or from More, not from the main row; the owner's write-off policy table is one (static/policy.js)
 const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates'],['policy','Write-off policy']];
 const ALIASES = {appeals:'worklist'};        // the earlier Appeals queue is the Worklist
@@ -130,29 +149,45 @@ const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);       // never a name every object has (constructor, __proto__, toString)
 function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || own(ALIASES, k); }
 function initNav(){
-  const firstRef = (TABS.find(t=>REF_TABS.has(t[0]))||[])[0];       // the reference tabs stand apart, to the right
-  $('#nav').innerHTML = TABS.map(([k,l])=>`${k===firstRef?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
-  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
+  // the shell: the sidebar, the phone's tab bar, Help, the theme, Search and go to (static/shell.js)
+  RWShell.mount({page: 'app', link: '#', go: tab => { state.tab = tab; location.hash = tab; render(); }, find: text => findClaim(text),
+    onTheme: () => { if(state.tab === 'providers'){ if(typeof pvRedraw === 'function' && pvRedraw()) return; render(); } }});
+  document.querySelectorAll('#nav a[data-tab], #tabbar a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
     state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
   $('#lockBtn').onclick = ()=>{ pvForget(); render(); };
-  $('#themeBtn').onclick = ()=>{const r=document.documentElement; const dark = r.dataset.theme==='dark' || (r.dataset.theme!=='light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    r.dataset.theme = dark?'light':'dark'; if(state.tab==='providers'){ if(typeof pvRedraw==='function' && pvRedraw()) return; render(); } };
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
-  $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
+  $('#health').onclick = e=>{ e.preventDefault(); const anchor = e.currentTarget.dataset.anchor || null;
+    if(typeof tdGoData === 'function') tdGoData(anchor); else { state.tab='data'; location.hash='data'; render(); } };
   $('#guideBtn').onclick = ()=>openGuide();
   $('#keysBtn').onclick = ()=>keysSheet();
   $('#claimFind').onkeydown = e=>{ if(e.key==='Enter'){ e.preventDefault(); findClaim(e.target.value); } };
 }
+// The header's pill and bell, the sidebar's counts and the page's title, from what this page has heard (static/shell.js)
+function shellHeader(){
+  RWShell.update({meta: state.meta, sync: state.sync, blind: state.blind, alerts: state.alertsNew, brief: state.brief, exports: state.exports,
+    freshening: !!state.freshening, metaFailed: !state.meta && !!state.metaFailed});
+}
+// What the pill needs on every page, asked at most once in ten minutes: what the app cannot see (shared with blindBar)
+// and the EMA exports' ages. Both change with a run or an upload only.
+async function shellFeeds(){
+  const tasks = [];
+  if(Date.now() - (state.blindAt||0) > 600000){ state.blindAt = Date.now();
+    tasks.push(api('/api/ema/blind').then(x => { state.blind = x; }, () => { state.blindAt = 0; })); }
+  if(Date.now() - (state.exportsAt||0) > 600000){ state.exportsAt = Date.now();
+    tasks.push(api('/api/ema/exports').then(x => { state.exports = x; }, () => { state.exportsAt = 0; })); }
+  await Promise.all(tasks);
+  shellHeader();
+}
 async function loadMeta(){
   state.meta = await api('/api/meta');
-  const m = state.meta, r = m.remits||{}, runs = (m.runs||[])[0];
-  $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?(typeof practiceTime === 'function' ? practiceTime(runs.finished_at) : String(runs.finished_at).replace('T',' ').slice(0,16) + ' UTC'):'never'} · files ${m.files?m.files.n:0}`;
+  const m = state.meta;      // the remittance and file counts and the runs are on the Data tab; the header says what matters (shellHeader)
   $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
   $('#uploadLink').hidden = !(m.uploads || m.report_uploads);     // visit notes by hand on a server; EMA's reports on both hosts
   scBar();                                                         // safe mode said as soon as the site's settings say it
+  shellHeader();
 }
 async function loadSummary(){
   state.summary = await api('/api/summary?'+qs({year:state.year,status:state.status}));
@@ -165,14 +200,12 @@ async function render(){
   if(!state.meta){ try { await loadMeta(); } catch(e){} if(run !== state.run) return; }      // a cold start can fail the first call
   if(own(ALIASES, state.tab)){ state.tab = ALIASES[state.tab]; history.replaceState(null, '', '#'+state.tab); }
   if(!tabOpen(state.tab)) state.tab = 'today';
-  const classic = CLASSIC.some(t=>t[0]===state.tab);
-  $('#nav').dataset.cur = state.tab;            // between 641 and 1,359 px More stands for Progress, Data and Providers
-  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
-  const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
+  $('#nav').dataset.cur = state.tab;
+  RWShell.setActive(state.tab);                 // the place marked in the sidebar and the tab bar, the page's title
   scBar();                                       // safe mode, above everything on every page (the self-check's banner)
   blindBar();                                    // the blind-spot banner on every page; Today and Data draw their own
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
-  ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
+  ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.hidden = !NEEDS_SUMMARY.has(state.tab); });
   if(!own(DESKS, state.tab) && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; state.wlKey = null; }   // "item 3 of 50" means something on a list page only
   if(NEEDS_SUMMARY.has(state.tab)) await loadSummary();
   if(run !== state.run) return;
@@ -223,7 +256,7 @@ async function overview(v){
   const appealable = s.by_actionable.find(r=>r.actionable==='appeal')||{}, fix = s.by_actionable.find(r=>r.actionable==='correct_and_resubmit')||{};
   const dl = Object.fromEntries(s.deadlines.map(d=>[d.bucket,d]));
   const hot = (state.alertsNew||[]).filter(a=>a.severity!=='info').slice(0,4);
-  v.innerHTML = `${hot.length?`<div class="panel" style="margin-top:0"><h2>New alerts</h2>${hot.map(a=>`<div class="small"><span class="sev-${a.severity}">●</span> ${esc(a.title)}</div>`).join('')}<div class="small"><a id="goAlerts" style="cursor:pointer;color:var(--accent)">Open alerts</a></div></div>`:''}
+  v.innerHTML = `${hot.length?`<div class="panel" style="margin-top:0"><h2>New alerts</h2>${hot.map(a=>`<div class="small"><span class="sev-${a.severity}">●</span> ${esc(a.title)}</div>`).join('')}<div class="small"><a id="goAlerts" href="#alerts">Open alerts</a></div></div>`:''}
   <div class="grid kpis">
     ${kpi('Identified leakage', money(total(s.by_category)), 'all categories, '+(state.status==='all'?'all':'open')+' findings', 'overview')}
     ${kpi('Appealable', money(appealable.shortfall_cents), (appealable.n||0).toLocaleString()+' findings', 'appeals')}
@@ -246,7 +279,7 @@ async function overview(v){
   </div>
   <div class="panel"><h2>Context</h2>${s.info.map(r=>`<div class="small">• ${esc(r.title)}</div>`).join('')||'<div class="muted small">No context rows yet.</div>'}</div>`;
   v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{state.tab=k.dataset.go; render();});
-  if(v.querySelector('#goAlerts')) v.querySelector('#goAlerts').onclick=()=>{state.tab='alerts'; render();};
+  if(v.querySelector('#goAlerts')) v.querySelector('#goAlerts').onclick=e=>{ e.preventDefault(); state.tab='alerts'; location.hash='alerts'; render();};
   v.querySelectorAll('tr.row').forEach(tr=>{ const cat = tr.dataset.cat, sig = tr.dataset.sig;
     if(!['downcoding','bundling','denial','underpayment'].includes(cat)){ tr.classList.remove('row'); return; }   // fees and contract rows count other things
     tr.onclick = () => { state.tab = {downcoding:'downcoding', bundling:'bundling', denial:'denials', underpayment:'contracts'}[cat]; location.hash = state.tab;
@@ -614,8 +647,10 @@ async function freshen(){
   let r; try { r = await api('/api/sync/freshen', {method:'POST'}); } catch(e){ return; }
   if(!r || !r.started) return;
   const before = state.meta && state.meta.remits ? state.meta.remits.last_payment : null;
-  const was = $('#fresh').textContent;
-  $('#fresh').textContent = 'Looking for new payments (TriZetto, Dropbox)… ' + was;
+  state.freshening = true; shellHeader();        // the pill says it looks for new payments (TriZetto, Dropbox) until the run ends
+  try { await freshenWait(before); } finally { state.freshening = false; shellHeader(); }
+}
+async function freshenWait(before){
   for(let i = 0; i < 30; i++){
     await new Promise(ok => setTimeout(ok, 20000));
     let st; try { st = await api('/api/sync/status'); } catch(e){ continue; }
@@ -635,15 +670,16 @@ window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
 (async function(){
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
-  try { await loadMeta(); } catch(e){ if(!state.meta) $('#fresh').textContent='no data loaded yet'; }
+  try { await loadMeta(); } catch(e){ if(!state.meta){ state.metaFailed = true; shellHeader(); } }
   // the brief (the 7-day badges on the category tabs, the labels) is asked once: the first page and the panel wait on this
   // same answer. The bell and the feed chip fill in when theirs come; the first rows never wait for them
-  state.briefP = brief().catch(()=>null).finally(()=>{ state.briefP = null; });
+  state.briefP = brief().catch(()=>null).finally(()=>{ state.briefP = null; shellHeader(); });
   refreshHeader();
+  shellFeeds();
   const item = itemFromHash();
   if(!state.run) render();       // a click while the first answer was slow has drawn the page already
   if(item) openDetail(item);     // a link to one item: its panel over Today
-  setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);
+  setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); await shellFeeds(); } catch(e){} }, 120000);
   freshen();
 })();
 </script>

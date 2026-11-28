@@ -15,7 +15,7 @@ SHELLS = ("index.html", "upload.html", "setup.html")
 FONTS = ("inter-latin-opsz-wght.woff2", "inter-latin-ext-opsz-wght.woff2")
 # the inline style= attributes in remitwatch/static (pages and scripts). It may only go down: lower it when a change
 # removes some, never raise it (a new look goes in rw.css as a class).
-STYLE_ATTRS_MAX = 282
+STYLE_ATTRS_MAX = 278
 
 
 def read(name: str) -> str:
@@ -80,7 +80,7 @@ def test_the_stylesheet_has_every_class_the_pages_and_the_tests_name(css):
 
 
 def test_the_stylesheet_says_nothing_in_words_and_no_em_dash(css):
-    assert "—" not in css
+    assert "\u2014" not in css
     # a pseudo-element draws a mark, never words (words belong in the page, where they can be translated and read aloud)
     assert not re.findall(r'content:\s*"[^"]*[A-Za-z][^"]*"', css)
 

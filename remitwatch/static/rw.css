@@ -269,123 +269,141 @@ p, .line, .b-text { text-wrap: pretty; }
 .skip-link:focus { top: var(--sp-3); }
 
 /* == 4. Shell ====================================================================================================== */
-/* <div class="app"> <aside class="sidebar"> <div class="app-main"> <header class="topbar"> <div class="banner-zone">
-   <main class="page" id="view"> . The panel (#drawer) and the phone's tab bar sit outside, fixed. */
+/* <div class="app"> <nav id="nav" class="sidebar"> <div class="app-main"> <header class="topbar"> #swingBar #scBar #blindBar
+   <main id="view">. The item panel (#drawer), the phone's tab bar (#tabbar) and Search and go to (#palette) sit outside,
+   fixed. static/shell.js draws the sidebar and the tab bar and binds the header, the same on the app, Upload and Setup. */
 .app { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); min-height: 100vh; }
+:root[data-sidebar="rail"] .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 .app-main { min-width: 0; display: flex; flex-direction: column; }
 .page, main#view { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: var(--sp-6) var(--sp-8) var(--sp-16); }
 .page.wide, main#view.wide { max-width: 1440px; }
 .page.narrow { max-width: var(--reading-max); }
-.topbar, body > header {
-  position: sticky; top: 0; z-index: var(--z-sticky); display: flex; align-items: center; gap: var(--sp-3);
+.topbar {
+  position: sticky; top: 0; z-index: var(--z-sticky); display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--sp-2); row-gap: 0;
   min-height: var(--topbar-h); padding: 0 var(--sp-8); background: var(--topbar-bg);
   -webkit-backdrop-filter: saturate(180%) blur(12px); backdrop-filter: saturate(180%) blur(12px);
   border-bottom: 1px solid var(--border);
 }
-.topbar .grow { flex: 1; }
-.topbar .title { font-size: var(--fs-md); font-weight: var(--fw-semibold); color: var(--text); white-space: nowrap; }
-/* the search box: one place to find a claim or a patient, "/" to focus it */
-.search { position: relative; flex: 0 1 420px; min-width: 0; }
+.topbar > * { flex: none; }
+.topbar .grow { flex: 1 1 0; min-width: var(--sp-2); }
+.topbar-title { display: none; font-size: var(--fs-lg); line-height: var(--lh-lg); font-weight: var(--fw-semibold); letter-spacing: -.011em; color: var(--text); white-space: nowrap; }
+.topbar label.small { display: inline-flex; align-items: center; gap: 6px; color: var(--text-3); font-size: var(--fs-xs); }
+.topbar label.small select { height: 32px; font-size: var(--fs-sm); }
+.topbar label[hidden] { display: none; }
+/* the search: one place to find a claim or a patient; "/" focuses it, Ctrl K (Cmd K) opens Search and go to */
+.search { position: relative; flex: 0 1 380px; min-width: 200px; transition: flex-basis var(--t-med) var(--ease); }
+.search:focus-within { flex-basis: 480px; }
 .search input, .search input[type="search"] { width: 100%; height: 36px; padding-left: 36px; padding-right: 40px; background-color: var(--surface); }
 .search::before { content: ""; position: absolute; left: 12px; top: 10px; width: 16px; height: 16px; background: var(--text-3);
   -webkit-mask: var(--i-search) center / contain no-repeat; mask: var(--i-search) center / contain no-repeat; pointer-events: none; z-index: 1; }
 .search kbd { position: absolute; right: 8px; top: 8px; }
-.icon-btn { position: relative; width: 36px; height: 36px; padding: 0; border-color: transparent; background: transparent; box-shadow: none; color: var(--text-2); }
+/* Upload and Setup: the same box, as a button that opens Search and go to */
+.search.search-btn { display: flex; align-items: center; justify-content: flex-start; height: 36px; padding: 0 40px 0 36px; border: 1px solid var(--border-control);
+  border-radius: var(--r-md); background: var(--surface); color: var(--text-3); font-weight: var(--fw-regular); }
+.search.search-btn:hover { border-color: var(--text-3); background: var(--surface); color: var(--text-2); }
+.search:focus-within kbd { display: none; }
+.icon-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0;
+  border: 1px solid transparent; border-radius: var(--r-md); background: transparent; box-shadow: none; color: var(--text-2); }
 .icon-btn:hover { background: var(--nav-hover); color: var(--text); border-color: transparent; }
-.icon-btn .dot-count { position: absolute; top: 2px; right: 0; min-width: 17px; height: 17px; padding: 0 4px; border-radius: var(--r-full);
-  background: var(--danger-solid); color: #fff; font: var(--fw-semibold) var(--fs-xs)/17px var(--font-sans); text-align: center;
+.icon-btn .dot-count { position: absolute; top: 1px; right: -1px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-full);
+  background: var(--danger-solid); color: #fff; font: var(--fw-semibold) var(--fs-xs)/18px var(--font-sans); text-align: center;
   box-shadow: 0 0 0 2px var(--bg); font-variant-numeric: tabular-nums; }
-/* the feeds in one pill: green when every feed is current, amber with the dollars when one is late, red in safe mode */
-/* <a class="health stale"><span>Humana <b>5 weeks</b> late</span></a>: the words sit in one span */
-.health { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; height: 30px; padding: 0 12px 0 10px; border-radius: var(--r-full);
-  font-size: var(--fs-sm); font-weight: var(--fw-medium); color: var(--text-2); background: var(--surface);
-  border: 1px solid var(--border); text-decoration: none; white-space: nowrap; max-width: 100%; }
+.icon-btn .dot-count.quiet { background: var(--text-2); color: var(--surface); }
+.icon-btn .dot-count[hidden] { display: none; }
+/* the health pill: what the app cannot check, in dollars, on every page (the owner's rule 3). Green when every feed is
+   current, amber with the dollars when one is late, red in safe mode. On the Vercel site it also says when the site last
+   analysed and that it analyses only on a press, so there it takes a row of its own under the header. */
+.health { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; max-width: min(46vw, 560px); height: 30px; padding: 0 12px 0 10px;
+  border-radius: var(--r-full); font-size: var(--fs-sm); font-weight: var(--fw-medium); color: var(--text-2); background: var(--surface);
+  border: 1px solid var(--border); text-decoration: none; white-space: nowrap; }
 .health > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.health::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+.health::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
 .health:hover { border-color: var(--border-strong); text-decoration: none; color: var(--text); }
 .health.stale { color: var(--text); background: var(--warning-soft); border-color: var(--warning-border); }
-.health.stale::before { background: var(--warning); box-shadow: none; }
-.health.safe, .health.blind { color: var(--text); background: var(--danger-soft); border-color: var(--danger-border); }
-.health.safe::before, .health.blind::before { background: var(--danger); box-shadow: none; }
-.health b { font-weight: var(--fw-semibold); }
+.health.stale::before { background: var(--warning); }
+.health.safe { color: var(--text); background: var(--danger-soft); border-color: var(--danger-border); }
+.health.safe::before { background: var(--danger); }
+.health.busy::before, .health.press::before { background: var(--text-3); }
+.health.busy::before { animation: rw-pulse 1.2s ease-in-out infinite; }
+.health.press { order: 20; flex: 1 1 100%; max-width: none; height: auto; min-height: 30px; margin: 0 0 var(--sp-2); padding: 5px 12px 5px 10px;
+  border-radius: var(--r-md); white-space: normal; line-height: var(--lh-sm); }
+.health.press > span { overflow: visible; }
+@keyframes rw-pulse { 50% { opacity: .35; } }
+.menu-wrap { position: relative; }
+.menu-wrap > .menu { top: calc(100% + 6px); right: 0; }
+.menu[hidden] { display: none; }
 .banner-zone, #scBar, #blindBar { display: flex; flex-direction: column; gap: var(--sp-2); width: 100%; max-width: var(--content-max);
-  margin: 0 auto; padding: var(--sp-4) var(--sp-8) 0 !important; }
+  margin: 0 auto; padding: var(--sp-4) var(--sp-8) 0; }
 .banner-zone:empty, #scBar:empty, #blindBar:empty { display: none; }
 #scBar .banner, #blindBar .banner { margin: 0; }
 #swingBar { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: var(--sp-4) var(--sp-8) 0; }
 #swingBar[hidden] { display: none; }
-
-/* today's header (body > header): the brand, the feed line, Find a claim, then quiet controls. The long status line
-   (#fresh: remittance and file counts, UTC times) moves to the Data tab; until the markup changes it is hidden here. */
-body > header h1 { font-size: var(--fs-lg); }
-body > header .brand { margin: 0 var(--sp-2) 0 0; }
-body > header .fresh { flex: 1 1 200px; min-width: 0; color: var(--text-3); font-size: var(--fs-xs); line-height: var(--lh-xs); }
-body > header #fresh { display: none; }
-#feedChip { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); color: var(--text-3); }
-#claimFind { width: 260px; height: 34px; padding-left: 34px; font-size: var(--fs-sm);
-  background: var(--surface) var(--i-search-gray) no-repeat 11px center / 15px 15px; }
-body > header label.small { display: inline-flex; align-items: center; gap: 6px; color: var(--text-3); font-size: var(--fs-xs); }
-body > header label.small select { height: 30px; font-size: var(--fs-sm); }
-#guideBtn, #keysBtn, #uploadLink { color: var(--text-2); }
-#uploadLink { font-size: var(--fs-sm); font-weight: var(--fw-medium); text-decoration: none; padding: 0 var(--sp-2); white-space: nowrap; }
-#uploadLink:hover { color: var(--text); }
-#keysBtn, #themeBtn { width: 34px; height: 34px; padding: 0; }
-#themeBtn { border-color: transparent; background: transparent; box-shadow: none; color: var(--text-2); font-size: 16px; }
-#themeBtn:hover { background: var(--nav-hover); }
-#bellBtn { height: 34px; }
-#bellBtn b { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 5px;
-  border-radius: var(--r-full); background: var(--danger-solid); color: #fff; font-size: var(--fs-xs); line-height: 18px; font-variant-numeric: tabular-nums; }
+/* Search and go to: one box over the page (Ctrl K, Cmd K on a Mac, Find on a phone) */
+.palette { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; justify-content: center; align-items: flex-start; padding: 12vh var(--sp-4) var(--sp-4); background: var(--overlay); }
+.palette[hidden] { display: none; }
+.palette-box { width: 580px; max-width: 100%; max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl); box-shadow: var(--shadow-xl); }
+.palette-in { position: relative; display: flex; align-items: center; gap: var(--sp-2); padding: 0 var(--sp-4); border-bottom: 1px solid var(--border); }
+.palette-in > .i { color: var(--text-3); }
+.palette-in input, .palette-in input[type="search"] { flex: 1; height: 52px; padding: 0; border: 0; background: transparent; font-size: var(--fs-lg); box-shadow: none; }
+.palette-in input:focus { box-shadow: none; }
+.palette-list { overflow-y: auto; padding: var(--sp-2); }
+.palette-head { padding: var(--sp-2) var(--sp-2) var(--sp-1); font-size: var(--fs-xs); font-weight: var(--fw-medium); color: var(--text-3); }
+.palette-item { display: flex; align-items: center; gap: var(--sp-3); width: 100%; height: 40px; padding: 0 var(--sp-3); border: 0; border-radius: var(--r-md);
+  background: transparent; box-shadow: none; color: var(--text); font-weight: var(--fw-regular); text-decoration: none; justify-content: flex-start; }
+.palette-item > .i { color: var(--text-3); }
+.palette-item > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.palette-item.on, .palette-item:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+.palette-item.on { box-shadow: inset 2px 0 0 var(--accent); }
+.palette-empty { padding: var(--sp-4); color: var(--text-2); font-size: var(--fs-sm); }
 
 /* == 5. Navigation ================================================================================================= */
-/* Five places, then the administrator's and the owner's pages, each with an icon; Work holds the saved views. */
-.sidebar { position: sticky; top: 0; z-index: var(--z-nav); height: 100vh; overflow-y: auto; display: flex; flex-direction: column; gap: 1px;
-  padding: var(--sp-3) var(--sp-3) var(--sp-4); background: var(--bg); border-right: 1px solid var(--border); scrollbar-width: thin; }
+/* The places, each with an icon: Today, Work with its views, Faxes, Results; Insights; Settings; the owner's pages behind
+   the lock. The person chooses a narrow sidebar ([ or its button, kept on this computer); it never folds by itself. */
+nav#nav, .sidebar { position: sticky; top: 0; z-index: var(--z-nav); height: 100vh; overflow-y: auto; display: flex; flex-direction: column; gap: 1px;
+  padding: var(--sp-3) var(--sp-3) var(--sp-3); background: var(--bg); border-right: 1px solid var(--border); scrollbar-width: thin; }
 .brand { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 var(--sp-2); margin-bottom: var(--sp-3);
-  color: var(--text); font-size: var(--fs-lg); font-weight: var(--fw-semibold); letter-spacing: -.015em; text-decoration: none; }
-.brand:hover { text-decoration: none; }
-.brand-mark { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: #fff;
-  background: var(--inverse-bg); color: var(--inverse-fg); }
-.brand-mark svg { width: 16px; height: 16px; }
-.nav-label { display: flex; align-items: center; gap: 6px; padding: var(--sp-5) 10px 6px; font-size: var(--fs-xs); line-height: var(--lh-xs);
+  color: var(--text); font-size: var(--fs-lg); font-weight: var(--fw-semibold); letter-spacing: -.02em; text-decoration: none; }
+.brand:hover { color: var(--text); text-decoration: none; }
+/* the mark: a remittance slip with a check, in one flat color (the tile is the inverse of the page) */
+.brand-mark { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--inverse-fg); background: var(--inverse-bg); }
+.brand-mark svg { width: 18px; height: 18px; }
+.brand-mark .cut { stroke: var(--inverse-bg); }
+.nav-label { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: var(--sp-4) 10px var(--sp-1); font-size: var(--fs-xs); line-height: var(--lh-xs);
   font-weight: var(--fw-medium); color: var(--text-3); }
+.nav-label .i { width: 13px; height: 13px; vertical-align: 0; }
+.nav-label #lockBtn { margin-left: auto; height: 24px; padding: 0 8px; font-size: var(--fs-xs); }
 .nav-item { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 6px 10px; border-radius: var(--r-md);
   color: var(--text-2); font-size: var(--fs-md); font-weight: var(--fw-medium); text-decoration: none; cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast); }
+.nav-item[hidden] { display: none; }
+.nav-item > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item .i { width: 18px; height: 18px; color: var(--text-3); vertical-align: 0; }
 .nav-item:hover { background: var(--nav-hover); color: var(--text); text-decoration: none; }
 .nav-item.active, .nav-item[aria-current="page"] { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
 .nav-item.active .i, .nav-item[aria-current="page"] .i { color: var(--text); }
+.nav-item.within { color: var(--text); }
 .nav-count { margin-left: auto; font-size: var(--fs-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
 .nav-count.urgent { color: #fff; background: var(--danger-solid); border-radius: var(--r-full); min-width: 18px; height: 18px; padding: 0 5px; font-size: var(--fs-xs);
   display: inline-flex; align-items: center; justify-content: center; font-weight: var(--fw-semibold); }
+.nav-count[hidden], .nav-dot[hidden] { display: none; }
+.nav-item .bdg { margin-left: auto; }
 .nav-dot { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--warning); }
-.nav-sub { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 19px; padding-left: 10px; border-left: 1px solid var(--border); }
+.nav-sub { display: flex; flex-direction: column; gap: 1px; margin: 1px 0 var(--sp-1) 19px; padding-left: 10px; border-left: 1px solid var(--border); }
 .nav-sub .nav-item { min-height: 30px; padding: 5px 10px; font-size: var(--fs-sm); }
-.nav-foot { margin-top: auto; padding-top: var(--sp-4); display: flex; flex-direction: column; gap: 2px; }
-/* the icon rail: from 641 to 1023 px, and while the item panel is docked beside the list */
-.app.rail { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-.app.rail .sidebar { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
-.app.rail .brand > span:not(.brand-mark), .app.rail .nav-label, .app.rail .nav-sub, .app.rail .nav-count, .app.rail .nav-dot, .app.rail .nav-item > span { display: none; }
-.app.rail .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
-.app.rail .brand { padding: 0; justify-content: center; }
-
-/* today's tab row (nav#nav a[data-tab]): one quiet row with an underline for the page you are on. It no longer wraps:
-   it scrolls sideways, and its edges fade to say there is more. */
-nav#nav { position: relative; display: flex; flex-wrap: nowrap; align-items: stretch; gap: var(--sp-1); padding: 0 var(--sp-8);
-  background: var(--surface); box-shadow: inset 0 -1px 0 var(--border); overflow-x: auto; scrollbar-width: none; }
-nav#nav::-webkit-scrollbar { display: none; }
-nav#nav::after { content: ""; position: sticky; right: calc(-1 * var(--sp-8)); flex: none; width: 40px; margin-left: -40px; pointer-events: none;
-  background: linear-gradient(90deg, transparent, var(--surface) 80%); }
-nav#nav a { position: relative; flex: none; display: inline-flex; align-items: center; gap: 6px; height: 44px; padding: 0 10px;
-  color: var(--text-2); font-size: var(--fs-md); font-weight: var(--fw-medium); text-decoration: none; white-space: nowrap; cursor: pointer; }
-nav#nav a:hover { color: var(--text); }
-nav#nav a.active { color: var(--text); }
-nav#nav a.active::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 0; height: 2px; border-radius: 2px 2px 0 0; background: var(--text); }
-nav#nav a.ref { color: var(--text-3); font-size: var(--fs-sm); }
-nav#nav .gap { flex: 1 1 12px; }
-nav#nav a .bdg { margin-left: 0; }
-
-/* the phone's four places, at the bottom of the screen */
+.nav-foot { margin-top: auto; padding-top: var(--sp-4); display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.theme-seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); }
+.theme-seg button { width: 30px; height: 26px; padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-3); }
+.theme-seg button:hover { background: var(--surface-3); color: var(--text); }
+.theme-seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border-strong); }
+.nav-close { display: none; }
+/* the narrow sidebar: the icons alone (the person's choice on a desk; always between 641 and 1023 px) */
+:root[data-sidebar="rail"] nav#nav { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
+:root[data-sidebar="rail"] nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg) { display: none; }
+:root[data-sidebar="rail"] nav#nav .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
+:root[data-sidebar="rail"] nav#nav .brand { padding: 0; justify-content: center; }
+:root[data-sidebar="rail"] nav#nav .nav-foot { flex-direction: column; }
+/* the phone's places, at the bottom of the screen (section 21 shows it) */
 .tabbar { display: none; }
 
 /* == 6. Page header ================================================================================================ */
@@ -1262,7 +1280,7 @@ a.see-state.on { color: var(--text); font-weight: var(--fw-semibold); }
 .todo-row .tr-n { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .todo-row .tr-pile { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
 /* shown on a phone only (section 21), or between 641 and 1359 px only */
-.todo-chips, .fix-after, .howline, .ph-what, .ph-only, .mid-only { display: none; }
+.todo-chips, .fix-after, .howline, .ph-what, .ph-only, .mid-only { display: none; }   /* .mid-only: places the sidebar now holds */
 .fixonce { margin: var(--sp-2) 2px 0; font-size: var(--fs-sm); color: var(--text); }
 .why-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: var(--sp-1) var(--sp-1) var(--sp-2) 18px; align-items: center; }
 .wl-bar { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); align-items: center; justify-content: space-between; margin: var(--sp-2) 0; }
@@ -1279,25 +1297,23 @@ table.calc-fall tr.calc-total td { border-top: 2px solid var(--text); font-weigh
 table.fees td { vertical-align: middle; }
 .rs-top { display: flex; gap: var(--sp-3); align-items: baseline; flex-wrap: wrap; margin: var(--sp-1) 0 2px; }
 .rs-top a { text-decoration: none; color: var(--text); }
-/* Upload and Setup, until they move into the app's shell: their own <style> blocks go, and these rules carry what those
-   set. They are scoped to the standalone page's main (the app's is main#view), so the app's .row and .card are untouched;
-   :where() keeps the scope's weight low, so a page's own class still wins. */
-body > main:where(:not(#view)) { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: var(--sp-6) var(--sp-8) var(--sp-16); }
-body > main:where(:not(#view)) h1 { margin: var(--sp-2) 0 var(--sp-1); }
-body > main:where(:not(#view)) > .muted { max-width: 80ch; }
-body > main:where(:not(#view)) div.row { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 6px 0; }
-body > main:where(:not(#view)) .card { margin-top: var(--sp-2); padding: 10px var(--sp-3); border-radius: var(--r-md); box-shadow: none; overflow: visible; overflow-wrap: anywhere; }
-body > main:where(:not(#view)) .card .name { font-weight: var(--fw-semibold); word-break: break-all; }
-body > main:where(:not(#view)) .card ul { margin: 6px 0 0; padding-left: 18px; }
-body > main:where(:not(#view)) .card li { margin: 3px 0; }
-body > main:where(:not(#view)) .chip { margin: 0 0 0 6px; border-radius: var(--r-full); font-weight: var(--fw-semibold); }
-body > main:where(:not(#view)) .chip.ok { background: var(--success-soft); color: var(--success); }
-body > main:where(:not(#view)) .chip.no { background: var(--danger-soft); color: var(--danger); }
-body > main:where(:not(#view)) .chip.warn { background: var(--warning-soft); color: var(--warning); }
-body > main:where(:not(#view)) .bar { height: 6px; margin-top: 6px; }
-body > main:where(:not(#view)) .bar > div { width: 0; transition: width .2s; }
-body > main:where(:not(#view)) textarea { width: 100%; }
-body > main:where(:not(#view)) td { overflow-wrap: anywhere; }
+/* Upload and Setup: pages of their own inside the same shell. Their rules are scoped to their main (class doc), so the
+   app's .row and .card are untouched; :where() keeps the scope's weight low, so a page's own class still wins. */
+:where(main.doc) h1 { margin: 0 0 var(--sp-1); }
+:where(main.doc) > .muted { max-width: 80ch; }
+:where(main.doc) div.row { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 6px 0; }
+:where(main.doc) .card { margin-top: var(--sp-2); padding: 10px var(--sp-3); border-radius: var(--r-md); box-shadow: none; overflow: visible; overflow-wrap: anywhere; }
+:where(main.doc) .card .name { font-weight: var(--fw-semibold); word-break: break-all; }
+:where(main.doc) .card ul { margin: 6px 0 0; padding-left: 18px; }
+:where(main.doc) .card li { margin: 3px 0; }
+:where(main.doc) .chip { margin: 0 0 0 6px; border-radius: var(--r-full); font-weight: var(--fw-semibold); }
+:where(main.doc) .chip.ok { background: var(--success-soft); color: var(--success); }
+:where(main.doc) .chip.no { background: var(--danger-soft); color: var(--danger); }
+:where(main.doc) .chip.warn { background: var(--warning-soft); color: var(--warning); }
+:where(main.doc) .bar { height: 6px; margin-top: 6px; }
+:where(main.doc) .bar > div { width: 0; transition: width .2s; }
+:where(main.doc) textarea { width: 100%; }
+:where(main.doc) td { overflow-wrap: anywhere; }
 .top { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; }
 .no { color: var(--danger); }
 .warn { color: var(--warning); }
@@ -1330,17 +1346,12 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 .status-line, .big { font-size: var(--fs-md); margin-top: 4px; }
 
 /* == 21. Responsive ================================================================================================ */
-/* 1280 px and wider: the item panel docks beside the list; with the sidebar, the sidebar folds to its icons */
+/* 1280 px and wider: the item panel docks beside the list. The sidebar keeps the width the person chose: it never folds
+   by itself, so the page does not move twice for every item opened. */
 @media (min-width: 1280px) {
   body:has(#drawer.open), body.drawer-open { padding-right: var(--drawer-w); }
-  body:has(#drawer.open) .app, body.drawer-open .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-  body:has(#drawer.open) .app .sidebar, body.drawer-open .app .sidebar { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
-  body:has(#drawer.open) .app :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span),
-  body.drawer-open .app :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span) { display: none; }
-  body:has(#drawer.open) .app .nav-item, body.drawer-open .app .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
   body:has(#drawer.open) #drawer, body.drawer-open #drawer { box-shadow: var(--shadow-md); }
-  body:has(#drawer.open) > header :is(.fresh, #guideBtn, #uploadLink), body.drawer-open > header :is(.fresh, #guideBtn, #uploadLink) { display: none; }
-  body:has(#drawer.open) > header #claimFind, body.drawer-open > header #claimFind { width: 220px; }
+  body:has(#drawer.open) .search, body.drawer-open .search { flex-basis: 240px; }
   body:has(#drawer.open) table.wl td.what .chip.hint, body.drawer-open table.wl td.what .chip.hint { display: none; }
   body:has(#drawer.open) table.wl td.what, body.drawer-open table.wl td.what { min-width: 12rem; }
   body:has(#drawer.open) table.wl td.who, body.drawer-open table.wl td.who { min-width: 9.5rem; }
@@ -1348,23 +1359,19 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 }
 @media (max-width: 1279px) {
   .page, main#view { padding: var(--sp-5) var(--sp-6) var(--sp-12); }
-  .topbar, body > header { padding: 0 var(--sp-6); }
-  nav#nav { padding: 0 var(--sp-6); }
-  .banner-zone, #scBar, #blindBar, #swingBar { padding: var(--sp-4) var(--sp-6) 0 !important; }
+  .topbar { padding: 0 var(--sp-6); }
+  .banner-zone, #scBar, #blindBar, #swingBar { padding: var(--sp-4) var(--sp-6) 0; }
 }
-/* today's tab row between 641 and 1359 px: the reference pages move under More (as they do now) */
-@media (min-width: 641px) and (max-width: 1359px) {
-  nav#nav a.ref:not([data-tab="more"]):not([data-tab="results"]), nav#nav .gap { display: none; }
-  nav#nav[data-cur="progress"] a[data-tab="more"], nav#nav[data-cur="data"] a[data-tab="more"], nav#nav[data-cur="providers"] a[data-tab="more"] { color: var(--text); }
-  .mid-only { display: flex; }
-}
-/* 641 to 1023: the sidebar is an icon rail; two-column grids stack */
-@media (max-width: 1023px) {
+/* 641 to 1023: the sidebar is its icons alone; two-column grids stack */
+@media (min-width: 641px) and (max-width: 1023px) {
   .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-  .app .sidebar { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
-  .app :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span) { display: none; }
-  .app .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
-  .app .brand { padding: 0; justify-content: center; }
+  nav#nav { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
+  nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg, #railBtn) { display: none; }
+  nav#nav .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
+  nav#nav .brand { padding: 0; justify-content: center; }
+  .search { flex-basis: 260px; min-width: 160px; }
+}
+@media (max-width: 1023px) {
   .two, .three, .desk-mid.has-side { grid-template-columns: minmax(0, 1fr); }
   #drawer, .drawer { width: min(var(--drawer-w), calc(100vw - var(--rail-w))); }
   .batch { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; }
@@ -1381,23 +1388,32 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 }
 /* phone, 640 and narrower: a tab bar at the bottom, a one-row header, list rows as cards, the panel as a full sheet */
 @media (max-width: 640px) {
-  .app { display: block; }
-  .sidebar { display: none; }
+  .app, :root[data-sidebar="rail"] .app { display: block; }
+  nav#nav, .sidebar { display: none; }
+  /* More: the places as a sheet over the page */
+  body.nav-open nav#nav { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; width: auto; height: 100%; padding: var(--sp-3) var(--sp-4) var(--sp-6);
+    background: var(--surface); border: 0; overscroll-behavior: contain; align-items: stretch; }
+  body.nav-open nav#nav .nav-close { display: inline-flex; position: absolute; top: var(--sp-3); right: var(--sp-3); }
+  body.nav-open nav#nav .nav-item { min-height: 44px; }
+  body.nav-open nav#nav #railBtn { display: none; }
+  body.nav-open { overflow: hidden; }
   .tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-nav); display: grid; grid-template-columns: repeat(5, 1fr);
     height: calc(58px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom);
     background: var(--topbar-bg); -webkit-backdrop-filter: saturate(180%) blur(12px); backdrop-filter: saturate(180%) blur(12px);
     border-top: 1px solid var(--border); }
-  .tabbar a { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-    color: var(--text-3); font-size: 11px; font-weight: var(--fw-medium); text-decoration: none; }
+  .tabbar a { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    color: var(--text-3); font-size: var(--fs-xs); font-weight: var(--fw-medium); text-decoration: none; }
+  .tabbar a .bdg[hidden] { display: none; }
   .tabbar a .i { width: 22px; height: 22px; vertical-align: 0; }
   .tabbar a.active { color: var(--text); }
   .tabbar a .bdg { position: absolute; top: 5px; left: calc(50% + 5px); margin: 0; box-shadow: 0 0 0 2px var(--surface); }
-  .topbar { min-height: 52px; padding: 0 var(--sp-4); gap: var(--sp-2); }
-  .topbar .search, .hide-sm { display: none !important; }
-  .topbar .health { padding: 0 10px; max-width: 52vw; }
+  .topbar { min-height: 52px; padding: 0 var(--sp-4); column-gap: var(--sp-2); }
+  .topbar-title { display: block; }
+  .topbar .search, .topbar .menu-wrap, .topbar label.small, .hide-sm { display: none !important; }
+  .topbar .health { padding: 0 10px; max-width: 56vw; }
+  .topbar .health.press { max-width: none; padding: 5px 10px; }
   .page, main#view { padding: var(--sp-4) var(--sp-4) calc(84px + env(safe-area-inset-bottom)); }
-  body > main:where(:not(#view)) { padding: var(--sp-4) var(--sp-4) var(--sp-12); }
-  .banner-zone, #scBar, #blindBar, #swingBar { padding: var(--sp-3) var(--sp-4) 0 !important; }
+  .banner-zone, #scBar, #blindBar, #swingBar { padding: var(--sp-3) var(--sp-4) 0; }
   .page-head, .today-head { margin-bottom: var(--sp-4); }
   .page-title { font-size: var(--fs-xl); line-height: var(--lh-xl); }
   .page-actions .primary, .ph-go .primary { flex: 1; }
@@ -1416,18 +1432,19 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
   .banner:has(> .b-body) { flex-wrap: wrap; }
   .banner .b-actions { margin-left: 32px; width: 100%; }
   .list-head, .toolbar { margin-left: calc(-1 * var(--sp-4)); margin-right: calc(-1 * var(--sp-4)); padding: var(--sp-2) var(--sp-4); --sticky-top: 52px; }
-  body > header ~ main .list-head { --sticky-top: 44px; }
   .lh-tools { margin-left: 0; width: 100%; }
   .lh-tools select:not([data-f="payer"]), .lh-tools input { display: none; }
-  /* list rows become cards of three lines: who and amount; what happened; payer and due */
+  /* list rows become cards of three lines: who and amount; what happened; payer and due. The box that picks a row
+     stays at the card's left, always shown (a phone has no hover), so a bulk change works at this width too. */
   table.wl thead { display: none; }
   table.wl, table.wl tbody { display: block; width: 100%; }
   .list-card { background: none; border: 0; box-shadow: none; overflow: visible; }
-  table.wl tr { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "who num" "what what" "payer day";
+  table.wl tr { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; grid-template-areas: "sel who num" "sel what what" "sel payer day";
     gap: 2px var(--sp-3); margin: 0 0 var(--sp-2); padding: 10px var(--sp-3); background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--r-lg); }
   table.wl td { display: block; padding: 0; border: 0; min-width: 0 !important; background: none !important; }
-  table.wl td:first-child { display: none; }
+  table.wl td:first-child { grid-area: sel; padding-top: 1px; }
+  table.wl input.sel { opacity: 1; width: 20px; height: 20px; }
   table.wl td.who { grid-area: who; } table.wl td.num { grid-area: num; }
   table.wl td.what { grid-area: what; } table.wl td.payer { grid-area: payer; color: var(--text-3); font-size: var(--fs-xs); align-self: center; }
   table.wl td.day { grid-area: day; text-align: right; font-size: var(--fs-xs); align-self: center; }
@@ -1470,13 +1487,7 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
   .segs:not([role="tablist"]):not(.wrap) { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
   .segs .seg { flex: 0 0 auto; }
   .sigchips { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; } .sigchip { flex: 0 0 auto; }
-  /* today's markup on a phone: what the old stylesheet showed or hid at this width */
-  body > header { position: static; min-height: 0; flex-wrap: wrap; padding: var(--sp-2) var(--sp-4); }
-  nav#nav { position: sticky; top: 0; z-index: var(--z-sticky); padding: 0 var(--sp-3); }
-  #claimFind { width: 100%; order: 9; font-size: 16px; }
-  body > header .grow-sm { flex: 1; }
-  #keysBtn, #guideBtn, #uploadLink, #themeBtn, body > header .fresh { display: none; }
-  body > header #bellBtn { margin-left: auto; }
+  /* the pages' own markup on a phone: what their old stylesheet showed or hid at this width */
   .ph-row { flex-direction: column; align-items: stretch; }
   .ph-go { text-align: left; }
   .desk-mid .todo-list, .fix-top { display: none; }
@@ -1498,7 +1509,7 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
 @media print {
-  .sidebar, .topbar, body > header, nav#nav, .tabbar, #drawer, .drawer, .bulk-bar, .toasts, #rwNotice, #blindBar, #scBar, .no-print, #calcCtl { display: none !important; }
+  .sidebar, .topbar, nav#nav, .tabbar, .skip-link, .palette, #drawer, .drawer, .bulk-bar, .toasts, #rwNotice, #blindBar, #scBar, .no-print, #calcCtl { display: none !important; }
   body { background: #fff; color: #000; padding: 0 !important; }
   .app { display: block; }
   .panel:not(.sheet) { display: none !important; }

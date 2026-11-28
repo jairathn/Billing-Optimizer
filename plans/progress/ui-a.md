@@ -19,8 +19,28 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
    - Tests moved (same guarantee, read where the styles live now): test_ema_pages2 (every work type has its style),
      test_ema_pages (a printed page never carries the blind-spot banner). New: tests/test_style.py.
    - Inline `style=` count: 282 at P0 (tests/test_style.py STYLE_ATTRS_MAX; lower it as styles go).
-2. P1 shell: next.
-3. P4 Today.
+2. P1 shell: DONE (commit "ui-a P1").
+   - `remitwatch/static/shell.js` (one global, RWShell) draws the same shell on the app, Upload and Setup: the sidebar
+     (Today; Work with its views Denials, Bundling, Downcoding, Contracts, Fees and takebacks; Faxes; Results; Insights:
+     Bigger wins, Progress, Analysis; Settings: Data, Upload from EMA, Setup; Owner behind the lock: Write-off policy,
+     Providers, Calculator), the header (search, health pill, alerts bell, Help with How RemitWatch works, Keyboard
+     shortcuts and Search and go to), the phone's tab bar (Today, Work, Results, Find, More) and its More sheet.
+   - Routes, ids and data- attributes stay: `#nav`, `#feedChip` (the pill's words), `#claimFind`, `#bellBtn`, `#lockBtn`,
+     `#guideBtn`, `#keysBtn`, `#uploadLink`, `#swingBar`, `#scBar`, `#blindBar`, `#view`. TABS keys all have a place.
+   - The pill: safe mode, then what the app cannot check in dollars (/api/ema/blind), then how far the remittances
+     reach, then payments with no remittance, then overdue EMA exports; on Vercel always the press-only sentence.
+   - Theme (System, Light, Dark) and the sidebar's width are kept per computer (localStorage, wrapped); no flash on load.
+   - Page titles carry the count of what closes within 7 days, never patient data. Ctrl K or Cmd K opens Search and go to.
+   - The brand mark (a remittance slip with a check) and favicons in `static/brand/` (icon.svg follows the theme;
+     icon-32.png and icon-180.png drawn from it with Playwright by `$S/tk/units/ui-a/raster.js`).
+   - Phone width: worklist cards keep the box that picks a row (bulk changes still work at 390 px).
+   - Tests moved (same guarantee, new place): calc_model_check gate 9 (the Lock button names both tabs: shell.js) and
+     r34 (tab strips wrap at phone width: rw.css); test_uploads (the Upload link: shell.js's place, hidden until
+     /api/meta says so); test_hook_review (the pill names read-but-unchecked claims: shell.js); test_hotfix2_pages H8
+     (the pill says how far remittances reach, the newest payment in its hover) and H10 (on a phone, Find in the tab bar);
+     swing banner first inside Upload's and Setup's main. New: tests/test_shell.py.
+   - Inline `style=` count: 278 (tests/test_style.py STYLE_ATTRS_MAX).
+3. P4 Today: next.
 4. Brand finish.
 5. docs/DESIGN.md.
 
@@ -28,6 +48,10 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
 
 - P0, 1400x900 light (plans/tools/ui/checks.js): today sizes 6, accent 2, filled 1; worklist first row at 865 px (old
   markup), data, /upload (2 filled buttons: its own page), /setup: no overflow, no script error.
+
+- P1, 1400x900 light and dark, 390x844 light and dark, 22 pages each (plans/tools/ui/checks.js): no overflow, no script
+  error, no dialog on any page. Left for the page units: downcoding, faxes and /upload show 2 filled buttons (their own
+  content); results shows 7 type sizes; overview's dark alerts link fixed here.
 
 ## Next command
 

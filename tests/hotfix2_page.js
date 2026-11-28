@@ -248,15 +248,26 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
     body: JSON.stringify({ newest_payment_date: '2026-11-10', feed_date: '2026-09-01', days_behind: 83, mode: 'server', dropbox_configured: false }) }));
   await page.goto(base + '#today'); await sleep(1500);
   out.header = await page.$eval('#feedChip', c => c.innerText);
+  out.header_title = await page.$eval('#health', c => c.title);
   await page.unroute('**/api/sync/status');
 
   // ---------------------------------------------------------------- H10: Find a claim on a partial copy says so
   await page.route('**/api/claims/search', route => route.fulfill({ status: 200, contentType: 'application/json',
     body: JSON.stringify({ items: [], more: false, partial: 'The copy of the data on this site holds only the claims that have items, so a paid claim with no item does not show here. Look it up in EMA.' }) }));
-  await page.fill('#claimFind', 'ZZ99999999'); await page.press('#claimFind', 'Enter'); await sleep(800);
+  // Find a claim: the header's search on a computer; on a phone, Find in the tab bar opens Search and go to, whose
+  // first row finds the claim typed
+  const findClaimUi = async text => {
+    if (await page.isVisible('#claimFind')) { await page.fill('#claimFind', text); await page.press('#claimFind', 'Enter'); }
+    else {
+      if (await page.$('#drawer.open')) { await page.keyboard.press('Escape'); await sleep(300); }    // the item's sheet covers the tab bar
+      await page.click('#tabbar [data-act="find"]'); await page.fill('#palQ', text); await page.press('#palQ', 'Enter');
+    }
+    await sleep(800);
+  };
+  await findClaimUi('ZZ99999999');
   out.find_partial = await page.$eval('#drawer', d => d.innerText);
   await page.unroute('**/api/claims/search');
-  await page.fill('#claimFind', 'ZZ99999999'); await page.press('#claimFind', 'Enter'); await sleep(800);
+  await findClaimUi('ZZ99999999');
   out.find_server = await page.$eval('#drawer', d => d.innerText);
 
   await browser.close();

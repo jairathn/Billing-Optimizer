@@ -21,28 +21,16 @@ const blank = (s, alt) => (s===''||s==null) ? `<span class="muted">${alt||'(none
 const statusScope = () => state.status==='all' ? 'active' : state.status;
 function post(path, body){ return api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})}); }
 
-// ---------------------------------------------------------------- header: feed chip and alert bell
+// ---------------------------------------------------------------- header: the health pill and the alert bell
+// The answers the header is drawn from; the shell (static/shell.js RWShell.pill, through index.html's shellHeader) says
+// them: the feeds and what the app cannot check in dollars, the new alerts, and on the Vercel site when it last analysed
+// and that it analyses only on a press (the owner's decision 1).
 async function refreshHeader(){
   try {
     const [al, st] = await Promise.all([api('/api/alerts?status=new'), api('/api/sync/status')]);
     state.alertsNew = al.items; state.sync = st;
     if(typeof swingShow === 'function') swingShow($('#swingBar'), al.items);     // a big change in one run: top of every page (swing.js)
-    const n = al.items.length, hi = al.items.filter(a=>a.severity==='high').length;
-    $('#bellBtn').innerHTML = `Alerts <b class="${hi?'sev-high':''}">${n}</b>`;
-    const behind = st.days_behind;      // from the day the remittances reach for most payers, not one stray newer file
-    const cls = behind==null ? 'muted' : (behind>14 ? 'sev-high' : (behind>7 ? 'sev-medium' : 'ok'));
-    const reach = st.feed_date && st.newest_payment_date && st.feed_date < st.newest_payment_date ? ` · remittances reach ${esc(st.feed_date)} for most payers` : '';
-    // the Vercel site analyses only on a press (the owner's decision 1): every page says when it last did, and what its
-    // last run could not check
-    const an = st.analysed || {}, un = st.unchecked;
-    // (while a run is going too: it says so, and still when the site last analysed and that it analyses only on a press)
-    // what the last run could not check: the open items, and the remittance claims it read and did not analyse, in dollars
-    const rd = un && un.read && un.read.claims ? `${esc(String(un.read.claims))} remittance claim${un.read.claims===1?'':'s'} read since (${money(un.read.cents)} not paid)` : '';
-    const notChecked = un && un.read_since !== false && (un.n || rd) ? [un.n ? `${esc(String(un.n))} open item${un.n===1?'':'s'} (${money(un.cents)})` : '', rd].filter(Boolean).join(' and ') : '';
-    const press = st.press_only ? `${st.running ? 'analysing now · ' : ''}${an.at ? 'last analysed ' + esc(String(an.at).slice(0,16).replace('T',' ')) + ' UTC' : 'not analysed yet'} · analyses only when someone presses Run the analysis now (Data tab)${st.last_failed && !st.running ? ' · <span class="sev-high">the last run stopped before it finished (Data tab)</span>' : ''}${notChecked ? ` · <span class="sev-medium">the last run could not check ${notChecked}</span>` : ''}` : '';
-    const how = st.press_only ? press : (st.running ? 'syncing now' : (st.dropbox_configured ? (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand') : 'Dropbox not connected'));
-    $('#feedChip').innerHTML = reach ? `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${reach}${behind!=null?` (${behind} days ago)`:''} · ${how}`
-      : `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${behind!=null?` (${behind} days ago)`:''} · ${how}`;
+    if(typeof shellHeader === 'function') shellHeader();
   } catch(e){ /* older store without these tables */ }
 }
 

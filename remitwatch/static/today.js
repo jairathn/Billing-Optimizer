@@ -16,6 +16,7 @@ async function brief(force){
   if(force || !state.brief || Date.now() - state.briefAt > 60000){
     state.brief = await api('/api/brief'); state.briefAt = Date.now();
     if(typeof updateBadges === 'function') updateBadges(state.brief);
+    if(typeof shellHeader === 'function') shellHeader();      // the sidebar's counts and the page's title (index.html)
   }
   return state.brief;
 }

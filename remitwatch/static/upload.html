@@ -3,14 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RemitWatch upload</title>
+<title>Upload from EMA · RemitWatch</title>
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0d11" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/static/brand/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/brand/icon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/brand/icon-180.png">
+<script>
+// the theme and the sidebar a person chose on this computer, before the first paint (static/shell.js keeps them)
+(function(){ try { var t = localStorage.getItem('rw:theme'); if(t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  if(localStorage.getItem('rw:sidebar') === 'rail') document.documentElement.setAttribute('data-sidebar', 'rail'); } catch(e){} })();
+</script>
 <link rel="preload" href="/static/fonts/inter-latin-opsz-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/rw.css?v=2026-11-28">
 </head>
 <body>
-<main>
+<a class="skip-link" href="#main">Skip to the page</a>
+<div class="app" id="app">
+<nav id="nav"></nav>
+<div class="app-main">
+<header class="topbar" id="topbar">
+  <span class="topbar-title" id="pageTitle" aria-hidden="true">Upload from EMA</span>
+  <button type="button" class="search search-btn" id="searchBtn" aria-label="Search and go to"><span>Search</span><kbd>/</kbd></button>
+  <span class="grow"></span>
+  <a class="health" id="health" href="/#data"><span id="feedChip">Upload from EMA</span></a>
+  <a class="icon-btn" id="bellBtn" href="/#alerts" aria-label="Alerts" title="Alerts"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-bell"/></svg><span class="dot-count" hidden></span></a>
+  <div class="menu-wrap"><button class="icon-btn" id="helpBtn" aria-label="Help" title="Help" aria-haspopup="menu" aria-expanded="false"><svg class="i i-lg" aria-hidden="true"><use href="/static/icons.svg#i-help"/></svg></button>
+    <div class="menu" id="helpMenu" role="menu" hidden>
+      <a role="menuitem" href="/#today" id="guideLink"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-info"/></svg>How RemitWatch works</a>
+      <button role="menuitem" id="findBtn"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg>Search and go to<kbd class="kbd-right" id="findKey">Ctrl K</kbd></button>
+    </div></div>
+</header>
+<main class="page doc" id="main">
   <div id="swingBar" hidden></div>
-  <div class="top"><h1>Upload from EMA</h1><a href="/">Back to the dashboard</a></div>
+  <div class="page-head"><div><h1 class="page-title">Upload from EMA</h1></div></div>
   <div id="pressLine" class="small" hidden></div>
   <div class="muted">Until ModMed approves an API connection, EMA's side reaches RemitWatch as reports exported by hand. Each week, pull the five exports below from EMA and drop them here (or put them in the Dropbox folder). They go through the same reading and analysis as the files from Dropbox. Large reports are fine: this page compresses them and sends them in pieces, and a broken upload carries on where it stopped.</div>
 
@@ -58,6 +84,11 @@
     <div class="small">Before a file is sent, this page works out its checksum (SHA-256). Large files go in pieces of 4 MB, each checked as it arrives, and the whole file is checked against that checksum at the end: a file that does not arrive whole is not kept, nor one no export EMA makes looks like (one that unpacks to hundreds of times its size, or has a line longer than a megabyte). On the practice's server each file is kept in the same protected place as RemitWatch's store; on the Vercel site, reports and exports go to the private Dropbox folder RemitWatch keeps its data in. The files themselves are never emailed. Exports and remittance files never leave RemitWatch's storage. A visit note leaves it only inside the appeal packet built from it: faxed to the payer, or emailed where the practice has allowed that. When the note review is switched on, the note is also read by that review. Reports and exports are read by the next cycle; what each held, and what it replaced, then shows here. Uploading the same file again changes nothing: RemitWatch knows a file by its checksum, the same way whether it was uploaded or found in the Dropbox folder.</div>
   </div>
 </main>
+</div>
+</div>
+<nav class="tabbar" id="tabbar" aria-label="Places"></nav>
+<script src="/static/shell.js"></script>
+<script>RWShell.mount({page: 'upload', link: '/#'}); RWShell.live();</script>
 <script src="/static/upload.js"></script>
 <script src="/static/swing.js"></script>
 <script>swingLoad(document.getElementById('swingBar'));</script>
