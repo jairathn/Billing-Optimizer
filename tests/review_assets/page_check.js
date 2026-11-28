@@ -62,7 +62,7 @@ const port = process.argv[2], OUT = process.argv[3] + '/';
   out.injected.fees = await injected();
   out.fees_drawers = {};
   // a takeback opens its drawer from the list of every takeback; a payer's payment fees open that payer's request letter
-  await page.locator('#view .tile[data-paid=""]').first().click(); await settle();
+  await page.locator('#view .wk-segs [data-paid=""]').first().click(); await settle();
   out.fees_rows = await page.evaluate(() => [...document.querySelectorAll('#view table.wl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 140)));
   const tbRow = page.locator('#view table.wl tbody tr.row').first();
   if (await tbRow.count()) {
@@ -71,7 +71,7 @@ const port = process.argv[2], OUT = process.argv[3] + '/';
       appeal_button: !!document.querySelector('#drawer #btnAppeal'), buttons: [...document.querySelectorAll('#drawer .actions button')].map(b => b.innerText) }));
     await page.click('#closeD');
   } else out.fees_drawers.TAKEBACK = 'row not found';
-  await page.locator('#view .tile[data-l="fees"]').first().click(); await settle();
+  await page.locator('#view .wk-segs [data-l="fees"]').first().click(); await settle();
   const feeRow = page.locator('#view tr.fee-row').first();
   if (await feeRow.count()) {
     await feeRow.click(); await page.waitForSelector('#modal.open #letter'); await page.waitForTimeout(300);

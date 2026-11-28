@@ -1608,7 +1608,7 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 .wk-card > table th { top: calc(var(--topbar-h) + 44px); }
 /* the rows: a fixed table, two lines a cell, each line cut with an ellipsis */
 table.wl.wk { table-layout: fixed; }
-table.wl.wk th.c-sel { width: 40px; } table.wl.wk th.c-day { width: 172px; } table.wl.wk th.c-who { width: 22%; }
+table.wl.wk th.c-sel { width: 40px; } table.wl.wk th.c-day { width: 188px; } table.wl.wk th.c-who { width: 22%; }
 table.wl.wk th.c-payer { width: 17%; } table.wl.wk th.c-num { width: 104px; text-align: right; }
 main#view table.wl.wk td, main#view table.wl.wk td.who, main#view table.wl.wk td.what { min-width: 0; }
 table.wl.wk tr.row > td { height: 56px; padding-top: 0; padding-bottom: 0; overflow: hidden; vertical-align: middle; font-size: var(--fs-sm); font-weight: var(--fw-regular); }
@@ -1652,7 +1652,7 @@ table.wl.wk tr.group-row td { height: auto; padding: 7px var(--sp-4); }
   .wk-bar .lh-tools > :not(#moreF) { display: none; }
   .wk-card { margin-top: var(--sp-2); }
   /* two-line cards (CRITIQUE_premium change 10): the patient and the amount; what happened, the payer and the due date */
-  table.wl.wk tr.row { grid-template-columns: 28px minmax(0, 1.25fr) minmax(0, 1fr) auto; grid-template-areas: "sel who who num" "sel what payer day";
+  table.wl.wk tr.row { grid-template-columns: 28px minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 8.5rem); grid-template-areas: "sel who who num" "sel what payer day";
     align-items: center; gap: 4px var(--sp-2); margin: 0 0 6px; padding: 9px var(--sp-3); }
   table.wl.wk tr.row > td { height: auto; overflow: hidden; }
   table.wl.wk td .l2 { display: none; }

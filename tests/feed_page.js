@@ -24,7 +24,7 @@ const base = `http://127.0.0.1:${port}`;
     null, { timeout: 20000 }).catch(() => {});
   out.banner = await page.evaluate(() => { const b = document.querySelector('#view .banner'); return b ? b.innerText.replace(/\s+/g, ' ').trim() : ''; });
   await page.goto(`${base}/#worklist`);
-  await page.waitForFunction(() => { const v = document.querySelector('#view'); return v && v.querySelector('.tiles'); }, null, { timeout: 20000 }).catch(() => {});
+  await page.waitForFunction(() => { const v = document.querySelector('#view'); return v && v.querySelector('.wk-segs'); }, null, { timeout: 20000 }).catch(() => {});
   // the warning line comes with the Worklist's own answer about the feed: read once it is drawn (or after the wait)
   await page.waitForFunction(() => { const l = document.querySelector('#view .oneline'); return l && /not all in yet/.test(l.innerText); },
     null, { timeout: 20000 }).catch(() => {});
