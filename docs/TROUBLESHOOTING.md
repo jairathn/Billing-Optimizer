@@ -102,6 +102,32 @@ items). It is rebuilt once from its sources and checked again (remedy `derived_t
 for safe mode: the worklist people see stays on the last good run and automatic closures are held, and an alert says
 which check failed. To do: the bundle's examples/ for that check, then reproduce on a copy.
 
+**Money posted in EMA left the posting ledger** (the self-check `posted_money`, critical: it holds the run). For each
+service month, closed posting month, payer group and measure (insurer paid, patient paid, adjustments, patient
+adjustments) the check keeps the most the ledger ever held (selfcheck_posted). A cell that falls by more than $1 is a gap
+with its dollars: a newer Production export of the same dates lacks postings the one before had (a filtered or partial
+export replaced a complete one), or EMA itself removed them. A payer name that changes group is not a fall: the name
+rules change on their own (an alias learned or dropped from the weekly exports' payer ids, the owner's
+REMITWATCH_EMA_PAYER_ALIASES, a release's name rules), so the check keeps the group each name had when its marks were
+made (meta selfcheck:posted_groups), compares each name's money under that group, and moves the marks to the new groups
+once nothing is missing. A cell the move changes keeps the fall it already had, so a leak of less than $1 at a time is
+still caught while an alias comes and goes. The check's text then says how many names changed group, and a real loss
+read in the same run still shows with its own dollars, under the group the marks were made with. To do: compare the
+newest Production export of the dates the offending cells name with the one before; send the complete export again, or
+accept the change on the Data tab if EMA itself removed those postings. Accepting moves the marks to what the ledger
+holds, so a later fall in the same cell is new and holds the run again. Marks made before 2026-11-28 have no record of
+each name's group. The first check after the release sums each month across every payer group: a month whose total did
+not fall, and whose fall whole payer names now in another group can explain, starts again under the groups of now, and
+the check's text says how many dollars moved that way (if no name changed group, compare the exports as above). A month
+that also lost money at that check keeps its marks, so its gap includes the moved name's money there: check the export,
+then accept. That check records the groups, so this happens once.
+
+**Items kept after a held run.** A run safe mode held leaves the worklist, and the facts the vanished check compares
+against (selfcheck_facts and meta selfcheck:facts_input), as the last good run saved them; only the new items the held
+run still lists add their own. So an item an answer settled before the held run leaves on the next good run by its new
+facts, and is not kept as "nothing explains why". Items kept before this was fixed (2026-11-28) stay until a person
+accepts them on the Data tab.
+
 **A code bug** (an exception in a step, a category of items gone, a wrong verdict). The exception is logged with its
 stack where the step contains it; the self-checks catch the effects they cover (an item with no state, a closure with
 no proof, money that does not add up, items that vanished between runs) and hold closures in safe mode. A progress line
