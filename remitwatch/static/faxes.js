@@ -275,7 +275,7 @@ function bindFaxDrawer(id, d, seq, what, r){
       + ((r.candidates||[]).length ? ' Open "Build the appeal from the visit note" below and pick it there.' : '');
     if(r.code === 'check_code') msg.innerHTML += ' <button id="fxCode">It went out as billed: fax it</button>';
     if(r.code === 'stale') msg.innerHTML += ' <button id="fxStale">Still unpaid in EMA: fax it anyway</button>';
-    if(r.code === 'note_check' && r.packet_id) msg.innerHTML += ` <a href="/api/packets/${encodeURIComponent(r.packet_id)}/pdf" target="_blank" rel="noopener">Open the packet</a>`;
+    if(r.code === 'note_check' && r.packet_id) msg.innerHTML += ` <a href="/api/packets/${encodeURIComponent(r.packet_id)}/pdf?check=1" target="_blank" rel="noopener">Open the packet</a>`;
     if(r.code === 'note_check' && r.confirm) msg.innerHTML += `<div class="mt-1"><label><input type="checkbox" id="fxNoteOk"> I opened this note: it is this patient's visit on ${esc(r.visit_date ? longDate(r.visit_date) : 'the date of service')}</label> <button id="fxNoteGo" disabled>Fax it</button></div>`;
     if(r.code === 'check_first') msg.innerHTML += ' <button id="fxChecked">Checked: still unpaid, fax it</button>';
     // the buttons the answer brings are looked for in this item's own message, and act for this item only

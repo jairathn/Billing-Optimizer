@@ -1356,7 +1356,7 @@ def _packets_for(finding_id: str) -> list[dict]:
         from . import cloud
         st = cloud.SERVING_COPY.state(fast=True)        # part of opening a finding: must not wait on a slow Dropbox
         try:
-            got = [_shown_note_name(p) for p in cloud.list_packets(st, finding_id)] if st is not None else []
+            got = [_listed_hold(_shown_note_name(p)) for p in cloud.list_packets(st, finding_id)] if st is not None else []
             # a packet stays in the folder of the item it was built for: once detection gave the item's money a new id
             # (detect.carry_to_heirs), the faxes it went out with name it
             named = [r["packet_id"] for r in rows("SELECT DISTINCT packet_id FROM faxes WHERE finding_id=? AND packet_id IS NOT NULL",
@@ -1369,8 +1369,27 @@ def _packets_for(finding_id: str) -> list[dict]:
             return got
         except Exception:
             return []
-    return [_shown_note_name(p) for p in rows("SELECT packet_id, created_at, mode, subject, note_name, emailed_to, emailed_at FROM appeal_packets "
-                                              "WHERE finding_id=? ORDER BY created_at DESC", (finding_id,))] if has_table("appeal_packets") else []
+    return [_listed_hold(_shown_note_name(p)) for p in rows("SELECT packet_id, created_at, mode, subject, note_name, emailed_to, emailed_at, "
+                                                            "analysis FROM appeal_packets WHERE finding_id=? ORDER BY created_at DESC",
+                                                            (finding_id,))] if has_table("appeal_packets") else []
+
+
+def _listed_hold(p: dict | None) -> dict | None:
+    """A listed packet carries `note_hold` when the note check kept with it says its note does not show this patient's
+    visit and no person has said it is (the panel asks before it offers the packet); the review itself stays out."""
+    if p is None:
+        return p
+    a = p.pop("analysis", None) or {}
+    if isinstance(a, str):
+        try:
+            a = json.loads(a)
+        except ValueError:
+            a = {}
+    ident = a.get("note_identity") if isinstance(a, dict) else None
+    held = (p.get("mode") != "letter" and isinstance(ident, dict) and ident.get("ok") is False
+            and not _note_checked({"analysis": a}))
+    p["note_hold"] = _hold_words(ident, "") if held else None
+    return p
 
 
 CLAIM_PUBLIC_COLS = ("claim_key", "transaction_key", "patient_control_number", "claim_status_code", "charge_cents", "paid_cents",
@@ -3664,8 +3683,8 @@ MAX_NOTE_BYTES = (3 if runtime.serverless() else 15) * 1024 * 1024
 
 
 @app.post("/api/appeals/build", dependencies=[Depends(require_xhr)])
-def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str = Form("1"), file: Optional[UploadFile] = File(None),
-                  user: str = Depends(require_auth)):
+def appeals_build(request: Request, finding_id: str = Form(...), text: str = Form(""), use_ai: str = Form("1"),
+                  file: Optional[UploadFile] = File(None), user: str = Depends(require_auth)):
     """Review the uploaded or pasted visit note for one finding and build the appeal packet (letter, review, evidence, note) as a PDF.
     A plain function on purpose: the review takes about a minute and must not hold up every other request."""
     data = None
@@ -3680,20 +3699,26 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
     detail = finding_detail(finding_id, "ok")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (detail["finding"].get("claim_key"),)) if detail["finding"].get("claim_key") else None
     name = file.filename if (file is not None and data) else ""
-    if _note_identity(detail, raw_claim, name, data, text or None).get("code") == "several":
+    ident = _note_identity(detail, raw_claim, name, data, text or None)
+    if ident.get("code") == "several":
         from .uploads import SEVERAL
         raise HTTPException(400, SEVERAL)           # a report listing several patients is not this visit's note
-    packet = _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1", source="person")
-    if data and not runtime.serverless() and detail["finding"].get("claim_key"):
+    packet = _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1", source="person", ident=ident)
+    if not ident.get("ok"):
+        # a note whose text does not show this patient's visit: the packet waits for a person to open the note and say it
+        # is (POST /api/packets/{id}/note-checked) before it is downloaded, printed, emailed or faxed, and the note is not
+        # kept as the visit's own, so the visit's other items never pick it up (review d-1)
+        packet["note_hold"] = _hold_words(ident, _visit_day(detail, raw_claim))
+    elif data and not runtime.serverless() and detail["finding"].get("claim_key"):
         # kept as a note uploaded for this item's visit too (remitwatch.uploads): a rebuild, and the visit's other items, find it
         try:
             from . import uploads
             tmp = uploads.incoming(DB_PATH)
             with open(tmp, "wb") as fh:
                 fh.write(data)
-            uploads.accept(DB_PATH, tmp, name or "visit note", user, finding_id=finding_id)
-        except Exception:
-            pass        # the packet is what was asked for
+            uploads.accept(DB_PATH, tmp, name or "visit note", acting(request, user), finding_id=finding_id)
+        except Exception as exc:
+            runlog.caught(exc, "appeals_build:keep_note", level="warning")     # the packet is what was asked for
     return packet
 
 
@@ -3759,15 +3784,70 @@ def _packet_identity(packet_id: str, p: dict, detail: dict, raw_claim: dict | No
     return {"ok": False, "code": "unknown", "why": "The note this packet was built from cannot be read again to see whose note it is."}
 
 
+def _hold_words(ident: dict, visit_date: str) -> dict:
+    """What the page shows for a packet whose note does not show this patient's visit: why, and the visit's date."""
+    return {"code": ident.get("code") or "unknown", "visit_date": visit_date,
+            "why": ident.get("why") or "The note does not show this patient's visit."}
+
+
+def _note_checked(p: dict | None) -> dict | None:
+    """A person's word, kept with the packet, that they opened its note and it is this patient's visit."""
+    got = ((p or {}).get("analysis") or {}).get("note_checked")
+    return got if isinstance(got, dict) and got.get("at") else None
+
+
+def _packet_finding(p: dict) -> tuple[dict, dict | None]:
+    """The item a packet was built for and its claim, as _note_identity reads them (without the whole panel)."""
+    f = one("SELECT * FROM findings WHERE finding_id=?", (p.get("finding_id"),)) if p.get("finding_id") else None
+    c = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],)) if (f and f.get("claim_key") and has_table("claims")) else None
+    return {"finding": f or {}}, c
+
+
+def _note_hold(packet_id: str, p: dict | None) -> dict | None:
+    """Why a packet built from a visit note waits before it goes anywhere (downloaded, printed, emailed, uploaded to a
+    portal or faxed): its note's text does not show this patient's visit and no person has opened it and said it is. The
+    one rule /api/appeals/send holds a fax by. None when it may go (a letter alone, a note that shows the visit, or a
+    person's check)."""
+    if not p or p.get("mode") == "letter" or _note_checked(p):
+        return None
+    detail, raw_claim = _packet_finding(p)
+    ident = _packet_identity(packet_id, p, detail, raw_claim)
+    return None if ident.get("ok") else _hold_words(ident, _visit_day(detail, raw_claim))
+
+
+def _keep_note_check(packet_id: str, p: dict, who: str, dos: str) -> dict:
+    """Keep a person's check of a packet's note with the packet (analysis.note_checked), on either host."""
+    checked = {"by": who, "at": _now_iso(), "visit_date": dos}
+    if runtime.serverless():
+        cloud, st = _cloud_state()
+        cloud.mark_packet_checked(st, packet_id, checked)
+        return checked
+    conn = db()
+    try:
+        a = dict(p.get("analysis") or {}, note_checked=checked)
+        conn.execute("UPDATE appeal_packets SET analysis=? WHERE packet_id=?", (json.dumps(a), packet_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return checked
+
+
+def _held_answer(hold: dict) -> str:
+    return (f"Check the visit note before it goes: {hold['why']} Open it in the item's appeal step, and if it is this "
+            f"patient's visit on {hold['visit_date'] or 'the date of service'}, tick \"I opened this note: it is this patient's "
+            "visit\". Otherwise build the packet again from this visit's own note.")
+
+
 def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes | None, text: str | None, use_ai: bool,
-                  source: str = "person") -> dict:
+                  source: str = "person", ident: dict | None = None) -> dict:
     """Build the packet from a note (uploaded, pasted or read from EMA) and keep it. A review that found the note short is
     also kept as a lesson, for the suggested templates. The PDF goes to the payer and carries the real identifiers; the
     letter text in the answer does only when names are switched on. What the note's text shows about whose visit it is
     is kept with it (analysis.note_identity): a note read from the patient's own chart in EMA ('ema') is theirs by EMA's
     two identifiers; one uploaded or attached by a person ('upload', 'person') only by what its text shows."""
     from .notes import build_from_note, lesson
-    ident = {"ok": True} if source == "ema" else _note_identity(detail, raw_claim, name, data, text)
+    if ident is None:
+        ident = {"ok": True} if source == "ema" else _note_identity(detail, raw_claim, name, data, text)
     detail = _with_payer_rules(detail)          # the payer's rule for the code goes to the review and the checklist
 
     def build(conn):
@@ -5216,7 +5296,7 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
     checked = None
     if p.get("mode") != "letter":
         ident = _packet_identity(packet_id, p, detail, raw_claim)
-        if not ident.get("ok"):
+        if not ident.get("ok") and not (_note_checked(p) and ident.get("code") != "several"):
             dos = _visit_day(detail, raw_claim)
             same = body.get("packet_id") in (None, packet_id)
             if ident.get("code") == "several" or body.get("note_checked") is not True or not same:
@@ -5250,6 +5330,10 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
     if checked:
         _record_action({"kind": "event", "event": "note_check", "finding_id": fid, "actor": user, "at": _fax_now(),
                         "note": f"{user} opened the note and said it is this patient's visit on {checked}."})
+        try:
+            _keep_note_check(packet_id, p, user, checked)       # the packet's download and email go by the same check
+        except Exception as exc:
+            runlog.caught(exc, "appeals_send:keep_note_check", level="warning")
 
     def still_ok(conn) -> str | None:
         # checked again in the step that reserves the send: nothing went out for it meanwhile, it is still open, and the
@@ -6376,7 +6460,9 @@ def packet_get(packet_id: str, _: str = Depends(require_auth)):
 
 
 @app.get("/api/packets/{packet_id}/pdf")
-def packet_pdf(packet_id: str, _: str = Depends(require_auth)):
+def packet_pdf(packet_id: str, check: int = 0, _: str = Depends(require_auth)):
+    """The packet's PDF. One whose note does not show this patient's visit is held (409) until a person opens the note and
+    says it is (_note_hold): `check=1` shows it in the browser for that look, never as a download."""
     if runtime.serverless():
         cloud, st = _cloud_state()
         p = cloud.get_packet(st, packet_id, with_pdf=True)
@@ -6389,16 +6475,49 @@ def packet_pdf(packet_id: str, _: str = Depends(require_auth)):
             conn.close()
     if not p or not p.get("pdf"):
         raise HTTPException(404, "packet not found")
+    hold = _note_hold(packet_id, p)
+    if hold and check != 1:
+        raise HTTPException(409, _held_answer(hold))
     safe = "".join(ch for ch in packet_id if ch.isalnum() or ch in ".-_")[:80]
     pdf = p["pdf"]
+    how = "inline" if hold else "attachment"
     return StreamingResponse((pdf[i:i + 262144] for i in range(0, len(pdf), 262144)), media_type="application/pdf",
-                             headers={"Content-Disposition": f'attachment; filename="appeal-packet-{safe}.pdf"', "Cache-Control": "no-store"})
+                             headers={"Content-Disposition": f'{how}; filename="appeal-packet-{safe}.pdf"', "Cache-Control": "no-store"})
+
+
+@app.post("/api/packets/{packet_id}/note-checked", dependencies=[Depends(require_xhr)])
+def packet_note_checked(packet_id: str, request: Request, user: str = Depends(require_auth)):
+    """A person opened the packet's note and says it is this patient's visit: kept with the packet (analysis.note_checked,
+    who and when) and as a line in the item's history; the packet may then go by every way, the fax included."""
+    p = _packet_meta(packet_id)
+    if not p:
+        raise HTTPException(404, "packet not found")
+    detail, raw_claim = _packet_finding(p)
+    ident = _packet_identity(packet_id, p, detail, raw_claim)
+    if ident.get("code") == "several":
+        raise HTTPException(400, "A report that lists several patients is not this visit's note. Build the packet again from "
+                                 "this visit's own note.")
+    who, dos = acting(request, user), _visit_day(detail, raw_claim)
+    checked = _keep_note_check(packet_id, p, who, dos)
+    if p.get("finding_id"):
+        _record_action({"kind": "event", "event": "note_check", "finding_id": p["finding_id"], "actor": who,
+                        "note": f"Opened the note and said it is this patient's visit on {dos or 'the date of service'}."})
+    return {"ok": True, "note_checked": checked}
 
 
 @app.post("/api/packets/{packet_id}/email", dependencies=[Depends(require_xhr)])
 def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends(require_auth)):
     to = str(body.get("to") or os.environ.get("APPEAL_EMAIL_TO") or "").strip()
     note = str(body.get("note") or "")
+    if not runtime.serverless():
+        # a packet whose uploaded note was taken back, or matched to another visit since, may carry another patient's
+        # note: it is not faxed any more (_packet_problem), and it is not emailed either
+        why = _packet_problem(packet_id, {})
+        if why and why.startswith("The note it was built from"):
+            raise HTTPException(409, f"{why} It is not emailed: build the packet again in the item.")
+    hold = _note_hold(packet_id, _packet_meta(packet_id))
+    if hold:
+        raise HTTPException(409, _held_answer(hold))
     if runtime.serverless():
         from .notes import send_pdf
         cloud, st = _cloud_state()
@@ -6407,11 +6526,6 @@ def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends
         if out.get("sent"):
             cloud.mark_packet_emailed(st, packet_id, to)
         return out
-    # a packet whose uploaded note was taken back, or matched to another visit since, may carry another patient's note:
-    # it is not faxed any more (_packet_problem), and it is not emailed either
-    why = _packet_problem(packet_id, {})
-    if why and why.startswith("The note it was built from"):
-        raise HTTPException(409, f"{why} It is not emailed: build the packet again in the item.")
     from .notes import email_packet
     conn = db()
     try:

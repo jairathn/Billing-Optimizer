@@ -1948,7 +1948,10 @@ def list_packets(state, finding_id: str) -> list[dict]:
             raw = state.get(m["name"])
             if raw:
                 p = json.loads(raw)
-                out.append({k: p.get(k) for k in ("packet_id", "finding_id", "created_at", "mode", "model", "subject", "note_name", "emailed_to", "emailed_at")})
+                a = p.get("analysis") if isinstance(p.get("analysis"), dict) else {}
+                out.append(dict({k: p.get(k) for k in ("packet_id", "finding_id", "created_at", "mode", "model", "subject", "note_name",
+                                                       "emailed_to", "emailed_at")},
+                                analysis={k: a.get(k) for k in ("note_identity", "note_checked") if a.get(k) is not None}))
     return sorted(out, key=lambda p: p.get("created_at") or "", reverse=True)
 
 
@@ -1959,6 +1962,17 @@ def mark_packet_emailed(state, packet_id: str, to: str) -> None:
         p = json.loads(raw)
         p["emailed_to"], p["emailed_at"] = to, _now()
         state.put(paths[0], json.dumps(p, default=str).encode())
+
+
+def mark_packet_checked(state, packet_id: str, checked: dict) -> None:
+    """A person's word that the packet's note is this patient's visit (api.packet_note_checked), kept with the packet."""
+    paths = _packet_paths(packet_id)
+    raw = state.get(paths[0]) if paths else None
+    if not raw:
+        return
+    p = json.loads(raw)
+    p["analysis"] = dict(p.get("analysis") or {}, note_checked=checked)
+    state.put(paths[0], json.dumps(p, default=str).encode())
 
 
 # --------------------------------------------------------------------------- the cycle

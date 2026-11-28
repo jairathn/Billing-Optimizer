@@ -292,7 +292,11 @@ function drawerExtras(f, r){
   const builder = f.claim_key ? `${ema ? `<div class="filters" style="margin-bottom:6px"><button id="noteEma">${byHand ? 'Use the note uploaded from EMA and build the packet' : 'Get the note from EMA and build the packet'}</button>${byHand ? ' <a class="small" href="/upload">Upload notes</a>' : ''}</div><div id="emaMsg" class="small muted"></div>` : ''}<div class="note">${ema ? 'Or attach' : 'Attach'} the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
       <div class="filters"><input type="file" id="noteFile" accept=".pdf,.docx,.txt,.rtf,.html,.htm"><label class="small"><input type="checkbox" id="noteAi" checked> review with Claude</label><button id="noteGo">Build packet</button></div>
       <textarea id="noteText" rows="4" placeholder="…or paste the note text here" style="width:100%"></textarea>
-      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${typeof practiceDate === 'function' ? practiceDate(p.created_at) : String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
+      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>{
+        const day = `${typeof practiceDate === 'function' ? practiceDate(p.created_at) : String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}`;
+        return p.note_hold ? `${day} <button class="ghost small" data-pk-hold="${esc(p.packet_id)}">Check the note first</button>`
+          : `<a href="/api/packets/${encodeURIComponent(p.packet_id)}/pdf">${day}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`;
+      }).join(' · ')}</div>`:''}</div>` : '';
   return {notes, facts: factsHtml, builder};
 }
 // One line of an item's history (its panel, and Activity on Progress): a status change, from → to, or what happened with
@@ -321,7 +325,44 @@ function packetHtml(p){
     ${p.corrected_claim_instructions?`<div class="small"><b>Correction instead of appeal:</b> ${esc(p.corrected_claim_instructions)}</div>`:''}
     <pre>${esc(p.letter)}</pre></div>`;
 }
+// A packet whose note's text does not show this patient's visit waits for a person (api._note_hold, the rule the fax
+// send holds by): one notice in place of the packet's buttons, the note opened in the browser to look at, and the tick that
+// lets it go. Until then the server refuses its download and its email too (review d-1).
+function noteHoldHtml(p){
+  const h = p.note_hold || {}, f = (typeof state !== 'undefined' && state.detailF) || {};
+  const day = h.visit_date || f.service_date || '';
+  const when = day ? (typeof longDate === 'function' ? longDate(day) : day) : 'the date of service';
+  return `<div class="note sev-high" id="pkHold"><b>Check this note before it goes.</b> ${esc(h.why || '')}
+    <a href="/api/packets/${encodeURIComponent(p.packet_id)}/pdf?check=1" target="_blank" rel="noopener">Open it</a> and look: if it is
+    this patient's visit on ${esc(when)}, tick the box. If it is not, attach this visit's own note above and build the packet again.
+    <div class="actions"><label><input type="checkbox" id="pkOk"> I opened this note: it is this patient's visit on ${esc(when)}</label>
+    <button id="pkUse" disabled>Use this note</button></div><div id="pkHoldMsg" class="small"></div></div>`;
+}
+// the person ticked: the panel's copy of the item's packets lets this one go, and the next step's box is drawn again
+function xpNoteChecked(packetId){
+  const r = typeof state !== 'undefined' ? state.detailR : null;
+  (r && r.packets || []).forEach(q => { if(q.packet_id === packetId) q.note_hold = null; });
+  const d = document.querySelector('#drawer');
+  if(r && d && typeof xpRedrawBox === 'function') xpRedrawBox(state.detailId, d);
+}
 function showPacket(out, p){
+  if(p.note_hold){
+    out.innerHTML = noteHoldHtml(p);
+    const ok = out.querySelector('#pkOk'), use = out.querySelector('#pkUse');
+    ok.onchange = () => { use.disabled = !ok.checked; };
+    use.onclick = async () => {
+      if(use.disabled || !ok.checked) return;
+      use.disabled = true;
+      try {
+        await post('/api/packets/' + encodeURIComponent(p.packet_id) + '/note-checked', {});
+        const full = p.letter ? p : await api('/api/packets/' + encodeURIComponent(p.packet_id));
+        p.note_hold = null; full.note_hold = null;
+        xpNoteChecked(p.packet_id);
+        showPacket(out, full);
+      } catch(e){ out.querySelector('#pkHoldMsg').textContent = 'Not saved: ' + e.message; use.disabled = false; }
+    };
+    return;
+  }
   out.innerHTML = packetHtml(p);
   out.querySelector('#pkCopy').onclick = () => navigator.clipboard.writeText(p.letter);
   const send = out.querySelector('#pkSend');            // one email per click: a second click waits for the first answer
@@ -409,8 +450,17 @@ async function noteFromEma(id, d, documentId){
   } catch(e){ out.innerHTML = `<div class="sev-high small">Could not get the note: ${esc(e.message)}</div>`; }
   if(btn) btn.disabled = false;
 }
+// the appeal step's note check, opened from an earlier packet or from the route card's packet buttons
+function xpShowHold(d, pk){
+  const out = d && d.querySelector('#noteOut'); if(!out || !pk) return;
+  const fold = out.closest('details'); if(fold) fold.open = true;
+  showPacket(out, pk);
+  out.scrollIntoView({block: 'nearest'});
+}
 function bindDrawerExtras(id, d){
   const out = d.querySelector('#noteOut'); if(!out) return;
+  out.querySelectorAll('[data-pk-hold]').forEach(b => b.onclick = () =>
+    xpShowHold(d, ((state.detailR || {}).packets || []).find(q => q.packet_id === b.dataset.pkHold)));
   const em = d.querySelector('#noteEma'); if(em) em.onclick = () => noteFromEma(id, d);
   const go = d.querySelector('#noteGo');               // one packet per click: a second click waits for the first answer
   go.onclick = async () => {
@@ -466,7 +516,7 @@ function paidZeroOk(f, x){
 function xpPacketBuilt(id, d, p){
   const r = state.detailR;
   if(!p || !p.packet_id || !r || state.detailId !== id) return;
-  r.packets = [{packet_id: p.packet_id, created_at: p.created_at || new Date().toISOString(), note_name: p.note_name || ''}]
+  r.packets = [{packet_id: p.packet_id, created_at: p.created_at || new Date().toISOString(), note_name: p.note_name || '', note_hold: p.note_hold || null}]
     .concat((r.packets || []).filter(q => q.packet_id !== p.packet_id));
   if(typeof xpRedrawBox === 'function') xpRedrawBox(id, d);
 }
@@ -622,6 +672,8 @@ function rcAction(f, b, r, nx, c){
   }
   if(b.channel === 'mail'){
     const letter = RC_LETTER.has((c || {}).request) && ((r.packets || []).length || f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal));
+    const held = ((r.packets || [])[0] || {}).note_hold;
+    if(letter && held) return `<button class="primary" data-rc="checknote">Check the note first</button>`;
     return letter ? `<button class="primary" data-rc="letter">${(r.packets || []).length ? 'Print the packet' : 'Print the letter'}</button>`
       : `<button class="primary" data-rc="sheet">Print the cover sheet</button>`;
   }
@@ -650,7 +702,9 @@ function rcAttach(list, r, f){
   const out = (list || []).map(a => {
     const k = a.kind, pk = (r.packets || [])[0];
     const btn = k === 'letter' ? '<button class="ghost small" data-rc="letter">Open the letter</button>'
-      : k === 'packet' ? (pk ? `<a class="small" href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf" target="_blank" rel="noopener">Open the packet</a>` : '<button class="ghost small" data-rc="packet">Build the packet</button>')
+      : k === 'packet' ? (pk ? (pk.note_hold ? '<button class="ghost small" data-rc="checknote">Check the note first</button>'
+          : `<a class="small" href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf" target="_blank" rel="noopener">Open the packet</a>`)
+        : '<button class="ghost small" data-rc="packet">Build the packet</button>')
       : k === 'remittance' && r.bill ? '<button class="ghost small" data-rc="claim">See the remittance</button>' : '';
     return `<li>${esc(a.label)} ${btn}</li>`; }).join('');
   return out ? `<div class="small"><b>Attach</b><ul class="rc-attach">${out}</ul></div>` : '';
@@ -743,7 +797,9 @@ function xpRouteBind(f, x, r, d, h){
     if(k === 'call'){ location.href = 'tel:' + bt.dataset.tel; return; }
     if(k === 'fax'){ h.act.fax_payer(); return; }
     if(k === 'faxes'){ if(typeof closeDetail === 'function') closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); return; }
+    if(k === 'checknote'){ xpShowHold(d, (r.packets || [])[0]); return; }
     if(k === 'letter'){ const pk = (r.packets || [])[0];
+      if(pk && pk.note_hold){ xpShowHold(d, pk); return; }
       if(pk && bt.textContent.includes('packet')) window.open('/api/packets/' + encodeURIComponent(pk.packet_id) + '/pdf', '_blank', 'noopener');
       else { const l = d.querySelector('#btnAppeal'); if(l) l.click(); else rcPrintSheet(c, b); } return; }
     if(k === 'sheet'){ rcPrintSheet(c, b); return; }
@@ -1025,7 +1081,7 @@ async function xpFaxPreview(f, packets, d){
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Fax to ${esc(f.payer_group || 'the payer')}</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">Read what goes, then send it. It goes as it is to the payer's confirmed appeal fax number, and the item is marked Sent.</div>
     ${checklist.length ? `<div class="note sev-medium" id="xpFaxCheck"><b>Before you send it</b>${checklist.map(c => `<div>${esc(c)}</div>`).join('')}</div>` : ''}
-    <div class="actions">${pk ? `<a href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf" target="_blank" rel="noopener"><button>Open the PDF</button></a>` : ''}<button class="primary" id="xpFaxGo">Send the fax</button></div>
+    <div class="actions">${pk ? `<a href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf${pk.note_hold ? '?check=1' : ''}" target="_blank" rel="noopener"><button>Open the PDF</button></a>` : ''}<button class="primary" id="xpFaxGo">Send the fax</button></div>
     <div id="xpFaxMsg" class="small"></div><pre>${esc(letter)}</pre>`;
   $('#modal').classList.add('open');
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
@@ -1056,7 +1112,7 @@ async function xpFaxPreview(f, packets, d){
     msg.className = 'small sev-medium'; msg.textContent = res.reason || 'Not sent.'; bt.disabled = false;
     if(res.code === 'note_check' && res.confirm){
       // the note is this patient's visit only when a person opened it and said so (hotfix 2: wrong-patient notes)
-      msg.insertAdjacentHTML('beforeend', `<div style="margin-top:4px">${res.packet_id ? `<a href="/api/packets/${encodeURIComponent(res.packet_id)}/pdf" target="_blank" rel="noopener">Open the packet</a> ` : ''}<label><input type="checkbox" id="xpNoteOk"> I opened this note: it is this patient's visit on ${esc(res.visit_date ? longDate(res.visit_date) : 'the date of service')}</label> <button id="xpNoteGo" disabled>Fax it</button></div>`);
+      msg.insertAdjacentHTML('beforeend', `<div style="margin-top:4px">${res.packet_id ? `<a href="/api/packets/${encodeURIComponent(res.packet_id)}/pdf?check=1" target="_blank" rel="noopener">Open the packet</a> ` : ''}<label><input type="checkbox" id="xpNoteOk"> I opened this note: it is this patient's visit on ${esc(res.visit_date ? longDate(res.visit_date) : 'the date of service')}</label> <button id="xpNoteGo" disabled>Fax it</button></div>`);
       const ok = msg.querySelector('#xpNoteOk'), send = msg.querySelector('#xpNoteGo');
       ok.onchange = () => { send.disabled = !ok.checked; };
       send.onclick = () => { if(send.disabled || !ok.checked) return; said.note_checked = true; said.packet_id = said.packet_id || res.packet_id; go(); };

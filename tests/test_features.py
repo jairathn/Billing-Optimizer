@@ -576,6 +576,10 @@ def test_identifiers_stay_on_the_server_when_names_are_hidden(tmp_path, monkeypa
         assert secret not in built.json()["letter"]
     pid = built.json()["packet_id"]
     assert "Pat Sample" not in c.get(f"/api/packets/{pid}").json()["letter"]
+    # the pasted note shows no record number and no date of service: the packet waits until a person says the note is
+    # this visit's (review d-1), then downloads as before
+    assert built.json()["note_hold"] and c.get(f"/api/packets/{pid}/pdf").status_code == 409
+    assert c.post(f"/api/packets/{pid}/note-checked", json={}, headers={"X-Requested-With": "remitwatch"}).status_code == 200
     pdf = c.get(f"/api/packets/{pid}/pdf")
     assert pdf.status_code == 200 and pdf.content[:5] == b"%PDF-" and pdf.headers["cache-control"] == "no-store"
     bad = c.post("/api/appeals/build", data={"finding_id": fid}, files={"file": ("note.docx", b"PK\x03\x04 broken", "application/octet-stream")},

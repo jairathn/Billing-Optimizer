@@ -680,8 +680,96 @@ def test_h6_a_scanned_note_is_held_for_a_person(site):
     scan = pdf_of("", 1)
     built = c.post("/api/appeals/build", data={"finding_id": fid, "use_ai": "1"}, files={"file": ("scan.pdf", scan, "application/pdf")}, headers=XHR)
     assert built.status_code == 200, built.text
-    r = _send(c, fid)
+    # the packet the person built from the scan never goes without the tick (since review d-1 the scan is not kept as the
+    # visit's own note, so a send that names no packet builds again from EMA's own note for the visit instead)
+    r = _send(c, fid, packet_id=built.json()["packet_id"])
     assert r["code"] == "note_check" and "no text" in r["reason"] and line.sent == {}
+    r = _send(c, fid)
+    assert r.get("packet_id") != built.json()["packet_id"], r
+
+
+# =========================================================================== d-1: the panel's packet waits for the same check
+# The review (d-1): a note of another patient built a packet in the panel with no warning, and the packet could be
+# downloaded, printed, emailed or uploaded to a portal; only the fax send held it. Now every way out goes by one rule
+# (api._note_hold): a packet whose note does not show this patient's visit waits until a person opens the note and says
+# it is, kept with the packet and in the item's history. Invented notes only.
+def _pdf(c, pid, headers=None, **params):
+    return c.get(f"/api/packets/{pid}/pdf", params=params, headers=headers or {})
+
+
+def test_d1_a_packet_built_from_another_patients_note_goes_nowhere_until_a_person_checks_it(site):
+    from remitwatch import uploads
+    import remitwatch.api as api
+    c, line = site.c, site.line
+    fid = site.ids["DENIED_MEDICAL_NECESSITY"]
+    assert _number(c, PAYER_FAX).status_code == 200
+    built = c.post("/api/appeals/build", data={"finding_id": fid, "use_ai": "1"}, headers=XHR,
+                   files={"file": ("visit-note.txt", OTHER_NOTE.encode(), "text/plain")})
+    assert built.status_code == 200, built.text
+    p = built.json()
+    hold = p.get("note_hold") or {}
+    assert hold.get("visit_date") == "2026-11-01" and "this patient" in hold.get("why", ""), p.get("note_hold")
+    pid = p["packet_id"]
+    # every way out is held with the reason: the download, the email; the look itself opens in the browser only
+    r = _pdf(c, pid)
+    assert r.status_code == 409 and "Check the visit note before it goes" in r.json()["detail"], r.text
+    look = _pdf(c, pid, check=1)
+    assert look.status_code == 200 and look.headers["content-disposition"].startswith("inline")
+    r = c.post(f"/api/packets/{pid}/email", json={"to": "billing@example.org"}, headers=XHR)
+    assert r.status_code == 409 and "Check the visit note" in r.json()["detail"]
+    # the panel's list says so, and the note was not kept as the visit's own (the visit's other items never pick it up)
+    pk = c.get(f"/api/findings/{fid}").json()["packets"]
+    assert pk[0]["packet_id"] == pid and pk[0]["note_hold"]
+    conn = sqlite3.connect(api.DB_PATH)
+    try:
+        conn.executescript(uploads.DDL) if hasattr(uploads, "DDL") else None
+        kept = conn.execute("SELECT COUNT(*) FROM uploaded_notes").fetchone()[0] if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='uploaded_notes'").fetchone() else 0
+    finally:
+        conn.close()
+    assert kept == 0
+    # a person opens it and says it is this patient's visit: kept with the packet and in the history, then it may go
+    assert c.post(f"/api/packets/{pid}/note-checked", json={}).status_code == 400          # no X-Requested-With: refused
+    r = c.post(f"/api/packets/{pid}/note-checked", json={}, headers=dict(XHR, **{"X-RemitWatch-Person": "Quorvalda"}))
+    assert r.status_code == 200 and r.json()["note_checked"]["by"] == "Quorvalda", r.text
+    r = _pdf(c, pid)
+    assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment")
+    assert c.get(f"/api/findings/{fid}").json()["packets"][0]["note_hold"] is None
+    ev = [e for e in _events(c, fid) if e["kind"] == "note_check"]
+    assert len(ev) == 1 and ev[0]["actor"] == "Quorvalda" and "2026-11-01" in ev[0]["note"]
+    # the fax goes by the same check: no second tick
+    r = _send(c, fid)
+    assert r["status"] == "sent", r
+
+
+def test_d1_a_packet_whose_note_shows_its_visit_downloads_at_once(site):
+    c = site.c
+    fid = site.ids["DENIED_MEDICAL_NECESSITY"]
+    built = _build(c, fid, OWN_NOTE)
+    assert built.status_code == 200 and not built.json().get("note_hold"), built.text
+    r = _pdf(c, built.json()["packet_id"])
+    assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment")
+    assert c.get(f"/api/findings/{fid}").json()["packets"][0]["note_hold"] is None
+
+
+def test_d1_serverless_a_packet_built_from_another_patients_note_waits_for_a_person(sl):
+    c, h = sl.c, sl.h
+    fid = sl.ids[0]
+    built = c.post("/api/appeals/build", data={"finding_id": fid, "text": OTHER_NOTE, "use_ai": "0"}, headers=h)
+    assert built.status_code == 200, built.text
+    pid = built.json()["packet_id"]
+    assert built.json().get("note_hold"), built.json()
+    r = _pdf(c, pid, headers=h)
+    assert r.status_code == 409 and "Check the visit note before it goes" in r.json()["detail"]
+    assert _pdf(c, pid, headers=h, check=1).status_code == 200
+    r = c.post(f"/api/packets/{pid}/email", json={"to": "billing@example.org"}, headers=h)
+    assert r.status_code == 409
+    assert c.get(f"/api/findings/{fid}", headers=h).json()["packets"][0]["note_hold"]
+    r = c.post(f"/api/packets/{pid}/note-checked", json={}, headers=dict(h, **{"X-RemitWatch-Person": "Quorvalda"}))
+    assert r.status_code == 200, r.text
+    r = _pdf(c, pid, headers=h)
+    assert r.status_code == 200 and r.headers["content-disposition"].startswith("attachment")
+    assert c.get(f"/api/findings/{fid}", headers=h).json()["packets"][0]["note_hold"] is None
 
 
 def test_h6_a_report_listing_several_patients_is_not_a_visit_note(site, tmp_path):
