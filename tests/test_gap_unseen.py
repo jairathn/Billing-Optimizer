@@ -848,6 +848,33 @@ def test_a_second_payers_share_the_patient_paid_in_part_is_listed_at_the_rest(tm
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_whose_payer_is_its_ema_claims_first_payer_is_answered_by_its_postings_whatever_its_837_says(tmp_path, kind,
+                                                                                                          monkeypatch):
+    """The other side of the guard. EMA's claim 73 has Blue Cross as its FIRST payer (Medicare second), and Blue Cross's $60
+    is posted March 12 under it. The 837s show submission 2 of the bill sent March 9 to Blue Cross with SBR01 S (the 837
+    calls Blue Cross the second payer; EMA, which posts the answers, calls it the first). The claim's payer is EMA's first
+    payer: its postings there are its own, and its payment after the send answers the claim. Not listed, not counted."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, pay
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    both = {"primary": BCP, "secondary": MED}
+    v = {"cpt": "11102", "patient": 1, "svc": D(2026, 3, 5)}
+    rows = [charge(F.link_no(73), amount=86.66, posted=D(2026, 3, 5), **v, **both),
+            pay(F.link_no(73), "PAPER-73A", 60, posted=D(2026, 3, 12), payer=BCP, **v, **both)]
+    ar = [F.ar_row(claim=F.claim_id(73, sub=1), link=F.link_no(73), current=26.66, cpt="11102", svc=D(2026, 3, 5), patient=1,
+                   aging=D(2026, 4, 25), primary=BCP, secondary=MED)]
+    s, lg = _world(tmp_path, kind, monkeypatch, rows, ar)
+    sub2 = F.claim_id(73, sub=2)
+    send(s, tmp_path, [clm837_second(sub2, [("11102", "86.66", "20260305")], BC, "MEMBER000073", first=("MEDICARE TEST", "00888"))],
+         "20260309")
+    det, listed, unseen = _run(s, lg)
+    s.close()
+    assert sub2 not in listed and sub2 not in [r[0] for r in unseen.get("claims") or []], (
+        f"Blue Cross's own payment after the send, as EMA's first payer, does not answer its claim "
+        f"({ {k: v for k, v in det.ema_counts.items() if k.startswith('837_')} })")
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_one_remainder_is_counted_once_when_the_first_payers_denial_of_it_is_listed_too(tmp_path, kind, monkeypatch):
     """Visit March 5 (11102 at $86.66): EMA's claim 73 has Medicare Test Region first and Blue Cross second. Medicare paid
     $60 (March 6); the 837s show submission 2 of the bill sent March 9 to Blue Cross as the second payer (Medicare left

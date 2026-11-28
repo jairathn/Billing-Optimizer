@@ -1898,8 +1898,11 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
             for cid, lk in by_id:
                 c, (grp, second) = mine_of[cid], heads.get(lk, (None, None))
                 mine = c.get("payer_group")
-                if c.get("later_payer") or (mine and grp and second and not _same_payer(grp, mine)
-                                            and _same_payer(_second_group(conn, second, groups_of), mine)):
+                # (never when the claim's payer is EMA's first payer for the visit: EMA's postings under the first payer are
+                # then its own, whatever place an 837 gave it)
+                if mine and grp and _same_payer(grp, mine):
+                    continue
+                if c.get("later_payer") or (mine and second and _same_payer(_second_group(conn, second, groups_of), mine)):
                     second_of.add(cid)
                     found[cid] = (lk, found[cid][1] + "_secondary")
         need = {c["claim_id"]: c for c in part if c["claim_id"] not in found}
