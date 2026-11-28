@@ -150,9 +150,11 @@ payer answers. Paid what it owes, to $1, the run closes it as Paid with that pay
 lines, else EMA's posting), recovered at what arrived, and the decision log says paid_later:paid_as_second_payer
 (paid_later:settled_by_the_patient when the patient paid the share). Paid less, or nothing, it stays listed at what is
 left with "work its answer". What it owes is the share billed, or less where its own 835 gives its allowed amount (the
-owner's decision 3). A person who moves it off that closure keeps their status. A row the run keeps stale is on no
-list: the Results tab's open book counts it closed (paid when money came back on it, else no longer listed), never
-still open.
+owner's decision 3). The bill is read on the line the person billed even when the first payer later took its payment
+back or paid the line again, at any posting date EMA gives the second payer's money, and on the item's own EMA claim
+when the link map no longer pairs the bill with it. A person who moves it off that closure keeps their status. A row
+the run keeps stale is on no list: the Results tab's open book counts it closed (paid when money came back on it, else
+no longer listed), never still open.
 
 **A routine-rate review or a clinician's rate gap expired.** SECOND_RATE and PROVIDER_RATE_GAP items stand for claims
 with their own filing windows. When nobody worked one and the last claim's window has closed, it expires (Expired, the
