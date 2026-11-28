@@ -44,21 +44,26 @@ payer's accepted channel, easiest first, with the fields prefilled; and say whet
   report in the store reaches; the Data tab shows none of it in dollars, the stated reason is wrong, and the archive would
   drop them silently (G2, G3). The payer routes research is done (wf_c3711a72-b66; private `$S/tk/routes/research_raw.json`,
   public facts only). The replay ran all 11 months before a container restart; its analysis is being finished.
-- Running (2026-11-28, 08:30 UTC): wf_1b05bad9-f47 builds two units, each reviewed twice then fixed: `wip/gapfix`
-  (plans/briefs/2026-11-28_gapfix.md; G1 to G8 built, tests green, measuring) and `wip/routes`
-  (plans/briefs/2026-11-28_routes.md; payer_routes.json with 189 routes, routes.py, the drawer's route card, suites
-  running). wf_0ffb49e5-5fe finished the replay's analysis (private `$S/tk/replay/`, its report is in the workflow's
-  journal) and checks three suspect classes; two are confirmed code bugs so far (one claim keyed two ways, fixed by
-  gapfix G8; safe mode's posted_money check falls falsely when a payer alias is learned). wf_24badb46-8b5 checks the ten
-  suspect classes the first pass did not reach (proposed failing tests in `$S/tk/replay/proposed_tests/`).
-  wf_922f5636-97c builds unit `wip/ui-a` (plans/briefs/2026-11-28_ui.md: the stylesheet, the app shell, Today, the brand;
-  designer and biller reviews, then a fix round). The design system and both critiques are private in `$S/tk/ui/`.
+- Running (2026-11-28, 09:45 UTC): wf_1b05bad9-f47 is in the fix rounds of `wip/gapfix`
+  (plans/briefs/2026-11-28_gapfix.md, G1 to G8 built and reviewed twice) and `wip/routes`
+  (plans/briefs/2026-11-28_routes.md, payer_routes.json, routes.py, the drawer's route card; reviewed twice).
+  wf_47797c0b-c26 reviews `wip/replay-fix` (selfcheck: posted_money marks re-baselined when a payer name changes group; a
+  held run no longer saves the self-check facts). wf_922f5636-97c builds `wip/ui-a` (plans/briefs/2026-11-28_ui.md).
+  wf_a3fa6266-96f builds `wip/replay-fix-2a` (states: rate patterns past every window expire; a hand-off's Started is not a
+  person's; stale rows in the decision log; a second payer a person billed closes as Paid with proof when it pays, stays
+  listed when it pays less) and `wip/replay-fix-2b` (vanished check routes for a payment EMA posted and a resend under the
+  same claim id; detection hands the checks the ids it retires on purpose; precision_guard counts only the item's own payer
+  and nets takebacks; a let-go line settles a never-listed whole-claim denial; a same-visit vote split keeps its link), each
+  built on gapfix and replay-fix, reviewed and fixed.
+- The replay audit is done. Its verdicts are private (`$S/tk/replay/replay_finish_result.json`, `verify2_result.json`): no
+  automatic closure without proof in any month, no person's decision overwritten; ten code bugs, all routed to the units
+  above; the rest expected or the harness's own. Delete the big replay stores once replay-fix-2 merges (keep the JSON).
 - Vercel's /api/health answers (commit 330f4b5 at 08:07 UTC). The server's address is not in this session's notes; find
   it before the release check (never write it into the repository).
-- Next: merge wip/gapfix then wip/routes into the integration worktree; a unit `replay-fix` for the replay's confirmed
-  code bugs (failing tests first); merge wip/ui-a; four-env suites, a private real-data run, push main, check both sites;
-  then the UI units ui-work, ui-panel, ui-pages, ui-words, ui-signin (brief section "The units after ui-a"), suites,
-  deploy.
+- Next: merge into the integration worktree in this order: wip/gapfix, wip/routes, wip/replay-fix, wip/replay-fix-2a,
+  wip/replay-fix-2b, wip/ui-a; four-env suites, a private real-data run with a hand-trace of moved items, push main, check
+  both sites; then the UI units ui-work, ui-panel, ui-pages, ui-words, ui-signin (brief section "The units after ui-a"),
+  suites, deploy.
 
 ### Before that (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
 
