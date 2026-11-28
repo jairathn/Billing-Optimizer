@@ -218,8 +218,9 @@ COMPONENTS = ("26", "TC")                      # the parts of a service a line c
 # only source of its answers: its claims are judged by them, and counted on the Data tab when they cannot show it.
 NO_ERA_MIN_CLAIMS = 10
 NO_ERA_MAX_SHARE = 0.05
-# [{"payer", "payer_id", "claims", "billed_cents", "since", "listed", "answered_in_ema", "unchecked"}]: the claims due that the
-# 837 pass judged for each such payer, its earliest send, and how many it listed, EMA showed answered, or nothing could check
+# [{"payer", "payer_id", "claims", "billed_cents", "since", "listed", "answered_in_ema", "unchecked", and each of the last three's
+# "_cents"}]: the claims due that the 837 pass judged for each such payer, its earliest send, and how many it listed, EMA showed
+# answered, or nothing could check, with their billed dollars
 NO_ERA_META = "feed:no_era_837"
 # Weeks one feed shows claims sent and the other none (trace finding T-N13: a hole in the 837 files or in EMA's claim
 # exports), inside the weeks both reach, with at least SEND_WEEK_MIN claims on the side that has them
@@ -292,8 +293,8 @@ EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's 
 # silently. {"n", "cents" (at stake: a claim sent to a second or later payer at what the payer before it left), "billed_cents",
 # "due_from", "due_to", "overdue_30", "overdue_30_cents", "by_reason": {reason: {"n", "cents"}}, "by_group": {group: {"n",
 # "cents"}}, "ema_reports_from" (the first service date any EMA source in the store covers), "first_service", "years_before"
-# (the service years before it), "claims": [[claim id, 837 claim key or None, reason, group, cents, first service, sent, due]]
-# (most dollars first: what the Data tab lists and the archive holds), "at", "newest_835"}
+# (the service years before it), "claims": [[claim id, 837 claim key or None, reason, group, cents, first service, sent, due,
+# and codes] (most dollars first: what the Data tab lists and the archive holds), "at", "newest_835"}
 UNSEEN_KEY = "ema:unanswered_unseen"
 # why a claim is counted unseen, in the order they are decided (_finish_unseen)
 UNSEEN_REASONS = ("no_ema_reports", "ambiguous", "before_ema_reports", "second_payer_not_matched", "voided_in_ema",
@@ -7972,12 +7973,14 @@ class Detector:
                 # its 837 claims never get an ERA: EMA's postings are the only source of its answers. Counted for the Data
                 # tab; without EMA's reports nothing can show the answer, so it is not listed (never as paid either)
                 ne = no_era.setdefault(pid, {"payer": grp, "payer_id": pid, "claims": 0, "billed_cents": 0, "since": sent,
-                                              "listed": 0, "answered_in_ema": 0, "unchecked": 0})
+                                              "listed": 0, "answered_in_ema": 0, "unchecked": 0, "listed_cents": 0,
+                                              "answered_in_ema_cents": 0, "unchecked_cents": 0})
                 ne["claims"] += 1
                 ne["billed_cents"] += billed
                 ne["since"] = min(ne["since"], sent)
                 if not self.ema_on:
                     ne["unchecked"] += 1
+                    ne["unchecked_cents"] += billed
                     # with no EMA report in the store nothing can show its answer: counted unseen with that reason, so its
                     # dollars are on the Data tab and the archive keeps its bill (never a silent drop)
                     self._count_unseen({"pcn": pcn, "s837": r, "grp": grp, "sent": sent, "due": due, "source": "837"}, items, None,
@@ -8039,6 +8042,7 @@ class Detector:
                 self.ema_counts["837_no_answer"] += 1
                 if cd.get("no_era"):
                     no_era[cd["no_era"]]["listed"] += 1
+                    no_era[cd["no_era"]]["listed_cents"] += sum(int(x[2] or 0) for x in cd["items"])
             # EMA claims that are this claim or another listed one (send-day twins): the Production check leaves them
             self._export_links.update(cd.get("ema_twins") or ())
             fid = _fid(OPEN_837_ID, cd["pcn"])
@@ -9477,6 +9481,7 @@ class Detector:
                 self.ema_counts["837_answered_in_ema"] += 1
                 if ne is not None:
                     ne["answered_in_ema"] += 1
+                    ne["answered_in_ema_cents"] += sum(int(x[2] or 0) for x in cd["items"])
                 continue
             if len(left) < len(cd["items"]):
                 cd = dict(cd, items=left)      # the services EMA shows answered for this patient leave the item
@@ -9503,6 +9508,7 @@ class Detector:
                 self.ema_counts["837_waits_unfound"] += 1
                 if ne is not None:
                     ne["unchecked"] += 1
+                    ne["unchecked_cents"] += sum(int(x[2] or 0) for x in cd["items"])
                 self._count_unseen(cd, cd["items"], a)
                 continue
             out.append(dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"),
@@ -9603,7 +9609,9 @@ class Detector:
             if r["reason"] == "before_ema_reports" and r["svc"]:
                 years.add(r["svc"][:4])
         out["years_before"] = sorted(years)
-        out["claims"] = [[r["pcn"], r["key"], r["reason"], r["grp"], r["cents"], r["svc"], r["sent"], r["due"]]
+        # (the codes too: the dashboard's copy on a serverless host carries the 837 rows of the items' bills only)
+        out["claims"] = [[r["pcn"], r["key"], r["reason"], r["grp"], r["cents"], r["svc"], r["sent"], r["due"],
+                          sorted({code for code, _d in r["lines"]})]
                          for r in sorted(kept, key=lambda r: (-r["cents"], r["svc"] or "", r["pcn"]))]
         return out
 

@@ -165,3 +165,85 @@ def test_the_archive_keeps_the_bills_of_claims_counted_unseen_past_the_horizon(t
             "counted unseen")
         assert p["held"].get(archive.HELD_UNSEEN) == 12, p["held"]
     s.close()
+
+
+# ---------------------------------------------------------------------------------------- G2: the Data tab, on both hosts
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_the_data_tab_shows_the_unseen_claims_in_dollars_by_reason_and_payer_with_their_list(tmp_path, host, monkeypatch):
+    """Three claims to Blue Cross no source can show an answer to: claim 72 (January 20, older than EMA's reports, $150),
+    claim 75 (March 6, no EMA claim of its content, $150) and claim 76 (sent to Blue Cross as the second payer, $26.66 left by
+    the first). The Data tab (the server, and Vercel's dashboard copy) shows the total in dollars by reason and payer, names
+    the export that would let the bridges run on claim 72 (EMA's Production for services from January 20, 2026 to March 1,
+    2026 and the A/R for service year 2026), and lists the claims most dollars first, as a page and as a CSV, with the member
+    id only while the names switch is on (on the server: Vercel's dashboard copy keeps no member id). On Vercel, which reads EMA's A/R only, one sentence says why the count is larger
+    there. The data-health check says the same in dollars. Before: nothing read the count, and no page showed it."""
+    import remitwatch.api as api
+    from remitwatch import insights
+    from tests import ema_fixtures as F
+    from tests.test_ema_pages2 import _site
+    s, lg = _world(tmp_path, "file", monkeypatch)
+    send(s, tmp_path, [clm837(F.claim_id(72), [("99213", "150.00", "20260120")], payer=BC, member="MEMBER000072"),
+                       clm837(F.claim_id(75), [("99213", "150.00", "20260306")], payer=BC, member="MEMBER000075"),
+                       clm837_second(F.claim_id(76), [("99213", "150.00", "20260306")], BC, "MEMBER000076")], "20260309")
+    _run(s, lg)
+    db = str(tmp_path / "s.sqlite")
+    s.close()
+    c = _site(monkeypatch, db, serverless=host == "serverless", tmp=tmp_path)
+    u = c.get("/api/ema/data").json()["unseen"]
+    assert (u["n"], u["cents"]) == (3, 32666), u
+    assert {r["reason"]: (r["n"], r["cents"]) for r in u["reasons"]} == {
+        "before_ema_reports": (1, 15000), "ema_claim_not_found": (1, 15000), "second_payer_not_matched": (1, 2666)}, u["reasons"]
+    assert [(g["payer"], g["n"], g["cents"]) for g in u["groups"]] == [(u["groups"][0]["payer"], 3, 32666)], u["groups"]
+    assert u["export"] == ("EMA's Production report for services from January 20, 2026 to March 1, 2026, and the A/R report "
+                           "for service year 2026"), u["export"]
+    assert bool(u["host_note"]) == (host == "serverless"), u["host_note"]
+    page = c.get("/api/ema/unseen").json()
+    assert [(r["claim_id"], r["cents"]) for r in page["rows"]] == [(F.claim_id(72), 15000), (F.claim_id(75), 15000),
+                                                                  (F.claim_id(76), 2666)], page["rows"]
+    assert page["count"] == 3 and page["cents"] == 32666 and not page["names"]
+    assert all("member_id" not in r for r in page["rows"]) and page["rows"][0]["codes"] == ["99213"], page["rows"][0]
+    text = c.get("/api/ema/unseen.csv").text
+    assert text.splitlines()[0].startswith("claim_id,payer_group,dollars") and "MEMBER0000" not in text, text[:300]
+    monkeypatch.setattr(api, "SHOW_PHI", True)
+    named = c.get("/api/ema/unseen").json()
+    # the member id while the names switch is on, where the store holds it (the dashboard's copy keeps none)
+    want = "MEMBER000072" if host == "server" else ""
+    assert named["names"] and named["rows"][0]["member_id"] == want, named["rows"][0]
+    assert (want in c.get("/api/ema/unseen.csv").text) if want else True
+    if host == "server":
+        conn = sqlite3_connect(db)
+        try:
+            h = next(x for x in insights.data_health(conn, "2026-03-28", "2026-05-03") if x.get("key") == "unseen_837")
+        finally:
+            conn.close()
+        assert h["title"] == "3 claims sent that no source can show an answer to ($326.66)", h["title"]
+        assert "the service is older than every EMA report in the store" in h["detail"] and "March 1, 2026" in h["who"], h
+
+
+def sqlite3_connect(db):
+    import sqlite3
+    return sqlite3.connect(db)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_every_payer_that_sends_no_era_is_on_the_data_tab_with_its_dollars(tmp_path, kind):
+    """Twelve small plans, each sent ten claims ($100 each) in August, none of which ever got an ERA: each is a payer whose
+    837 claims get no ERA. The Data tab names the first ten, each line with its dollars (and the dollars no source can check),
+    and one more line for the other two: '2 more payers send no ERA: 20 claims, $2,000.00 billed'. Before: the eleventh
+    and twelfth payers were on no line (the list was cut at ten in silence), and no line gave the unchecked claims' dollars."""
+    from remitwatch import insights
+    from tests.test_837_sends import _remits, _visits
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    for p in range(12):
+        send(s, tmp_path, [clm837(f"CB0{p:02d}N{i:03d}C017", [("99214", "100.00", "20260810")], payer=(f"SMALL PLAN {p:02d}", f"SP{p:03d}"),
+                                  member=f"N{p:02d}{i:06d}") for i in range(10)], "20260812")
+    Detector(s, run_id="era", today="2026-11-12").run()
+    items = [h for h in insights.data_health(s.conn, "2026-11-10", "2026-11-12") if str(h.get("key", "")).startswith("no_era_837")]
+    lines = [h for h in items if h["key"] == "no_era_837"]
+    more = [h for h in items if h["key"] == "no_era_837_more"]
+    assert len(lines) == 10, [h["title"] for h in items]
+    assert all("($1,000.00)" in h["detail"] and "$1,000.00 billed" in h["detail"] for h in lines), lines[0]["detail"]
+    assert len(more) == 1 and more[0]["title"] == "2 more payers send no ERA: 20 claims, $2,000.00 billed", [h["title"] for h in more]
+    assert more[0]["unchecked"] == 20 and more[0]["unchecked_cents"] == 200000, more[0]
+    s.close()

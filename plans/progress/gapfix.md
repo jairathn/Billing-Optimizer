@@ -10,7 +10,7 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
 |---|---|---|
 | G8 one claim, one item | done, tests green, break and restore done | detect.py: `_item_links`, `save()` (same_link heir), `_note_waiting(cd=)`, `_waiting_ema_claims`, `_note_waiting_report`, `run_ema_report_claims` (waiting skip); tests/test_gap_one_claim.py |
 | G3 archive holds unseen bills | done, tests green, break and restore done | archive.py `_held_bills` (HELD_UNSEEN, reads meta ema:unanswered_unseen 'claims'); tests/test_gap_unseen.py::test_the_archive_keeps_* |
-| G2 unseen count by reason, dollars, Data tab | half: the count (reasons, value, totals, claims) done; the pages to do | detect.py `_count_unseen`, `_finish_unseen`, `_ema_reports_from`, `_unseen_ema_lines`, `_save_ema_wiring`; ema_checks.claim_answers 'candidates'; next: insights `_feeds_837`, api_ema (list/CSV), data.js |
+| G2 unseen count by reason, dollars, Data tab | done, tests green, break and restore done | detect.py `_count_unseen`, `_finish_unseen`, `_ema_reports_from`, `_unseen_ema_lines`, `_save_ema_wiring`, no-ERA `*_cents`; ema_checks.claim_answers 'candidates'; insights `UNSEEN_WORDS`, `unseen_summary`, `_unseen_837`, `_feeds_837` (NO_ERA_LINES + `no_era_837_more`); api_ema `/api/ema/data` 'unseen', `/api/ema/unseen`, `/api/ema/unseen.csv`; static/data.js `dtUnseenHtml`, `dtUnseenRows` |
 | G1 print-batch hand-off (fixed_b + never early) | to do | detect.py `_ema_check_open_claims`, `run_ema_report_claims` |
 | G4 ERA start/stop window | to do | detect.py `_run_837` no_era_ids |
 | G5 A/R held-open line | to do | detect.py `_837_ema_answers` (or ema_checks) |
@@ -48,6 +48,14 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
   due]] most dollars first. The meta is not in diagnose.SAFE_META (the bundle shows its length and hash only).
 - archive._held_bills holds the bill of every claim in that list (HELD_UNSEEN "counted unseen"), at any horizon.
 - `_save_ema_wiring` now logs its sqlite error (runlog.caught) instead of `pass`.
+- Pages: insights.unseen_summary (meta only, so the dashboard's copy shows it) feeds the data-health item `unseen_837` (title
+  in dollars, reasons in words with dollars, top payers, the export that would cure the before_ema_reports part, and on a
+  serverless host one sentence why the count is larger there) and the Data tab payload `unseen`. data.js draws the panel
+  (by reason, by payer: ten and one remainder line) with a paged list and a CSV (`/api/ema/unseen`, `.csv`), most dollars
+  first; the member id only with the names switch on and only where the store holds it (the Vercel copy keeps none). The
+  meta's claim rows carry their codes (the Vercel copy has 837 rows only for the items' bills).
+- No-ERA lines: every payer, the first NO_ERA_LINES (10) one by one and the rest on one line ('N more payers send no ERA:
+  X claims, $Y billed'); each part of each line gives its billed dollars (listed, answered in EMA, unchecked).
 
 ## Next command
 
