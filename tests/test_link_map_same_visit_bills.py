@@ -174,3 +174,67 @@ def test_a_map_an_older_rule_made_is_mapped_again_at_the_next_refresh(tmp_path, 
     finally:
         lg.close()
         s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_denied_bill_keeps_its_ema_claim_when_the_visits_other_bill_was_answered_first(tmp_path, kind, ema_env):
+    """The same visit in the other order (the review's case): Medicaid first processes the visit's claim as the second
+    payer (bill B, $0, its answer posted in EMA on day 75), and only later denies the visit's erroneous first claim CO-109
+    (bill A, posted on day 185). Both votes name the link's patient for one date: one visit's bills. The link goes to the
+    bill whose answer was the payer's denial (claim status 4), whatever order EMA posted them in, so that the denial,
+    which EMA shows settled by the Medicare Advantage plan before it, reads its EMA claim and is done."""
+    s, lg = _ema_store(tmp_path, kind)
+    try:
+        both = dict(patient=0, svc=SVC, cpt="99214", primary=MA, secondary=MCD)
+        rows = [charge(LINK, amount=120.00, posted=SVC + dt.timedelta(days=2), **both),
+                pay(LINK, "MA50000001", 78.40, posted=SVC + dt.timedelta(days=50), payer=MA, **both),
+                adj(LINK, "CO-45", 41.60, posted=SVC + dt.timedelta(days=50), contractual=True, payer=MA, **both),
+                pay(LINK, T_B, 0, posted=SVC + dt.timedelta(days=75), payer=MCD, **both),
+                pay(LINK, T_A, 0, posted=SVC + dt.timedelta(days=185), payer=MCD, **both),
+                charge(F.link_no(99), cpt="99212", patient=3, svc=SVC + dt.timedelta(days=150),
+                       posted=SVC + dt.timedelta(days=195), status="Payment Pending")]
+        remit(s, trace=T_B, paid_on=day(57), payer=MCD_835, status="2",
+              claims=[{"pcn": BILL_B, "status": "2", "lines": [(S, "99214", 120.00, 0, [("OA", "23", 78.40), ("CO", "45", 41.60)])]}])
+        remit(s, trace=T_A, paid_on=day(170), payer=MCD_835, status="4",
+              claims=[{"pcn": BILL_A, "status": "4", "lines": [(S, "99214", 120.00, 0, [("CO", "109", 120.00)])]}])
+        load(s, lg, tmp_path, rows)
+        det = Detector(s, run_id="r1", today=day(200))
+        det.run()
+        assert det.ema_errors == [], det.ema_errors
+        link = tuple(s.conn.execute("SELECT bill, method, votes, total, conflict FROM ema_link_map WHERE link = ?", (LINK,)).fetchone())
+        items = [dict(r) for r in s.query("SELECT signal, work_state, state_rule, ema_link FROM findings "
+                                          "WHERE patient_control_number = ? AND COALESCE(stale, 0) = 0", (BILL_A,))]
+        assert [(i["signal"], i["work_state"], i["state_rule"]) for i in items] == \
+            [("CLAIM_DENIED_UNPAID", "done", "paid_before_other_payer")], (link, items)
+        assert link == (F.bill_id(42), "payment", 1, 2, 0), link
+    finally:
+        lg.close()
+        s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_control_a_denied_bill_another_link_holds_is_not_taken(tmp_path, kind, ema_env):
+    """The same visit in the other order, but another EMA claim (another patient's) already holds the denied bill: it
+    voted for bill A on its own posting under the denial's check. The visit's link never takes a bill another link holds
+    by its preference for the denied bill: it keeps the bill of its first vote, B, and the other claim keeps A."""
+    s, lg = _ema_store(tmp_path, kind)
+    try:
+        other = F.link_no(43)
+        both = dict(patient=0, svc=SVC, cpt="99214", primary=MA, secondary=MCD)
+        rows = [charge(LINK, amount=120.00, posted=SVC + dt.timedelta(days=2), **both),
+                pay(LINK, "MA50000001", 78.40, posted=SVC + dt.timedelta(days=50), payer=MA, **both),
+                pay(LINK, T_B, 0, posted=SVC + dt.timedelta(days=75), payer=MCD, **both),
+                pay(LINK, T_A, 0, posted=SVC + dt.timedelta(days=185), payer=MCD, **both),
+                charge(other, amount=120.00, patient=3, svc=SVC, cpt="99214", posted=SVC + dt.timedelta(days=3)),
+                pay(other, T_A, 0, patient=3, svc=SVC, cpt="99214", posted=SVC + dt.timedelta(days=190), payer=MCD)]
+        remit(s, trace=T_B, paid_on=day(57), payer=MCD_835, status="2",
+              claims=[{"pcn": BILL_B, "status": "2", "lines": [(S, "99214", 120.00, 0, [("OA", "23", 78.40), ("CO", "45", 41.60)])]}])
+        remit(s, trace=T_A, paid_on=day(170), payer=MCD_835, status="4",
+              claims=[{"pcn": BILL_A, "status": "4", "lines": [(S, "99214", 120.00, 0, [("CO", "109", 120.00)])]}])
+        load(s, lg, tmp_path, rows)
+        got = {lk: (b, c) for lk, b, c in s.conn.execute("SELECT link, bill, COALESCE(conflict, 0) FROM ema_link_map WHERE link IN (?, ?)",
+                                                         (LINK, other))}
+        assert got == {LINK: (F.bill_id(41), 0), other: (F.bill_id(42), 0)}, got
+    finally:
+        lg.close()
+        s.close()

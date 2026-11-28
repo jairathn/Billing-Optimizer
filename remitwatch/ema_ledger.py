@@ -97,8 +97,8 @@ META_NAME_RULES = "ema:name_rules"          # the payer-name rules the stored pa
 META_MAP_RULE = "ema:map_rule"              # the map rule the stored link map was made by (MAP_RULE)
 # the claim-link map's own rule (_map): a store mapped by another one maps its links with no bill or a conflict again at
 # the next refresh, without waiting for a new report. 2: one visit's bills (one patient, one date of service) are no
-# conflict
-MAP_RULE = "2"
+# conflict; 3: such a link goes to the bill the payer denied, whatever order EMA posted the answers in
+MAP_RULE = "3"
 
 # the work database refresh() attaches to the store connection (and the ledger's alias there)
 _W = "emaw"
@@ -1752,9 +1752,12 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
     A link whose payment votes split with no bill at 2/3 is a conflict (no bill), unless the split is one visit's: every
     vote chose its bill by the patient's name (the 835 claim names the link's own patient) and every vote is for one
     date of service (any of the visit's codes). Those are one patient's bills of one visit (billed to a payer twice,
-    say first as primary in error and then as secondary): the link keeps the bill its first vote named, the bill it was
-    mapped to before the visit's other bill was answered, so that bill's items keep their EMA claim. Each item reads
-    only its own date and codes on the link. A split between two patients, or over two dates, stays a conflict."""
+    say first as primary in error and then as secondary): the link goes to the bill whose vote came from the payer's
+    denial (its 835 claim status 4), whatever order EMA posted the answers in, since that denial is the item that needs
+    EMA's facts (the other payer paid before it); of several such votes, the first EMA posted; never a bill another link
+    holds. With none, to the bill its first vote named, the bill it was mapped to before the visit's other bill was
+    answered. The visit's other bill reads no EMA claim (one bill per link). Each item reads only its own date and codes on the link. A split between
+    two patients, or over two dates, stays a conflict."""
     x = conn.execute
     W = _W
     now = _now()
@@ -1781,7 +1784,8 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
     x(f"""CREATE TABLE {W}.pb_l835 AS
         SELECT x.ckey AS ckey, CAST(COALESCE(l.service_date, c.statement_from) AS TEXT) AS svc, l.procedure_code AS code,
                l.original_procedure_code AS ocode, l.paid_cents AS paid, CAST(rw_bill(c.patient_control_number) AS TEXT) AS bill,
-               c.patient_control_number AS pcn, CAST(rw_name_key(c.patient_last, c.patient_first) AS INTEGER) AS nk,
+               c.patient_control_number AS pcn, CAST(c.claim_status_code AS TEXT) AS st,
+               CAST(rw_name_key(c.patient_last, c.patient_first) AS INTEGER) AS nk,
                CAST(CASE WHEN c.corrected_patient_last IS NOT NULL OR c.corrected_patient_first IS NOT NULL
                     THEN rw_name_key(COALESCE(c.corrected_patient_last, c.patient_last),
                                      COALESCE(c.corrected_patient_first, c.patient_first)) END AS INTEGER) AS cnk
@@ -1789,35 +1793,37 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
         WHERE c.patient_control_number IS NOT NULL""")
     x(f"""CREATE TABLE {W}.pb_k835 AS
         SELECT CAST(ckey AS TEXT) AS ckey, CAST(svc AS TEXT) AS svc, CAST(code AS TEXT) AS code, paid, CAST(bill AS TEXT) AS bill,
-               pcn, CAST(nk AS INTEGER) AS nk, CAST(cnk AS INTEGER) AS cnk FROM (
-            SELECT ckey, svc, code, paid, bill, pcn, nk, cnk FROM {W}.pb_l835 WHERE code IS NOT NULL
-            UNION ALL SELECT ckey, svc, ocode, paid, bill, pcn, nk, cnk FROM {W}.pb_l835
+               pcn, st, CAST(nk AS INTEGER) AS nk, CAST(cnk AS INTEGER) AS cnk FROM (
+            SELECT ckey, svc, code, paid, bill, pcn, st, nk, cnk FROM {W}.pb_l835 WHERE code IS NOT NULL
+            UNION ALL SELECT ckey, svc, ocode, paid, bill, pcn, st, nk, cnk FROM {W}.pb_l835
                       WHERE ocode IS NOT NULL AND ocode <> COALESCE(code, ''))""")
     _drop(conn, "pb_l835")
     x(f"CREATE INDEX {W}.ix_pb_k835 ON pb_k835(ckey, svc, code)")
     cand = f"""SELECT y.link AS link, y.svc AS svc, y.cpt AS cpt, y.check_no AS check_no, y.posted AS posted, y.payer AS payer,
-               k.bill AS bill, k.pcn AS pcn,
+               k.bill AS bill, k.pcn AS pcn, (k.st = '4') AS dn,
                (y.name_key IS NOT NULL AND (y.name_key = k.nk OR y.name_key = k.cnk)) AS sn, (y.ins_paid = k.paid) AS sa
         FROM {W}.pa_pay y JOIN {W}.pb_ck ck ON ck.check_no = y.check_no
         JOIN {W}.pb_k835 k ON k.ckey = ck.ckey AND k.svc = y.svc AND k.code = y.cpt
         WHERE y.in_835 = 1 AND y.link IN (SELECT link FROM {W}.pb_need)
           AND y.link NOT IN (SELECT link FROM {W}.pb_ar WHERE fac = 1)"""
     # each payment votes for the bill of the first narrowing (name and amount, name, amount, any) that leaves exactly one;
-    # `named`: the vote chose its bill by the patient's name (the first two narrowings), with its date and posting
+    # `named`: the vote chose its bill by the patient's name (the first two narrowings), with its date and posting;
+    # `denied`: the 835 claim it chose is the payer's denial of that bill (claim status 4)
     x(f"""CREATE TABLE {W}.pb_votes AS
         SELECT CAST(link AS INTEGER) AS link,
                CAST(CASE WHEN n1 = 1 THEN b1 WHEN n2 = 1 THEN b2 WHEN n3 = 1 THEN b3 WHEN n4 = 1 THEN b4 END AS TEXT) AS bill,
                CASE WHEN n1 = 1 THEN p1 WHEN n2 = 1 THEN p2 WHEN n3 = 1 THEN p3 WHEN n4 = 1 THEN p4 END AS pcn,
                CASE WHEN n1 = 1 OR n2 = 1 THEN 1 ELSE 0 END AS named, CAST(svc AS TEXT) AS svc,
-               CAST(posted AS TEXT) AS posted
+               CAST(posted AS TEXT) AS posted,
+               CASE WHEN n1 = 1 THEN d1 WHEN n2 = 1 THEN d2 WHEN n3 = 1 THEN d3 WHEN n4 = 1 THEN d4 ELSE 0 END AS denied
         FROM (SELECT link, svc, cpt, posted,
                 COUNT(DISTINCT CASE WHEN sn AND sa THEN bill END) AS n1, MIN(CASE WHEN sn AND sa THEN bill END) AS b1,
-                MAX(CASE WHEN sn AND sa THEN pcn END) AS p1,
+                MAX(CASE WHEN sn AND sa THEN pcn END) AS p1, MAX(CASE WHEN sn AND sa THEN dn ELSE 0 END) AS d1,
                 COUNT(DISTINCT CASE WHEN sn THEN bill END) AS n2, MIN(CASE WHEN sn THEN bill END) AS b2,
-                MAX(CASE WHEN sn THEN pcn END) AS p2,
+                MAX(CASE WHEN sn THEN pcn END) AS p2, MAX(CASE WHEN sn THEN dn ELSE 0 END) AS d2,
                 COUNT(DISTINCT CASE WHEN sa THEN bill END) AS n3, MIN(CASE WHEN sa THEN bill END) AS b3,
-                MAX(CASE WHEN sa THEN pcn END) AS p3,
-                COUNT(DISTINCT bill) AS n4, MIN(bill) AS b4, MAX(pcn) AS p4
+                MAX(CASE WHEN sa THEN pcn END) AS p3, MAX(CASE WHEN sa THEN dn ELSE 0 END) AS d3,
+                COUNT(DISTINCT bill) AS n4, MIN(bill) AS b4, MAX(pcn) AS p4, MAX(dn) AS d4
               FROM ({cand}) GROUP BY link, svc, cpt, check_no, posted, payer)""")
     x(f"""CREATE TABLE {W}.pb_pay AS SELECT CAST(link AS INTEGER) AS link, CAST(bill AS TEXT) AS bill, n AS votes, total, pcn FROM (
               SELECT link, bill, n, pcn, SUM(n) OVER (PARTITION BY link) AS total,
@@ -1825,17 +1831,31 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
               FROM (SELECT link, bill, COUNT(*) AS n, MAX(pcn) AS pcn FROM {W}.pb_votes WHERE bill IS NOT NULL GROUP BY link, bill))
           WHERE rk = 1""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_pay ON pb_pay(link)")
-    # one visit's split: every vote named the link's own patient, for one date of service. The bill of its first vote
-    # (by the day EMA posted it), with that bill's votes
+    # the bills other links hold in this map (the links kept as they were, the A/R's, and the payment links a bill won at
+    # 2/3): a visit's split never takes a bill another link holds by preference
+    kept = (f"""SELECT bill, link FROM {W}.pb_old WHERE link NOT IN (SELECT link FROM {W}.pb_need)
+                 AND link NOT IN (SELECT link FROM {W}.pb_ar) AND COALESCE(conflict, 0) = 0 AND bill IS NOT NULL UNION """
+            if not full else "")
+    x(f"""CREATE TABLE {W}.pb_held AS {kept}SELECT bill, link FROM {W}.pb_ar WHERE bill IS NOT NULL
+          UNION SELECT bill, link FROM {W}.pb_pay WHERE bill IS NOT NULL AND votes * {b} >= total * {a}""")
+    x(f"CREATE INDEX {W}.ix_pb_held ON pb_held(bill)")
+    # one visit's split: every vote named the link's own patient, for one date of service. The bill of its vote from the
+    # payer's denial (the visit billed to the payer in error, whose denial is what needs EMA's facts: the other payer paid
+    # before it), whatever order EMA posted the answers in, unless another link holds that bill; else of its first vote
+    # (by the day EMA posted it), the bill it was mapped to before the visit's other bill was answered. With that bill's
+    # votes
     x(f"""CREATE TABLE {W}.pb_visit AS
         SELECT v.link AS link, f.bill AS bill, f.pcn AS pcn,
                (SELECT COUNT(*) FROM {W}.pb_votes c WHERE c.link = v.link AND c.bill = f.bill) AS votes
         FROM (SELECT link FROM {W}.pb_votes WHERE bill IS NOT NULL GROUP BY link
               HAVING MIN(named) = 1 AND COUNT(DISTINCT svc) = 1 AND COUNT(DISTINCT bill) > 1) v
-        JOIN (SELECT link, bill, pcn, ROW_NUMBER() OVER (PARTITION BY link ORDER BY COALESCE(posted, ''), bill) AS rk
-              FROM {W}.pb_votes WHERE bill IS NOT NULL) f ON f.link = v.link AND f.rk = 1""")
+        JOIN (SELECT link, bill, pcn, ROW_NUMBER() OVER (PARTITION BY link ORDER BY pref, COALESCE(posted, ''), bill) AS rk
+              FROM (SELECT y.link AS link, y.bill AS bill, y.pcn AS pcn, y.posted AS posted,
+                           CASE WHEN COALESCE(y.denied, 0) = 1 AND NOT EXISTS (
+                                SELECT 1 FROM {W}.pb_held h WHERE h.bill = y.bill AND h.link <> y.link) THEN 0 ELSE 1 END AS pref
+                    FROM {W}.pb_votes y WHERE y.bill IS NOT NULL)) f ON f.link = v.link AND f.rk = 1""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_visit ON pb_visit(link)")
-    _drop(conn, "pb_votes", "pb_k835", "pb_tx", "pb_ck")
+    _drop(conn, "pb_votes", "pb_k835", "pb_tx", "pb_ck", "pb_held")
     # the map
     x(f"CREATE TABLE {W}.pb_map AS SELECT * FROM main.ema_link_map WHERE 0")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_map ON pb_map(link)")
