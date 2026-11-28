@@ -1163,7 +1163,7 @@ const panelStamp = () => String(((state.meta || {}).remits || {}).last_payment |
 function panelCacheDrop(){ PANEL_CACHE.clear(); }
 // a note dropped on the Upload page in another tab: an open panel whose step waits for the note asks again when this tab
 // is shown again, so the note is there (review d-6). Not on window focus: a file chooser closing gives the focus back too.
-if(typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+if(typeof document !== 'undefined' && typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', () => {
   if(document.visibilityState !== 'visible' || typeof state === 'undefined' || !state.detailId || typeof openDetail !== 'function') return;
   const d = document.getElementById('drawer'), m = d && d.classList.contains('open') && d.querySelector('#xpMain');
   if(!m || !['upload_note', 'attach_note', 'find_note'].includes(m.dataset.xp)) return;

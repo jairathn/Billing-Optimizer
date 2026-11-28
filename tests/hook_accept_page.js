@@ -1,7 +1,8 @@
 // The owner's "Accept what run ... found" on the Data tab (static/ops.js) on a site with an owner's password (the hook unit's
 // fix round, review hook-r2-1 and hook-r2-5). Modes: 'unlocked' (the owner typed the owner's password into the Providers
 // tab: state.ownerKey is set, as providers.js sets it), 'locked' (nothing typed yet: the panel must ask for it), 'look'
-// (only whether the panel offers Accept at all). The confirm is answered Yes. Prints one JSON line: the accept requests
+// (only whether the panel offers Accept at all). The question beside the button (a confirm box before review d-3) is
+// answered Yes; a browser box is an error. Prints one JSON line: the accept requests
 // (status, body, whether the owner's password went with it), the notice, whether the panel asks for the password, and what
 // the panel offers after.
 // Usage: node hook_accept_page.js <port> <user> <password> <owner password> [unlocked|locked|look]
@@ -15,7 +16,7 @@ const base = `http://127.0.0.1:${port}`;
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 }, httpCredentials: { username: user, password: pass } });
   const page = await ctx.newPage();
   page.on('pageerror', e => out.errors.push(`pageerror: ${e.message}`));
-  page.on('dialog', d => d.accept());
+  page.on('dialog', d => { out.errors.push('a browser box: ' + d.type()); d.accept(); });   // review d-3: none any more
   page.on('response', async r => { if (r.url().includes('/api/ops/selfcheck/accept')) {
     let body = null; try { body = await r.json(); } catch (e) {}
     out.accept.push({ status: r.status(), body, sent_owner: !!r.request().headers()['x-owner-password'] }); } });
@@ -27,6 +28,9 @@ const base = `http://127.0.0.1:${port}`;
   if ((mode || 'unlocked') === 'unlocked') await page.evaluate(k => { state.ownerKey = k; }, ownerPw);
   out.button = await page.evaluate(() => document.querySelector('[data-op-accept]').innerText);
   await page.click('[data-op-accept]');
+  // the question beside the button is answered yes, as the confirm box was (review d-3)
+  const yes = page.locator('.inline-ask .ia-yes').first();
+  if (await yes.waitFor({ timeout: 5000 }).then(() => true).catch(() => false)) { out.asked = await page.locator('.inline-ask .ia-text').first().innerText(); await yes.click(); }
   await page.waitForFunction(() => { const n = document.getElementById('rwNotice'); return (n && n.innerText.trim()) || document.querySelector('#ops-panels input[type=password]'); },
     null, { timeout: 20000 }).catch(() => {});
   out.notice = await page.evaluate(() => { const n = document.getElementById('rwNotice'); return n ? n.innerText.trim() : ''; });

@@ -13,7 +13,8 @@ const [port, user, pass, dueToday, faxed] = process.argv.slice(2);
     page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
     page.on('pageerror', e => errors.push('pageerror: ' + e.message));
     page.on('response', r => { if (r.status() >= 400) failed.push(r.status() + ' ' + r.url()); });
-    page.on('dialog', async d => { dialogs.push(d.message()); await d.accept(); });
+    // a question is asked beside its button now (review d-3: no browser boxes); a browser box is an error
+    page.on('dialog', async d => { dialogs.push(d.message()); errors.push('a browser box: ' + d.type()); await d.accept(); });
     const base = `http://127.0.0.1:${port}/`;
     await page.goto(base + '#today');
     await page.waitForFunction(() => !!document.querySelector('#view #tdPlan'), null, { timeout: 30000 });       // Today has drawn its plan
@@ -38,6 +39,10 @@ const [port, user, pass, dueToday, faxed] = process.argv.slice(2);
       r.faxes = { button: (await bt.count()) ? await bt.innerText() : '', stale: (await bt.count()) ? await bt.getAttribute('data-stale') : null };
       if (await bt.count()) {
         await bt.click();
+        // the question beside the button is read and answered yes, as the confirm box was
+        const yes = page.locator('.inline-ask .ia-yes').first();
+        if (await yes.waitFor({ timeout: 5000 }).then(() => true).catch(() => false)) {
+          dialogs.push(await page.locator('.inline-ask .ia-text').first().innerText()); await yes.click(); }
         await page.waitForFunction(() => ((document.querySelector('#fxPersonMsg') || {}).innerText || '').length > 0, null, { timeout: 30000 });
         r.faxes.message = await page.evaluate(() => document.querySelector('#fxPersonMsg').innerText);
       }

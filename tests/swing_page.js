@@ -50,10 +50,15 @@ async function settle(page) {
     const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 }, httpCredentials: { username: user, password: pass } });
     const page = await ctx.newPage();
     const asked = [];
-    page.on('dialog', d => { asked.push(d.message()); d.accept(); });
+    // the question is asked beside the button now (review d-3: no browser boxes): it is read and answered yes there, as the
+    // confirm box was; a browser box would be an error
+    page.on('dialog', d => { out.errors.push(`a browser box: ${d.type()}`); d.accept(); });
     await page.goto(`${base}/#denials`);
     await settle(page);
     await page.click('#swingBar [data-swing-ack]');
+    await page.waitForSelector('#swingBar .inline-ask .ia-yes', { timeout: 5000 }).catch(() => {});
+    const q = await page.$('#swingBar .inline-ask');
+    if (q) { asked.push(await page.evaluate(e => e.querySelector('.ia-text').textContent, q)); await page.click('#swingBar .inline-ask .ia-yes'); }
     await page.waitForFunction(() => document.querySelector('#swingBar').hidden, null, { timeout: 10000 }).catch(() => {});
     out.after_ack = { hidden: await page.evaluate(() => document.querySelector('#swingBar').hidden), asked };
     await page.goto(`${base}/#today`);
