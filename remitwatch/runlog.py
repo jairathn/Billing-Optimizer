@@ -211,6 +211,9 @@ class Scrubber:
     def __init__(self) -> None:
         self.names: set[str] = set()
         self._pair_heads: set[str] = set()      # first words of the pairs in names
+        # staff names of one word the code uses too (Grace, Mark, Pat, An): a one-word name has no pair to learn, so it is
+        # kept as written, with its capital, and masked wherever it is written so
+        self.people_exact: set[str] = set()
         self._vocab: set[str] | None = None
         self._code_words: set[str] | None = None
 
@@ -331,10 +334,15 @@ class Scrubber:
             s = _PAREN.sub("", str(v or "")).strip()
             if not s or s.lower() in APP_ACTORS or len(s) > 120:
                 continue
-            words = [w.lower().strip("'-") for w in _NAME_WORD.findall(s)]
-            for w in words:
+            raw = [w.strip("'-") for w in _NAME_WORD.findall(s)]
+            words = [w.lower() for w in raw]
+            for w, r in zip(words, raw):
                 if (len(w) >= 3 and w not in stop) or (len(w) == 2 and w.isalpha() and w not in _TWO_LETTER_KEEP):
                     self.names.add(w)
+                elif len(raw) == 1 and len(r) >= 2 and r[:1].isupper():
+                    # "First name is enough" (the person card): a first name that is a word of the code's own ("Grace",
+                    # "Mark") or a short English word ("An") has no pair, so it is masked as written
+                    self.people_exact.add(r)
             for x, y in zip(words, words[1:]):
                 if len(x) >= 2 and len(y) >= 2 and x not in self.names and y not in self.names:
                     self.names.add(f"{x} {y}")
@@ -388,7 +396,10 @@ class Scrubber:
         toks = list(_WORD.finditer(s))
         names = self.names
         words2 = list(_WORD2.finditer(s)) if names else []
-        short = [m for m in words2 if not m.group(0).islower() and m.group(0).lower() in names]
+        exact = self.people_exact
+        if exact and not words2:
+            words2 = list(_WORD2.finditer(s))
+        short = [m for m in words2 if not m.group(0).islower() and (m.group(0).lower() in names or m.group(0) in exact)]
         heads = self._pair_heads if names else None
         if not toks and not short and not (heads and len(words2) > 1):
             return s
@@ -402,7 +413,7 @@ class Scrubber:
         for i, m in enumerate(toks):
             w = m.group(0)
             lw = w.lower().strip("'-")
-            if names and lw in names:
+            if (names and lw in names) or (exact and w.strip("'-") in exact):
                 mask[i] = True
             elif len(w) >= 4 and w.isupper() and not known(w):
                 mask[i] = True

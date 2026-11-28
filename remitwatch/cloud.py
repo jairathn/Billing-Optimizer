@@ -2388,6 +2388,9 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         arc_sink = archive.StateSink(state)
         taken, journal = archive.take_journal(conn, journal, sink=arc_sink) if journal else ([], journal)
         requests_done: list[dict] = []         # what the Data tab's requests came to (an acceptance refused as stale is said)
+        if journal:
+            # the names on the journal's changes, learned before the fold: a warning logged while folding is masked too
+            runlog.SCRUB.add_people(a.get("actor") for _n, a in journal if isinstance(a, dict))
         done, left, wrote = apply_actions(conn, journal, results=requests_done) if journal else ([], [], False)
         done, wrote = done + taken, wrote or bool(taken)
         if journal:

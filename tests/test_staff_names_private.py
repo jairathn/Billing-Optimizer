@@ -9,8 +9,11 @@ after which no byte of any log, manifest or bundle holds them. Every name is inv
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from urllib.parse import quote
+
+import pytest
 
 from remitwatch import cloud, diagnose, pipeline, runlog
 from remitwatch.state import DropboxState
@@ -155,3 +158,121 @@ def test_no_staff_name_reaches_any_log_byte_on_a_serverless_host(tmp_path, monke
     assert any(b"EMA ERROR" in b for b in files.values())                 # the failing line itself was logged
     assert_clean(files, STAFF_WORDS)
     assert os.path.exists(str(root / "RemitWatch-state"))
+
+
+# ---------------------------------------------------------------------------------- a first name the code uses as a word
+# The person card says "First name is enough". A first name that is also a word of RemitWatch's own (Grace, Mark, Pat) or a
+# short English word (An) has no pair for the scrubber to learn, so it is kept as written, with its capital, and masked
+# wherever it is written so (Scrubber.people_exact). The states write "Marked Paid by <name> on <day>" into the state basis
+# and the decision log keeps it, scrubbed; a failing self-check's bundle carries the decision logs. The review found such
+# a name kept whole on both hosts (finding e-2).
+CODE_WORD_NAMES = ["Grace", "Mark", "Pat", "An"]
+
+
+def _word_hits(files: dict[str, bytes], name: str) -> list[str]:
+    """Files that hold the name as a whole word, as written (the code's own lowercase "grace_days" or "mark" is no hit)."""
+    rx = re.compile(rb"(?<![A-Za-z])" + name.encode() + rb"(?![A-Za-z])")
+    return sorted(k for k, b in files.items() if rx.search(b))
+
+
+@pytest.mark.parametrize("name", CODE_WORD_NAMES + [SOLO])
+def test_a_one_word_staff_name_the_code_also_uses_is_masked_as_written(name):
+    rl = runlog.Scrubber()
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""CREATE TABLE finding_events (id INTEGER PRIMARY KEY, finding_id TEXT, at TEXT, kind TEXT, actor TEXT, note TEXT);
+                          CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);""")
+    conn.execute("INSERT INTO finding_events (finding_id, kind, actor) VALUES ('f', 'manual', ?)", (name,))
+    rl.learn(conn)
+    out = rl.text(f"Marked Paid by {name} on Nov 28, 2026 (recovered $1.00)")
+    assert not re.search(rf"(?<![A-Za-z]){name}(?![A-Za-z])", out), out
+    assert out.startswith("Marked Paid by") and "$1.00" in out
+    # the code's own words stay readable where they are not written as the name is
+    kept = rl.text("mark as sent; an item in grace_days; Marked; Patient billed")
+    assert kept == "mark as sent; an item in grace_days; Marked; Patient billed", kept
+
+
+def _status_changes(c, fids, name):
+    from urllib.parse import quote as _q
+    h = {"X-Requested-With": "remitwatch", "X-RemitWatch-Person": _q(name)}
+    for fid, st in zip(fids, ("resolved", "dismissed", "in_progress")):
+        body = {"status": st, "notes": "invented note"}
+        if st == "resolved":
+            body["recovered_cents"] = 100
+        r = c.post(f"/api/findings/{fid}/status", json=body, headers=h)
+        assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("name", ["Grace", "Pat"])
+def test_a_code_word_first_name_never_reaches_the_decision_log_or_a_bundle_on_a_server(name, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    feed = tmp_path / "feed"
+    denial_files(feed)
+    pipeline.run_cycle(db, sync=False, local=str(feed), email=False, report=False, log=lambda *a: None)
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", "")
+    c = TestClient(api.app)
+    fids = [r[0] for r in sqlite3.connect(db).execute("SELECT finding_id FROM findings WHERE status='open' ORDER BY finding_id")]
+    assert fids
+    _status_changes(c, fids, name)
+    # the next analysis takes the person's statuses into the states and writes the decision log
+    pipeline.run_cycle(db, sync=False, local=str(feed), email=False, report=False, log=lambda *a: None, force_detect=True)
+    store = Store(db)
+    try:
+        basis = [r[0] for r in store.conn.execute("SELECT state_basis FROM findings WHERE finding_id=?", (fids[0],))]
+        assert any(f"by {name} on" in (b or "") for b in basis), basis       # the store keeps the name with the item
+        files = log_tables(store.conn)
+        assert b"Marked Paid by" in files["item_decisions"]                  # the decision was logged, name masked
+    finally:
+        store.close()
+    res = diagnose.build_bundle(db_path=db, days=2, known=PLANTED)
+    files.update({f"bundle:{n}": b for n, b in diagnose.unpack(res["bytes"]).items()})
+    files.update(all_log_bytes(runlog.logs_dir_for(db)))
+    assert not _word_hits(files, name)
+
+
+def test_a_code_word_first_name_never_reaches_the_decision_log_or_a_bundle_on_a_serverless_host(tmp_path, monkeypatch):
+    name = "Grace"
+    root = tmp_path / "dbx"
+    client = FakeDropbox(str(root))
+    state = DropboxState(client, "/RemitWatch-state")
+    denial_files(root / DATA)
+    for _ in range(6):
+        if not cloud.run_cloud_cycle(state, client, budget_s=600, email=False).get("more"):
+            break
+    store, _existed = cloud.load_raw(state)
+    try:
+        fids = [r[0] for r in store.conn.execute("SELECT finding_id FROM findings WHERE status='open' ORDER BY finding_id")]
+    finally:
+        store.close()
+    assert fids
+    # the people's changes as the dashboard journals them, folded by the next run (a fresh process: nothing learned yet)
+    runlog.SCRUB.people_exact.discard(name)
+    cloud.record_action(state, {"kind": "status", "finding_id": fids[0], "status": "resolved", "recovered_cents": 100,
+                                "notes": "invented note", "actor": name, "seen": "open"})
+    # a change that fails while the journal is folded, its error naming the person: logged before learn_people runs
+    cloud.record_action(state, {"kind": "event", "finding_id": fids[0], "event": "asked", "note": "invented", "actor": name})
+    real_apply = cloud.actions_mod.apply
+
+    def failing_apply(conn, a):
+        if a.get("kind") == "event":
+            raise ValueError(f"the note {a.get('actor')} wrote could not be read")
+        return real_apply(conn, a)
+    monkeypatch.setattr(cloud.actions_mod, "apply", failing_apply)
+    for _ in range(4):
+        if not cloud.run_cloud_cycle(state, client, budget_s=600, email=False, force_detect=True).get("more"):
+            break
+    store, _existed = cloud.load_raw(state)
+    try:
+        held = {a for (a,) in store.conn.execute("SELECT actor FROM finding_events WHERE finding_id=?", (fids[0],))}
+        assert name in held
+        files = all_log_bytes(str(root / "RemitWatch-state" / "logs"))
+        files.update(log_tables(store.conn))
+        assert b"Marked Paid by" in files["item_decisions"]
+        res = diagnose.build_bundle(conn=store.conn, state=state, days=2, known=PLANTED)
+    finally:
+        store.close()
+    files.update({f"bundle:{n}": b for n, b in diagnose.unpack(res["bytes"]).items()})
+    assert not _word_hits(files, name)
