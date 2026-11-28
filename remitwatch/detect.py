@@ -3243,6 +3243,19 @@ class Detector:
         for e, _u, cents in sorted(picks, key=lambda p: (p[0][0], p[0][1] or "")):
             r = rows.setdefault((e[0], e[1]), [e, 0.0])
             r[1] += cents
+        if int(round(sum(c for _e, c in rows.values()))) <= 0:
+            # the payments paid the item's units, and another item of the same service already counted what they brought
+            # (each unit's recovery is counted once): the proof names each payment with its own amount, never $0.00 (the
+            # release's real-data run: 33 forwarded items closed so), and says where the recovery is counted
+            pays = [(e, int(e[2] or 0)) for e, _c in rows.values()]
+            said = "; ".join(f"{e[0]}, trace {e[1]}, ${c/100:.2f}" for e, c in pays)
+            first = pays[0][0]
+            detail = {"payment_date": first[0], "trace": first[1], "paid_cents": sum(c for _e, c in pays), "claim_status": first[3],
+                      "claim": first[4], "recovered_cents": 0, "recovery_counted_elsewhere": True}
+            if len(pays) > 1:
+                detail["payments"] = [{"payment_date": e[0], "trace": e[1], "claim": e[4], "paid_cents": c} for e, c in pays]
+            return ((f"Paid on a later remittance ({said})" if len(pays) == 1 else f"Paid on later remittances ({said})")
+                    + "; what it brought is counted on another item of the same service"), detail
         said = "; ".join(f"{e[0]}, trace {e[1]}, ${c/100:.2f}" for e, c in rows.values())
         first = next(iter(rows.values()))[0]
         detail = {"payment_date": first[0], "trace": first[1], "paid_cents": int(round(sum(c for _e, c in rows.values()))),

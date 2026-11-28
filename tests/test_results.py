@@ -1827,3 +1827,17 @@ def test_a_packet_and_a_fax_of_the_same_evening_count_in_the_same_week(store):
     by_week = payload["hours_counts"]["by_week"]
     weeks = {k: sorted(w for w, n in (by_week.get(k) or {}).items() if n) for k in ("packet", "fax")}
     assert weeks == {"packet": ["2026-11-16"], "fax": ["2026-11-16"]}, weeks
+
+
+def test_money_paid_above_the_amount_flagged_counts_and_is_shown_apart(store):
+    """The owner's decision (2026-11-28): an item's own recovered figure stops at the amount flagged, Results counts every
+    dollar that came back, and what a payer paid beyond the amount flagged is shown apart (never a complaint, never hidden)."""
+    fid, _ = denial(store, shortfall_cents=8000)
+    paid(store, on="2026-04-20", amount=90)
+    run(store)
+    m = dash(store)["money"]
+    assert m["returned_cents"] == 9000 and money_of(store, fid)["returned"] == 9000
+    assert (m["above_flagged_cents"], m["above_flagged_items"]) == (1000, 1)
+    paid(store, 2, on="2026-04-21", amount=50)                 # an item flagged at its charge, paid less: nothing above
+    run(store)
+    assert dash(store)["money"]["above_flagged_cents"] == 1000

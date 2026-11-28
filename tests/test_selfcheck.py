@@ -1984,3 +1984,35 @@ def test_a_known_money_gap_that_grows_is_new():
     item = {"id": "closure_proof", "keys": [("F-1", 9000)]}
     assert sc._new_keys(grown, base) == [("2026-03|2026-03|X|ins_paid", 5000)]
     assert sc._new_keys(same, base) == [] and sc._new_keys(item, base) == []
+
+
+def test_the_owners_release_acceptance_lets_old_code_items_go_and_keeps_later_ones(kind):
+    """The owner accepted the 2026-11-27 release's changes (asked 2026-11-28, written in sc.RELEASE_ACCEPTANCES): an item
+    last listed by a run that started before the release, which the release's code no longer produces, leaves the
+    worklist, accepted with who in the history. An item a run after the release listed, or one no run dates, is kept as
+    usual when a later run drops it."""
+    c = kind.conn
+    add_item(c, "F-old", line_key="L1", run_id="run-20261124T102654Z")         # the code before the release listed it
+    add_item(c, "F-dated", line_key="L2", run_id="old-shape")                    # a run detection_runs dates before it
+    c.execute("""INSERT INTO detection_runs (run_id, started_at, finished_at, version, lines, findings, summary)
+                 VALUES ('old-shape', '2026-11-20T10:00:00+00:00', NULL, 'x', 0, 0, '{}')""")
+    add_item(c, "F-later", line_key="L3", run_id="run-20261128T101500Z-ab12")  # listed by a run of the release's code
+    add_item(c, "F-undated", line_key="L4", run_id="r0")                         # nothing dates its run: never guessed
+    c.commit()
+    run(c, None, "run-20261128T110000Z-aa11")
+    kind.reopen()
+    c = kind.conn
+
+    def drop_all(cn):
+        cn.execute("DELETE FROM findings")
+    out = run(c, drop_all, "run-20261128T120000Z-cd34")
+    assert {r[0] for r in c.execute("SELECT finding_id FROM findings")} == {"F-later", "F-undated"} and out["kept"] == 2
+    acc = dict(c.execute("SELECT key, accepted_by FROM selfcheck_baseline WHERE check_id = 'vanished' AND accepted_by IS NOT NULL"))
+    assert set(acc) == {"F-old", "F-dated"} and all("2026-11-27 release" in by for by in acc.values())
+    assert sc.meta_get(c, sc.K_ACCEPTED)[-1]["checks"] == {"vanished": 2}
+    assert out["new"]["vanished"] == 2                                           # the accepted ones are not counted as new
+    kind.reopen()
+    c = kind.conn
+    out = run(c, drop_all, "run-20261129T120000Z-ef56")                          # the next day: the same, nothing comes back
+    assert {r[0] for r in c.execute("SELECT finding_id FROM findings")} == {"F-later", "F-undated"} and out["kept"] == 2
+    assert len(sc.meta_get(c, sc.K_ACCEPTED)) == 1                               # accepted once, not again every run

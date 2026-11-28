@@ -1629,7 +1629,14 @@ def _money(conn: sqlite3.Connection, reg: dict, att: dict, lf: dict, today: str)
     gaps = [_days(e["work_date"], e["date"]) for it in items.values() for e in it["events"]
             if e.get("bucket") == "a" and e.get("work_date") and (e.get("counted_cents") or 0) > 0]
     first_flag = min((r["F"] for r in reg.values() if r["F"]), default=None)
+    # what payers paid beyond the amount flagged (the owner's decision, 2026-11-28): counted in the money returned, shown
+    # apart, while each item's own recovered figure stops at the amount flagged
+    above = [(fid, it["returned"] - int((reg.get(fid) or {}).get("flagged_cents") or 0)) for fid, it in rows
+             if int((reg.get(fid) or {}).get("flagged_cents") or 0) > 0]
+    above = sorted(((f, c) for f, c in above if c > 0), key=lambda x: (-x[1], x[0]))
+    lists["above_flagged"] = [[f, c] for f, c in above]
     out = {"returned_cents": total, "a_cents": tot["a"], "b_cents": tot["b"], "c_cents": tot["c"], "items": len(rows),
+           "above_flagged_cents": sum(c for _f, c in above), "above_flagged_items": len(above),
            "a_items": len(lists["returned:a"]), "b_items": len(lists["returned:b"]), "c_items": len(lists["returned:c"]),
            "taken_back_cents": sum(it["taken_back"] for it in items.values()), "taken_back_items": len(lists["taken_back"]),
            "mark_taken_back_items": len(lists["mark_taken_back"]),

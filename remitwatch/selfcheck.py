@@ -1372,8 +1372,9 @@ PERSON_KINDS = ("manual", "hidden", "unhidden")
 ROW_COLS = ("finding_id", "signal", "category", "status", "work_state", "follow_up_on", "line_key", "claim_key",
             "patient_control_number", "service_date", "procedure_code", "shortfall_cents", "payer_group", "auto_note",
             "transaction_key", "payment_date", "stale", "evidence", "hint", "appeal_deadline", "recovered_cents", "ema_link",
-            "first_seen", "original_procedure_code", "paid_cents")     # the last two: the code billed and what was paid, as
+            "first_seen", "original_procedure_code", "paid_cents",     # the code billed and what was paid, as
                                                                         # detect.fold_payer_policy read them (_owner_accepted)
+            "run_id")                                                   # the run that last wrote it (RELEASE_ACCEPTANCES)
 
 
 def begin_detection(conn: sqlite3.Connection, *, run_id: str | None = None, today: Any = None) -> dict:
@@ -1962,6 +1963,63 @@ def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: li
             "new_items_why": why_new, "person_changes": person}
 
 
+# The owner's acceptance of a release's changes, written in the code because the owner asked for it instead of pressing
+# Accept on the Data tab (2026-11-28, for the 2026-11-27 release): the vanished check's items that the code before the
+# release listed (last written by a run that started before `written_before`, UTC) and the release's code no longer
+# produces are accepted on each host's first run after it, with who in the acceptance history, as the Data tab's Accept
+# would. An item a run after the release listed, or one whose run nothing dates, is kept as usual when a later run drops it.
+RELEASE_ACCEPTANCES = (
+    {"id": "release-2026-11-27", "written_before": "2026-11-27T21:05:00",
+     "by": "owner, in the code: the 2026-11-27 release's changes, accepted 2026-11-28"},
+)
+_RUN_ID_TIME = re.compile(r"run-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z")
+
+
+def _runs_started(conn: sqlite3.Connection, run_ids: Iterable[str]) -> dict[str, str]:
+    """When each run started, UTC 'YYYY-MM-DDTHH:MM:SS': detection_runs, else the time in the run id (run-YYYYMMDDTHHMMSSZ);
+    a run neither dates is left out."""
+    ids = sorted({str(r) for r in run_ids if r})
+    out: dict[str, str] = {}
+    if ids and _has_table(conn, "detection_runs"):
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            for rid, st in conn.execute(f"SELECT run_id, started_at FROM detection_runs WHERE run_id IN ({','.join('?' * len(part))})",
+                                        part):
+                if st and re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", str(st)):
+                    out[str(rid)] = str(st)[:19]
+    for rid in ids:
+        m = None if rid in out else _RUN_ID_TIME.match(rid)
+        if m:
+            out[rid] = f"{m[1]}-{m[2]}-{m[3]}T{m[4]}:{m[5]}:{m[6]}"
+    return out
+
+
+def _release_accept(conn: sqlite3.Connection, van: dict, before: dict[str, dict], at: str, rid: str) -> int:
+    """Accept the vanished items a release acceptance covers (RELEASE_ACCEPTANCES): the accepted baseline with who, and a
+    line in the acceptance history, as accept_findings writes them. Returns how many."""
+    keys = [(k, c) for k, c in van.get("keys", []) if k in before]
+    if not keys:
+        return 0
+    started = _runs_started(conn, (before[k].get("run_id") for k, _c in keys))
+    done = _accepted(conn).get("vanished", set())
+    total = 0
+    for rel in RELEASE_ACCEPTANCES:
+        take = [(k, c) for k, c in keys if k not in done
+                and started.get(str(before[k].get("run_id") or ""), "9999") < rel["written_before"]]
+        if not take:
+            continue
+        conn.executemany("INSERT OR REPLACE INTO selfcheck_baseline (check_id, key, cents, since, accepted_by) VALUES (?,?,?,?,?)",
+                         [("vanished", k, c, at, rel["by"]) for k, c in take])
+        hist = list(meta_get(conn, K_ACCEPTED, []) or [])[-49:]
+        hist.append({"at": at, "by": rel["by"], "run_id": rid, "checks": {"vanished": len(take)}, "release": rel["id"]})
+        meta_set(conn, K_ACCEPTED, hist)
+        done |= {k for k, _c in take}
+        total += len(take)
+        _log("release_accepted", counts={"accepted": len(take), "cents": sum(int(c or 0) for _k, c in take)},
+             detail={"run_id": rid})
+    return total
+
+
 KEPT_HINT = ("Kept by RemitWatch's self-check: the newest analysis no longer lists this item and nothing explains why "
              "(no payment, no replacement, no fold). It stays until a person checks it.")
 
@@ -2037,6 +2095,12 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
         results.append(_check_error("vanished", exc))
     results.extend(_stored_results(conn))
     first = conn.execute("SELECT COUNT(*) FROM selfcheck_runs").fetchone()[0] == 0
+    van = next((r for r in results if r["id"] == "vanished"), None)
+    if van and van["status"] == "fail":
+        try:
+            _release_accept(conn, van, before, at, rid)      # before the baseline is read: accepted items are not new
+        except Exception as exc:       # noqa: BLE001  (the items stay kept, as without it: nothing is dropped)
+            _caught(exc, "release_accept")
     base = _baseline(conn)
     new_by: dict[str, list] = {}
     hold_ids: list[str] = []
@@ -2050,7 +2114,6 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
             hold_ids.append(r["id"])
     kept = 0
     accepted = _accepted(conn).get("vanished", set())
-    van = next((r for r in results if r["id"] == "vanished"), None)
     van_new = [k for k, _c in (van or {}).get("keys", []) if k not in accepted] if van and van["status"] == "fail" else []
     held_info: dict = {}
     can_hold = not first and len(before) > 0 and _has_table(conn, SNAPSHOT, "temp")

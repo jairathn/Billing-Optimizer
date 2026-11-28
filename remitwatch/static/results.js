@@ -210,6 +210,7 @@ function rsMoneyHtml(d){
       ${rsTile('Flagged, no recorded work', rsBig(m.c_cents), rsPl(m.c_items, 'item') + '; may have come back anyway', 'returned:c', '', '', m.c_cents)}
       ${m.taken_back_cents ? rsTile('Taken back after the flag', rsBig(m.taken_back_cents), rsPl(m.taken_back_items, 'item') + ' not paid back since', 'taken_back', '', '', m.taken_back_cents) : ''}
     </div>
+    ${m.above_flagged_cents ? `<div class="small" style="margin-top:6px">${rsLink('above_flagged', rsPl(m.above_flagged_items, 'item'))} paid ${rsM(m.above_flagged_cents)} more than the amount flagged: counted above. Each item's own recovered figure stops at the amount flagged.</div>` : ''}
     ${m.mark_taken_back_items ? `<div class="small" style="margin-top:6px">${rsLink('mark_taken_back', rsPl(m.mark_taken_back_items, 'item'))} marked Paid by a person, but the payer took the payment back: not counted.</div>` : ''}
     <details class="small" style="margin-top:8px"><summary>How this is counted</summary>
       <p>Every dollar a payer paid on an item's line after RemitWatch first flagged the item, plus money RemitWatch found. Money paid before the flag never counts, and money the payer paid before the flag and took back after it is paid back first by any later payment: only what comes beyond it counts. One payment counts once, on the earliest item of its line.</p>
