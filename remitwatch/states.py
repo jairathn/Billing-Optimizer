@@ -3549,7 +3549,9 @@ def _second_role_short(res: dict, f: dict, sr: dict, today: str, put) -> dict:
 def _billed_second(res: dict, fx: dict, ev: list, anchor: str | None, who: str, today: str, put) -> dict:
     """A SECONDARY_NOT_BILLED item a person marked billed (the page's Mark billed sets Sent): the second payer's payment
     closes the loop (the person's status stands, the item says to mark it Paid), else it waits on the SECOND payer's
-    answer, never the first payer's (H4)."""
+    answer, never the first payer's (H4). Where the detection run measured the second payer's answer against what was
+    billed (evidence second_answer: it paid less than it owes, or answered without paying; paid in full, the run closes
+    the item as Paid itself), the rest is worked from that answer (replay-fix-2a A4)."""
     f = fx["item"]
     e = _ev(f)
     second = e.get("second_payer") or "the second payer"
@@ -3557,6 +3559,21 @@ def _billed_second(res: dict, fx: dict, ev: list, anchor: str | None, who: str, 
     billed = next((x for x in reversed(ev) if x["kind"] in ("billed", "sent") and x["source"] == "remitwatch"), None)
     lead = f"Billed to {second} by {who} on {day(anchor)}"
     rows = [billed] if billed else []
+    sa = e.get("second_answer") if isinstance(e.get("second_answer"), dict) else None
+    if sa and int(sa.get("left_cents") or 0) > 100:
+        paid, left, codes = int(sa.get("paid_cents") or 0), int(sa["left_cents"]), [str(c) for c in sa.get("codes") or []]
+        payer = sa.get("payer") or second
+        what = (f"paid {usd(paid)}" if paid > 0 else ("answered " + (", ".join(codes) if codes else "with $0.00"))) \
+            + (f"; the patient paid {usd(sa['patient_since_cents'])} more" if sa.get("patient_since_cents") else "")
+        res["work"] = billed or {"date": anchor, "kind": "billed", "text": lead}
+        res["answered"] = {"date": sa.get("date"), "source": "835" if sa.get("source") == "835" else "production", "paid": paid,
+                           "status": None, "payer": payer, "group": payer,
+                           "codes": codes or ([f"paid {usd(paid)}"] if paid > 0 else [])}
+        res["appeal_block"] = "answered"
+        return put("work_now", "work_answered", f"{lead}; {payer} answered on {day(sa.get('date'))} ({what}): {usd(left)} of the "
+                   f"{usd(sa.get('owed_cents'))} it owes is left, work its answer",
+                   rows + [{"source": res["answered"]["source"], "kind": "answer", "date": sa.get("date"),
+                            "text": f"answer of {day(sa.get('date'))}: {what}"}])
     got = _second_payer_paid(fx)
     if got:
         res["proof"], res["appeal_block"] = got, "paid"

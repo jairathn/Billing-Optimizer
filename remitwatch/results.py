@@ -1804,13 +1804,18 @@ def _work_done(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tu
 
 def _closure(r: dict, f: dict | None, money: int) -> str | None:
     """Why an item of the open book is closed now, or None while it is open: paid, patient, second payer, owner policy,
-    let go by a person, expired, otherwise settled, or no longer listed."""
+    let go by a person, expired, otherwise settled, or no longer listed. A row the detection run keeps stale is on no list
+    (every list asks for live rows): whatever state it was stored with, it is no longer listed, closed as paid when money
+    came back on it, else gone; never still open (replay-fix-2a A4: a second payer's bill a person sent, kept stale once the
+    payer paid, was counted 'Still open: Work now' with no list holding it)."""
     if f is None:
         return "paid" if money > 0 else "gone"
     ws, st = f.get("work_state"), f.get("status")
     basis = str(f.get("state_basis") or "").lower()
     outcome = str(f.get("ema_outcome") or "")
     if ws in OPEN_STATES or ws == "cant_check" or ws is None:
+        if f.get("stale"):
+            return "paid" if money > 0 else "gone"
         return None
     if st == "resolved" and not money and basis.startswith("marked done by"):
         return "done"           # a person's Done on a patient-group denial (the owner's decision 2): no money, never a payment
@@ -1844,7 +1849,7 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
     cur: dict[str, dict] = {}
     if book and _fx(conn):
         fc = _cols(conn, "findings")
-        sel = [c for c in ("finding_id", "work_state", "status", "state_basis", "ema_outcome", "follow_up_on") if c in fc]
+        sel = [c for c in ("finding_id", "work_state", "status", "state_basis", "ema_outcome", "follow_up_on", "stale") if c in fc]
         for part in _chunks(sorted(book)):
             _temp_ids(conn, "rs_o", part)
             for r in conn.execute(f"SELECT {', '.join(sel)} FROM findings WHERE finding_id IN (SELECT id FROM temp.rs_o)"):
@@ -1868,7 +1873,8 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
             still[(f or {}).get("work_state") if (f or {}).get("work_state") in OPEN_STATES else "unknown"].append(fid)
         ws = real_work(att["work"].get(fid))
         # worked and still open with nothing back yet; an item denied again after the work had its answer (counted apart)
-        if ws and f and f.get("work_state") in OPEN_STATES and not money.get(fid) and fid not in att["denied_again"]:
+        if ws and f and f.get("work_state") in OPEN_STATES and not f.get("stale") and not money.get(fid) \
+                and fid not in att["denied_again"]:
             waiting_no_money.append(fid)
             waited.append(_days(ws[-1]["date"], today))
     n = len(book)
