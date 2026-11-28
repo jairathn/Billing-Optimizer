@@ -1646,7 +1646,7 @@ def test_today_s_strip_adds_up_and_each_part_opens_its_list(page_run):
     """CRITIQUE_premium change 5: one figure that adds up. Work now is the whole; what is new and the follow-ups due are
     its parts and add up to it; what closes within 7 days and is not sent yet is inside it, counted by the route with
     the Worklist's own filter (state todo, the to-do statuses, deadline week: the list step 1 opens), so each figure
-    opens the very list it counts. Beside it, the week's progress and what deadlines took in the last 30 days."""
+    opens the very list it counts. Beside it, the week's progress and what deadlines took this week (the scoreboard's)."""
     out, ans = page_run()
     t, b = ans["/api/ema/today"], ans["/api/brief"]
     whole, fu = t["states"]["todo"], t["states"]["followup_due"]
@@ -1662,9 +1662,11 @@ def test_today_s_strip_adds_up_and_each_part_opens_its_list(page_run):
     assert f"New {_dollars((whole_d - fu_d) * 100)} ({whole['n'] - fu['n']})" in text and f"Follow-ups due {_dollars(fu['cents'])} ({fu['n']})" in text
     if due["n"]:
         assert f"Of which closes in 7 days: {_dollars(due['cents'])} ({due['n']})" in text and 'class="td-due"' in strip
-    done, missed = b.get("done") or {}, b.get("missed") or {}
+    done, sw = b.get("done") or {}, b.get("score_week")
     assert f"Sent or paid this week {_dollars(done.get('week_cents') or 0)}" in text
-    assert f"Lost to deadlines, last {missed.get('days') or 30} days {_dollars(missed.get('cents') or 0)}" in text
+    # what deadlines took: the scoreboard's own figure for this week, with its words (review d-2: one definition)
+    lost = _dollars(sw.get("lost_cents") or 0) if sw else "–"
+    assert f"Lost to deadlines, this week {lost} windows closed, unworked" in text
     for key, go in (("todo", whole["go"]), ("followup_due", fu["go"])):
         assert out["today_clicks"][key][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **go), key
     if due["n"]:

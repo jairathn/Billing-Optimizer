@@ -419,7 +419,7 @@ function rsSumFigsHtml(s){
     const cls = 'rs-fig' + (cents && tone ? ' is-' + tone : '');
     return key && cents ? `<a href="#" class="${cls} rs-open" data-key="${esc(key)}" title="${esc(hover)}">${body}</a>` : `<div class="${cls}" title="${esc(hover)}">${body}</div>`; };
   return fig('Back', cw.recovered_cents, 'returned:week:' + cw.week, '', 'paid on flagged items', b.recovered || RS_BASIS.returned)
-    + fig('Lost to deadlines', cw.lost_cents, 'lost:week:' + cw.week, 'bad', 'windows that closed', b.lost || '')
+    + fig('Lost to deadlines', cw.lost_cents, 'lost:week:' + cw.week, 'bad', 'windows closed, unworked', b.lost || '')
     + fig('At risk in 14 days', s.at_risk_cents, 'at_risk', 'warn', c.at_risk == null ? 'windows closing soon' : rsPl(c.at_risk, 'item') + ' to work', b.at_risk || '')
     + fig('Given up, no decision', cw.given_up_cents, '', 'bad', 'written off, nobody decided', (b.given_up || '') + (s.given_up_weeks ? ' This week: ' + s.given_up_weeks + '.' : ''));
 }

@@ -15,6 +15,7 @@ fixed when the change is one safe line, else they wait with the reason.
 | e-2 | high | yes: a one-word name the code uses (Grace, Mark, Pat, An) is never learned | fixed |
 | d-1 | high | yes: a packet from another patient's note downloaded (200) and emailed with no warning | fixed |
 | e-1 | high | yes: the reviewer's test fails on both hosts at 233c24f | fixed |
+| d-2 | high | yes: Today's lost (insights.missed) and paid back (Paid marks) were second counts of Results' figures | fixed |
 
 ## Log
 
@@ -46,3 +47,12 @@ fixed when the change is one safe line, else they wait with the reason.
   limit while still ahead) used by `api._last_day`, `results.live_sql` (at risk, its order, given up recoverable and
   past), `insights.missed` and `insights.work` (a last-chance item counts inside its window, dated by the limit).
   Broken on purpose (insights and results back): both host cases fail; restored.
+- d-2 (one definition of the scoreboard figures). Verified in the code: Today's strip read `brief.missed` (open items
+  whose window closed in 30 days) and `brief.recovered.year_cents` (Paid marks), Results reads `results.scoreboard`.
+  Fix: `/api/brief` carries `score_week`, the scoreboard's current week (`api._score_week`: results.scoreboard itself);
+  Today's strip shows "Lost to deadlines, this week" and "... came back after flagging" from it, with the scoreboard's
+  words ("windows closed, unworked"), the figure opens Results; Results' This week says "windows closed, unworked" too;
+  "moved on today" reads "changed today" (d-11). `brief.missed` stays only as the count of the Work list "Window closed
+  in the last 30 days" (the e-1 test holds them equal). Tests: tests/test_one_definition.py (both hosts: score_week is
+  the scoreboard's current week; the strip reads no second count). Moved with the same guarantee:
+  test_ema_pages2::test_today_s_strip_adds_up (the lost figure is now the scoreboard's week). Broken on purpose: 3 fail.

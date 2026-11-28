@@ -154,7 +154,9 @@ const TD_CHEV = '<svg class="i chev" aria-hidden="true"><use href="/static/icons
 // shows a dash; the week's figures come from the brief at once).
 function tdStripHtml(td, b){
   const st = (td && td.states) || {}, whole = td && td.ready ? st.todo : null, fu = st.followup_due || {n: 0, cents: 0};
-  const bs = (td && td.basis) || {}, done = b.done || {}, missed = b.missed || {}, rec = b.recovered || {};
+  // the money back and the lost to deadlines are the scoreboard's own for this week (Results' figures and words, the
+  // brief's score_week): one definition of each on every page (review d-2)
+  const bs = (td && td.basis) || {}, done = b.done || {}, sw = b.score_week || null;
   let left;
   if(whole){
     const newN = Math.max(0, (whole.n||0) - (fu.n||0)), newC = Math.max(0, (whole.cents||0) - (fu.cents||0));
@@ -173,16 +175,17 @@ function tdStripHtml(td, b){
         : (due ? '<span class="td-sub">Nothing in it closes within 7 days.</span>' : '')}
     </div>`;
   } else left = `<div class="td-whole"><span class="lbl">Work now</span><span class="fig">–</span><span class="td-sub">${td === undefined ? 'Counting…' : ''}</span></div>`;
+  const back = sw && sw.recovered_cents ? ` · ${money(sw.recovered_cents)} came back after flagging` : '';
   const week = `<div><span class="lbl">Sent or paid this week</span><span class="fig">${money(done.week_cents||0)}<small>${esc(pl(done.week_n||0, 'item'))}</small></span>
-      <span class="td-sub">${Number(done.today_n||0).toLocaleString()} moved on today${rec.year_cents ? ` · ${money(rec.year_cents)} paid back in ${esc(rec.year)}` : ''}</span></div>`;
-  const lost = `<div><a href="#" id="seeMissed" title="Items whose filing window closed in the last ${esc(missed.days || 30)} days while nobody worked them"><span class="lbl">Lost to deadlines, last ${esc(missed.days || 30)} days</span>
-      <span class="fig">${money(missed.cents||0)}<small>${esc(pl(missed.n||0, 'item'))}</small></span></a>
-      <span class="td-sub">${missed.n ? 'passed their window unworked' : 'nothing passed its window unworked'}</span></div>`;
+      <span class="td-sub">${Number(done.today_n||0).toLocaleString()} changed today${back}</span></div>`;
+  const lostFig = `<span class="lbl">Lost to deadlines, this week</span><span class="fig">${sw && sw.lost_cents != null ? money(sw.lost_cents) : '–'}</span>`;
+  const lost = `<div>${sw ? `<a href="#" id="seeLost" title="Items whose last window closed this week while they waited for work, as Results' scoreboard counts them">${lostFig}</a>` : lostFig}
+      <span class="td-sub">windows closed, unworked</span></div>`;
   return `<div class="td-strip"${whole ? ' id="tdStates"' : ''} aria-label="Today in figures">${left}${week}${lost}</div>`;
 }
 function tdBindStrip(el, td){
   if(!el) return;
-  const sm = el.querySelector('#seeMissed'); if(sm) sm.onclick = e => { if(e) e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
+  const sl = el.querySelector('#seeLost'); if(sl) sl.onclick = e => { if(e) e.preventDefault(); state.tab = 'results'; location.hash = 'results'; render(); };
   if(td) tdBindCounts(el, td);
 }
 

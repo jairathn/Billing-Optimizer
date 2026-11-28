@@ -2805,6 +2805,25 @@ def _no_answer_summary() -> dict:
     return out
 
 
+def _score_week() -> dict | None:
+    """This week's money as Results' scoreboard counts it (results.scoreboard, its current week): Today's strip shows its
+    money back and its lost to deadlines from here, so each figure has one definition on every page that shows it
+    (brief rule 3, review d-2). None when the scoreboard cannot be read (Today then shows a dash)."""
+    from . import results
+    conn = db()
+    try:
+        weeks = results.scoreboard(conn).get("weeks") or []
+    except Exception as exc:
+        runlog.caught(exc, "brief:scoreboard", level="warning")
+        return None
+    finally:
+        conn.close()
+    if not weeks:
+        return None
+    cw = weeks[-1]
+    return {"week": cw.get("week"), "recovered_cents": cw.get("recovered_cents"), "lost_cents": cw.get("lost_cents")}
+
+
 @app.get("/api/brief")
 def brief(_: str = Depends(require_auth)):
     """Everything the home screen shows in one call: the open work still inside its filing window by the kind of work it
@@ -2820,6 +2839,7 @@ def brief(_: str = Depends(require_auth)):
     if out.get("ready"):
         out["written_off"] = _written_off_summary()
         out["no_answer"] = _no_answer_summary()
+        out["score_week"] = _score_week()
         fu = out.get("follow_ups") or {}
         behind = _data_behind_days()
         if fu.get("n") and behind is not None and behind > STALE_APPEAL_DAYS:
