@@ -608,3 +608,139 @@ def test_a_card_that_cannot_be_put_together_leaves_the_panel_and_says_why(store,
     out = c.get("/api/findings/F1/explain").json()
     assert out["route_card"] is None and "could not be worked out (RuntimeError)" in out["route_card_error"]
     assert out["explain"]["next_step"]["route"] == "appeal"
+
+
+# ================================================================================================ the card in a browser
+PAGE_PW = "correct-horse-battery-7"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _browser_ready() -> bool:
+    import shutil
+    import subprocess
+    return bool(shutil.which("node")) and subprocess.run(["node", "-e", "require('playwright')"], capture_output=True,
+                                                         cwd=REPO).returncode == 0
+
+
+def _live_world(store) -> str:
+    """A medical necessity denial UnitedHealthcare answered 20 days before the real day (a served site works out today's
+    state), on a claim whose patient and member number are the invented ones every test claim carries."""
+    today = dt.date.today()
+
+    def day(n: int) -> str:
+        return (today - dt.timedelta(days=n)).isoformat()
+    tk = remit(store, trace=F.check_no(1), paid_on=day(20), payer="UNITEDHEALTHCARE",
+               claims=[{"pcn": F.claim_id(1), "pccn": "ICN-TEST-1", "received": day(35),
+                        "lines": [ln("99213", 150, 0, [("CO", "50", 150)], svc=day(40), lcn="1")]}])
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", actionable="appeal", payer_name="UNITEDHEALTHCARE",
+         payer_group="UnitedHealthcare", payer_kind="commercial", service_date=day(40), payment_date=day(20), first_seen=day(19),
+         appeal_deadline=(today + dt.timedelta(days=150)).isoformat(), line_key=line_key(store, tk), claim_key=f"{tk}-0",
+         transaction_key=tk)
+    store.conn.commit()
+    return today.isoformat()
+
+
+def _look(env_extra: dict, fid: str) -> dict:
+    """Serve the app (uvicorn, as both hosts do; no scheduler) and look at the item's card with Playwright
+    (tests/routes_card_page.js)."""
+    import socket
+    import subprocess
+    import time
+    import urllib.request
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DROPBOX_", "TRIZETTO_", "SRFAX_", "ANTHROPIC_", "SMTP_",
+                                                                     "MODMED_", "PRACTICE_"))
+           and k not in ("REPORT_TO", "ALERT_WEBHOOK_URL", "REMITWATCH_MODE", "REMITWATCH_OWNER_PASSWORD", "REMITWATCH_SHOW_PHI",
+                         "REMITWATCH_ALLOW_OPEN", "REMITWATCH_STATE_DIR", "REMITWATCH_DB", "VERCEL", "VERCEL_ENV", "CRON_SECRET")}
+    env.update(REMITWATCH_PASSWORD=PAGE_PW, REMITWATCH_USER="oda", REMITWATCH_SYNC_INTERVAL_MINUTES="0",
+               PYTHONDONTWRITEBYTECODE="1", **env_extra)
+    srv = subprocess.Popen([os.sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port",
+                            str(port), "--log-level", "warning"], cwd=REPO, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        got = subprocess.run(["node", os.path.join(REPO, "tests", "routes_card_page.js"), str(port), "oda", PAGE_PW, fid],
+                             capture_output=True, text=True, timeout=240, cwd=REPO)
+        assert got.returncode == 0, got.stderr[-2000:]
+        return json.loads(got.stdout.strip().splitlines()[-1])
+    finally:
+        srv.terminate()
+        srv.wait(timeout=10)
+
+
+def _check_card(seen: dict, want: dict) -> None:
+    """What both hosts' pages must show of the card `want` (routes.card on the same store, names off)."""
+    assert [e for e in seen["errors"] if "pageerror" in e] == [], seen["errors"]
+    assert not [f for f in seen["failed"] if "/api/findings/" in f], seen["failed"]
+    best = want["best"]
+    for name in ("desktop", "phone"):
+        v = seen["views"][name]
+        # in the next step, under its Next line and above its buttons
+        assert v["in_next_step"] and v["below_next_line"] and v["above_buttons"], (name, v)
+        # one line: the channel, the way, the time it takes, the deadline; its main button
+        assert v["head"].startswith("Portal") and best["line"] in v["head"] and " by " in v["head"], (name, v["head"])
+        assert v["main_button"] == best["action"]["label"], (name, v["main_button"])
+        # every filled field has its copy button; Copy all and the c key copy the clean block; one Copy copies one value
+        assert v["filled_rows"] >= 6 and v["copy_buttons"] == v["filled_rows"], (name, v)
+        assert v["copied"] == want["copy_all"] and v["keyed"] == want["copy_all"], (name, v["copied"], v["keyed"])
+        assert "Payer claim number: ICN-TEST-1" in v["copied"] and "Billed: $150.00" in v["copied"]
+        first = next(x for x in best["fields"] + best["facts"] if x.get("value"))
+        assert v["first_label"] == f"Copy {first['label']}" and v["one"] == first["value"], (name, v["first_label"], v["one"])
+        # names off: the invented patient and member number are nowhere on the card or in what it copies
+        for word in (NAME, MEMBER):
+            assert word not in v["text"] and word not in v["copied"] and word not in v["one"], (name, word)
+        assert "Names are switched off on this site" in v["text"]
+        # the source line and the time limit
+        assert f"checked {TABLE['checked']}" in v["text"] and "Limit:" in v["text"]
+        # nothing scrolls sideways, phone width too
+        assert v["page_overflow"] <= 0 and v["drawer_overflow"] <= 0 and v["card_overflow"] <= 0, (name, v)
+        assert v["sent_label"] == "I sent it"
+    sent = seen["views"]["phone"]["sent"]
+    assert sent["status"] == 200, sent
+    assert sent["body"]["status"] == "appealed"
+    assert sent["body"]["notes"] == f"Sent by Portal: {best['name']}. Reference REF-TEST-1"
+
+
+@pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
+def test_the_card_in_a_browser_on_the_server_at_desktop_and_phone_width(store, tmp_path):
+    today = _live_world(store)
+    want = routes.card(store.conn, "F1", explain=story.explain(store.conn, "F1", today=today), today=today, show_names=False)
+    assert want and want["request"] == "reconsideration_or_first_appeal" and want["best"]["channel"] == "payer_portal"
+    db = str(tmp_path / "site.sqlite")
+    dst = sqlite3.connect(db)
+    try:
+        store.conn.backup(dst)
+    finally:
+        dst.close()
+    seen = _look({"REMITWATCH_DB": db, "REMITWATCH_MODE": "server"}, "F1")
+    _check_card(seen, want)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT status FROM findings WHERE finding_id='F1'").fetchone()[0] == "appealed"
+        notes = [r[0] for r in conn.execute("SELECT note FROM finding_events WHERE finding_id='F1'")]
+    finally:
+        conn.close()
+    assert f"Sent by Portal: {want['best']['name']}. Reference REF-TEST-1" in notes
+
+
+@pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
+def test_the_card_in_a_browser_on_the_serverless_site_from_the_dashboards_copy(store, tmp_path):
+    from remitwatch.state import LocalState
+    today = _live_world(store)
+    want = routes.card(store.conn, "F1", explain=story.explain(store.conn, "F1", today=today), today=today, show_names=False)
+    state_dir = tmp_path / "RemitWatch-state"
+    st = LocalState(str(state_dir))
+    cloud.save_serving(st, store.conn)
+    seen = _look({"REMITWATCH_MODE": "serverless", "REMITWATCH_STATE_DIR": str(state_dir),
+                  "REMITWATCH_TMP": str(tmp_path / "site-scratch")}, "F1")
+    _check_card(seen, want)
+    # the dashboard's copy is read-only: I sent it waits in the journal for the next run, with its channel and reference
+    acts = [a for _name, a in cloud.read_actions(st)]
+    assert len(acts) == 1 and f"Sent by Portal: {want['best']['name']}. Reference REF-TEST-1" in json.dumps(acts[0]), acts
