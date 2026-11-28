@@ -857,7 +857,7 @@ def test_a_payer_whose_837_claims_never_get_an_era_is_named_on_the_data_tab(tmp_
         assert h is not None and not h["ok"], f"nothing on the Data tab ({where}) names the payer whose claims never get an ERA"
         assert h["title"] == "No ERA comes for claims sent to VA Community Care"
         assert h["n"] == 12 and h["cents"] == 120000
-        assert "12 claims sent since 2026-08-12 ($1,200.00 billed)" in h["detail"]
+        assert "12 claims sent since Aug 12, 2026 ($1,200.00 billed)" in h["detail"]
     served.close()
     s.close()
 

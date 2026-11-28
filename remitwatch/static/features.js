@@ -283,7 +283,7 @@ function drawerExtras(f, r){
   const datedOpen = !!f.appeal_deadline && f.appeal_deadline >= site;
   const wroteOff = f.written_off_cents ? `<div class="note sev-medium"><b>Written off in EMA.</b> ${money2(f.written_off_cents)} of the money in dispute on this ${f.line_key ? 'line' : 'claim'} is written off (or moved to the patient) in EMA${f.written_off_on ? ', as of ' + esc(f.written_off_on) : ''}${!['open','in_progress'].includes(f.status) ? '.' : datedOpen ? '. The payer can still be asked for it: work it, and reverse the write-off in EMA when the payer pays.' : f.appeal_deadline ? '. Its filing window has closed.' : '. No filing date is on file for it: check the payer\'s rules before working it.'}</div>` : '';
   const notes = `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${wroteOff}${why}${windows}${later}`;
-  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${esc(atTime(e.at))}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
+  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${esc(atTime(e.at))}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${e.by ? 'by ' + esc(e.by) : esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
   const factsHtml = `${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
       <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
@@ -525,7 +525,7 @@ function xpEffective(f, x){
   const when = f.status_changed_at ? ` on ${longDate(practiceDate(f.status_changed_at))}` : '';
   const [action, buttons] = XP_BY_STATUS[f.work_state];
   return Object.assign({}, x, {explain: Object.assign({}, ex, {
-    verdict: {state: f.work_state, sentence: `${(typeof STATUS_WORDS !== 'undefined' && STATUS_WORDS[f.status]) || f.status} by a person${when}.`, rows: []},
+    verdict: {state: f.work_state, sentence: `${(typeof STATUS_WORDS !== 'undefined' && STATUS_WORDS[f.status]) || f.status} by ${f.worked_by && f.worked_to === f.status ? f.worked_by : 'a person'}${when}.`, rows: []},
     next_step: {route: 'status', action, buttons}, state: {work_state: f.work_state}})});
 }
 // EMA's address for the item's claim (Open in EMA): the next step's own, or the template EMA's block gives with the item's
@@ -638,8 +638,8 @@ function rcPrintSheet(c, b){
     return i > 0 ? `<tr><th>${esc(l.slice(0, i))}</th><td>${esc(l.slice(i + 2))}</td></tr>` : `<tr><td colspan="2">${esc(l)}</td></tr>`; }).join('');
   const att = ((b || {}).attachments || []).map(a => `<li>${esc(a.label)}</li>`).join('');
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(head)}</title><style>body{font:14px/1.5 system-ui,sans-serif;margin:32px;color:#111;background:#fff}
-    th{text-align:left;padding:4px 16px 4px 0;vertical-align:top}td{padding:4px 0}button{margin-bottom:16px}@media print{button{display:none}}</style></head>
-    <body><button onclick="print()">Print</button><h1 style="font-size:18px">${esc(head)}</h1><table>${rows}</table>
+    th{text-align:left;padding:4px 16px 4px 0;vertical-align:top}td{padding:4px 0}button{margin-bottom:16px}h1{font-size:18px}@media print{button{display:none}}</style></head>
+    <body><button onclick="print()">Print</button><h1>${esc(head)}</h1><table>${rows}</table>
     ${att ? `<p><b>Enclose</b></p><ul>${att}</ul>` : ''}</body></html>`;
   const url = URL.createObjectURL(new Blob([html], {type: 'text/html'}));
   window.open(url, '_blank', 'noopener,noreferrer');
@@ -1170,7 +1170,7 @@ function panelHeadHtml(f, r, x){
     <div class="dr-top"><span class="crumb">${panelCrumb(f.finding_id)}</span>${panelNavHtml(panelPlace(f.finding_id))}</div>
     <h2 class="dr-title" id="drTitle" tabindex="-1">${esc(plain)}</h2>
     ${meta.length ? `<div class="dr-meta">${meta.join('<span class="sep" aria-hidden="true"></span>')}</div>` : ''}
-    <div class="dr-state"><span id="xpChips">${xpChips(f, ws)}</span>${stMenuHtml(f)}</div>
+    <div class="dr-state"><span id="xpChips">${xpChips(f, ws)}</span>${stMenuHtml(f)}${f.worked_by && f.worked_to === f.status ? `<span class="small muted by">by ${esc(f.worked_by)}</span>` : ''}</div>
     <dl class="facts facts-2" id="drFacts">${panelFactsHtml(f, x)}</dl></div>`;
 }
 // the head's due date and money follow the next step once it comes (its deadline, its amount)

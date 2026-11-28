@@ -833,7 +833,7 @@ def test_the_weekly_reports_closed_this_week_starts_on_the_practices_day_a_week_
         _item(store.conn, fid, status="resolved", recovered_cents=2500, auto_note="EMA shows this line paid",
               status_changed_at=when.isoformat(timespec="seconds"))
     lines = report.ema_section(store)
-    assert "- Closed this week because EMA shows them paid: 1 items, $25" in lines, lines
+    assert "- Closed this week because EMA shows them paid: 1 item, $25" in lines, lines
 
 
 def test_a_second_upload_of_the_same_name_is_named_for_the_practices_day(store, monkeypatch):
@@ -888,4 +888,4 @@ def test_a_held_trizetto_sign_in_is_dated_the_practices_day(store, monkeypatch):
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (trizetto.REFUSED_META, json.dumps({"who": "h", "at": NIGHT})))
     env = {"TRIZETTO_SFTP_USER": "SITE", "TRIZETTO_SFTP_PASSWORD": "x", "TRIZETTO_SFTP_PASSWORD_SET": "2026-10-01"}
     [h] = insights.trizetto_health(store.conn, "2026-11-25", env)
-    assert h["at"] == "2026-11-24" and h["title"].endswith("on 2026-11-24"), h
+    assert h["at"] == "2026-11-24" and h["title"].endswith("on Nov 24, 2026"), h

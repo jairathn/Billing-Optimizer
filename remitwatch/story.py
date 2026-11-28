@@ -113,7 +113,7 @@ def _row(date: Any, source: str, kind: str, text: str, *, payer: Any = None, amo
          tags: Sequence = (), line: str | None = None, **extra: Any) -> dict:
     # a stored day as written; a moment (a person's mark, a fax) on the practice's calendar, as the states date it
     r = {"n": 0, "date": S._pday(date) or None, "source": source, "kind": kind, "payer": payer or None,
-         "amount_cents": amount, "codes": codes or [], "text": text, "decisive": False, "line": line, "tags": list(tags)}
+         "amount_cents": amount, "codes": codes or [], "text": _words(text), "decisive": False, "line": line, "tags": list(tags)}
     r.update(extra)
     return r
 
@@ -388,7 +388,7 @@ def _rows_production(conn: sqlite3.Connection, fx: dict, ledger: Any) -> tuple[l
                 tags.append("adj_later" if gap and gap > 0 else "adj_before")
         rule = ""
         if grp and any(_same_reason(k, h["carc"]) for h in era_wo) and "adj_at_posting" in tags:
-            rule = ". EMA's posting rule wrote this off (EMA's ERA export shows WRITE_OFF)"
+            rule = ". EMA's posting rule wrote this off (EMA's ERA export marks it written off)"
             tags.append("rule_proven")
         meaning = _meaning(k) if grp else ""
         return (f"{what} adjustment {usd(cents)}, reason {k}" + (f" ({meaning})" if meaning else "") +
@@ -517,9 +517,9 @@ def _rows_production(conn: sqlite3.Connection, fx: dict, ledger: Any) -> tuple[l
                         + ("; a claim status is claim-level and undated: it never says how this line ended" if e["kind"] == "status" else "")
                         + (f" (work: {S.WORK_WORDS.get(kind, kind)})" if kind else "") + ".", tags=["ema_" + e["kind"]] + (["work"] if kind else [])))
     for h in era:
-        out.append(_row(h["date"], "weekly", "era_line", f"EMA's ERA-lines export: {h['carc'] or 'a reason'} {usd(h['cents'])} handled "
-                        f"{h['status'] or '?'}" + (" (EMA's posting rule wrote it off)" if h["status"] == "WRITE_OFF" else
-                                                    " (left open for a person)" if h["status"] == "IGNORE" else "") + ".",
+        out.append(_row(h["date"], "weekly", "era_line", f"EMA's ERA-lines export: {h['carc'] or 'a reason'} {usd(h['cents'])} "
+                        + ("written off by EMA's posting rule" if h["status"] == "WRITE_OFF" else
+                           "left open for a person" if h["status"] == "IGNORE" else f"handled {h['status'] or 'in a way not on file'}") + ".",
                         amount=h["cents"], codes=[{"code": h["carc"], "meaning": _meaning(h["carc"] or "")}] if h["carc"] else [],
                         tags=["era", f"era:{_ckey(h['carc'])}"]))
     return out, itemized, notes
@@ -632,7 +632,7 @@ def _rows_remitwatch(fx: dict) -> list[dict]:
     if f.get("auto_note") and f.get("status") == "resolved":
         out.append(_row(f.get("status_changed_at"), "remitwatch", "auto_note", f"Closed by the analysis: {f['auto_note']}", tags=["auto_note"]))
     if f.get("hint"):
-        out.append(_row(None, "remitwatch", "hint", f"RemitWatch's hint: {f['hint']}.", tags=["hint"]))
+        out.append(_row(None, "remitwatch", "hint", f"RemitWatch's hint: {str(f['hint']).rstrip(' .')}.", tags=["hint"]))
     return out
 
 
@@ -852,6 +852,10 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
 
 
 def _balance_text(b: dict) -> str:
+    return _words(_balance_words(b))
+
+
+def _balance_words(b: dict) -> str:
     if b["basis"] == "production":
         parts = [f"insurer paid {usd(b['insurer_paid_cents'])}", f"patient paid {usd(b['patient_paid_cents'])}",
                  f"contractual {usd(b['contractual_cents'])}", f"written off {usd(b['written_off_cents'])}"]
@@ -1231,7 +1235,24 @@ def _reason_words(fx: dict) -> str:
     return words + (f" with {r}" if r else "")
 
 
+# The words a biller reads (DESIGN 2.2 and P14, unit ui-words), on every sentence the story hands a page: one date format
+# (Mar 3, 2026; a hint quoted from a rule may still carry 2026-03-03), zero as $0 (never $0.00), no code words (the run is
+# "the analysis"), and a sentence said twice in a row said once. Every number and date is kept; only how it is written moves.
+_ISO_DAY = re.compile(r"(?<![\w-])(\d{4}-\d{2}-\d{2})(?![\w:-])(?!\.\w)")
+_ZERO = re.compile(r"(?<![\w.,$])\$0\.00(?![\d])")
+_RUN = re.compile(r"\b([Tt]he next|[Tt]his|[Tt]he last|[Aa] later) run\b")
+_TWICE = re.compile(r"(?<![^ .:;])([A-Z][^.:;]{3,80}\.) \1")
+
+
+def _words(s: str) -> str:
+    s = _ISO_DAY.sub(lambda m: day(m.group(1)) if S._d(m.group(1)) else m.group(1), s)
+    s = _ZERO.sub("$0", s)
+    s = _RUN.sub(lambda m: f"{m.group(1)} analysis", s)
+    return _TWICE.sub(r"\1", s)
+
+
 def _clean(s: str) -> str:
+    s = _words(s)
     s = re.sub(r"\s+\(\)", "", s)
     s = re.sub(r"\(\s+", "(", s)
     s = re.sub(r"\s+\)", ")", s)
@@ -1319,7 +1340,7 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
 
     def done(text: str, marks: list[int], strength: str = "one_source", why: str | None = None):
         if started:
-            text = f"{_started_words(st)}. {text}"
+            text = f"{_started_words(st, conn, fx['item'].get('finding_id'))}. {text}"
         if late:
             text = f"{late} {text}"
         return text, marks, strength, why
@@ -1473,10 +1494,23 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
     return done(f"{head}: {f.get('payer_group') or 'the payer'} answered {carcs} {_refs(ns)}.{window}", ns)
 
 
-def _started_words(st: dict) -> str:
-    """'Started by <who> on <date>' from a person-started state."""
+def _started_words(st: dict, conn: sqlite3.Connection | None = None, finding_id: str | None = None) -> str:
+    """'Started by <who> on <date>' from a person-started state. Before the next analysis has written that basis, the
+    item's newest Started in its history says who (ui-words: the name the person chose, else the sign-in), as the states
+    write it after the analysis; "a person" only when the history has none."""
     b = str(st.get("state_basis") or "")
-    return b.split(".", 1)[0] if b.startswith("Started by") else "Started by a person"
+    if b.startswith("Started by"):
+        return b.split(".", 1)[0]
+    if conn is not None and finding_id:
+        try:
+            e = conn.execute("SELECT actor, at FROM finding_events WHERE finding_id=? AND kind='manual' AND to_status='in_progress' "
+                             "ORDER BY at DESC, id DESC LIMIT 1", (finding_id,)).fetchone()
+        except sqlite3.Error:
+            e = None
+        if e and e[0]:
+            when = S._pday(e[1])            # the practice's day of the moment kept (a 9 PM Eastern start is that day's)
+            return f"Started by {e[0]} on {day(when)}" if when else f"Started by {e[0]}"
+    return "Started by a person"
 
 
 def _secondary_sentence(fx: dict, story: dict, st: dict, today: str) -> tuple[str, list[int]]:
@@ -2464,7 +2498,9 @@ def _refund_step(f: dict, fx: dict, st: dict, bal: dict, deadline: str | None, b
     if rule == "possible_overpayment":
         hint = S._archive_hint(f) or {}
         over = st.get("credit_cents") or int(hint.get("possible_overpayment_cents") or 0)
-        action = (f"Paid twice: {S._hint_text(hint) or st.get('state_basis')}. Do not ask for more. Confirm with {grp} which payment stands, then "
+        said = S._hint_text(hint) or st.get('state_basis') or ""
+        said = said.split(": ", 1)[1] if said.startswith("Paid more than the payer owes: ") else said
+        action = (f"Paid twice: {said}." + ("" if "do not ask for more" in said.lower() else " Do not ask for more.") + f" Confirm with {grp} which payment stands, then "
                   f"refund the extra {usd(over)} or let it recoup it.")
         steps = [who_paid, f"Call {grp} (or use its portal) to confirm which payment stands and whether it will recoup the extra or wants a refund check.",
                  "Post the refund or the recoupment in EMA so the line shows what the payer finally paid."]
@@ -3263,8 +3299,22 @@ def explain(conn: sqlite3.Connection, finding_id: str, *, ledger: Any = None, to
     why = _why_unpaid(conn, f)
     if why:
         nxt = _with_payer_rule(nxt, why, f, st)
+    # the line a biller reads first and what goes behind Why (DESIGN P14): the whole sentence stays in `sentence` and
+    # `action`, split at its first sentence end only, so nothing is said that the rules did not decide
+    verdict["headline"], verdict["why"] = _headline(verdict.get("sentence"))
+    nxt["headline"], nxt["why"] = _headline(nxt.get("action"))
     return {"story": story, "verdict": verdict, "next_step": nxt, "state": {k: v for k, v in st.items() if k != "evidence"},
             "why_unpaid": why}
+
+
+def _headline(text: Any) -> tuple[str, str]:
+    """A verdict or a step as its first sentence and the rest: ("Unpaid and nobody has worked it: Humana answered CO-50
+    (row 1).", "You can still appeal until Dec 31, 2027."). One sentence is all headline; nothing is cut inside one."""
+    t = str(text or "").strip()
+    cut = S.sentence_end(t, semicolon=False)
+    if cut is None:
+        return t, ""
+    return t[:cut + 1].strip(), t[cut + 1:].strip()
 
 
 def _why_unpaid(conn: sqlite3.Connection, f: dict) -> list[dict]:

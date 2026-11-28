@@ -8,9 +8,35 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone
 
 STATUSES = ("open", "in_progress", "appealed", "resolved", "lost", "dismissed")
+
+# Who is working (CRITIQUE_biller change 5): everyone signs in with the one shared password, so the page asks each person
+# for their own name once per computer and sends it with every change (api.PERSON_HEADER); it is kept as the actor of what
+# they did, in the item's history, where the shared sign-in was kept before. Staff names live in the store with the
+# item's history only: never in a log line, a manifest or a bundle (runlog.Scrubber learns them as it learns patients').
+PERSON_MAX = 40
+# what the app itself writes as an actor (a hide rule, a fax sent again by the hourly run, the run, a packet): never a
+# person's name, so "by retry" in a history is always the app and a count by person never counts the app
+APP_ACTORS = frozenset({"system", "hide rule", "packets", "fax", "remitwatch", "retry", "cli", "anonymous", "owner", "a person",
+                        "someone", "the run", "nobody"})
+_PERSON_MARKS = frozenset(" .'\u2019-")
+
+
+def person_name(value) -> str:
+    """A person's own name as kept with what they do, or '' when `value` is not one: letters of any script (with their
+    accents and vowel signs), with spaces and . ' - between them, starting with a letter, two letters at least and
+    PERSON_MAX characters at most, never a word the app writes as an actor itself (APP_ACTORS). Spaces are collapsed and
+    the letters put in one Unicode form, so one person's name typed on two computers is one name."""
+    s = unicodedata.normalize("NFC", " ".join(str(value or "").split()))
+    if not s or len(s) > PERSON_MAX or not s[0].isalpha() or sum(ch.isalpha() for ch in s) < 2 or s.lower() in APP_ACTORS:
+        return ""
+    if any(not (ch.isalpha() or ch in _PERSON_MARKS or unicodedata.category(ch).startswith("M")) for ch in s):
+        return ""
+    return s
+
 
 # Faxes sent and received (remitwatch.fax), each payer's confirmed fax numbers, and what each note review taught (the
 # suggested templates): written through the journal like statuses, so they last on a serverless host too.

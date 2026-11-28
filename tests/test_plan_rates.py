@@ -638,7 +638,7 @@ def test_every_deadline_view_counts_a_repricing_requests_claims_once_by_their_ow
     text = report.build_report(w.store, detail=True)
     due = text.split("## Appeals due in the next 45 days")[1].split("##")[0]
     assert due.count("|") and "6 claims paid on the payer's earlier fee schedule" in due and "$1,200" in due, due
-    assert "$1,800" not in due and due.count("OLD_FEE_SCHEDULE") == 1, due
+    assert "$1,800" not in due and due.count(report.say_what("OLD_FEE_SCHEDULE")) == 1 and "OLD_FEE_SCHEDULE" not in due, due
     w.store.close()
     c = api_client(tmp_path, monkeypatch)
     buckets = {d["bucket"]: d["shortfall_cents"] for d in c.get("/api/summary").json()["deadlines"]}

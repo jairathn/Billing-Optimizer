@@ -10,6 +10,7 @@ Every row is invented (tests/ema_fixtures.py, and the builders of tests/test_sta
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sqlite3
 
 import pytest
@@ -70,11 +71,23 @@ def texts(out: dict) -> list[str]:
     return t
 
 
+ISO_DAY = re.compile(r"(?<![\w-])\d{4}-\d{2}-\d{2}(?![\w:-])(?!\.\w)")
+
+
 def plain(out: dict) -> None:
-    """The wording rules: no em dashes, no jargon, no bare 'review' as an instruction."""
+    """The wording rules: no em dashes, no jargon, no bare 'review' as an instruction; and DESIGN 2.2 (unit ui-words): one
+    date format (Mar 3, 2026, never 2026-03-03), zero as $0 (never $0.00), no code word for the analysis ("the run")."""
     for t in texts(out):
         assert "—" not in t and "–" not in t, t
         assert "false positive" not in t.lower(), t
+        assert not ISO_DAY.search(t), t
+        assert "$0.00" not in t, t
+        assert not re.search(r"\b(the next|this|the last) run\b", t, re.I), t
+        assert ".." not in t.replace("...", ""), t
+    for part in ("verdict", "next_step"):
+        head, why = out[part]["headline"], out[part]["why"]
+        whole = out[part]["sentence" if part == "verdict" else "action"]
+        assert (head + (" " + why if why else "")).strip() == whole.strip(), (head, why, whole)
     for s_ in out["next_step"]["steps"]:
         assert not s_.lower().startswith("review"), s_
 
@@ -277,7 +290,8 @@ def test_an_auto_write_off_the_era_export_records_is_proven(store, ledger, tmp_p
     out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
     assert out["verdict"]["strength"] == "proven" and "Recorded by EMA's ERA export." in out["verdict"]["sentence"]
     wo = next(r for r in out["story"]["rows"] if r["kind"] == "adjustment")
-    assert "EMA's posting rule wrote this off (EMA's ERA export shows WRITE_OFF)" in wo["text"] and "rule_proven" in wo["tags"]
+    # (ui-words: EMA's own status word is said in words; the same proof row, tagged the same)
+    assert "EMA's posting rule wrote this off (EMA's ERA export marks it written off)" in wo["text"] and "rule_proven" in wo["tags"]
     # without the export, the posting day alone never says "posting rule wrote this off" on the row
     assert any(r["kind"] == "era_line" for r in out["story"]["rows"])
 
@@ -584,7 +598,7 @@ def test_a_payers_answer_ema_never_posted_is_the_first_step(store, ledger, tmp_p
     item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
     load(store, ledger, tmp_path, [charge(F.link_no(1), status="Payment Pending"), later()])
     n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
-    assert n["steps"][0].startswith("First post Anthem / BCBS's remittance of Mar 28, 2026 in EMA (check ending 0001; paid $0.00; "
+    assert n["steps"][0].startswith("First post Anthem / BCBS's remittance of Mar 28, 2026 in EMA (check ending 0001; paid $0; "
                                     "CO-50 $150.00): EMA has not posted it")
     assert "mark_posted" in n["buttons"]
 
@@ -763,7 +777,7 @@ def test_a_whole_claim_answer_balances_at_the_claim(store):
     _whole_claim(store, adj=[("CO", "29", 300)])
     b = story.item_story(store.conn, "F1", today=TODAY)["balance"]
     assert (b["basis"], b["reconciles"], b["denied_cents"], b["open_cents"]) == ("835_claim", True, 30000, 30000)
-    assert b["text"] == ("Claim charge $300.00 = paid $0.00 + contractual $0.00 + patient's share $0.00 + denied $300.00 (the 835 of Mar 28, 2026 "
+    assert b["text"] == ("Claim charge $300.00 = paid $0 + contractual $0 + patient's share $0 + denied $300.00 (the 835 of Mar 28, 2026 "
                          "answered the whole claim; EMA's postings for it are not on file). It reconciles to the cent.")
 
 
@@ -994,7 +1008,7 @@ def test_a_payment_that_came_before_the_item_closes_with_nothing_recovered(store
     n = story.next_step(store.conn, "F1", today=TODAY)
     assert n["route"] == "nothing"
     assert not any(s_.startswith("Close it in RemitWatch: Paid, with the amount") for s_ in n["steps"]), n["steps"]
-    assert any("$0.00 recovered" in s_ for s_ in n["steps"]), n["steps"]
+    assert any("$0 recovered" in s_ for s_ in n["steps"]), n["steps"]           # zero is $0 (DESIGN 2.2, ui-words)
 
 
 # ------------------------------------------------------------------------------------------- credits and refunds
@@ -1050,6 +1064,13 @@ def test_a_possible_overpayment_is_a_refund_to_decide_never_a_rate_request(store
     n = out["next_step"]
     assert out["state"]["rule"] == "possible_overpayment" and n["route"] == "refund" and not n["appeal_ok"], n["action"]
     assert "reprocess" not in n["action"] and n["expected_cents"] == 0
+    # (ui-words) the rule's hint, quoted, is written as a biller reads it: its date in the one format, the rule's label
+    # once, "do not ask for more" once; every number kept
+    plain(out)
+    assert "Apr 20, 2026 ($90.00)" in n["action"] and "$40.00" in n["action"], n["action"]
+    assert n["action"].lower().count("do not ask for more") == 1, n["action"]
+    assert n["action"].startswith("Paid twice: Blue Cross Test paid this line again"), n["action"]
+    assert n["headline"].startswith("Paid twice: ") and n["why"], n
 
 
 # ------------------------------------------------------------------------------------------- work already done

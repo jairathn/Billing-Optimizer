@@ -172,10 +172,32 @@ _ALNUM_OK = frozenset({"sha256", "x86-64", "utf-16", "utf-32", "base64", "py313"
 _ID_QUOTED = re.compile(r"^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+|"
                         r"%[-A-Za-z%/ :.]*|[A-Z][a-z]+(?:[A-Z][a-z]+)+(?:Error|Exception|Warning))$")
 _PLACEHOLDER = re.compile(r"\x00(\d+)\x00")
-_TRIPLE = re.compile(r'("""|\'\'\')(?:.|\n)*?\1')
+# (written with {3}: three quotes side by side in this line would pair with the wrong ones when this file's own words are read)
+_TRIPLE = re.compile(r'("{3}|\'{3})(?:.|\n)*?\1')
 _COMMENT = re.compile(r"#[^\n]*")
 _NAME_STOP = frozenset("the and for with from this that not none null true false payer payers claim claims line lines bill "
                        "paid patient insurance medicare medicaid".split())
+# Where the store keeps a person's own name beside what they did (actions.person_name, api.acting): the items' histories
+# and the decisions that keep who made them. Staff names live there only; Scrubber.learn_people learns them from there.
+PEOPLE_COLUMNS = (("finding_events", "actor"), ("hide_rules", "actor"), ("payer_fax", "confirmed_by"), ("payer_fax", "checked_by"),
+                  ("archive_requests", "actor"), ("ema_report_files", "decided_by"), ("selfcheck_baseline", "accepted_by"),
+                  ("spot_checks", "who"))
+# meta records whose entries say who decided ({"by": ...} at any depth): the write-off policy, the owner's acceptances of
+# what the self-checks found, the Results settings
+PEOPLE_META = ("ema:writeoff_policy", "selfcheck:acceptances", "results:settings")
+_PAREN = re.compile(r"\s*\([^)]*\)\s*$")       # "Priya (owner's password)": the note in brackets is not the name
+
+
+def _bys(value: Any, depth: int = 0) -> list[str]:
+    """Every "by" value in a meta record, however deep (a policy is {pattern: {decision, by, at}}, a history a list)."""
+    if depth > 6:
+        return []
+    if isinstance(value, dict):
+        out = [str(value["by"])] if isinstance(value.get("by"), str) else []
+        return out + [x for v in value.values() if isinstance(v, (dict, list)) for x in _bys(v, depth + 1)]
+    if isinstance(value, list):
+        return [x for v in value[:500] for x in _bys(v, depth + 1)]
+    return []
 
 
 def _digits_in(s: str) -> int:
@@ -224,6 +246,12 @@ class Scrubber:
         return self._code_words
 
     def learn(self, conn: sqlite3.Connection, limit: int = 400_000) -> int:
+        """Add the names the store holds: the patients' and subscribers' (the 835's names, _learn_patients) and the staff
+        names kept with what each person did (learn_people). Returns how many it knows."""
+        self._learn_patients(conn, limit)
+        return self.learn_people(conn)
+
+    def _learn_patients(self, conn: sqlite3.Connection, limit: int = 400_000) -> int:
         """Add the patient and subscriber names the store holds (the 835's names): words of three letters or more that
         are not RemitWatch's own words, and words of two letters (Le, Ng, Wu) but the few in _TWO_LETTER_KEEP. A name
         none of whose words that leaves (PRICE, WILL ROSE: words the code uses too) is kept as its pairs of words side
@@ -262,6 +290,55 @@ class Scrubber:
                         self.names.add(f"{x} {y}")
                         self._pair_heads.add(x)
         return len(self.names)
+
+    def learn_people(self, conn: sqlite3.Connection, limit: int = 20_000) -> int:
+        """Add the staff names the store holds beside what each person did (PEOPLE_COLUMNS: the items' histories and the
+        decisions that keep who made them, and the meta records in PEOPLE_META), learned as patients' names are: a staff
+        name is never logged, and should one reach a log line, a manifest or a bundle it is masked there. Cheap (a
+        DISTINCT per column), so a run calls it again once the journal's changes are in. Returns how many it knows."""
+        values: set[str] = set()
+        cur = conn.cursor()
+        cur.row_factory = None
+        for table, col in PEOPLE_COLUMNS:
+            try:
+                if col not in {r[1] for r in cur.execute(f"PRAGMA table_info({table})")}:
+                    continue
+                values.update(str(v) for (v,) in cur.execute(f"SELECT DISTINCT {col} FROM {table} WHERE COALESCE({col}, '') != '' "
+                                                             f"LIMIT {int(limit)}"))
+            except sqlite3.Error as exc:
+                _note_internal("learn_people", exc)
+        for key in PEOPLE_META:
+            try:
+                row = cur.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            except sqlite3.Error:
+                continue
+            if not row or not row[0]:
+                continue
+            try:
+                values.update(_bys(json.loads(row[0])))
+            except (TypeError, ValueError):
+                continue
+        self.add_people(values)
+        return len(self.names)
+
+    def add_people(self, values: Iterable[Any]) -> None:
+        """Staff names as the store keeps them ("Priya", "Priya (owner's password)", "Ines (oda)"): the words of each name
+        the way learn() takes a patient's (a word of the code's own is kept as a pair with its neighbour), never what the
+        app writes as an actor itself (actions.APP_ACTORS) nor the note in brackets after a name."""
+        from .actions import APP_ACTORS
+        stop = self.code_words() | _NAME_STOP
+        for v in values:
+            s = _PAREN.sub("", str(v or "")).strip()
+            if not s or s.lower() in APP_ACTORS or len(s) > 120:
+                continue
+            words = [w.lower().strip("'-") for w in _NAME_WORD.findall(s)]
+            for w in words:
+                if (len(w) >= 3 and w not in stop) or (len(w) == 2 and w.isalpha() and w not in _TWO_LETTER_KEEP):
+                    self.names.add(w)
+            for x, y in zip(words, words[1:]):
+                if len(x) >= 2 and len(y) >= 2 and x not in self.names and y not in self.names:
+                    self.names.add(f"{x} {y}")
+                    self._pair_heads.add(x)
 
     def add_names(self, words: Iterable[str]) -> None:
         """Words that are names, whatever else they are (a test's planted names, a bundle's `known` words)."""

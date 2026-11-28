@@ -133,9 +133,9 @@ def test_a_flood_of_1600_new_items_in_one_run_raises_a_high_alert_with_its_numbe
     assert d["files"] == {"835": 8}
     assert "added 1,600 open items" in a["title"] and "+$121,744" in a["title"]
     lines = "\n".join(d["lines"])
-    assert "40 at the run before" in lines and "1,640 after this run" in lines and "Denials: 40 to 1,640 open items" in lines
-    assert "8 remittance (835) files" in lines and "2026-11-20 10:17 UTC" in lines
-    assert d["action"] == ("Before working new items, open the Data tab and check the files read since 2026-11-20 10:17 UTC. "
+    assert "40 at the analysis before" in lines and "1,640 after this analysis" in lines and "Denials: 40 to 1,640 open items" in lines
+    assert "8 remittance (835) files" in lines and "Nov 20, 2026, 5:17 AM" in lines      # the practice's clock (New York), never UTC (ui-words)
+    assert d["action"] == ("Before working new items, open the Data tab and check the files read since Nov 20, 2026, 5:17 AM. "
                            "If one is wrong, tell the practice owner and do not work the new items yet.")
     store.close()
 
@@ -163,7 +163,7 @@ def test_a_run_that_drops_800_items_raises_it(kind, tmp_path):
     run_alerts(store.conn, today=DAY2)
     [a] = swings(store.conn, "new")
     assert a["severity"] == "high" and a["detail"]["change"]["n"] == -800 and a["detail"]["files"] == {}
-    assert "No files were read between the two runs." in a["detail"]["lines"]
+    assert "No files were read between the two analyses." in a["detail"]["lines"]
     store.close()
 
 
@@ -323,7 +323,7 @@ def test_a_release_that_changed_the_rules_gives_info_not_high(kind, tmp_path, mo
     [a] = swings(store.conn, "new")
     assert a["severity"] == "info" and a["detail"]["rules_changed"] is True
     assert "release" in a["title"]
-    assert any("The rules changed between the two runs" in x and "9.9-invented" in x for x in a["detail"]["lines"])
+    assert any("The rules changed between the two analyses" in x and "9.9-invented" in x for x in a["detail"]["lines"])
     store.close()
 
 
@@ -478,7 +478,7 @@ def test_no_file_name_and_no_patient_detail_reach_the_alert_or_the_mail(kind, tm
     monkeypatch.setattr(report, "email_report", lambda text, subject="": sent.append(subject + "\n" + text) or True)
     monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
     notify(store.conn, log=lambda *x: None)
-    assert sent and "One analysis run added 1,600 open items" in sent[0]
+    assert sent and "One analysis added 1,600 open items" in sent[0]
     for blob in (text_of(a), sent[0]):
         for word in PLANTED:
             assert word not in blob, word
@@ -506,7 +506,7 @@ def test_the_alert_mail_carries_it_and_every_later_alert_mail_leads_with_it_unti
     monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
     notify(store.conn, log=lambda *x: None)
     subject, text = sent[-1]
-    assert subject.startswith("RemitWatch alert: One analysis run added 1,600 open items")
+    assert subject.startswith("RemitWatch alert: One analysis added 1,600 open items")
     assert a["title"] in text and a["detail"]["action"] in text and "Denials: 40 to 1,640 open items" in text
     # mailed once: a later run sends nothing new...
     assert notify(store.conn, log=lambda *x: None) == {"sent": 0}
@@ -539,7 +539,7 @@ def test_a_release_swing_is_mailed_too(tmp_path, monkeypatch):
     monkeypatch.setattr(report, "email_report", lambda text, subject="": sent.append(text) or True)
     monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
     assert notify(store.conn, log=lambda *x: None)["sent"] == 1
-    assert "[INFO]" in sent[0] and "The rules changed between the two runs" in sent[0]
+    assert "[INFO]" in sent[0] and "The rules changed between the two analyses" in sent[0]
     assert swings(store.conn)[0]["notified_at"]
     store.close()
 
@@ -579,7 +579,7 @@ def test_the_server_cycle_raises_it_mails_it_and_its_dashboard_shows_it_until_ac
     write(inbox, denials(10000, 1600), "flood")
     out = cyc()
     assert out["alerts"]["by_kind"].get("SWING") == 1
-    assert any(s.startswith("RemitWatch alert: One analysis run added 1,600 open items") for s in sent)
+    assert any(s.startswith("RemitWatch alert: One analysis added 1,600 open items") for s in sent)
     monkeypatch.setattr(api_mod, "DB_PATH", db)
     monkeypatch.setattr(api_mod, "PASSWORD", "")
     tc = TestClient(api_mod.app)
@@ -614,7 +614,7 @@ def test_the_serverless_cycle_raises_it_and_the_dashboard_copy_shows_it_until_ac
     write(root / DATA, denials(10000, 1600), "flood")
     out = cyc()
     assert out["alerts"]["by_kind"].get("SWING") == 1 and "serving" in out
-    assert any(s.startswith("RemitWatch alert: One analysis run added 1,600 open items") for s in sent)
+    assert any(s.startswith("RemitWatch alert: One analysis added 1,600 open items") for s in sent)
     [a] = swings(raw_conn(state), "new")
     # the dashboard reads its copy of the store, as the serverless site does
     monkeypatch.setenv("REMITWATCH_MODE", "serverless")

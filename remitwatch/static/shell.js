@@ -3,8 +3,9 @@
 // Light or Dark) and the sidebar's width, kept on this computer; each page's title, with the count of what closes within
 // 7 days; and Search and go to (Ctrl K, or Cmd K on a Mac).
 // One global name, RWShell: the pages share one scope, and Upload and Setup have their own helpers ($, api, esc).
-// Browser storage holds only the theme and the sidebar's width (per-viewer conveniences), never a patient detail, and
-// every read and write is wrapped so the page works without it. A page title carries counts, never patient data.
+// Browser storage holds only the theme, the sidebar's width and the person's own name (per-viewer conveniences), never a
+// patient detail, and every read and write is wrapped so the page works without it. A page title carries counts, never
+// patient data.
 (function(){
   'use strict';
   const ICON = (n, cls) => `<svg class="i${cls ? ' ' + cls : ''}" aria-hidden="true"><use href="/static/icons.svg#i-${n}"/></svg>`;
@@ -71,6 +72,7 @@
       <button type="button" class="icon-btn nav-close" id="navClose" aria-label="Close the menu">${ICON('x', 'i-lg')}</button>
       ${groups}
       <div class="nav-foot">
+        <div class="person-slot" id="personSlot">${personHtml()}</div>
         <div class="theme-seg" role="group" aria-label="Theme">${seg}</div>
         <button type="button" class="icon-btn" id="railBtn" title="Narrow the sidebar ([)" aria-label="Narrow or widen the sidebar">${ICON('sidebar')}</button>
       </div>`;
@@ -95,6 +97,111 @@
     themeChanged();
   }
   function themeChanged(){ if(typeof opts.onTheme === 'function') try { opts.onTheme(themeIsDark()); } catch(e){} }
+
+  // ---------------------------------------------------------------- who is working here: the person's own name, on this computer
+  // Everyone signs in with one password, so each person picks their own name once per computer. It is kept here (the only
+  // thing kept about them) and sent with every change (api.PERSON_HEADER, URI-encoded): the item's history keeps it, the
+  // panel and Work say "Sent by <name>". The rules are actions.person_name's: letters (accents too), spaces and . ' -,
+  // starting with a letter, 2 to 40 characters, never a word the app writes as an actor itself.
+  const APP_WORDS = ['system', 'hide rule', 'packets', 'fax', 'remitwatch', 'retry', 'cli', 'anonymous', 'owner', 'a person', 'someone',
+    'the run', 'nobody'];
+  function personName(v){
+    const s = String(v == null ? '' : v).normalize('NFC').split(/\s+/).filter(Boolean).join(' ');
+    if(!s || s.length > 40 || !/^\p{L}/u.test(s) || !/^[\p{L}\p{M} .'’-]+$/u.test(s)) return '';
+    if((s.match(/\p{L}/gu) || []).length < 2 || APP_WORDS.includes(s.toLowerCase())) return '';
+    return s;
+  }
+  function person(){ return personName(store.get('rw:person')); }
+  function initials(n){ const w = String(n || '').split(/[\s-]+/).filter(Boolean); return ((w[0] || '')[0] || '') + (w.length > 1 ? (w[w.length - 1][0] || '') : ''); }
+  // the headers a change carries: the person's name when one is set on this computer (Upload and Setup's own calls too)
+  function headers(h){ const out = Object.assign({}, h || {}); const n = person(); if(n) out['X-RemitWatch-Person'] = encodeURIComponent(n); return out; }
+  // Every change a page sends carries the name: one wrapper around fetch for every page's own helper (the app's api(),
+  // Results, Upload, Setup), so a call added later carries it too. Only this site's own changes (never a GET, never
+  // another host), and never over a header the call set itself.
+  if(typeof window.fetch === 'function' && !window.fetch.rwPerson){
+    const plain = window.fetch.bind(window);
+    const withName = function(input, init){
+      try {
+        const n = person();
+        const method = String((init && init.method) || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase();
+        if(n && method !== 'GET' && method !== 'HEAD'){
+          const url = new URL(typeof input === 'string' ? input : (input && input.url) || String(input), location.href);
+          if(url.origin === location.origin){
+            const h = new Headers((init && init.headers) || (input && typeof input === 'object' && input.headers) || undefined);
+            if(!h.has('X-RemitWatch-Person')) h.set('X-RemitWatch-Person', encodeURIComponent(n));
+            init = Object.assign({}, init || {}, {headers: h});
+          }
+        }
+      } catch(e){}
+      return plain(input, init);
+    };
+    withName.rwPerson = true;
+    window.fetch = withName;
+  }
+  function setPerson(n){
+    const v = personName(n);
+    store.set('rw:person', v || null);
+    drawPerson();
+    try { document.dispatchEvent(new CustomEvent('rw:person', {detail: {name: v}})); } catch(e){}
+    return v;
+  }
+  function personHtml(){
+    const n = person();
+    if(n) return `<button type="button" class="person-me" id="personBtn" aria-haspopup="dialog" aria-expanded="false" title="You are working as ${escH(n)}. Change the name">
+        <span class="avatar" aria-hidden="true">${escH(initials(n).toUpperCase())}</span><span class="person-name">${escH(n)}</span></button>`;
+    return `<button type="button" class="person-me ask" id="personBtn" aria-haspopup="dialog" aria-expanded="false" title="Who is working here?">
+        <span class="avatar" aria-hidden="true">${ICON('people')}</span><span class="person-name">Who is working here?</span></button>`;
+  }
+  function drawPerson(){ const b = document.getElementById('personSlot'); if(!b) return; b.innerHTML = personHtml();
+    const btn = document.getElementById('personBtn'); if(btn) btn.addEventListener('click', e => { e.stopPropagation(); personCard(); }); }
+  let peopleKnown = null;
+  async function knownNames(){
+    if(peopleKnown) return peopleKnown;
+    try { const r = await fetch('/api/people?days=1', {credentials: 'same-origin', cache: 'no-store'}); peopleKnown = r.ok ? ((await r.json()).names || []) : []; }
+    catch(e){ peopleKnown = []; }
+    return peopleKnown;
+  }
+  function closePersonCard(){ const c = document.getElementById('personCard'); if(c) c.hidden = true;
+    const b = document.getElementById('personBtn'); if(b) b.setAttribute('aria-expanded', 'false'); }
+  async function personCard(){
+    let card = document.getElementById('personCard');
+    if(!card){
+      card = document.createElement('div'); card.id = 'personCard'; card.className = 'person-card'; card.hidden = true;
+      card.setAttribute('role', 'dialog'); card.setAttribute('aria-label', 'Who is working here?');
+      document.body.appendChild(card);
+      document.addEventListener('mousedown', e => { if(!card.hidden && !card.contains(e.target) && !(e.target.closest && e.target.closest('#personBtn'))) closePersonCard(); });
+      card.addEventListener('keydown', e => { if(e.key === 'Escape'){ e.stopPropagation(); closePersonCard(); const b = document.getElementById('personBtn'); if(b) b.focus(); } });
+    }
+    if(!card.hidden){ closePersonCard(); return; }
+    const n = person();
+    card.innerHTML = `<div class="person-card-head"><b>Who is working here?</b>
+        <button type="button" class="icon-btn" data-person="close" aria-label="Close">${ICON('x')}</button></div>
+      <p>Your name goes beside each change you make, so the team sees who has an item. It stays on this computer.</p>
+      <div class="person-names" id="personNames"></div>
+      <form class="person-form" id="personForm" autocomplete="off">
+        <label for="personIn">Your name</label>
+        <div class="person-row"><input id="personIn" maxlength="40" value="${escH(n)}" placeholder="First name is enough" spellcheck="false">
+          <button type="submit">Save</button></div>
+        <div class="person-err" id="personErr" role="alert"></div>
+      </form>${n ? `<button type="button" class="ghost small" data-person="clear">Someone else is working here</button>` : ''}`;
+    card.hidden = false;
+    const b = document.getElementById('personBtn'); if(b) b.setAttribute('aria-expanded', 'true');
+    const input = card.querySelector('#personIn'); input.focus(); input.select();
+    card.querySelector('[data-person="close"]').addEventListener('click', closePersonCard);
+    const clear = card.querySelector('[data-person="clear"]');
+    if(clear) clear.addEventListener('click', () => { setPerson(''); closePersonCard(); });
+    card.querySelector('#personForm').addEventListener('submit', e => { e.preventDefault();
+      const v = personName(input.value);
+      if(!v){ card.querySelector('#personErr').textContent = 'Use letters, 2 to 40 of them. Spaces, dashes and apostrophes are fine.'; input.focus(); return; }
+      setPerson(v); closePersonCard(); });
+    // the names people here already use, so one person keeps one spelling
+    const names = (await knownNames()).filter(x => personName(x) && x !== n).slice(0, 8);
+    const box = card.querySelector('#personNames');
+    if(box && names.length){
+      box.innerHTML = `<span>Pick yours</span>` + names.map(x => `<button type="button" class="chip-btn" data-name="${escH(x)}">${escH(x)}</button>`).join('');
+      box.querySelectorAll('[data-name]').forEach(x => x.addEventListener('click', () => { setPerson(x.dataset.name); closePersonCard(); }));
+    }
+  }
 
   // ---------------------------------------------------------------- the sidebar's width: the person's choice, never automatic
   function setRail(on){ if(on) document.documentElement.setAttribute('data-sidebar', 'rail'); else document.documentElement.removeAttribute('data-sidebar');
@@ -289,6 +396,7 @@
     const lb = document.getElementById('lockBtn'); if(lb) lb.style.display = 'none';      // shown while the owner's password is held (providers.js)
     const tb = document.getElementById('tabbar'); if(tb) tb.innerHTML = tabbarHtml();
     nav.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.themeSet)));
+    drawPerson();
     const rb = document.getElementById('railBtn'); if(rb) rb.addEventListener('click', toggleRail);
     const nc = document.getElementById('navClose'); if(nc) nc.addEventListener('click', () => openSheet(false));
     if(tb) tb.querySelectorAll('[data-act]').forEach(a => a.addEventListener('click', e => { e.preventDefault();
@@ -327,5 +435,6 @@
     update({brief, exports});
   }
 
-  window.RWShell = {mount, setActive, update, pill, title, palette, closePalette, setTheme, themeIsDark, live, bellMenu, names: NAMES, groups: GROUPS};
+  window.RWShell = {mount, setActive, update, pill, title, palette, closePalette, setTheme, themeIsDark, live, bellMenu, names: NAMES, groups: GROUPS,
+    person, personName, setPerson, headers, initials};
 })();

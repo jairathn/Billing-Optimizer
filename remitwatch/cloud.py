@@ -2390,6 +2390,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         requests_done: list[dict] = []         # what the Data tab's requests came to (an acceptance refused as stale is said)
         done, left, wrote = apply_actions(conn, journal, results=requests_done) if journal else ([], [], False)
         done, wrote = done + taken, wrote or bool(taken)
+        if journal:
+            # the names of the people whose changes the journal just brought in (a name new since the scrubber learned the
+            # store's, at load): masked from here on should one reach this run's log
+            runlog.SCRUB.learn_people(conn)
         if requests_done:
             out["selfcheck_requests"] = requests_done
 

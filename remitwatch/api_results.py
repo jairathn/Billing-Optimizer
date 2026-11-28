@@ -255,11 +255,11 @@ def results_settings(_: str = Depends(_user)):
 
 
 @router.put("/api/results/settings", dependencies=[Depends(_xhr)])
-def results_settings_save(body: dict = Body(default={}), user: str = Depends(_owner)):
+def results_settings_save(body: dict = Body(default={}), user: str = Depends(_owner), request: Request = None):
     if not isinstance(body, dict):
         raise HTTPException(400, "Send an object.")
     values = body.get("values")
-    who = str(body.get("name") or "").strip()[:80] or user
+    who = str(body.get("name") or "").strip()[:80] or _api().acting(request, user)
     st = _state()
     try:
         if st is not None:
@@ -302,14 +302,14 @@ def results_spot(day: Optional[str] = Query(None, max_length=10), summary: int =
 
 
 @router.post("/api/results/spot", dependencies=[Depends(_xhr)])
-def results_spot_answer(body: dict = Body(default={}), user: str = Depends(_user)):
+def results_spot_answer(body: dict = Body(default={}), user: str = Depends(_user), request: Request = None):
     if not isinstance(body, dict):
         raise HTTPException(400, "Send an object.")
     day = str(body.get("day") or "")[:10]
     fid = str(body.get("finding_id") or "")[:64]
     if not results._d(day) or not fid:
         raise HTTPException(400, "Name the day and the item.")
-    who = str(body.get("name") or "").strip()[:80] or user
+    who = str(body.get("name") or "").strip()[:80] or _api().acting(request, user)
     st = _state()
     try:
         conn = _api().db()

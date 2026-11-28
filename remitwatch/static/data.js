@@ -158,7 +158,7 @@ async function dtUnseenRows(v, page){
       <div class="small muted">${[dtDay(x.service_date), (x.codes||[]).join(', '), x.sent ? 'sent ' + dtDay(x.sent) : ''].filter(Boolean).map(esc).join(' · ')}</div><div class="small muted">${esc(x.why)}</div></div></div>`).join('') || '<div class="muted small">No claims.</div>'}</div>`
     : `<div class="scroll"><table class="small"><thead><tr><th>Claim</th>${r.names ? '<th>Member</th>' : ''}<th>Payer</th><th>Service</th><th>Codes</th><th class="num">Dollars</th><th>Sent</th><th>Why it is not listed</th></tr></thead>
     <tbody>${rows.map(x=>`<tr><td>${esc(x.claim_id)}</td>${r.names ? `<td>${esc(x.member_id||'')}</td>` : ''}<td>${esc(x.payer_group)}</td><td>${dtDay(x.service_date)}</td><td>${esc((x.codes||[]).join(', '))}</td><td class="num">${money2(x.cents)}</td><td>${dtDay(x.sent)}</td><td>${esc(x.why)}</td></tr>`).join('') || `<tr><td colspan="${r.names ? 8 : 7}" class="muted">No claims.</td></tr>`}</tbody></table></div>`;
-  el.innerHTML = `<h3 class="small" style="margin:10px 0 4px">${esc(pl(r.count, 'claim'))}, ${money(r.cents)}, most dollars first</h3>${body}
+  el.innerHTML = `<h3 class="small unseen-h">${esc(pl(r.count, 'claim'))}, ${money(r.cents)}, most dollars first</h3>${body}
     <div class="pager"><button class="dtPrev" ${page<=1?'disabled':''}>‹ prev</button><span>page ${page} of ${pages}</span><button class="dtNext" ${page>=pages?'disabled':''}>next ›</button></div>`;
   el.querySelector('.dtPrev').onclick = () => dtUnseenRows(v, page-1);
   el.querySelector('.dtNext').onclick = () => dtUnseenRows(v, page+1);

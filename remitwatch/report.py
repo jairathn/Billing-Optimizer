@@ -18,6 +18,26 @@ def money(c) -> str:
     return f"${(c or 0) / 100:,.0f}"
 
 
+# The words of the weekly summary (DESIGN 2.2 and P14, unit ui-words): a status as the pages say it, what an item is in
+# words (never its rule's code name), counts with their noun, and one date format. Every figure is the one it was.
+STATUS_WORDS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
+
+
+def say_what(signal: str | None) -> str:
+    from .insights import SIGNAL_LABELS
+    label = (SIGNAL_LABELS.get(signal or "") or ("",))[0]
+    return label or str(signal or "").replace("_", " ").lower().capitalize() or "Other"
+
+
+def say_items(n: int, one: str = "item", many: str = "items") -> str:
+    return f"{n:,} {one if n == 1 else many}"
+
+
+def say_when(d: str | None, none: str = "") -> str:
+    from .states import day
+    return day(d) if d else none
+
+
 def build_report(store: Store, run_id: str | None = None, sync_stats: dict | None = None, ingest_stats: dict | None = None,
                  detail: bool = False) -> str:
     """Summary report. The emailed version (detail=False) carries payer names, counts and dollars only; the saved file adds claim-level rows."""
@@ -46,25 +66,25 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
                 WHERE category IN ('downcoding','bundling','denial','underpayment') AND COALESCE(stale,0)=0 GROUP BY 1""")
     by = {r["status"]: r for r in prog}
     lines.append("## Scoreboard")
-    lines.append("| status | findings | dollars |")
+    lines.append("| status | items | dollars |")
     lines.append("|---|---:|---:|")
     for st in ("open", "in_progress", "appealed", "resolved", "lost", "dismissed"):
         if st in by:
-            lines.append(f"| {st} | {by[st]['n']:,} | {money(by[st]['rec'] if st == 'resolved' else by[st]['cents'])} |")
+            lines.append(f"| {STATUS_WORDS[st]} | {by[st]['n']:,} | {money(by[st]['rec'] if st == 'resolved' else by[st]['cents'])} |")
     lines.append("")
     # stale rows (worked findings the rules no longer produce, kept for their notes) are left out of every count here
     new = q("""SELECT category, signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
                WHERE first_seen = (SELECT MAX(first_seen) FROM findings WHERE COALESCE(stale,0)=0) AND COALESCE(stale,0)=0
                  AND category IN ('downcoding','bundling','denial','underpayment','fees')
                GROUP BY 1,2 ORDER BY cents DESC""")
-    lines.append("## New this run")
+    lines.append("## New since the last analysis")
     if new:
-        lines.append("| category | signal | findings | dollars |")
+        lines.append("| category | what | items | dollars |")
         lines.append("|---|---|---:|---:|")
         for r in new:
-            lines.append(f"| {r['category']} | {r['signal']} | {r['n']} | {money(r['cents'])} |")
+            lines.append(f"| {r['category']} | {say_what(r['signal'])} | {r['n']} | {money(r['cents'])} |")
     else:
-        lines.append("No new findings.")
+        lines.append("Nothing new.")
     lines.append("")
     # the practice's day (runtime.practice_today): a window is open until midnight where the practice is
     from . import runtime
@@ -94,12 +114,13 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     due = sorted([dict(r) for r in due] + list(soon.values()), key=lambda r: (r["appeal_deadline"], -(r["shortfall_cents"] or 0)))
     lines.append("## Appeals due in the next 45 days")
     if due and not detail:
-        lines.append(f"{due_n} findings are due; open the Appeals queue in the dashboard for the list.")
+        lines.append(f"{say_items(due_n, 'item is', 'items are')} due; open Work in RemitWatch for the list.")
     elif due:
-        lines.append("| deadline | payer | claim | DOS | code | signal | dollars |")
+        lines.append("| due | payer | claim | date of service | code | what | dollars |")
         lines.append("|---|---|---|---|---|---|---:|")
         for r in due:
-            lines.append(f"| {r['appeal_deadline']} | {r['payer_group']} | {r['patient_control_number']} | {r['service_date']} | {r['procedure_code'] or ''} | {r['signal']} | {money(r['shortfall_cents'])} |")
+            lines.append(f"| {say_when(r['appeal_deadline'])} | {r['payer_group']} | {r['patient_control_number']} | {say_when(r['service_date'])} | "
+                         f"{r['procedure_code'] or ''} | {say_what(r['signal'])} | {money(r['shortfall_cents'])} |")
     else:
         lines.append("Nothing due.")
     lines.append("")
@@ -118,7 +139,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
                 r["n"] += 1
     top = sorted(by_payer.values(), key=lambda r: -(r["cents"] or 0))[:10]
     lines.append("## Open, still appealable, by payer")
-    lines.append("| payer | findings | dollars |")
+    lines.append("| payer | items | dollars |")
     lines.append("|---|---:|---:|")
     for r in top:
         lines.append(f"| {r['payer_group']} | {r['n']} | {money(r['cents'])} |")
@@ -126,7 +147,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     fix = q("""SELECT signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable='correct_and_resubmit' AND appeal_deadline >= ? GROUP BY 1 ORDER BY cents DESC""", (today,))
     lines.append("## Correctable billing errors (resubmit, no appeal needed)")
     for r in fix:
-        lines.append(f"- {r['signal']}: {r['n']} lines, {money(r['cents'])}")
+        lines.append(f"- {say_what(r['signal'])}: {say_items(r['n'], 'line', 'lines')}, {money(r['cents'])}")
     lines.append("")
     lines += ema_section(store)
     info = q("SELECT title FROM findings WHERE category='info' AND COALESCE(stale,0)=0 ORDER BY signal, year")
@@ -159,15 +180,15 @@ def ema_section(store: Store) -> list[str]:
     out = ["## From EMA's reports"]
     unworked = _meta(store, "ema:unworked") or {}
     if unworked:
-        out.append(f"- Untouched work inside its window: {unworked.get('n', 0):,} items, {money(unworked.get('cents'))} "
-                   f"(EMA's postings through {unworked.get('data_through') or 'the newest data'})")
+        out.append(f"- Untouched work inside its window: {say_items(unworked.get('n', 0))}, {money(unworked.get('cents'))} "
+                   f"(EMA's postings through {say_when(unworked.get('data_through'), 'the newest data')})")
     from . import runtime
     # this week: closed since the start of the practice's day a week ago (a stored time, compared as the store writes them;
     # never SQL's datetime('now'), which is UTC and written with a space that a stored time passes all its day)
     week = q("""SELECT COUNT(*) n, COALESCE(SUM(recovered_cents),0) cents FROM findings WHERE status='resolved' AND COALESCE(stale,0)=0
                 AND auto_note IS NOT NULL AND (auto_note LIKE 'EMA shows%' OR auto_note LIKE 'Rebilled to%')
                 AND status_changed_at >= ?""", (runtime.practice_day_start(runtime.practice_today(-7)),))[0]
-    out.append(f"- Closed this week because EMA shows them paid: {week['n']:,} items, {money(week['cents'])}")
+    out.append(f"- Closed this week because EMA shows them paid: {say_items(week['n'])}, {money(week['cents'])}")
     for sig, words in (("NOT_SENT", "Claims that never left EMA"), ("REMIT_NOT_POSTED", "Payments on an 835 that EMA never posted")):
         r = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE signal=? AND COALESCE(stale,0)=0
                  AND status IN ('open','in_progress')""", (sig,))[0]
@@ -175,12 +196,12 @@ def ema_section(store: Store) -> list[str]:
     auto = q("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE ema_outcome='auto_written_off'
                 AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') AND appeal_deadline >= ?""",
              (runtime.practice_today(),))[0]           # the practice's day, never SQL's date('now') (UTC)
-    out.append(f"- Written off automatically by EMA and still appealable: {auto['n']:,} items, {money(auto['cents'])}")
+    out.append(f"- Written off automatically by EMA and still appealable: {say_items(auto['n'])}, {money(auto['cents'])}")
     acc = _meta(store, "ema:ar_accounted") or {}
     if acc.get("buckets"):
         labels = acc.get("labels") or {}
         total = acc.get("total") or {}
-        out.append(f"- The insurance A/R of {acc.get('as_of') or 'the newest pull'}: {total.get('n', 0):,} rows, {money(total.get('cents'))}"
+        out.append(f"- The insurance A/R of {say_when(acc.get('as_of'), 'the newest pull')}: {total.get('n', 0):,} rows, {money(total.get('cents'))}"
                    + ("" if acc.get("adds_up") else " (the buckets do not add up: tell the maintainer)"))
         for key, b in acc["buckets"].items():
             if b.get("n"):

@@ -1197,7 +1197,7 @@ def _known_pattern(c: sqlite3.Connection, pattern: str) -> bool:
 
 
 @router.post("/api/ema/policy", dependencies=[Depends(_xhr)])
-def policy_set(body: dict = Body(default={}), user: str = Depends(_user)):
+def policy_set(body: dict = Body(default={}), user: str = Depends(_user), request: Request = None):
     """Pursue or accept one write-off pattern. Any signed-in person may, as with the hide rules; who and when are kept
     (the name typed, beside the sign-in). Accepting takes the pattern's items off the work queue at the next run, as
     written off by the owner's policy; they stay findable, and pursue brings them back."""
@@ -1207,7 +1207,8 @@ def policy_set(body: dict = Body(default={}), user: str = Depends(_user)):
         raise HTTPException(400, "The decision is pursue or accept.")
     if not pattern or len(pattern) > 200 or pattern.count("|") != 3:
         raise HTTPException(400, "That is not a write-off pattern.")
-    name = " ".join(str(body.get("name") or "").split())[:40]
+    # the name typed on the page, else the one the person chose on this computer (api.person_of)
+    name = " ".join(str(body.get("name") or "").split())[:40] or _api().person_of(request)
     who = f"{name} ({user})" if name and name != user else user
     with _conn() as c:
         if not _known_pattern(c, pattern):
