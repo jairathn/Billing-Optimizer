@@ -44,14 +44,21 @@ payer's accepted channel, easiest first, with the fields prefilled; and say whet
   report in the store reaches; the Data tab shows none of it in dollars, the stated reason is wrong, and the archive would
   drop them silently (G2, G3). The payer routes research is done (wf_c3711a72-b66; private `$S/tk/routes/research_raw.json`,
   public facts only). The replay ran all 11 months before a container restart; its analysis is being finished.
-- Running (2026-11-28): wf_1b05bad9-f47 builds two units, each reviewed twice then fixed: `wip/gapfix`
-  (plans/briefs/2026-11-28_gapfix.md: G8 one claim one item, G3 archive holds unseen claims, G2 the unseen count in
-  dollars with reasons, G1 print batch, G4 ERA start, G5 A/R open line, G7 waiting view) and `wip/routes`
-  (plans/briefs/2026-11-28_routes.md: payer_routes.json, routes.py, the drawer's route card). wf_0ffb49e5-5fe finishes
-  the replay (private `$S/tk/replay/REPORT.md`). wf_8fa00f6b-f21 writes the design system (private `$S/tk/ui/`: AUDIT.md,
-  DESIGN.md, styleguide.html, two critiques) for the owner's ask of a premium, clean product.
-- Next: merge wip/gapfix then wip/routes into the integration worktree, four-env suites, a private real-data run, push
-  main, check /api/health on both sites; then the design pass on every page (its own unit), suites, deploy.
+- Running (2026-11-28, 08:30 UTC): wf_1b05bad9-f47 builds two units, each reviewed twice then fixed: `wip/gapfix`
+  (plans/briefs/2026-11-28_gapfix.md; G1 to G8 built, tests green, measuring) and `wip/routes`
+  (plans/briefs/2026-11-28_routes.md; payer_routes.json with 189 routes, routes.py, the drawer's route card, suites
+  running). wf_0ffb49e5-5fe finished the replay's analysis (private `$S/tk/replay/`, its report is in the workflow's
+  journal) and checks three suspect classes; two are confirmed code bugs so far (one claim keyed two ways, fixed by
+  gapfix G8; safe mode's posted_money check falls falsely when a payer alias is learned). wf_24badb46-8b5 checks the ten
+  suspect classes the first pass did not reach (proposed failing tests in `$S/tk/replay/proposed_tests/`).
+  wf_922f5636-97c builds unit `wip/ui-a` (plans/briefs/2026-11-28_ui.md: the stylesheet, the app shell, Today, the brand;
+  designer and biller reviews, then a fix round). The design system and both critiques are private in `$S/tk/ui/`.
+- Vercel's /api/health answers (commit 330f4b5 at 08:07 UTC). The server's address is not in this session's notes; find
+  it before the release check (never write it into the repository).
+- Next: merge wip/gapfix then wip/routes into the integration worktree; a unit `replay-fix` for the replay's confirmed
+  code bugs (failing tests first); merge wip/ui-a; four-env suites, a private real-data run, push main, check both sites;
+  then the UI units ui-work, ui-panel, ui-pages, ui-words, ui-signin (brief section "The units after ui-a"), suites,
+  deploy.
 
 ### Before that (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
 
