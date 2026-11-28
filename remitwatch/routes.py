@@ -274,7 +274,8 @@ FIELD_RULES: list[tuple[str, str, tuple[str, ...]]] = [
      r"claim dispute comments|every asterisked|every field marked|open the pended|urgent care box|show me|claim search|"
      r"select the patient|optional: an excel|create a reconsideration|act on)", "step", ()),
     # selections and the patient's own contact details a person fills (the store has none of them)
-    (r"^action\b|^fee schedule change|^lines:|^bank information|beneficiary phone|member address|beneficiary state|"
+    (r"^type:", "set", ()),
+    (r"^action\b|^type\b|^fee schedule change|^lines:|^bank information|beneficiary phone|member address|beneficiary state|"
      r"state of residence|relationship of the subscriber", "field", ()),
     # claim settings the label states (a replacement claim's frequency code, the payer's id)
     (r"clm05|frequency|resubmission code|type of bill|box 22.*code 7|box 22: code 7|item 22 resubmission", "field", ("frequency_code",)),
