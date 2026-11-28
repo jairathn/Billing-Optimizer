@@ -41,6 +41,8 @@ TABLE_PATH = Path(__file__).with_name("payer_routes.json")
 FALLBACK = "No checked route for this payer yet. Use its provider portal, then note what worked."
 # the routes whose work goes to no payer: they get no card (states.route_of)
 NO_CARD = frozenset({"post", "bill_patient", "bill_secondary", "contract", "policy", "fees", "decide", "wait", "nothing", "status"})
+# claims that never reached the payer (rejected before it, or never sent): no payer route, a new claim from EMA
+NEVER_REACHED = frozenset({"REJECTED_PRE_PAYER", "NOT_SENT"})
 # a first-filing limit this close (or past) puts the timely filing proof beside a claim status request
 NEAR_FILING_DAYS = 30
 SETTINGS = ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI", "PRACTICE_PTAN", "PRACTICE_PHONE",
@@ -172,6 +174,10 @@ def request_for(conn: sqlite3.Connection | None, f: dict, st: dict, nx: dict, to
     no payer."""
     route = nx.get("route") or st.get("route") or ""
     if not route or route in NO_CARD:
+        return None, "", None
+    if f.get("signal") in NEVER_REACHED:
+        # the claim never reached the payer: it is fixed and sent again from EMA as a new claim, and the payer's own
+        # corrected-claim route (a replacement of a claim it has, frequency 7 with its claim number) does not apply
         return None, "", None
     medicare = f.get("payer_kind") == "medicare"
     carcs = _carcs(conn, f)
@@ -481,10 +487,60 @@ def _one(conn: sqlite3.Connection, sql: str, args: tuple) -> dict:
 
 
 def _strip_lead(action: str) -> str:
-    """The next step's sentence without the deadline words put in front of it (story._next): the reason itself."""
+    """The next step's argument, the reason itself: without the deadline words put in front of it (story._next), its
+    'Appeal to <payer>:' head, and the how-to-file sentence the card says in its own words."""
     s = re.sub(r"^(?:Only \d+ days? left \(by [^)]*\): do it today\. |Today is the last day \([^)]*\): do it today\. |"
                r"The safe date passed on [^:]*: (?:send it|act) now\. )", "", str(action or "")).strip()
+    s = re.sub(r"^(?:Appeal to|Dispute it with) [^:]{1,80}: ", "", s)
+    s = s.replace(" Medicare contractors take no faxed redeterminations: file it on the contractor's portal or by mail.", "")
     return s[:1000]
+
+
+def _ema_person(conn: sqlite3.Connection, claim_id: str | None) -> dict:
+    """Who a claim no payer has answered is about, from EMA's rows (as the item's panel says it, api._ema_people): the member
+    ID EMA holds for the claim (the policy number on its newest row) and the patient's name from a remittance for another
+    claim of the same EMA patient. {} where the copy has none."""
+    if not claim_id or conn is None:
+        return {}
+    try:
+        rows = conn.execute("SELECT policy_number, patient_id FROM ema_rows WHERE claim_id=? ORDER BY "
+                            "COALESCE(transaction_date, posted_date, service_date, ''), row_index", (str(claim_id),)).fetchall()
+    except sqlite3.Error:
+        return {}
+    member, pid = "", ""
+    for pol, p in rows:
+        member = (pol or "").strip() or member
+        pid = (p or "").strip() or pid
+    out = {"patient_id": member, "patient_id_qual": "MI"} if member else {}
+    if pid:
+        try:
+            n = conn.execute("SELECT c.patient_last, c.patient_first FROM ema_rows e JOIN claims c ON c.patient_control_number = e.claim_id "
+                             "WHERE e.patient_id=? AND COALESCE(c.patient_last,'') != '' ORDER BY c.payment_date DESC LIMIT 1", (pid,)).fetchone()
+        except sqlite3.Error:
+            n = None
+        if n:
+            out.update(patient_last=n[0], patient_first=n[1])
+    return out
+
+
+def _ema_facts(conn: sqlite3.Connection, claim_id: str | None, code: str | None) -> dict[str, str]:
+    """What EMA's rows hold on the claim's line that no remittance carries: its diagnosis codes, the authorization number
+    and the plan's group number (no patient identifier). {} where the copy has none."""
+    if not claim_id or conn is None:
+        return {}
+    try:
+        rows = conn.execute("SELECT icd10, auth_number, group_number, cpt FROM ema_rows WHERE claim_id=? ORDER BY row_index",
+                            (str(claim_id),)).fetchall()
+    except sqlite3.Error:
+        return {}
+    mine = [r for r in rows if not code or str(r[3] or "") == str(code)] or rows
+    dx = []
+    for r in mine:
+        for x in re.split(r"[,;\s]+", str(r[0] or "")):
+            if x and x not in dx:
+                dx.append(x)
+    first = lambda i: next((str(r[i]).strip() for r in mine if str(r[i] or "").strip()), "")      # noqa: E731
+    return {"diagnosis": ", ".join(dx[:12]), "authorization": first(1), "group_number": first(2)}
 
 
 def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict, group: str | None, show_names: bool,
@@ -494,6 +550,8 @@ def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict,
     nothing."""
     v: dict[str, str] = {k: "" for k in HINTS}
     if show_names:
+        if not claim:
+            claim = _ema_person(conn, f.get("patient_control_number"))       # a claim no payer answered: EMA's rows say who
         last, first = str(claim.get("patient_last") or "").strip(), str(claim.get("patient_first") or "").strip()
         v["patient_name"] = ", ".join(x for x in (last, first) if x)
         v["patient_last"], v["patient_first"] = last, first
@@ -534,6 +592,10 @@ def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict,
         "reason": _strip_lead(nx.get("action") or ""),
     })
     v["group_number"] = str(claim.get("group_number") or "")
+    ema = _ema_facts(conn, f.get("patient_control_number"), f.get("procedure_code"))
+    v["diagnosis"] = ema.get("diagnosis", "")
+    v["authorization"] = v["authorization"] or ema.get("authorization", "")
+    v["group_number"] = v["group_number"] or ema.get("group_number", "")
     if (nx.get("route") or "") == "refund":
         v["refund_reason"] = v["reason"]
         credit = int((st or {}).get("credit_cents") or 0)
@@ -557,7 +619,7 @@ def fill(fields: list[str], vals: dict[str, str]) -> tuple[list[dict], list[str]
             continue
         got = [vals.get(k, "") for k in keys]
         value = " · ".join(x for x in got if x)
-        missing = [HINTS.get(k, "fill it in") for k, x in zip(keys, got) if not x] if keys else ["fill it in"]
+        missing = [HINTS.get(k, "fill it in") for k, x in zip(keys, got) if not x] if keys else ["by hand"]
         out.append({"label": label, "value": value, "keys": list(keys), "fill": "; ".join(missing) if missing else "",
                     "names": bool(set(keys) & NAME_KEYS)})
     return out, steps

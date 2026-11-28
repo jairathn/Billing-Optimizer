@@ -312,6 +312,17 @@ def test_work_that_goes_to_no_payer_gets_no_card(store, route):
     assert routes.card(store.conn, "F1", explain=ex, today=TODAY) is None
 
 
+@pytest.mark.parametrize("signal", sorted(routes.NEVER_REACHED))
+def test_a_claim_that_never_reached_the_payer_gets_no_payer_route(store, signal):
+    # rejected before the payer, or never sent: fixed and sent again from EMA as a new claim, never as the payer's
+    # replacement claim (frequency 7 with a claim number the payer does not have)
+    world(store, payer="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial", signal=signal,
+          actionable="correct_and_resubmit")
+    ex = story.explain(store.conn, "F1", today=TODAY)
+    ex["next_step"] = dict(ex["next_step"], route="corrected")
+    assert routes.card(store.conn, "F1", explain=ex, today=TODAY) is None
+
+
 def test_a_refund_is_the_overpayment_route(store):
     world(store, payer="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial")
     ex = story.explain(store.conn, "F1", today=TODAY)
@@ -403,6 +414,44 @@ def test_the_fields_come_from_the_store_and_the_settings_never_invented(store, m
     assert m["Provider Name"]["value"] == "Invented Skin Clinic" and m["Last 5 digits of Tax ID Number"]["value"] == "00000"
     # a value the store has not: shown empty with what to fill
     assert m["Contact"]["value"] == "" and m["Contact"]["fill"] == "your name"
+
+
+def _ema_row(store, **kw):
+    r = {"row_fingerprint": "RF-1", "family": "charge_lines", "row_index": 1, "claim_id": F.claim_id(1), "cpt": "99213",
+         "patient_id": "EMA-PAT-TEST-9", "policy_number": "POLICY-TEST-7", "icd10": "L57.0, L82.1", "auth_number": "AUTH-TEST-3",
+         "group_number": "GRP-TEST-2", "service_date": "2026-03-02"}
+    r.update(kw)
+    store.conn.execute(f"INSERT INTO ema_rows ({', '.join(r)}) VALUES ({', '.join('?' * len(r))})", list(r.values()))
+    store.conn.commit()
+
+
+def test_a_claim_no_payer_answered_takes_its_patient_from_emas_rows_with_names_on_only(store):
+    item(store, payer_name="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial", signal="NO_ANSWER",
+         category="no_answer", carc=None, actionable="follow_up", appeal_deadline="2026-12-20", line_key=None, claim_key=None)
+    _ema_row(store)
+    # the same EMA patient's remittance for another claim spells the name
+    remit(store, trace="T9", paid_on="2026-02-10", payer="UNITEDHEALTHCARE",
+          claims=[{"pcn": "OTHER-CLAIM-TEST", "lines": [ln("99212", 90, 60, lcn="1")]}])
+    _ema_row(store, row_fingerprint="RF-2", claim_id="OTHER-CLAIM-TEST", cpt="99212", policy_number="")
+    on, _ = card(store, names=True)
+    text = every_text(on)
+    assert "POLICY-TEST-7" in text and NAME in text
+    off, _ = card(store, names=False)
+    text = every_text(off)
+    assert "POLICY-TEST-7" not in text and NAME not in text and "EMA-PAT-TEST-9" not in text
+
+
+def test_emas_diagnosis_and_authorization_fill_what_no_remittance_carries(store):
+    world(store, payer="KY MEDICARE PART B", payer_group="Medicare KY (CGS J15)", payer_kind="medicare", cfi="MB", reason=("CO", "4"),
+          signal="DENIED_MISSING_MODIFIER", actionable="correct_and_resubmit",
+          deadline_basis="a reopening of the clerical error within 1 year of the remittance")
+    _ema_row(store)
+    c, _ = card(store)
+    mail = next(o for o in c["others"] if o["channel"] == "phone")
+    assert any(x["value"] == "" for x in mail["fields"])
+    vals = routes.values(store.conn, dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone()), {}, {},
+                         {}, "Medicare KY (CGS J15)", False, TODAY)
+    assert vals["diagnosis"] == "L57.0, L82.1" and vals["authorization"] == "AUTH-TEST-3" and vals["group_number"] == "GRP-TEST-2"
 
 
 def test_with_names_off_no_name_or_member_number_is_in_any_field_or_in_copy_all(store):
