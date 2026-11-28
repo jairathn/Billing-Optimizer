@@ -35,9 +35,11 @@ function dtCopy(text, btn){
 // the page's one line under its title: how far the remittances reach, how many, and when the site last analysed them
 function dtHeadLine(m){
   const r = (m && m.remits) || {}, run = ((m && m.runs) || [])[0] || {};
-  const day = d => { const x = new Date(String(d || '').slice(0, 10) + 'T12:00:00'); return isNaN(x) ? '' : x.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'}); };
+  const day = d => { const x = new Date(String(d || '').slice(0, 10) + 'T12:00:00'); return isNaN(x) ? '' : x.toLocaleDateString('en-US', x.getFullYear() === new Date().getFullYear() ? {month: 'short', day: 'numeric'} : {month: 'short', day: 'numeric', year: 'numeric'}); };      // "Dec 15", or "Dec 15, 2027" in another year
   const at = run.finished_at || run.finished || run.at || '';
-  const when = !at ? '' : (typeof practiceTime === 'function' ? practiceTime(at) : String(at).replace('T', ' ').slice(0, 16));      // the practice's time zone
+  // in the practice's time zone (the brief's), "Nov 28, 7:54 AM": never an ISO date on a biller's page
+  const tz = (typeof state !== 'undefined' && state.brief && state.brief.tz) || undefined, t = new Date(at);
+  let when = ''; if(at && !isNaN(t)){ try { when = t.toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz}); } catch(e){ when = t.toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}); } }
   return [r.last_payment ? 'Newest payment ' + day(r.last_payment) : '', r.n ? Number(r.n).toLocaleString('en-US') + (r.n === 1 ? ' remittance' : ' remittances') : '', when ? 'last analysis ' + when : ''].filter(Boolean).join(' · ');
 }
 async function dataTab(v){

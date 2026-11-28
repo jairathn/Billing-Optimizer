@@ -20,7 +20,13 @@ one conflict, index.html's head, keeps ui-a's head; the route card's styles move
    font, ink and grid from the tokens, a theme change draws every chart again; straight lines; "Jan 2026", "Feb"
    month labels; no rotated labels; each canvas says its datasets in an aria-label.
 
+4. Faxes, Data, Upload, Setup (commit "ui-pages Faxes, Data, Upload, Setup"): sections; one filled button (Faxes'
+   follow-up Send; Upload's most overdue export); Faxes in DESIGN P8's order with no setting names on the page; Data
+   with a title and the header's old counts in one line; Overview's second recovered figure renamed "Paid on a later
+   remittance" (brief rule 3); Providers' context gray from the token; docs/DESIGN.md components.
+5. Tests: tests/test_ui_pages.py (new), the bell in tests/test_shell.py's browser run (tests/shell_page.js).
+
 ## Next
 
-Faxes, Data, Upload and Setup content as sections (change 13) with one filled button each; the owner's pages at the
-four sizes in both themes; tests; checks; final merge.
+The checks at the four sizes in both themes on every page this unit owns; the touched tests in python3 and 3.11.1;
+the full suite once in python3; both node checks; final merge and push.

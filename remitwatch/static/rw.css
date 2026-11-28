@@ -1587,6 +1587,8 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 
 /* Results: the week first (the manager's Summary), then the scoreboard, the money back with its chart, the rest */
 .rs-page .page-head { margin-bottom: var(--sp-5); }
+/* the one line under a title sits under it (section 6's 80ch cap kept it on the title's row, pushed right) */
+.secs > .page-head > .small.muted { max-width: none; }
 .rs-asof { font-size: var(--fs-xs); }
 .rs-sum { margin: 0 0 var(--sp-8); }
 .rs-figs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
