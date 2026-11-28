@@ -67,6 +67,13 @@ The unit: Work (DESIGN P2 and P11), CRITIQUE_premium changes 3 and 10, CRITIQUE_
   sorted by money, adding up to the count line; the owner's pattern comes last on the Worklist and is counted.
 - Broken on purpose (`_last_day` returning the target date; no owner order): both new tests fail; restored.
 - Inline style= count 274 (tests/test_style.py STYLE_ATTRS_MAX lowered from 275).
+- Also moved: tests/review_assets/page_check.js (the Fees view's segments) and tests/feed_page.js (waits for .wk-segs).
+- Full suite in python3 (3.13, SQLite 3.53), two shards, on the merged tip fa0aafa: 4673 passed, 29 skipped, 1 xfailed,
+  2 errors (test_review_rates P4 and P5: page_check.js clicked the old Fees tiles); after moving page_check.js the file
+  passes, 25 of 25.
+- The touched files' tests in Python 3.11.1 with SQLite 3.40.0 (20 files): 758 passed; 25 failed and 3 errors, every one
+  "Connection has no attribute serialize/deserialize" (that build has no store-image calls; CLAUDE.md allows these).
+- Node checks: calc_model_check and lab_review_check, 222 checks true, none false.
 
 ## Numbers measured (plans/tools/ui/checks.js --panel, demo store, light and dark)
 
