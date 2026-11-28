@@ -247,3 +247,60 @@ def test_every_payer_that_sends_no_era_is_on_the_data_tab_with_its_dollars(tmp_p
     assert len(more) == 1 and more[0]["title"] == "2 more payers send no ERA: 20 claims, $2,000.00 billed", [h["title"] for h in more]
     assert more[0]["unchecked"] == 20 and more[0]["unchecked_cents"] == 200000, more[0]
     s.close()
+
+
+# --------------------------------------------------------------------------------------- G4: when a payer's ERAs begin or end
+@pytest.mark.parametrize("kind", KINDS)
+def test_claims_sent_before_a_payer_starts_sending_eras_are_not_listed_once_it_does(tmp_path, kind):
+    """The VA's community care network (payer id VACCN) sent no ERA for the twelve claims sent January 14 (services January
+    12): its answers reach the practice outside the 835 feed. In August the practice enrolled for its ERAs: the twenty claims
+    sent August 12 are each answered by an 835 (September 15). The January claims were sent while no ERA could come for
+    them: nothing shows they went unanswered, so they are counted with the claims no source can check (the Data tab's line
+    for the payer, and the unseen count), not listed as never answered.
+    Before: whether a payer sends ERAs was decided once per payer id over every claim ever sent (detect.NO_ERA_MIN_CLAIMS,
+    NO_ERA_MAX_SHARE); once more than 5% of its claims got an 835 the January claims were judged by the 835s and listed.
+    On the real data, the VA's ERA enrollment would do this to the 1,236 VA claims of 2023 and 2024 counted unseen today
+    (about 97.5% of the VA claims EMA can check are paid), unless EMA's 2024 reports are loaded first."""
+    from tests.test_837_sends import VA, _chased, _remits, _visits, answer
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    jan = [f"CB0000J{i:02d}C017" for i in range(12)]
+    aug = [f"CB0000A{i:02d}C017" for i in range(20)]
+    send(s, tmp_path, [clm837(c, [("99214", "100.00", "20260112")], payer=VA, member=f"J{i:08d}") for i, c in enumerate(jan)], "20260114")
+    send(s, tmp_path, [clm837(c, [("99214", "100.00", "20260810")], payer=VA, member=f"A{i:08d}") for i, c in enumerate(aug)], "20260812")
+    _remits(s, tmp_path, [answer(c, "1", "80.00", dos="20260810", code="99214", charge="100.00") for c in aug], "20260915",
+            payer="OPTUM VA CCN TEST", payer_id="VACCN")
+    found = _chased(s, "t1", today="2026-11-12")
+    assert not set(jan) & set(found), (
+        f"{len(set(jan) & set(found))} claims sent before the payer's ERAs began are listed as never answered")
+    assert not set(aug) & set(found), "the August claims are answered by their 835s"
+    no_era = json.loads((s.conn.execute("SELECT value FROM meta WHERE key='feed:no_era_837'").fetchone() or ["[]"])[0])
+    va = [p for p in no_era if p.get("payer_id") == "VACCN"]
+    assert len(va) == 1 and va[0]["unchecked"] == 12 and va[0]["unchecked_cents"] == 120000, no_era
+    assert sorted(r[0] for r in _unseen(s).get("claims") or []) == sorted(jan), "the January claims are counted unseen, by name"
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_claims_sent_after_a_payer_stops_sending_eras_are_counted_not_listed(tmp_path, kind):
+    """The mirror case. The VA's network answered the twelve claims sent January 14 with 835s (February 15); then its ERAs
+    stopped: the twenty claims sent August 12 got none, though they are due and the remittances on file reach November 10.
+    Nothing on file can say whether the VA answered them outside the 835 feed: they are counted with the claims no source can
+    check, not listed as never answered. Before: 12 of the 32 claims ever sent got an 835 (over 5%), so the payer was judged
+    to send ERAs and the twenty August claims were listed as never answered."""
+    from tests.test_837_sends import VA, _chased, _remits, _visits, answer
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    jan = [f"CB0000J{i:02d}C017" for i in range(12)]
+    aug = [f"CB0000A{i:02d}C017" for i in range(20)]
+    send(s, tmp_path, [clm837(c, [("99214", "100.00", "20260112")], payer=VA, member=f"J{i:08d}") for i, c in enumerate(jan)], "20260114")
+    _remits(s, tmp_path, [answer(c, "1", "80.00", dos="20260112", code="99214", charge="100.00") for c in jan], "20260215",
+            payer="OPTUM VA CCN TEST", payer_id="VACCN")
+    send(s, tmp_path, [clm837(c, [("99214", "100.00", "20260810")], payer=VA, member=f"A{i:08d}") for i, c in enumerate(aug)], "20260812")
+    found = _chased(s, "t1", today="2026-11-12")
+    assert not set(aug) & set(found), f"{len(set(aug) & set(found))} claims sent after the payer's ERAs stopped are listed"
+    no_era = json.loads((s.conn.execute("SELECT value FROM meta WHERE key='feed:no_era_837'").fetchone() or ["[]"])[0])
+    va = [p for p in no_era if p.get("payer_id") == "VACCN"]
+    assert len(va) == 1 and va[0]["unchecked"] == 20, no_era
+    assert sorted(r[0] for r in _unseen(s).get("claims") or []) == sorted(aug)
+    s.close()

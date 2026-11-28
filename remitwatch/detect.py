@@ -86,6 +86,7 @@ import os
 import re
 import sqlite3
 from array import array
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
@@ -218,6 +219,10 @@ COMPONENTS = ("26", "TC")                      # the parts of a service a line c
 # only source of its answers: its claims are judged by them, and counted on the Data tab when they cannot show it.
 NO_ERA_MIN_CLAIMS = 10
 NO_ERA_MAX_SHARE = 0.05
+# ... judged for each claim on the claims sent under the same payer id in the 90 days before and after its own send (180 days
+# around it): never over every claim the payer was ever sent, so an ERA enrollment that starts or stops moves only the claims
+# sent around then (gapfix G4)
+NO_ERA_WINDOW_DAYS = 90
 # [{"payer", "payer_id", "claims", "billed_cents", "since", "listed", "answered_in_ema", "unchecked", and each of the last three's
 # "_cents"}]: the claims due that the 837 pass judged for each such payer, its earliest send, and how many it listed, EMA showed
 # answered, or nothing could check, with their billed dollars
@@ -7778,12 +7783,36 @@ class Detector:
                     GROUP BY 1, 2, 3"""):
             id_votes[pid][payer_group_kind(pname, cfi)] += n
         due_by = _add_days(newest, -(NO_ANSWER_DAYS + 15)) or ""
-        no_era_ids: set[str] = set()
-        for pid, n, got in c.execute("""SELECT payer_id, COUNT(*), SUM(EXISTS (SELECT 1 FROM claims cl WHERE cl.patient_control_number = x.pcn))
-                                        FROM (SELECT patient_control_number AS pcn, MAX(payer_id) AS payer_id FROM claims_837
-                                              WHERE bht_created <= ? GROUP BY patient_control_number) x GROUP BY payer_id""", (due_by,)):
-            if pid and n >= NO_ERA_MIN_CLAIMS and (got or 0) <= NO_ERA_MAX_SHARE * n:
-                no_era_ids.add(pid)
+        # whether a claim's payer sends ERAs, judged by the claims sent under its payer id in the NO_ERA_WINDOW_DAYS before and
+        # after the claim's own send (gapfix G4), never over every claim the payer was ever sent: a payer that starts sending
+        # ERAs (the VA's network, once the practice enrolls) does not turn the claims sent before into never-answered work
+        # (nothing ever could answer them through the 835 feed), and one that stops does not leave the claims sent after it
+        # stopped to be listed as never answered. Each claim id once (its newest send due by now), with whether any 835 answers it
+        era_days: dict[str, list[str]] = defaultdict(list)
+        era_got: dict[str, list[int]] = defaultdict(list)
+        for pid, day, got in sorted(c.execute(
+                """SELECT x.payer_id, x.day, EXISTS (SELECT 1 FROM claims cl WHERE cl.patient_control_number = x.pcn)
+                   FROM (SELECT patient_control_number AS pcn, MAX(payer_id) AS payer_id, MAX(SUBSTR(bht_created, 1, 10)) AS day
+                         FROM claims_837 WHERE bht_created <= ? GROUP BY patient_control_number) x
+                   WHERE x.payer_id IS NOT NULL AND x.day IS NOT NULL""", (due_by,)), key=lambda t: (t[0], t[1])):
+            era_days[pid].append(day)
+            era_got[pid].append((era_got[pid][-1] if era_got[pid] else 0) + (1 if got else 0))     # answered, running total
+        no_era_cache: dict[tuple, bool] = {}
+
+        def no_era_at(pid: str | None, day: str | None) -> bool:
+            """Whether the claims sent under this payer id around `day` show it sends no ERA: at least NO_ERA_MIN_CLAIMS of
+            them due, and at most NO_ERA_MAX_SHARE answered by any 835."""
+            if not pid or not day or pid not in era_days:
+                return False
+            key = (pid, day)
+            if key not in no_era_cache:
+                days, got = era_days[pid], era_got[pid]
+                i = bisect_left(days, _add_days(day, -NO_ERA_WINDOW_DAYS) or day)
+                j = bisect_right(days, _add_days(day, NO_ERA_WINDOW_DAYS) or day)
+                n = j - i
+                answered = (got[j - 1] - (got[i - 1] if i else 0)) if n else 0
+                no_era_cache[key] = n >= NO_ERA_MIN_CLAIMS and answered <= NO_ERA_MAX_SHARE * n
+            return no_era_cache[key]
         # the same member's other claims to the same payer, answered as primary, name the payer group (its product)
         members = sorted({(r[4], r[8]) for r in cand.values() if r[4] and r[8]})
         sub_votes: dict[tuple, Counter] = defaultdict(Counter)
@@ -7972,7 +8001,8 @@ class Detector:
             billed = sum(x[2] or 0 for x in items)
             pid = (r[4] or "").strip()
             last = None
-            if pid in no_era_ids:
+            ne_claim = no_era_at(r[4], r[0])
+            if ne_claim:
                 # its 837 claims never get an ERA: EMA's postings are the only source of its answers. Counted for the Data
                 # tab; without EMA's reports nothing can show the answer, so it is not listed (never as paid either)
                 ne = no_era.setdefault(pid, {"payer": grp, "payer_id": pid, "claims": 0, "billed_cents": 0, "since": sent,
@@ -8025,7 +8055,7 @@ class Detector:
                         "group": (grp, kind), "grp": grp, "kind": kind, "through": through, "payer_last": last, "secondary": sec,
                         "s837": r, "batched": False, "resent_837": bool(again), "bill_answered": again[1] if again else None,
                         "added_after_answer": bool(again), "id_signal": OPEN_837_ID,
-                        "source": "837", "no_era": pid if pid in no_era_ids else None, "cob": cb, "who": who.get(pcn),
+                        "source": "837", "no_era": pid if ne_claim else None, "cob": cb, "who": who.get(pcn),
                         # EMA's claims are found under the group EMA gives the 837's payer (_ema_group)
                         "match_group": self._ema_group(r[5]),
                         # the older bills of the visit this one carries (each with the payer it went to when not this
