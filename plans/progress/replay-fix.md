@@ -29,13 +29,15 @@ integration tip ed245a1 (handoff only) first.
 - rf-r1-3 (low, predates the branch), verified. Accepting posted money moves the cell's mark, but the accepted baseline
   kept the old cents, so a later loss in that cell up to that amount was not new and did not hold the run. Fixed in
   `_baseline`: an accepted posted_money key compares with 0; the accepted cents stay in selfcheck_baseline on record.
+  And `offenders()` (the Data tab's list behind the check) no longer calls such a new fall accepted: an accepted
+  posted_money key counts as accepted only when a person accepted what the run shown found.
 - docs/TROUBLESHOOTING.md (posted_money paragraph) says all three.
 
 Tests (tests/test_replay_selfcheck.py, invented data, file, compact and image stores): 18 failing tests first (commit
 382b77d, red), then the fix (995abe7); then the reviewer's other posted and held cases ported as regression tests
 (124 tests in the file). Break and restore (`$S/tk/units/replay-fix/break_restore.py`, output `break_restore.txt`):
 groups recorded once -> 8 fail; the whole-name rule -> 6; signed money -> 2; every month of a name -> 3; the kept
-shortfall -> 3; the accepted baseline -> 3; the moved dollars -> 6; restored exactly (`git diff` equal to the saved
+shortfall -> 3; the accepted baseline -> 3; the accepted label -> 3; the moved dollars -> 6; restored exactly (`git diff` equal to the saved
 diff). The reviewer's own files against this tree: 72 passed.
 
 Real data, read only, in memory (`$S/tk/units/replay-fix/repro_posted_r1.py`, outputs `repro_posted_r1_before.txt` on
@@ -43,11 +45,11 @@ Real data, read only, in memory (`$S/tk/units/replay-fix/repro_posted_r1.py`, ou
 record and the alias learned before the first check: before ok with {slices 93}; after ok, 93 month cells and
 $477,532.67 shown as moved, groups recorded (259 names), the next check ok. (E) the same with the planted $66,412.17
 loss: both catch exactly $66,412.17, but before the groups stayed unrecorded (0 names) while it was open; after, 259
-recorded. (F) the same with a planted offset (a Medicaid KY name loses $106.06 + $505.75 in service 2026-05, posted
-2026-06, and a Humana Medicare Advantage name that held $87,219.62 there gains the same): before ok, nothing caught;
-after fail and held, $32,141.11 in 4 cells: the $611.81 and $31,529.30 of the moved name's money in that same month
-(a month that lost money keeps its marks; the documented leftover below). With the groups recorded the same offset is
-exactly $611.81.
+recorded. (F) the same with a planted offset in one recent month (a Medicaid KY name loses its postings of that
+month, $611.81, and a Humana Medicare Advantage name that already held far more there gains the same): before ok,
+nothing caught; after fail and held, $32,141.11 in 4 cells: the $611.81 and $31,529.30 of the moved name's money in
+that same month (a month that lost money keeps its marks; the documented leftover below). With the groups recorded the
+same offset is exactly $611.81.
 
 ## The two bugs and the fixes (remitwatch/selfcheck.py)
 
