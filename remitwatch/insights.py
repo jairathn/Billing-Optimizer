@@ -680,12 +680,26 @@ def _waiting_837(conn: sqlite3.Connection) -> list[dict]:
                     key=lambda gv: (-int(gv[1].get("billed_cents") or 0), gv[0]))
     by = "; ".join(f"{g}: {int(v.get('n') or 0)} (${int(v.get('billed_cents') or 0) / 100:,.2f}, the first due {v.get('first_due')})"
                    for g, v in groups[:5]) + ("; and more" if len(groups) > 5 else "")
+    # the claims past the named list (WAITING_LIST_MAX) are counted with their dollars (gapfix G7), and what EMA's reports
+    # say of some waiting claims (a report check left them to their pass, or they never left EMA's print batch)
+    un = w.get("unnamed") if isinstance(w.get("unnamed"), dict) else {}
+    named = len(w.get("claims") or [])
+    more = (f" The list names the first {named:,} by due day; {int(un.get('n') or 0):,} more "
+            f"(${int(un.get('billed_cents') or 0) / 100:,.2f}, due from {un.get('first_due')} to {un.get('last_due')}) are counted "
+            "here, not named.") if un.get("n") else ""
+    reps = w.get("ema_reports") if isinstance(w.get("ema_reports"), dict) else {}
+    said = {"rejected": "EMA's reports call rejected", "no_answer": "Production shows no answer to yet",
+            "not_sent": "EMA's reports call never sent", "print_batch": "never left EMA's print batch and are not late yet"}
+    rep = "; ".join(f"{int(v.get('n') or 0):,} (${int(v.get('billed_cents') or 0) / 100:,.2f}) {said.get(k, k)}"
+                    for k, v in sorted(reps.items()) if isinstance(v, dict) and v.get("n"))
     return [{"key": "waiting_837", "ok": True, "n": n, "cents": cents, "first_due": w.get("first_due"), "last_due": w.get("last_due"),
-             "by_group": dict(groups), "by_due_week": w.get("by_due_week") or {},
+             "by_group": dict(groups), "by_due_week": w.get("by_due_week") or {}, "unnamed": un or None, "ema_reports": reps or None,
              "title": f"{n} {'claim' if n == 1 else 'claims'} sent {'is' if n == 1 else 'are'} waiting for the payer's answer "
                       f"(${cents / 100:,.2f} billed)",
              "detail": (f"{'It is' if n == 1 else 'They are'} not on any list until {'it comes' if n == 1 else 'they come'} due, "
-                        f"from {w.get('first_due')} to {w.get('last_due')}" + (f". By payer: {by}" if by else "") + "."),
+                        f"from {w.get('first_due')} to {w.get('last_due')}" + (f". By payer: {by}" if by else "") + "."
+                        + (f" Of these, {rep}: each waits for its own due day here, listed once if still unanswered then." if rep else "")
+                        + more),
              "who": "Nobody yet: a claim still unanswered on its due day is listed under Chase the payer that day."}]
 
 
@@ -709,23 +723,123 @@ def _unanswered_weeks_item(conn: sqlite3.Connection) -> list[dict]:
                     "payers never received."}]
 
 
+# why a never-answered claim is counted, not listed (detect.UNSEEN_REASONS), in the words the pages use
+UNSEEN_WORDS = {
+    "no_ema_reports": "no EMA report is in the store yet, so nothing can show the payer's answer",
+    "payer_remittances_stop": "the payer's remittances stop before the claim was due, so no 835 can show its answer",
+    "ambiguous": "EMA holds several claims with the same date, code and charge, and nothing says which is this one",
+    "before_ema_reports": "the service is older than every EMA report in the store",
+    "second_payer_not_matched": "the claim went to the visit's second payer, and EMA files the visit under its first payer",
+    "voided_in_ema": "EMA shows the patient's charge for that day and code voided",
+    "ema_claim_not_found": "no claim in EMA's reports matches it",
+}
+NO_ERA_LINES = 10          # the payers whose claims get no ERA named one by one on the Data tab; the rest share one line
+
+
+def _d(day: str | None) -> str:
+    """A day as the pages write it (March 2, 2026); one no calendar has, as it was written."""
+    from .detect import real_day
+    if not day:
+        return ""
+    if not real_day(day):
+        return str(day)
+    d = date.fromisoformat(str(day)[:10])
+    return f"{d:%B} {d.day}, {d.year}"
+
+
+def unseen_summary(conn: sqlite3.Connection, serverless: bool | None = None) -> dict | None:
+    """The claims the 837s show sent that no 835 and no EMA report can show an answer to (detect.UNSEEN_KEY), for the pages:
+    {'n', 'cents', 'billed_cents', 'reasons': [{reason, words, n, cents}] (most dollars first), 'groups': [{payer, n, cents}],
+    'ema_reports_from', 'export' (the reports that would let the bridges run on the claims older than EMA's reports, or
+    None), 'host_note' (on a host that reads only EMA's A/R, why the count is larger), 'at'}. None when nothing is counted.
+    Reads only the meta, so the dashboard's copy shows it too."""
+    from .detect import UNSEEN_KEY, real_day
+    u = _meta(conn, UNSEEN_KEY) or {}
+    if not isinstance(u, dict) or not u.get("n"):
+        return None
+
+    def dollars(v: dict) -> int:
+        # the count an analysis before this release left (by group {n, billed_cents}, not yet valued) gives billed dollars
+        # until the next analysis values it: every payer's line has its dollars, and they add up to the total (gapfix
+        # review r2-7)
+        return int(v.get("cents", v.get("billed_cents")) or 0)
+    reasons = sorted(((k, v) for k, v in (u.get("by_reason") or {}).items() if isinstance(v, dict)),
+                     key=lambda kv: (-dollars(kv[1]), kv[0]))
+    groups = sorted(((k, v) for k, v in (u.get("by_group") or {}).items() if isinstance(v, dict)),
+                    key=lambda kv: (-dollars(kv[1]), kv[0]))
+    frm = u.get("ema_reports_from")
+    old = [r for r in u.get("claims") or [] if isinstance(r, (list, tuple)) and len(r) > 5 and r[2] == "before_ema_reports" and r[5]]
+    export = None
+    if old and frm:
+        first = min(str(r[5])[:10] for r in old)
+        years = sorted({str(r[5])[:4] for r in old})
+        last = (date.fromisoformat(frm[:10]) - timedelta(days=1)).isoformat() if real_day(frm) else frm
+        export = (f"EMA's Production report for services from {_d(first)} to {_d(last)}, and the A/R report for service "
+                  f"{'year' if len(years) == 1 else 'years'} {' and '.join(years) if len(years) <= 2 else ', '.join(years[:-1]) + ' and ' + years[-1]}")
+    if serverless is None:
+        from .runtime import serverless as _sl
+        serverless = _sl()
+    note = ("This site reads only EMA's A/R report, not Production, so it cannot see the answers Production holds for these "
+            "claims: the count is larger here than on the server site, which reads both.") if serverless else None
+    # the claims themselves, when the analysis that made the count kept them (every analysis since this release does)
+    listed = isinstance(u.get("claims"), list)
+    return {"n": int(u.get("n") or 0), "cents": dollars(u), "billed_cents": int(u.get("billed_cents") or 0),
+            "reasons": [{"reason": k, "words": UNSEEN_WORDS.get(k, k), "n": int(v.get("n") or 0), "cents": dollars(v)}
+                        for k, v in reasons],
+            "groups": [{"payer": k, "n": int(v.get("n") or 0), "cents": dollars(v)} for k, v in groups],
+            "ema_reports_from": frm, "export": export, "host_note": note, "at": u.get("at"), "listed": listed,
+            "list_note": None if listed else ("The next analysis lists these claims one by one, with why each is not listed: "
+                                              "this count was made before the site kept the list.")}
+
+
+def _unseen_837(conn: sqlite3.Connection) -> list[dict]:
+    """The never-answered claims no source can show the answer to, in dollars, by reason and payer (blindness is loud: the
+    owner's rule 3), with the export that would let the bridges run on the ones older than EMA's reports."""
+    u = unseen_summary(conn)
+    if not u:
+        return []
+    n, cents = u["n"], u["cents"]
+    why = "; ".join(f"{r['n']:,} ({_usd_words(r['cents'])}): {r['words']}" for r in u["reasons"][:6])
+    top = ", ".join(f"{g['payer']} {g['n']:,} ({_usd_words(g['cents'])})" for g in u["groups"][:5]) + \
+        (f", and {len(u['groups']) - 5} more payers" if len(u["groups"]) > 5 else "")
+    who = ("Practice administrator: export " + u["export"] + " and put them where the server reads EMA's reports; the next run "
+           "checks these claims against them. Billing lead: check the rest on each payer's portal, most dollars first (the Data "
+           "tab lists them).") if u["export"] else ("Billing lead: check these claims on each payer's portal, most dollars first "
+                                                     "(the Data tab lists them).")
+    return [{"key": "unseen_837", "ok": False, "n": n, "cents": cents, "reasons": u["reasons"], "groups": u["groups"][:10],
+             "export": u["export"], "host_note": u["host_note"],
+             "title": f"{n:,} {'claim' if n == 1 else 'claims'} sent that no source can show an answer to ({_usd_words(cents)})",
+             "detail": (f"No 835 answers {'it' if n == 1 else 'them'} and EMA's reports show no answer either, so "
+                        f"{'it is' if n == 1 else 'they are'} counted here, not listed."
+                        + (f" Why: {why}." if why else "") + f" By payer: {top}."
+                        + (f" {u['host_note']}" if u["host_note"] else "") + (f" {u['list_note']}" if u.get("list_note") else "")),
+             "who": who}]
+
+
+def _usd_words(cents: int) -> str:
+    return f"${int(cents or 0) / 100:,.2f}"
+
+
 def _feeds_837(conn: sqlite3.Connection) -> list[dict]:
     """What the 837 claim files show that the other feeds do not, as the last analysis saved it (detect.NO_ERA_META and
     detect.SEND_WEEKS_META, which the dashboard's copy carries): a payer whose claims never get an ERA, so that only EMA's
     postings can show its answers; weeks one feed shows claims sent and the other none (trace finding T-N13); the send
     weeks whose claims went mostly unanswered (a lost batch); and the claims sent that are not due yet (waiting)."""
     from .detect import NO_ERA_META, SEND_WEEKS_META
-    out: list[dict] = _unanswered_weeks_item(conn) + _waiting_837(conn)
-    for p in [p for p in _meta(conn, NO_ERA_META) or [] if isinstance(p, dict) and p.get("payer") and p.get("claims")][:10]:
+    out: list[dict] = _unanswered_weeks_item(conn) + _waiting_837(conn) + _unseen_837(conn)
+    payers = [p for p in _meta(conn, NO_ERA_META) or [] if isinstance(p, dict) and p.get("payer") and p.get("claims")]
+    for p in payers[:NO_ERA_LINES]:
         n, cents = int(p.get("claims") or 0), int(p.get("billed_cents") or 0)
         listed, ema_ans, blind = int(p.get("listed") or 0), int(p.get("answered_in_ema") or 0), int(p.get("unchecked") or 0)
         parts = []
         if ema_ans:
-            parts.append(f"{ema_ans} of those due EMA shows answered")
+            parts.append(f"{ema_ans} of those due EMA shows answered ({_usd_words(p.get('answered_in_ema_cents'))} billed)")
         if listed:
-            parts.append(f"{listed} EMA shows no answer to {'is' if listed == 1 else 'are'} listed as never answered")
+            parts.append(f"{listed} EMA shows no answer to {'is' if listed == 1 else 'are'} listed as never answered "
+                         f"({_usd_words(p.get('listed_cents'))})")
         if blind:
-            parts.append(f"{blind} no source can show an answer to {'is' if blind == 1 else 'are'} not listed")
+            parts.append(f"{blind} no source can show an answer to {'is' if blind == 1 else 'are'} not listed "
+                         f"({_usd_words(p.get('unchecked_cents'))})")
         out.append({"key": "no_era_837", "ok": False, "payer": p["payer"], "payer_id": p.get("payer_id"), "n": n, "cents": cents,
                     "listed": listed, "answered_in_ema": ema_ans, "unchecked": blind,
                     "title": f"No ERA comes for claims sent to {p['payer']}",
@@ -734,6 +848,19 @@ def _feeds_837(conn: sqlite3.Connection) -> list[dict]:
                                + (" " + "; ".join(parts) + "." if parts else "")),
                     "who": f"Billing lead: ask {p['payer']} (or TriZetto) about ERA enrollment, and keep posting its payments in EMA. "
                            "Check the claims not listed on its portal."})
+    rest = payers[NO_ERA_LINES:]
+    if rest:
+        # no silent cap: the payers past the first ones share one line, with their claims and dollars
+        k = sum(int(p.get("claims") or 0) for p in rest)
+        c = sum(int(p.get("billed_cents") or 0) for p in rest)
+        b, bc = sum(int(p.get("unchecked") or 0) for p in rest), sum(int(p.get("unchecked_cents") or 0) for p in rest)
+        out.append({"key": "no_era_837_more", "ok": False, "n": k, "cents": c, "payers": len(rest), "unchecked": b,
+                    "unchecked_cents": bc,
+                    "title": f"{len(rest)} more payers send no ERA: {k:,} {'claim' if k == 1 else 'claims'}, {_usd_words(c)} billed",
+                    "detail": (", ".join(f"{p['payer']} ({int(p.get('claims') or 0)}, {_usd_words(p.get('billed_cents'))})" for p in rest[:15])
+                               + (", and more" if len(rest) > 15 else "") + "."
+                               + (f" {b:,} of their claims ({_usd_words(bc)}) no source can show an answer to are not listed." if b else "")),
+                    "who": "Billing lead: ask each payer (or TriZetto) about ERA enrollment, and keep posting their payments in EMA."})
     weeks = _meta(conn, SEND_WEEKS_META) or {}
     a = [w for w in weeks.get("ema_no_837") or [] if isinstance(w, dict) and w.get("week")] if isinstance(weeks, dict) else []
     b = [w for w in weeks.get("no_ema_837") or [] if isinstance(w, dict) and w.get("week")] if isinstance(weeks, dict) else []
@@ -809,7 +936,8 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
         def held(p: dict) -> str:
             k, c = int(p.get("claims") or 0), int(p.get("billed_cents") or 0)
             return (f"{k} {'claim' if k == 1 else 'claims'} sent to {p['payer']} and due since then (${c / 100:,.2f} billed) "
-                    f"{'is' if k == 1 else 'are'} not listed as never answered")
+                    f"{'is' if k == 1 else 'are'} not listed as never answered (the Data tab lists "
+                    f"{'it' if k == 1 else 'them'} with the claims no source can show an answer to)")
         n, cents = sum(int(p.get("claims") or 0) for p in behind), sum(int(p.get("billed_cents") or 0) for p in behind)
         one = behind[0]
         items.append({"key": "payer_stopped", "ok": False, "n": n, "cents": cents, "payers": behind[:20],

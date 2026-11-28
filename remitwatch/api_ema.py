@@ -14,6 +14,9 @@ CSVs. remitwatch.ema_checks does the work on the whole store during the run; thi
     GET  /api/ema/ar?bucket=&page=      one page of the A/R rows of one bucket of the A/R accounted for
     GET  /api/ema/checks?cause=&month=&payer=&page=   one page of the checks EMA posted that no 835 carries
     GET  /api/ema/checks.csv, /api/ema/unposted.csv, /api/ema/credits.csv   (no patient names)
+    GET  /api/ema/unseen?page=, /api/ema/unseen.csv   the claims sent that no source can show an answer to (detect's
+                                        meta ema:unanswered_unseen), most dollars first, with their reasons; the member id
+                                        only while the names switch is on
     GET  /api/ema/policy                the owner's write-off policy table: the write-off patterns (payer group x code x
                                         modifier x reason), the codes a payer almost never pays (group|code||payer_policy,
                                         out of Work now until the owner decides) and the reasons EMA posts as contractual
@@ -572,12 +575,19 @@ def data(user: str = Depends(_user)):
     """The Data tab's EMA panels: the reports on file, freshness, the reconcile summary (payments with no remittance,
     835 payments EMA never posted, credits, the A/R accounted for), the re-send requests, what the run noted, and the
     write-off patterns waiting for the owner. A panel whose figures cannot be read says so by the fault's kind."""
+    from .insights import unseen_summary
     with _conn() as c:
         if not _reports_arrived(c):
-            return {"ready": False}
+            # the claims no source can show an answer to are counted with no EMA report too (the reason no_ema_reports): the
+            # panel shows them in dollars before any report arrives (gapfix review r2-8). It reads only the meta
+            try:
+                u = unseen_summary(c)
+            except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+                u = {"error": _fault(exc)}
+            return {"ready": False, "unseen": u} if u else {"ready": False}
         out: dict = {"ready": True, "today": _today(), "fresh": _freshness(c), "blind": blind_spot(c)}
         for name, fn in (("catalog", _catalog), ("reconcile", _reconcile), ("resend", lambda cc: _c1_rows(cc, {})),
-                         ("upper_bound", _upper_bound)):
+                         ("upper_bound", _upper_bound), ("unseen", unseen_summary)):
             try:
                 out[name] = fn(c)
             except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
@@ -760,6 +770,76 @@ def credits_csv(user: str = Depends(_user)):
         if not _table(c, "ema_ar"):
             raise HTTPException(404, "No EMA A/R report has been read yet.")
     return _csv("remitwatch-credits.csv", _stream(_credit_rows))
+
+
+UNSEEN_PAGE = 100
+
+
+def _unseen_rows(conn: sqlite3.Connection) -> list[dict]:
+    """The claims of the unseen count (detect.UNSEEN_KEY 'claims'), most dollars first: claim id, payer group, the reason,
+    the dollars at stake, the first service day, the day it was sent and the day it was due, its codes, and its member id
+    only while the names switch is on (with the claim id it would point at a person) and where the store holds it (the
+    dashboard's copy on a serverless host keeps no member id)."""
+    from .detect import UNSEEN_KEY
+    from .insights import UNSEEN_WORDS
+    u = _meta(conn, UNSEEN_KEY, {}) or {}
+    rows = [r for r in (u.get("claims") or []) if isinstance(r, (list, tuple)) and len(r) >= 8] if isinstance(u, dict) else []
+    keys = sorted({str(r[1]) for r in rows if r[1]})
+    names = bool(_api().SHOW_PHI)
+    codes: dict[str, list] = {}
+    member: dict[str, str] = {}
+    if keys and _table(conn, "lines_837"):
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            q = ",".join("?" * len(part))
+            for key, code in conn.execute(f"SELECT claim_837_key, procedure_code FROM lines_837 WHERE claim_837_key IN ({q}) "
+                                          "ORDER BY claim_837_key, line_seq", part):
+                if code and code not in codes.setdefault(key, []):
+                    codes[key].append(code)
+            if names and _table(conn, "claims_837"):
+                for key, sub in conn.execute(f"SELECT claim_837_key, subscriber_id FROM claims_837 WHERE claim_837_key IN ({q})", part):
+                    member[key] = sub or ""
+    out = []
+    for r in rows:
+        cid, key, reason, grp, cents, svc, sent, due = r[:8]
+        own = [str(x) for x in r[8]] if len(r) > 8 and isinstance(r[8], list) else []
+        x = {"claim_id": str(cid or ""), "payer_group": grp or "Unknown", "reason": reason, "why": UNSEEN_WORDS.get(reason, reason),
+             "cents": int(cents or 0), "service_date": svc, "sent": sent, "due": due, "codes": own or codes.get(str(key or ""), [])}
+        if names:
+            x["member_id"] = member.get(str(key or ""), "")
+        out.append(x)
+    return out
+
+
+@router.get("/api/ema/unseen")
+def unseen(page: int = Query(1, ge=1, le=100000), user: str = Depends(_user)):
+    """One page of the claims sent that no source can show an answer to, most dollars first (the unseen count's list).
+    Never writes."""
+    from .detect import UNSEEN_KEY
+    with _conn() as c:
+        rows = _unseen_rows(c)
+        u = _meta(c, UNSEEN_KEY, {}) or {}
+    start = (page - 1) * UNSEEN_PAGE
+    # listed: whether the analysis that made the count kept its claims (an analysis before this release kept none: the list
+    # comes with the next one, and the panel says so rather than offer an empty list)
+    return {"page": page, "size": UNSEEN_PAGE, "count": len(rows), "cents": sum(r["cents"] for r in rows),
+            "names": bool(_api().SHOW_PHI), "rows": rows[start:start + UNSEEN_PAGE],
+            "listed": isinstance(u, dict) and isinstance(u.get("claims"), list)}
+
+
+def _unseen_csv_rows(conn: sqlite3.Connection) -> Iterator[list]:
+    names = bool(_api().SHOW_PHI)
+    yield (["claim_id", "member_id"] if names else ["claim_id"]) + ["payer_group", "dollars", "service_date", "sent", "due",
+                                                                    "codes", "reason"]
+    for r in _unseen_rows(conn):
+        yield ([r["claim_id"], r.get("member_id", "")] if names else [r["claim_id"]]) + [
+            r["payer_group"], f"{r['cents'] / 100:.2f}", r["service_date"] or "", r["sent"] or "", r["due"] or "",
+            " ".join(r["codes"]), r["why"]]
+
+
+@router.get("/api/ema/unseen.csv")
+def unseen_csv(user: str = Depends(_user)):
+    return _csv("remitwatch-claims-no-source-shows-answered.csv", _stream(_unseen_csv_rows))
 
 
 # ------------------------------------------------------------------------------- the owner's write-off policy (O11)
