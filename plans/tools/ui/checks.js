@@ -33,6 +33,9 @@ const SIZES = (args.sizes || '1366x650,1536x730,1400x900,390x844').split(',').ma
 const THEMES = (args.themes || 'light,dark').split(',');
 const WORK = new Set(['worklist', 'denials', 'bundling', 'downcoding', 'contracts']);
 const LIMITS = { overflow: 1, sizes: 6, accent: 8, filled: 1 };
+// Work (the brief's checks): the first row high on a desk, a full screen of rows on a laptop and of cards on a phone,
+// and no row that moves when the item panel opens
+const WORK_LIMITS = { firstRowTop: 220, rows: 7 };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // what a screen measures, in the page (no text leaves it: paths and numbers only)
@@ -145,6 +148,11 @@ function measure() {
         if (r.accent > LIMITS.accent) bad.push(`${r.accent} accent elements`);
         if (r.filled > LIMITS.filled) bad.push(`${r.filled} filled buttons`);
         if (r.low) bad.push(`${r.low} low-contrast texts: ${m.low.slice(0, 4).join('; ')}`);
+        if (r.work.firstRowTop != null) {
+          if (w === 1400 && h === 900 && r.work.firstRowTop > WORK_LIMITS.firstRowTop) bad.push(`first row at ${r.work.firstRowTop} px (at most ${WORK_LIMITS.firstRowTop})`);
+          if (((w === 1366 && h === 650) || (w === 390 && h === 844)) && r.work.rowsOnScreen < WORK_LIMITS.rows) bad.push(`${r.work.rowsOnScreen} rows on the first screen (at least ${WORK_LIMITS.rows})`);
+          if (r.work.panelRowDelta) bad.push(`a row moved ${r.work.panelRowDelta} px when the panel opened`);
+        }
         if (bad.length) fails.push(`${name} ${w}x${h} ${theme}: ${bad.join(' | ')}`);
         if (args.verbose) r.accentPaths = m.accent;
         if (args.verbose) r.lowPaths = m.low;

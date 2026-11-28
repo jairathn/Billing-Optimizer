@@ -68,7 +68,14 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
      Find a claim); on a phone, Find in the tab bar opens it.
    - Tests: tests/test_shell.py (a browser run of the shell on a fresh store: palette, theme, titles, icons, Upload in
      the shell, the phone's tab bar, Find and More) with tests/shell_page.js.
-5. docs/DESIGN.md: next.
+5. docs/DESIGN.md: DONE (commit "ui-a docs"). The design system for the next person, from DESIGN.src.md with the
+   critiques' corrections (CRITIQUE_premium sections 4 and 8): principles, type, words and numbers, space, color with
+   both themes' values, state and status, the shell, components, how to change it and the checks, and what changed
+   from the first design. No screenshots, no demo password, no em dashes. plans/tools/ui/checks.js now also fails Work
+   on its row limits (first row at most 220 px at 1400x900, at least 7 rows at 1366x650 and 7 cards at 390x844, no row
+   moving when the panel opens with --panel): Work fails them today, which is ui-work's job.
+6. Final checks: next (every page at four sizes in both themes; touched tests in four environments; full suite in
+   python3 and in Python 3.11.1 with SQLite 3.40; both node checks).
 
 ## Numbers measured
 
