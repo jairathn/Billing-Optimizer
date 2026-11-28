@@ -384,6 +384,114 @@ def test_the_first_payers_payment_after_the_send_does_not_answer_the_second_paye
     s.close()
 
 
+def _second_payer_world(tmp_path, kind, monkeypatch, *, eaf, contractual, written_off):
+    """Claim 75: a visit March 5 (11102 at $86.66). EMA files it under Medicare Test Region, its first payer, which paid $60
+    and wrote `contractual` dollars off as contractual on March 6, and names Blue Cross as its second payer. The 837s show
+    claim 75 sent March 9 to Blue Cross as the second payer, saying Medicare left the patient `eaf` dollars (AMT*EAF; None:
+    the 837 does not say). Blue Cross never posted anything; on April 12 the practice wrote `written_off` dollars off in EMA
+    (CO-206, not contractual, under Medicare's name). Returns the listed items and the unseen count."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import adj, charge, pay
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    both = {"primary": MED, "secondary": BCP}
+    v = {"cpt": "11102", "patient": 1, "svc": D(2026, 3, 5)}
+    rows = [charge(F.link_no(75), amount=86.66, posted=D(2026, 3, 5), **v, **both),
+            pay(F.link_no(75), "PAPER-75A", 60, posted=D(2026, 3, 6), payer=MED, **v, **both)]
+    if contractual:
+        rows.append(adj(F.link_no(75), "CO-45", contractual, posted=D(2026, 3, 6), contractual=True, payer=MED, **v, **both))
+    if written_off:
+        rows.append(adj(F.link_no(75), "CO-206", written_off, posted=D(2026, 4, 12), payer=MED, **v, **both))
+    s, lg = _world(tmp_path, kind, monkeypatch, rows)
+    send(s, tmp_path, [clm837_second(F.claim_id(75), [("11102", "86.66", "20260305")], BC, "MEMBER000075", left=eaf)], "20260309")
+    det, listed, unseen = _run(s, lg)
+    s.close()
+    return det, listed, unseen
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("eaf", ["20.00", None], ids=["837_says", "837_silent"])
+def test_a_second_payers_claim_whose_remainder_ema_wrote_off_is_listed_at_what_the_first_payer_left(tmp_path, kind, monkeypatch, eaf):
+    """Medicare paid $60 and wrote $6.66 off as contractual: it left the patient $20.00, and the claim to Blue Cross, the
+    second payer, is worth that. Blue Cross never answered; five weeks after the send the practice wrote the $20.00 off in
+    EMA, so EMA leaves nothing open on the visit. The claim is listed at $20.00, what the first payer left (by the 837's
+    AMT*EAF, or, when the 837 does not say, by EMA's postings: the charge less the first payer's payment and contractual
+    adjustment), and its evidence keeps what EMA leaves open: a write-off with no answer from the claim's payer is no
+    answer, and EMA's figures alone close nothing.
+    Before: EMA's open balance, $0 after the write-off, was taken for what the first payer left, and the claim was on no
+    list and in no count but the maintainers' (on the real data two claims to Medicaid as second payer, $285.21 by their
+    837s, were dropped)."""
+    from tests import ema_fixtures as F
+    det, listed, unseen = _second_payer_world(tmp_path, kind, monkeypatch, eaf=eaf, contractual=6.66, written_off=20)
+    assert F.claim_id(75) in listed, (
+        f"not listed (counts {dict((k, v) for k, v in det.ema_counts.items() if 'second' in k)}): Blue Cross never answered, "
+        "and the practice's write-off in EMA is no answer")
+    item = listed[F.claim_id(75)]
+    assert item["ema_link"] == F.link_no(75), item
+    assert item["shortfall_cents"] == 2000, item["shortfall_cents"]
+    ev = json.loads(item["evidence"])
+    assert ev.get("second_payer_left_cents") == 2000 and ev.get("ema_open_cents") == 0, ev
+    assert "has posted nothing" in (item["hint"] or ""), item["hint"]
+    assert (unseen.get("n") or 0) == 0, unseen
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("sent", ["20260309", "20260428"], ids=["due", "waiting"])
+def test_a_claim_to_the_second_payer_never_stands_for_its_ema_claims_own_never_sent_item(tmp_path, kind, monkeypatch, sent):
+    """EMA's claim 76 (11102 at $86.66, March 5) has Medicare Test Region as its first payer and Blue Cross as its second,
+    and Production of May 1 calls it Invalid: nothing went to Medicare. The 837s show claim 76 sent March 9 to Blue Cross
+    as the second payer (or April 28, not due yet); Blue Cross never answered. Two matters, two payers: EMA's claim is
+    listed as never sent (fix it and send it to Medicare), and the claim to Blue Cross is listed as never answered on its
+    own (or waits for its due day on the waiting view, holding nothing of EMA's claim). EMA's status of its claim
+    is the first payer's, never the second payer's claim's, and the second payer's claim never takes EMA's claim from the
+    report checks (nor waits for it, nor inherits its work).
+    Before: finding the claim to Blue Cross through EMA's claim's second payer gave it EMA's claim's status, so it was
+    handed to the never-sent check and absorbed in its item; with the EMA claim marked as the 837 pass's own, a never-sent
+    item for the first payer vanished on the real data (UHC Medicare Advantage, $290.38) and was kept only by the
+    self-check."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    rows = [charge(F.link_no(76), cpt="11102", amount=86.66, patient=1, svc=D(2026, 3, 5), posted=D(2026, 3, 5), status="Invalid",
+                   primary=MED, secondary=BCP)]
+    s, lg = _world(tmp_path, kind, monkeypatch, rows)
+    send(s, tmp_path, [clm837_second(F.claim_id(76), [("11102", "86.66", "20260305")], BC, "MEMBER000076", paid="0.00", left=None)],
+         sent)
+    det = Detector(s, run_id="gap", today="2026-05-03")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
+    lg.close()
+    got = {(r["signal"], r["patient_control_number"] or f"link:{r['ema_link']}"): dict(r) for r in s.query(
+        "SELECT signal, patient_control_number, ema_link, payer_group, hint, evidence FROM findings WHERE COALESCE(stale,0)=0 "
+        "AND signal IN ('NO_ANSWER','REJECTED_PRE_PAYER','NOT_SENT') AND (patient_control_number=? OR ema_link=?)",
+        (F.claim_id(76), F.link_no(76)))}
+    w = json.loads((s.conn.execute("SELECT value FROM meta WHERE key='feed:waiting_837'").fetchone() or ["{}"])[0])
+    waiting = next((r for r in w.get("claims") or [] if r and r[0] == F.claim_id(76)), None)
+    s.close()
+    mine = [k for k in got if k[1] == F.claim_id(76)]
+    theirs = [k for k in got if k[1] == f"link:{F.link_no(76)}"]
+    assert len(theirs) == 1 and theirs[0][0] in ("NOT_SENT", "REJECTED_PRE_PAYER"), (
+        f"EMA's claim, never sent to its first payer, is on no list of its own: {sorted(got)}")
+    if sent == "20260428":
+        assert not mine and waiting is not None and len(waiting) == 5, (sorted(got), waiting)
+        return
+    assert mine == [("NO_ANSWER", F.claim_id(76))], f"the claim to the second payer is not listed as never answered: {sorted(got)}"
+    item = got[mine[0]]
+    assert item["ema_link"] == F.link_no(76) and "Invalid" not in (item["hint"] or ""), item
+    assert json.loads(item["evidence"]).get("ema_bridge", "").endswith("_secondary"), item["evidence"]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_second_payers_claim_the_first_payer_settled_in_full_is_not_listed(tmp_path, kind, monkeypatch):
+    """Control: Medicare paid $60 and wrote the other $26.66 off as contractual, so it left the patient nothing, and the
+    837 does not say otherwise. Blue Cross owes nothing on the visit: the claim is not listed (counted for the maintainers,
+    meta ema:wiring), and not counted with the claims no source can show an answer to (its EMA claim was found)."""
+    from tests import ema_fixtures as F
+    det, listed, unseen = _second_payer_world(tmp_path, kind, monkeypatch, eaf=None, contractual=26.66, written_off=0)
+    assert F.claim_id(75) not in listed, listed.get(F.claim_id(75))
+    assert det.ema_counts.get("open_claim_second_nothing_left") == 1, dict(det.ema_counts)
+    assert (unseen.get("n") or 0) == 0, unseen
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_small_plan_that_never_sends_eras_is_judged_by_its_nearest_claims(tmp_path, kind):
     """A small plan (payer id SP001) sent no ERA for any of its twelve claims, two a month from January to June: around any

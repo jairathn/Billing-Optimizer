@@ -384,7 +384,9 @@ def _fid(*parts) -> str:
 
 def _item_links(r: dict) -> set[int]:
     """The EMA claim numbers an item about a whole claim is about: its ema_link, and those its evidence names (the report
-    checks' 'ema_links' and Production's 'ema_link'). Never a send-day twin's: that is another claim's EMA claim."""
+    checks' 'ema_links' and Production's 'ema_link'). Never a send-day twin's: that is another claim's EMA claim. None for a
+    claim to the visit's second payer found through its EMA claim's secondary payer (gapfix G6): the EMA claim's own items
+    are its first payer's."""
     out: set[int] = set()
     ev = r.get("evidence")
     if isinstance(ev, str):
@@ -393,6 +395,8 @@ def _item_links(r: dict) -> set[int]:
         except ValueError:
             ev = {}
     ev = ev if isinstance(ev, dict) else {}
+    if str(ev.get("ema_bridge") or "").endswith("_secondary"):
+        return out                          # a claim to the visit's second payer: its EMA claim's own items are another matter
     for x in [r.get("ema_link"), ev.get("ema_link")] + list(ev.get("ema_links") or []):
         try:
             if x is not None and str(x).strip():
@@ -7475,16 +7479,32 @@ class Detector:
                     # the payer before it left the patient nothing: this payer owes nothing on the claim
                     self.ema_counts["open_claim_second_send_nothing_left"] += 1
                     return False
-        if cd.get("ema_second") and cd.get("ema_open_cents") is not None:
-            # found through its EMA claim's second payer and not answered by it: worth at most what EMA leaves open after the
-            # first payer (gapfix G6), as a send to a later payer is worth what the payer before it left
-            left = int(cd["ema_open_cents"] or 0)
-            ev["second_payer_open_cents"] = left
-            if left <= 0:
-                self.ema_counts["open_claim_second_nothing_open"] += 1
-                return False                # EMA shows nothing left open on the visit: nothing for the second payer to pay
-            if expected is None or left < expected:
-                expected = left             # (with no rate to price it, what is left is its size)
+        second_note = None
+        if cd.get("ema_second"):
+            # found through its EMA claim's second payer and not answered by it (gapfix G6): worth what the payer before it
+            # left, as any send to a later payer. The claim's own 837 says what that was when it went out as a later payer's
+            # claim (sent_as, above); else EMA's postings do: the charge less insurance's payments and contractual
+            # adjustments. EMA's open balance is neither: a remainder the practice wrote off, or the patient paid, with no
+            # answer from this payer leaves its share owed, and EMA's figures alone take nothing off the list
+            stated = (ev.get("sent_as") or {}).get("left_cents")
+            left = stated if stated is not None else cd.get("ema_first_left_cents")
+            if cd.get("ema_open_cents") is not None:
+                ev["ema_open_cents"] = int(cd["ema_open_cents"] or 0)      # what EMA leaves open on the visit now
+            if left is not None:
+                left = max(0, int(left))
+                ev["second_payer_left_cents"], ev["second_payer_left_basis"] = left, ("837" if stated is not None else "ema")
+                if left <= 0:
+                    # the first payer left nothing (its payment and contractual adjustment cover the charge): nothing for
+                    # the second payer to pay; counted for the maintainers (meta ema:wiring)
+                    self.ema_counts["open_claim_second_nothing_left"] += 1
+                    return False
+                if expected is None or left < expected:
+                    expected = left         # (with no rate to price it, what the first payer left is its size)
+                if ev.get("ema_open_cents") is not None and ev["ema_open_cents"] < left:
+                    second_note = (f"EMA names {grp} as this visit's second payer, and {grp} has posted nothing on it. The first "
+                                   f"payer left ${left / 100:,.2f}; EMA leaves ${max(0, ev['ema_open_cents']) / 100:,.2f} open (the "
+                                   "rest was written off or paid by the patient with no answer from this payer): check the payer's "
+                                   "portal before you send it again or let it go")
         # only another payer answered (trace finding T-C2): what it paid comes off the item's size, and the item says that the
         # primary's remittance is missing
         sec = cd.get("secondary") or []
@@ -7608,6 +7628,8 @@ class Detector:
         if cd.get("status_context"):
             hints.append(cd["status_context"] + ", but no payment, $0 answer or payer's reason is posted on it: check the payer's portal "
                          "before you send it again")
+        if second_note:
+            hints.append(second_note)
         ao = cd.get("ar_open")
         if ao:
             hints.append(f"EMA's A/R of {ao.get('as_of')} holds this service open for insurance (${int(ao.get('balance_cents') or 0) / 100:,.2f}, "
@@ -8115,7 +8137,9 @@ class Detector:
             # EMA claims that are this claim or another listed one (send-day twins): the Production check leaves them
             self._export_links.update(cd.get("ema_twins") or ())
             fid = _fid(OPEN_837_ID, cd["pcn"])
-            if cd.get("ema_link") is not None:
+            if cd.get("ema_link") is not None and not cd.get("ema_second"):
+                # (a claim found through its EMA claim's second payer is that payer's matter: EMA's claim's own checks, its
+                # first payer's, stay with the report checks, and their work stays with them: gapfix G6)
                 self._export_links.add(cd["ema_link"])
                 # the Production check's item for the same EMA claim, keyed by its number before the A/R knew its claim id,
                 # hands its work to this one (save: heir keys)
@@ -8165,6 +8189,8 @@ class Detector:
         out: dict[int, str] = {}
         for cd in cds:
             a = answers.get(cd["pcn"]) or {}
+            if a.get("second_payer"):
+                continue                    # the second payer's claim: its EMA claim's checks are the first payer's (G6)
             if a.get("link") is not None:
                 out[int(a["link"])] = cd["pcn"]
             for lk in a.get("twins") or ():
@@ -9565,8 +9591,10 @@ class Detector:
                 continue
             if len(left) < len(cd["items"]):
                 cd = dict(cd, items=left)      # the services EMA shows answered for this patient leave the item
-            # the claim's newest status: by its claim id, else by the EMA claim it was matched to
-            st = statuses.get(cd["pcn"]) or (statuses.get(a["link"]) if a.get("link") is not None else None)
+            # the claim's newest status: by its claim id, else by the EMA claim it was matched to. A claim found through its
+            # EMA claim's second payer takes only its own: EMA's claim's status is its first payer's (gapfix G6)
+            st = statuses.get(cd["pcn"]) or (statuses.get(a["link"]) if a.get("link") is not None and not a.get("second_payer")
+                                             else None)
             if st and str(st.get("as_of") or "")[:10] > cd["sent"]:
                 cls = st.get("class")
                 if cls == "not_sent":
@@ -9595,7 +9623,8 @@ class Detector:
                 pending.append((cd, a, ne))
                 continue
             out.append(dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"),
-                            ema_bare_zero=a.get("bare_zero"), ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents")))
+                            ema_bare_zero=a.get("bare_zero"), ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents"),
+                            ema_first_left_cents=a.get("first_left_cents")))
         # a claim no bridge finds whose line EMA's own A/R holds open for insurance past its due day (the same keyed patient,
         # day and code, in any bucket: "held for insurance, no claim created" too): EMA's books say the money is open and the
         # 837 says the claim went out, so it is listed as never answered, the A/R row its evidence (gapfix G5)
@@ -10240,9 +10269,10 @@ class Detector:
                 elif cls == "gave_up":
                     cd = dict(cd, gave_up=True, status=st.get("status") or cd["status"])
             cd = dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"), ema_bare_zero=a.get("bare_zero"),
-                      ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents"))
-            if a.get("link") is not None:
-                self._export_links.add(a["link"])
+                      ema_second=a.get("second_payer"), ema_open_cents=a.get("open_cents"),
+                      ema_first_left_cents=a.get("first_left_cents"))
+            if a.get("link") is not None and not a.get("second_payer"):
+                self._export_links.add(a["link"])   # (a second payer's claim leaves its EMA claim to the report checks: G6)
             # EMA claims that are this claim or another listed one (send-day twins): the Production check leaves them
             self._export_links.update(a.get("twins") or ())
             out.append((cd, items))

@@ -1945,8 +1945,13 @@ def claim_answers(conn: sqlite3.Connection, claims: list[dict]) -> dict:
                 res["candidates"] = several[cid]       # EMA claims of its content, none chosen (the unseen count's 'ambiguous')
             if got and cid in second_of:
                 res["second_payer"] = True             # found through its EMA claim's second payer: only its postings answer it
-                res["open_cents"] = int(conn.execute("SELECT COALESCE(SUM(COALESCE(balance, 0)), 0) FROM ema_lines WHERE link = ?",
-                                                     (got[0],)).fetchone()[0] or 0)     # what EMA leaves open after the first payer
+                # what the first payer left (the charge less insurance's payments and contractual adjustments: the second
+                # payer's share), and what EMA leaves open now, after any write-off the practice made, which says nothing
+                # of what the second payer owes
+                left, bal = conn.execute("""SELECT COALESCE(SUM(COALESCE(charges, 0) - COALESCE(ins_paid, 0) - COALESCE(contractual, 0)), 0),
+                                                   COALESCE(SUM(COALESCE(balance, 0)), 0) FROM ema_lines WHERE link = ?""",
+                                         (got[0],)).fetchone()
+                res["first_left_cents"], res["open_cents"] = max(0, int(left or 0)), int(bal or 0)
             out[cid] = res
         _temp(conn, "ec_al", ["cid TEXT", "link INTEGER", "sent TEXT", "sec INTEGER"],
               [(cid, lk, next((c.get("sent") for c in part if c["claim_id"] == cid), None) or "", 1 if cid in second_of else 0)
