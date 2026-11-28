@@ -1644,14 +1644,14 @@ def _dollars(c: int) -> str:
 
 def test_today_s_strip_adds_up_and_each_part_opens_its_list(page_run):
     """CRITIQUE_premium change 5: one figure that adds up. Work now is the whole; what is new and the follow-ups due are
-    its parts and add up to it; what closes within 7 days is inside it, counted by the route with the Worklist's own
-    filter (state todo, deadline week), so each figure opens the very list it counts. Beside it, the week's progress
-    and what deadlines took in the last 30 days."""
+    its parts and add up to it; what closes within 7 days and is not sent yet is inside it, counted by the route with
+    the Worklist's own filter (state todo, the to-do statuses, deadline week: the list step 1 opens), so each figure
+    opens the very list it counts. Beside it, the week's progress and what deadlines took in the last 30 days."""
     out, ans = page_run()
     t, b = ans["/api/ema/today"], ans["/api/brief"]
     whole, fu = t["states"]["todo"], t["states"]["followup_due"]
     due = whole["due7"]
-    assert due["go"] == {"state": "todo", "status": "all", "deadline": "week"}
+    assert due["go"] == {"state": "todo", "status": "open,in_progress", "deadline": "week", "sort": "deadline"}
     assert 0 <= due["n"] <= whole["n"] and 0 <= due["cents"] <= whole["cents"] and fu["n"] <= whole["n"]
     h = out["today_html"]
     strip = h.split('id="tdStates"')[1].split('id="tdMoreSlot"')[0]
@@ -1677,6 +1677,16 @@ def test_today_s_strip_adds_up_and_each_part_opens_its_list(page_run):
     fu2 = t2["states"]["followup_due"]["cents"]
     fu2_d = int(_dollars(fu2)[1:].replace(",", ""))
     assert f"New {_dollars((whole_d - fu2_d) * 100)} ({whole['n'] - 1})" in text2 and f"Follow-ups due {_dollars(fu2)} (1)" in text2
+    assert "Nothing in it closes within 7 days." in text2 and 'class="td-due"' not in out2["today_html"]
+    # something closes within 7 days: the red part says it inside the whole and opens its own list, soonest first
+    t3 = json.loads(json.dumps(t))
+    cents3 = min(4000, whole["cents"])
+    t3["states"]["todo"]["due7"].update(n=1, cents=cents3)
+    out3, _ = page_run({"/api/ema/today": t3})
+    strip3 = out3["today_html"].split('id="tdStates"')[1].split('id="tdMoreSlot"')[0]
+    text3 = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", strip3))
+    assert f"Of which closes in 7 days: {_dollars(cents3)} (1)" in text3 and 'class="td-due"' in strip3
+    assert out3["today_clicks"]["todo_week"][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **due["go"])
     # the strip's whole and its 7-day part are drawn when the counts come; until then a dash, never a zero
     out, _ = page_run({"__fail": ["/api/ema/today"]})
     assert 'id="tdStates"' not in out["today_html"] and "Work now" in out["today_html"] and ">–<" in out["today_html"]
@@ -1697,30 +1707,49 @@ def test_today_shows_a_banner_only_for_a_late_feed_and_leaves_the_self_checks_to
 
 
 def test_the_route_counts_what_closes_in_7_days_inside_work_now(worlds, tmp_path, monkeypatch):
-    """/api/ema/today's Work now carries what in it closes within 7 days, the number the Worklist shows for state todo
-    and deadline week: Today's strip shows it as a part of the whole, so it can never be more than the whole. The window
-    is today and the next 6 days, as the Worklist counts it. The same answer on both hosts (the dashboard's copy holds
+    """/api/ema/today's Work now carries what in it closes within 7 days and is not sent yet: one definition with Today's
+    step 1, the red numbers on the tabs and the count in each page's title (/api/brief work.total due7), counted with
+    the Worklist's own filter, so the strip shows it as a part of the whole and a click opens exactly that list. A
+    follow-up due on an item already sent is in Work now, but its filing window no longer closes on it. The window is
+    today and the next 6 days, as the Worklist counts it. The same answer on both hosts (the dashboard's copy holds
     every column the count reads)."""
     db = copied(worlds, tmp_path)
     conn = sqlite3.connect(db)
-    # the two denials in Work now: one whose last day is today (inside), one whose last day is the 7th day (outside)
-    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_MISSING_INFO'", (TODAY,))
-    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-7),))
+    # one denial was sent and its follow-up is due (in Work now), its window's last day today; the other is not sent
+    # yet and its window's last day is the 6th day from today, the last day inside the 7
+    conn.execute("UPDATE findings SET status='appealed', work_state='waiting', follow_up_on=?, appeal_deadline=? "
+                 "WHERE signal='DENIED_MISSING_INFO'", (iso(1), TODAY))
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-6),))
     conn.commit()
     conn.close()
-    want = (1, 12000)
-    assert sql_count(db, "work_state='work_now' AND appeal_deadline >= ? AND appeal_deadline < ?", TODAY, iso(-7)) == want
+    want = (1, 9000)
+    todo = "(work_state='work_now' OR (work_state='waiting' AND follow_up_on <= ?)) AND status IN ('open','in_progress')"
+    assert sql_count(db, f"{todo} AND appeal_deadline >= ? AND appeal_deadline < ?", TODAY, TODAY, iso(-7)) == want
     srv = _site(monkeypatch, db)
-    whole = srv.get("/api/ema/today").json()["states"]["todo"]
-    due = whole["due7"]
-    assert (due["n"], due["cents"]) == want and due["go"] == {"state": "todo", "status": "all", "deadline": "week"}
+    st = srv.get("/api/ema/today").json()["states"]
+    whole, due = st["todo"], st["todo"]["due7"]
+    assert (whole["n"], whole["cents"]) == (2, 21000) and (st["followup_due"]["n"], st["followup_due"]["cents"]) == (1, 12000)
+    assert (due["n"], due["cents"]) == want                                   # a part of the whole
+    assert due["go"] == {"state": "todo", "status": "open,in_progress", "deadline": "week", "sort": "deadline"}
     assert _list_total(srv, due["go"]) == want                               # the list a click opens, its count line
-    assert (whole["n"], whole["cents"]) == (2, 21000)                         # the part is inside the whole
+    total = srv.get("/api/brief").json()["work"]["total"]
+    assert (total["due7_n"], total["due7_cents"]) == want                    # step 1, the tabs' red numbers, the title
+    # the 7th day from today is outside the window, here as on the list
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-7),))
+    conn.commit()
+    edge = srv.get("/api/ema/today").json()["states"]["todo"]["due7"]
+    assert (edge["n"], edge["cents"]) == (0, 0) == _list_total(srv, edge["go"])
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-6),))
+    conn.commit()
+    conn.close()
     (tmp_path / "vercel").mkdir()
     cloud_c = _site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel")
     got = cloud_c.get("/api/ema/today").json()["states"]["todo"]
     assert got["due7"] == due and (got["n"], got["cents"]) == (whole["n"], whole["cents"])
     assert _list_total(cloud_c, due["go"]) == want
+    cloud_total = cloud_c.get("/api/brief").json()["work"]["total"]
+    assert (cloud_total["due7_n"], cloud_total["due7_cents"]) == want
 
 
 def test_today_stays_blind_and_ticks_nothing_when_its_counts_do_not_come_back(page_run):

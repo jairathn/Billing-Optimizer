@@ -177,8 +177,9 @@ hover, 200 ms panel) and off for people who ask their system for less motion.
 - **Banners** (`.banner`): `stale` for a late feed or the blind spot, `danger` and safe mode for a stop, `info` neutral.
   Only Today and the pages whose figures it changes show one.
 - **Today's strip** (`.td-strip`): the whole (Work now) with a composition bar of its parts (New, Follow-ups due) and
-  what in it closes within 7 days in red; beside it the week (sent or paid) and what deadlines took. Each figure opens
-  the list it counts.
+  what in it closes within 7 days and is not sent yet, in red: one definition with the plan's step 1, the red numbers
+  on Work's views and the count in the title. Beside it the week (sent or paid) and what deadlines took. Each figure
+  opens the list it counts.
 - **The plan** (`.plan`, `.step`): fixed columns `28px 1fr 7.5rem 9rem` (number, words, money, button) so money and
   buttons line up. The next step is `is-next`: tinted, the 2 px selection rule, the one filled button `Start (N)`. Other
   steps say `Start`. A done step is one line with a check and a quiet Review link.

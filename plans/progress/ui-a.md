@@ -49,16 +49,19 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
    - The plan: fixed columns (number, words, money, button); the next step is marked is-next and has the page's one
      filled button "Start (N)"; the others say "Start"; a done step is one line with a check and a quiet Review link;
      "Plan · N of M done".
-   - /api/ema/today: Work now carries `due7`, counted with the Worklist's own filter (state todo, deadline week), so the
-     red part is inside the whole and opens its own list (api_ema.py, one field).
+   - /api/ema/today: Work now carries `due7`, counted with the Worklist's own filter (state todo, the to-do statuses,
+     deadline week, soonest first), so the red part is inside the whole and opens its own list (api_ema.py, one field).
+     One definition with the plan's step 1, the red numbers on Work's views and the count in the title (api._todo_soon):
+     a follow-up due on an item already sent is in Work now, but its filing window no longer closes on it.
    - Moved, without losing a figure: the nine tiles (scoreboard and items by state) to the top of Results
      (today.js tdBoard, one hook in results.js); EMA's exports line to the top of Data (today.js tdEmaInto, one hook in
      data.js) and to the pill; the other self-checks stay on Data with the dot in the sidebar.
    - Tests moved: test_ema_pages2 (the tiles, titles, clicks, compact phone lines and scoreboard read Results' board;
      the exports line and its links read the Data tab; load order); feed_page.js and clock_page.js wait for #tdPlan and
-     read the date from the eyebrow. New: the strip adds up and opens its lists, the route's due7 equals the Worklist's
-     count on both hosts (one denial whose last day is today counts, one whose last day is the 7th day does not), the
-     late-feed-only banner, the board and line placements (tests/test_shell.py).
+     read the date from the eyebrow. New: the strip adds up and opens its lists (with and without something closing
+     within 7 days), the route's due7 equals the Worklist's count and /api/brief's due7 on both hosts (a sent follow-up
+     due today is left out, a denial due on the 6th day counts, one due on the 7th day does not), the late-feed-only
+     banner, the board and line placements (tests/test_shell.py).
    - Inline `style=` count: 275.
 4. Brand finish: DONE (commit "ui-a brand").
    - The mark: a remittance slip with a check, one flat color on an inverse tile (shell.js markSvg; static/brand/icon.svg
@@ -117,7 +120,8 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
   `#dtEmaLine`, drawn by today.js tdEmaInto. Charts take `--viz-*`.
 - ui-words: the person's name and menu belong in the sidebar's foot (`.nav-foot`), beside the theme.
 - ui-signin: the sign-in page should link `/static/rw.css?v=...`, preload the Latin font and use `static/brand/icon.svg`.
-- /api/ema/today gained `states.todo.due7` (api_ema.py), counted with the Worklist's own filter.
+- /api/ema/today gained `states.todo.due7` (api_ema.py), counted with the Worklist's own filter; it equals /api/brief's
+  `work.total.due7_n` and `due7_cents` (one definition: step 1, the views' red numbers, the title).
 
 ## Open questions
 

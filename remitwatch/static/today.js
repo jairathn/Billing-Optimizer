@@ -169,7 +169,7 @@ function tdStripHtml(td, b){
       <svg class="td-comp" viewBox="0 0 100 6" preserveAspectRatio="none" role="img" aria-label="New ${esc(money(newC))}, follow-ups due ${esc(money(fu.cents||0))}"><rect class="new" width="${part}" height="6"/><rect class="fu" x="${part}" width="${100 - part}" height="6"/></svg>
       <div class="td-legend"><span><i class="new"></i>New ${money(newShown)} (${Number(newN).toLocaleString()})</span>
         <a href="#" data-td="followup_due" title="${esc(TD_STATES[1][3])}"><i class="fu"></i>Follow-ups due ${money(fu.cents||0)} (${Number(fu.n||0).toLocaleString()})</a></div>
-      ${due && due.n ? `<a href="#" class="td-due" data-td="todo_week" title="Inside Work now: the filing window closes within 7 days">Of which closes in 7 days: ${money(due.cents)} (${Number(due.n).toLocaleString()})</a>`
+      ${due && due.n ? `<a href="#" class="td-due" data-td="todo_week" title="Inside Work now: not sent yet, and the filing window closes within 7 days (step 1 of the plan)">Of which closes in 7 days: ${money(due.cents)} (${Number(due.n).toLocaleString()})</a>`
         : (due ? '<span class="td-sub">Nothing in it closes within 7 days.</span>' : '')}
     </div>`;
   } else left = `<div class="td-whole"><span class="lbl">Work now</span><span class="fig">–</span><span class="td-sub">${td === undefined ? 'Counting…' : ''}</span></div>`;

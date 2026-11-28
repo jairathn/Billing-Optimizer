@@ -458,9 +458,11 @@ def today(user: str = Depends(_user)):
         if ready:
             for key in TODAY_STATES:
                 out["states"][key] = dict(count({"state": key, "status": "all", "deadline": ""}), label=STATE_WORDS[key])
-            # inside Work now, what closes within 7 days: Today's strip says it as a part of the whole, so it is counted
-            # with the Worklist's own filter (the list a click opens), never taken from another population
-            out["states"]["todo"]["due7"] = count({"state": "todo", "status": "all", "deadline": "week"})
+            # inside Work now, what closes within 7 days and is not sent yet (the to-do statuses): Today's strip says it as
+            # a part of the whole. One definition with Today's step 1, the red numbers on the tabs and the count in each
+            # page's title (api._todo_soon), counted with the Worklist's own filter: a click opens that list, soonest
+            # first. A follow-up due on an item already sent is in Work now, but its filing window no longer closes on it
+            out["states"]["todo"]["due7"] = count({"state": "todo", "status": TODO, "deadline": "week", "sort": "deadline"})
         if has_outcome:
             out["auto_written_off"] = count({"ema": "auto_written_off", "status": TODO, "deadline": "valid", "sort": "shortfall"})
         if has_outcome and through:
