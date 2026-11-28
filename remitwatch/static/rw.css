@@ -385,6 +385,8 @@ nav#nav, .sidebar { position: sticky; top: 0; z-index: var(--z-nav); height: 100
 .nav-item.active, .nav-item[aria-current="page"] { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
 .nav-item.active .i, .nav-item[aria-current="page"] .i { color: var(--text); }
 .nav-item.within { color: var(--text); }
+/* a rail (or a narrow desk) hides Work's views: Work itself is marked while one of them is open */
+:root[data-sidebar="rail"] .nav-item.within { background: var(--surface); box-shadow: 0 0 0 1px var(--border); }
 .nav-count { margin-left: auto; font-size: var(--fs-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
 .nav-count.urgent { color: #fff; background: var(--danger-solid); border-radius: var(--r-full); min-width: 18px; height: 18px; padding: 0 5px; font-size: var(--fs-xs);
   display: inline-flex; align-items: center; justify-content: center; font-weight: var(--fw-semibold); }
@@ -1402,6 +1404,7 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
   nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg, #railBtn) { display: none; }
   nav#nav .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
   nav#nav .brand { padding: 0; justify-content: center; }
+  nav#nav .nav-item.within { background: var(--surface); box-shadow: 0 0 0 1px var(--border); }
   .search { flex-basis: 260px; min-width: 160px; }
 }
 @media (max-width: 1023px) {
