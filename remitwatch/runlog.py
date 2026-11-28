@@ -2045,13 +2045,14 @@ def _latest_version(conn: sqlite3.Connection) -> str | None:
 
 def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, after: Snapshot | None = None, *,
                      step: str = "detect", rule_version: str | None = None, rules: dict | None = None,
-                     now: datetime | None = None, write: bool = True) -> dict:
+                     now: datetime | None = None, write: bool = True, retired: dict | None = None) -> dict:
     """Compare the items before and after a step and write one row per item that changed automatically: raised, closed
     with proof, reopened, hidden by a rule, signal changed, folded into another, no longer raised, state changed,
     outcome, deadline, dollars or follow-up day moved. Each row names the rule (from the item's own evidence: the
-    archive rule, the later payment, the EMA outcome; the state rule when `rules` gives it) and the rule version, the
-    evidence row keys, and before and after. A change a person made (a status set by hand since the previous run) is
-    left to their own events. Returns counts for the run's manifest."""
+    archive rule, the later payment, the EMA outcome; the state rule when `rules` gives it; for an item detection stopped
+    raising on purpose, the counter that holds its dollars, `retired`: detect:snb_past_limit, detect:unseen) and the rule
+    version, the evidence row keys, and before and after. A change a person made (a status set by hand since the previous
+    run) is left to their own events. Returns counts for the run's manifest."""
     after = after if after is not None else snapshot_items(conn, now=now)
     at = _iso(now)
     version = rule_version or _latest_version(conn)
@@ -2137,8 +2138,9 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
             add(f, "folded", "archive_rules:fold_into", {"folded_into": [None, folded_into[f]], "status": [b.get("status"), None]},
                 [{"source": "item", "line_key": b.get("line_key"), "claim_key": b.get("claim_key")}])
         else:
-            add(f, "gone", "detect:no_longer_raised", {"signal": [b.get("signal"), None], "status": [b.get("status"), None],
-                                                         "work_state": [b.get("work_state"), None]},
+            why = (retired or {}).get(f)
+            add(f, "gone", f"detect:{_slug(why)}" if why else "detect:no_longer_raised",
+                {"signal": [b.get("signal"), None], "status": [b.get("status"), None], "work_state": [b.get("work_state"), None]},
                 [{"source": "item", "line_key": b.get("line_key"), "claim_key": b.get("claim_key")}])
     for f, ch in changed.items():
         a = rowd(acols, after.rows[f])

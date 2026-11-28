@@ -127,6 +127,13 @@ TRACK_ALERT_SHARE = 0.05            # a closure rule whose reopen rate passes 5%
 RATE_MIN_CASES = 10                 # a recovery-rate pattern needs this many cases, else the next level is used
 RATE_MATURE_DAYS = 90               # a denial younger than this (from the newest remittance) has not had time to be paid
 LATER_PAID_SHARE = 0.95             # a later payment of at least this share of the shortfall covers it (precision guard)
+# a payer's provider-level adjustments that take money back from a claim they name (an overpayment recovered, a balance
+# carried forward and recovered, Medicare's withholding, interest given back): later_payments nets them, as detection's
+# ledger and states.py read them
+TAKEBACK_PLB = ("WO", "FB", "J1", "L6")
+# items about a payer's own rate or level (a downcode, an underpayment): only that payer's later money pays them; another
+# payer's payment after them is its share of what the first left (a second payer's copay), never the first payer's money
+OWN_PAYER_CATEGORIES = ("downcoding", "underpayment")
 SETTLED_SHARE = 0.50                # the self-audit's "paid" test (half the target, as the answer keys have it)
 STALE_835_DAYS = 10                 # alerts.STALE_DAYS
 STALE_PRODUCTION_DAYS = 14          # ema_checks.PRODUCTION_FRESH_DAYS
@@ -438,10 +445,17 @@ K_RATES = "selfcheck:rates"
 K_HOUSE = "selfcheck:housekeeping"
 K_ANSWER = "selfcheck:answer_days"
 K_FACTS_VERSION = "selfcheck:facts_version"
+K_FACTS_PAYMENT = "selfcheck:facts_payment_version"
 K_FACTS_INPUT = "selfcheck:facts_input"
-# the fingerprint's own version (_facts_of): a build that reads another part of an item's claim changes every fingerprint,
-# so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else)
+# the fingerprint's own version (_facts_of): a build that reads another part of every item's claim changes every
+# fingerprint, so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else
+# for every item)
 FACTS_VERSION = "3"
+# the version of the part only an item about an 835 payment itself has (a transaction and no line or claim:
+# REMIT_NOT_POSTED, TAKEBACK): EMA's checks of that payment. Raised on its own, so a build that changes only that part
+# leaves out only those items' stored fingerprints, and its first run still compares every other item's (byte for byte
+# the same). 1: EMA's checks of the payment (2026-11-28)
+FACTS_PAYMENT_VERSION = "1"
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
@@ -1068,10 +1082,19 @@ def check_facility_twin(conn: sqlite3.Connection, today: str) -> dict:
 
 def later_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     """For each item (finding dicts with finding_id, patient_control_number, service_date, codes, payment_date, ema_link,
-    transaction_key), the money paid on the same bill, date of service and code AFTER the item's own remittance: from the
-    835 archive (net of reversals; never a surgery-center claim) and from EMA's payments no 835 carries (never the item's
-    own check). {finding_id: {'r835', 'ema', 'total', 'first', 'same_payer'}}. Reads the 835 tables by the claim id
-    index both kinds of store keep (claims by claim id, lines by claim), one bill at a time."""
+    transaction_key, category, payer_group, paid_cents), the money paid on the same bill, date of service and code AFTER
+    the item's own remittance: from the 835 archive (net of reversals; never a surgery-center claim) and from EMA's
+    payments no 835 carries (never the item's own check). {finding_id: {'r835', 'ema', 'total', 'first', 'same_payer'}}.
+    Reads the 835 tables by the claim id index both kinds of store keep (claims by claim id, lines by claim), one bill at
+    a time. What counts as the item's money:
+      - for a downcode or an underpayment, only its own payer's (by payer group: ema_checks._same_payer): another payer's
+        payment after it is that payer's share of what the first payer left (a second payer paying the copay), never the
+        first payer's level change or rate paid;
+      - a payment a later provider-level adjustment took back (PLB WO, FB, J1 or L6 whose reference names the paying claim,
+        by its claim id or the payer's claim number, dated on or after the payment: _plb_taken) counts only for what is
+        left of it;
+      - a later answer that repeats the item's own (the same claim id, code and paid amount: the plan's network answering
+        the claim again under another payer name) is no new money, nor is the reversal of such a repeat."""
     out: dict[str, dict] = {}
     by_bill: dict[str, list[dict]] = defaultdict(list)
     for it in items:
@@ -1087,49 +1110,165 @@ def later_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dic
             for tk, tr in conn.execute(f"SELECT transaction_key, trace_number FROM transactions WHERE transaction_key IN "
                                        f"({','.join('?' * len(part))})", part):
                 traces[tk] = _digits(tr)
+    rows_of: dict[str, list] = {}
+    if has_835:
+        for bill in by_bill:
+            # (claim id, date of service, code, billed code, paid on, cents, claim status, payer, line, claim, payer's claim
+            # number, filing indicator), in the order the money came
+            rows_of[bill] = sorted(conn.execute(
+                """SELECT c.patient_control_number, l.service_date, l.procedure_code, l.original_procedure_code, l.payment_date,
+                          COALESCE(l.paid_cents, 0), c.claim_status_code, c.payer_name, l.line_key, c.claim_key,
+                          c.payer_claim_control_number, c.claim_filing_indicator
+                   FROM claims c JOIN lines l ON l.claim_key = c.claim_key
+                   JOIN transactions t ON t.transaction_key = c.transaction_key
+                   WHERE c.patient_control_number >= ? AND c.patient_control_number < ?
+                     AND COALESCE(t.superseded, 0) = 0""", (bill, bill + "~")).fetchall(),
+                key=lambda r: (str(r[4] or ""), str(r[8] or "")))
+    taken = _plb_taken(conn, rows_of)
+    from .ema_checks import _same_payer, _same_payer_named
     for bill, its in by_bill.items():
-        rows = []
-        if has_835:
-            hi = bill + "~"
-            rows = conn.execute("""SELECT c.patient_control_number, l.service_date, l.procedure_code, l.original_procedure_code,
-                                          l.payment_date, COALESCE(l.paid_cents, 0), c.claim_status_code, c.payer_name, l.line_key
-                                   FROM claims c JOIN lines l ON l.claim_key = c.claim_key
-                                   JOIN transactions t ON t.transaction_key = c.transaction_key
-                                   WHERE c.patient_control_number >= ? AND c.patient_control_number < ?
-                                     AND COALESCE(t.superseded, 0) = 0""", (bill, hi)).fetchall()
+        rows = rows_of.get(bill, [])
         for it in its:
             codes = set(_codes_of(it))
             after = str(it.get("payment_date") or "")[:10]
             svc = str(it.get("service_date") or "")[:10]
             own_group = it.get("payer_group")
+            own_only = it.get("category") in OWN_PAYER_CATEGORIES
+            own_pcn = str(it.get("patient_control_number") or "")
+            own_paid = int(it.get("paid_cents") or 0)
             r835 = same = 0
             first = None
-            for pcn, sd, pc, opc, pd, paid, st, payer, lk in rows:
+            mine_rows = []                      # the rows that can be this item's later money, in the order the money came
+            for pcn, sd, pc, opc, pd, paid, st, payer, lk, _ck, _cn, cfi in rows:
                 if bill_of(pcn) != bill or is_facility(pcn) or str(sd or "")[:10] != svc or lk == it.get("line_key"):
                     continue
                 if not ({pc, opc} & codes) or not pd or str(pd)[:10] <= after:
                     continue
                 if st not in ("1", "2", "3", "19", "20", "21", "22"):
                     continue
+                mine = bool(own_group) and _same_payer(_group_kind(payer, cfi)[0], own_group)
+                if own_only and not mine:
+                    continue                    # another payer's share, not this payer's rate or level
+                mine_rows.append((pcn, pd, paid, st, lk, mine))
+
+            def repeat(pcn, paid, st) -> bool:
+                return own_paid > 0 and str(pcn) == own_pcn and paid == own_paid and st != "22"
+            # the item's own answer delivered again (a reprocessing at the same amount, the plan's network answering under
+            # another payer name) is no new money, and as many reversals of the item's own amount go with those repeats,
+            # whatever order the lines of one day come in (counted first, so a reversal read before its repayment is one)
+            repeats = sum(1 for pcn, _pd, paid, st, _lk, _m in mine_rows if repeat(pcn, paid, st))
+            for pcn, pd, paid, st, lk, mine in mine_rows:
+                if repeat(pcn, paid, st):
+                    continue                    # the item's own answer delivered again: no new money
+                if repeats and st == "22" and str(pcn) == own_pcn and paid == -own_paid:
+                    repeats -= 1                # ... and the reversal that goes with it
+                    continue
+                if paid > 0:
+                    paid = max(0, paid - taken.get(lk, 0))      # what a later takeback left of it
                 r835 += paid
                 if paid > 0:
                     first = min(first or str(pd)[:10], str(pd)[:10])
-                    if own_group and _group_kind(payer)[0] == own_group:
+                    if mine:
                         same += paid
             ema = 0
             link = it.get("ema_link")
             if link and _has_table(conn, "ema_line_payments"):
                 own = traces.get(it.get("transaction_key") or "", "")
-                for check, posted, cents, in835 in conn.execute(
-                        f"""SELECT check_no, posted, COALESCE(ins_paid, 0), COALESCE(in_835, 0) FROM ema_line_payments
+                pcols = set(_cols(conn, "ema_line_payments"))
+                who = ", payer, payer_group" if {"payer", "payer_group"} <= pcols else ", NULL, NULL"
+                for check, posted, cents, in835, pname, pgroup in conn.execute(
+                        f"""SELECT check_no, posted, COALESCE(ins_paid, 0), COALESCE(in_835, 0){who} FROM ema_line_payments
                             WHERE link = ? AND svc = ? AND cpt IN ({','.join('?' * len(codes))})""",
                         (int(link), svc, *sorted(codes))):
                     if in835 or not posted or str(posted)[:10] <= after or (own and _digits(check) == own):
                         continue
+                    if own_only and not (own_group and _same_payer_named(pgroup, pname, own_group)):
+                        continue                # another payer's posting: its share, not this payer's money
                     ema += cents
                     if cents > 0:
                         first = min(first or str(posted)[:10], str(posted)[:10])
             out[it["finding_id"]] = {"r835": r835, "ema": ema, "total": r835 + ema, "first": first, "same_payer": same}
+    return out
+
+
+def _plb_taken(conn: sqlite3.Connection, rows_of: dict[str, list]) -> dict[str, int]:
+    """What the payers' provider-level takebacks (TAKEBACK_PLB, a positive amount) took from the payments in `rows_of`
+    (later_payments' rows by bill): {line key: cents}. An entry names a claim as detection's ledger and states.py read a
+    reference: its whole text is the claim id; else exactly one claim id of these bills inside it (detect.CLAIM_ID_IN_TEXT);
+    else a word of it (6 characters or more) is the payer's claim number of exactly one of these claims. It takes from
+    that claim's payments by the same company (detect.payer_company with LEDGER_COMPANIES, as detection's ledger compares
+    payers: a PLB remittance carries no claim, so its payer name gives the company's commercial group, while a Medicare
+    Advantage or Medicaid plan's payment carries its product) dated on or before it, the newest first, each at most to
+    what is left of it. A claim status 22 reversal, which later_payments counts itself, first takes the payment it
+    reverses (the same claim id, company, date of service and code, dated before it, the newest first): a PLB entry
+    recovering the balance that reversal carried forward takes only what the reversal left, so one takeback is never
+    counted twice (detection's ledger skips such an entry the same way)."""
+    out: dict[str, int] = {}
+    if not rows_of or not _has_table(conn, "plb") or not {"reference", "amount_cents", "reason_code"} <= set(_cols(conn, "plb")):
+        return out
+    from .detect import CLAIM_ID_IN_TEXT, LEDGER_COMPANIES, payer_company
+
+    def company(group: Any) -> str:
+        co = payer_company(group)
+        return LEDGER_COMPANIES.get(co, co)
+    pays: dict[str, list] = defaultdict(list)       # claim id -> [paid on, line, cents, company, date of service, codes]
+    numbers: dict[str, set] = defaultdict(set)      # the payer's claim number -> claim ids
+    revs: list[tuple] = []                          # status 22 reversals: (claim id, day, cents, company, date of service, codes)
+    for rows in rows_of.values():
+        for pcn, sd, pc, opc, pd, paid, st, payer, lk, _ck, cn, cfi in rows:
+            if not pcn:
+                continue
+            if cn and str(cn).strip():
+                numbers[str(cn).strip().upper()].add(str(pcn))
+            if paid > 0 and st in ("1", "2", "3", "19", "20", "21") and lk and pd:
+                pays[str(pcn).upper()].append([str(pd)[:10], lk, int(paid), company(_group_kind(payer, cfi)[0]),
+                                               str(sd or "")[:10], {pc, opc} - {None, ""}])
+            elif paid < 0 and st == "22" and pd:
+                revs.append((str(pcn).upper(), str(pd)[:10], -int(paid), company(_group_kind(payer, cfi)[0]),
+                             str(sd or "")[:10], {pc, opc} - {None, ""}))
+    if not pays:
+        return out
+    codes = ",".join("'" + c + "'" for c in TAKEBACK_PLB)
+    entries = conn.execute(f"""SELECT p.reference, p.amount_cents, COALESCE(p.payment_date, t.payment_date), COALESCE(p.payer_name, t.payer_name)
+                               FROM plb p JOIN transactions t ON t.transaction_key = p.transaction_key
+                               WHERE COALESCE(t.superseded, 0) = 0 AND upper(COALESCE(p.reason_code, '')) IN ({codes})
+                                 AND COALESCE(p.amount_cents, 0) > 0 AND COALESCE(p.reference, '') <> ''""").fetchall()
+    if not entries:
+        return out
+    left = {p[1]: p[2] for ps in pays.values() for p in ps}
+    for name, day, cents, co, sd, rcodes in sorted(revs, key=lambda r: (r[1], r[0], r[2])):
+        for d, lk, _paid, g, psd, pcodes in sorted(pays.get(name, ()), key=lambda x: (x[0], x[1]), reverse=True):
+            if cents <= 0:
+                break
+            # only a payment dated before the reversal (a same-day payment beside it is its repayment), of the same service
+            if d >= day or psd != sd or not (pcodes & rcodes) or (co and g and co != g) or left.get(lk, 0) <= 0:
+                continue
+            take = min(cents, left[lk])
+            left[lk] -= take
+            cents -= take
+    for ref, cents, day, payer in sorted(entries, key=lambda e: (str(e[2] or ""), str(e[0]), int(e[1] or 0))):
+        text = str(ref or "").strip().upper()
+        name = text if text in pays else None
+        if name is None:
+            ids = {x for x in CLAIM_ID_IN_TEXT.findall(text) if x in pays}
+            name = next(iter(ids)) if len(ids) == 1 else None
+        if name is None:
+            found = {p.upper() for w in [text] + [w for w in re.split(r"[^0-9A-Z]+", text) if len(w) >= 6]
+                     for p in (numbers.get(w) or ()) if len(numbers[w]) == 1}
+            name = next(iter(found)) if len(found) == 1 else None
+        if name is None or name not in pays:
+            continue
+        co = company(_group_kind(payer)[0]) if payer else None
+        rest = int(cents or 0)
+        for d, lk, _paid, g, _sd, _codes in sorted(pays[name], key=lambda x: (x[0], x[1]), reverse=True):
+            if rest <= 0:
+                break
+            if d > str(day or "")[:10] or (co and g and co != g) or left.get(lk, 0) <= 0:
+                continue
+            take = min(rest, left[lk])
+            left[lk] -= take
+            out[lk] = out.get(lk, 0) + take
+            rest -= take
     return out
 
 
@@ -1441,7 +1580,7 @@ def _is_listed(r: dict, states_kept: bool) -> bool:
 
 
 def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dict[str, dict], *,
-                   facts: dict[str, str] | None = None, delivered_again: Any = None) -> dict:
+                   facts: dict[str, str] | None = None, delivered_again: Any = None, retired: Any = None) -> dict:
     """Open items people were shown as work (Work now or Waiting) before the run that the run no longer has, or keeps only
     as a stale row (an item a person worked that no rule produces any more: it is on no list), with no route out: a
     person's own decision on it while the run ran; an item THIS run made for the same line, claim and code, or service (an
@@ -1451,10 +1590,14 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
     (`facts`: the fingerprints that run stored, selfcheck_facts: the 835 answers on its bill, EMA's lines and newest A/R
     rows for its EMA claim number), as the rules' answer may then rightly change; or its line is a copy of an answer the
     payer delivered again the same day (`delivered_again`: the lines the detector passed by, detect._answer_copies), whose
-    one item the other delivery keeps."""
+    one item the other delivery keeps; or detection stopped raising it on purpose and counts its dollars elsewhere
+    (`retired`: {finding id: the counter}, Detector.retired: a second payer's share past its limit and a month's grace,
+    snb_past_limit; a claim no source can show the answer to, the unseen count). That route is only for an item nobody
+    worked: one a person worked is kept as a stale row, and a dropped rule keeps people's work on the list."""
     if not before:
         return _skip("vanished", "no items before this run")
     again = {str(x) for x in (delivered_again or ()) if x}
+    gone_by_rule = {str(k): str(v) for k, v in dict(retired or {}).items() if k and v}
     states_kept = any(r.get("work_state") for r in before.values())
     new_rows = [r for f, r in after.items() if f not in before and not r.get("stale")]
     lines = {r["line_key"] for r in new_rows if r.get("line_key")}
@@ -1517,6 +1660,8 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             rt["regrouped"] += 1                # a pattern whose lines this run lists one by one again
         elif lk and lk in again:
             rt["delivered_again"] += 1          # one answer delivered twice is one item: the other delivery keeps it (T-I3)
+        elif a is None and fid in gone_by_rule:
+            rt["retired:" + gone_by_rule[fid]] += 1     # retired by its rule on purpose, its dollars in that counter
         else:
             (cands if listed else ucands).append(r)
     left = _no_route(conn, cands, routes, facts)
@@ -1533,8 +1678,9 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
 
 
 def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, facts: dict[str, str] | None) -> list[dict]:
-    """The candidates the store's own records give no route out: not their remittance superseded, not a claim answered or
-    sent again since, not the owner's accepted pattern, not new facts on their own claim (`facts`). Counts the routes."""
+    """The candidates the store's own records give no route out: not their remittance superseded, not an 835 payment EMA
+    has since posted in full, not a claim answered or sent again since, not the owner's accepted pattern, not new facts on
+    their own claim (`facts`). Counts the routes."""
     superseded: set[str] = set()
     tks = sorted({r.get("transaction_key") for r in cands if r.get("transaction_key")})
     if tks and _has_table(conn, "transactions"):
@@ -1543,6 +1689,7 @@ def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, fact
             have = {tk: sup for tk, sup in conn.execute(f"SELECT transaction_key, COALESCE(superseded, 0) FROM transactions "
                                                         f"WHERE transaction_key IN ({','.join('?' * len(part))})", part)}
             superseded.update(tk for tk in part if have.get(tk, 1))     # gone from the store, or superseded
+    posted = _posted_in_ema(conn, [r for r in cands if r.get("signal") == "REMIT_NOT_POSTED" and r.get("transaction_key")])
     claim_items = [r for r in cands if not r.get("line_key") and r.get("signal") in CLAIM_SIGNALS]
     answered = _answered_since(conn, claim_items)
     sent_again = _sent_again(conn, claim_items)
@@ -1552,6 +1699,8 @@ def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, fact
     for r in cands:
         if r.get("transaction_key") and r["transaction_key"] in superseded:
             routes["superseded"] += 1
+        elif r["finding_id"] in posted:
+            routes["posted_in_ema"] += 1        # EMA now holds the 835's payment: C4 rightly stops listing it (Results counts it)
         elif r["finding_id"] in answered:
             routes["claim_answered"] += 1
         elif r["finding_id"] in sent_again:
@@ -1577,31 +1726,101 @@ _SUB_NO = re.compile(r"C(\d{1,3})$")
 
 
 def _sent_again(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
-    """Items about a whole claim whose bill went out again under a later submission number (EMA's rows with a submission
-    date, an 837 or an 835 claim of the same bill): detection chases only a bill's newest submission, and the earlier
-    one's item waits, stale, until the new one comes due (detect.save hands its notes on)."""
+    """Items about a whole claim whose bill went out again: under a later submission number (EMA's rows with a submission
+    date, an 837 or an 835 claim of the same bill), or under the same claim id (an 837 of it created, or EMA's submission
+    date of it, after the send the item is about, its evidence's `sent`; for an item that names no send, on or after the
+    practice's day it was first seen). Detection chases only a bill's newest submission and waits for a send's due day:
+    the earlier item waits, stale, and the claim shows on the Waiting view until the new send comes due (detect.save hands
+    its notes on, and lists it again with them if that send goes unanswered)."""
+    from .runtime import practice_date
     out: set[str] = set()
     sources = [(t, col, extra) for t, col, extra in (("ema_rows", "claim_id", " AND COALESCE(claim_submission_date,'') != ''"),
                                                      ("claims_837", "patient_control_number", ""),
                                                      ("claims", "patient_control_number", ""))
                if _has_table(conn, t) and col in _cols(conn, t)
                and (not extra or "claim_submission_date" in _cols(conn, t))]
+    resent = [(t, col, day) for t, col, day in (("claims_837", "patient_control_number", "bht_created"),
+                                                ("ema_rows", "claim_id", "claim_submission_date"))
+              if _has_table(conn, t) and {col, day} <= set(_cols(conn, t))]
     for r in items:
         pcn = str(r.get("patient_control_number") or "")
         b, m = bill_of(pcn), _SUB_NO.search(pcn)
-        if not b or not m:
-            continue
-        mine = int(m.group(1))
-        for t, col, extra in sources:
-            found = False
-            for (other,) in conn.execute(f"SELECT DISTINCT {col} FROM {t} WHERE {col} >= ? AND {col} < ?{extra}", (b + "C", b + "D")):
-                mo = _SUB_NO.search(str(other or ""))
-                if mo and bill_of(other) == b and int(mo.group(1)) > mine:
+        found = False
+        if b and m:
+            mine = int(m.group(1))
+            for t, col, extra in sources:
+                for (other,) in conn.execute(f"SELECT DISTINCT {col} FROM {t} WHERE {col} >= ? AND {col} < ?{extra}", (b + "C", b + "D")):
+                    mo = _SUB_NO.search(str(other or ""))
+                    if mo and bill_of(other) == b and int(mo.group(1)) > mine:
+                        found = True
+                        break
+                if found:
+                    break
+        own = str(_ev(r.get("evidence")).get("sent") or "")[:10]
+        since = practice_date(str(r.get("first_seen") or ""))
+        if not found and pcn and (own or since) and resent:
+            # the same claim id sent again (a rejected claim fixed and sent, or an unanswered one sent again, with no new
+            # submission number): a send dated after the send the item is about (its evidence's `sent`: the newest send
+            # either source showed when it was raised), whenever its 837 was read (837 files come in batches, often after
+            # the run that raised the item); for an item that names no send, one dated on or after the practice's day it
+            # was raised
+            for t, col, day in resent:
+                (newest,) = conn.execute(f"SELECT MAX({day}) FROM {t} WHERE {col} = ? AND COALESCE({day}, '') != ''", (pcn,)).fetchone()
+                d = str(newest or "")[:10]
+                if d and (d > own if own else d >= since):
                     found = True
                     break
-            if found:
-                out.add(r["finding_id"])
-                break
+        if found:
+            out.add(r["finding_id"])
+    return out
+
+
+def _ema_checks_of(conn: sqlite3.Connection, tks: Iterable[Any]) -> dict[str, list]:
+    """EMA's checks of each of these 835 payments (transaction keys), read as ema_checks.unposted_remits reads them: the
+    checks matched to the payment (trace_key) and the ones C1 paired with it under another number (pair_trace).
+    {transaction key: [checks, cents posted, first posting, newest posting]}; a payment no check holds is left out."""
+    out: dict[str, list] = {}
+    keys = sorted({str(t) for t in tks if t})
+    if not keys or not _has_table(conn, "ema_checks"):
+        return out
+    cols = set(_cols(conn, "ema_checks"))
+    if not {"trace_key", "ins_paid", "first_posted", "last_posted"} <= cols:
+        return out
+    pair = "pair_trace" in cols
+    for i in range(0, len(keys), 400):
+        part = keys[i:i + 400]
+        q = ",".join("?" * len(part))
+        paired = (f"""UNION ALL SELECT pair_trace AS k, ins_paid, first_posted, last_posted FROM ema_checks
+                      WHERE pair_trace IN ({q}) AND COALESCE(trace_key, '') <> pair_trace""" if pair else "")
+        for k, n, cents, first, last in conn.execute(
+                f"""SELECT k, COUNT(*), SUM(COALESCE(ins_paid, 0)), MIN(first_posted), MAX(last_posted) FROM (
+                        SELECT trace_key AS k, ins_paid, first_posted, last_posted FROM ema_checks WHERE trace_key IN ({q})
+                        {paired}) GROUP BY k""", part + (part if pair else [])):
+            out[str(k)] = [int(n or 0), int(cents or 0), str(first or "")[:10] or None, str(last or "")[:10] or None]
+    return out
+
+
+def _posted_in_ema(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
+    """REMIT_NOT_POSTED items whose 835 payment EMA's checks now hold in full: the checks of its trace (and the ones C1
+    paired with it) hold what its claims paid (the transaction's claim_paid_total) within unposted_remits' tolerance,
+    max($1, 0.5%). C4 then rightly stops listing it and Results counts the posting as money found: the work is done."""
+    out: set[str] = set()
+    if not items or not _has_table(conn, "transactions"):
+        return out
+    from .ema_checks import DIFF_MIN, DIFF_SHARE
+    held = _ema_checks_of(conn, [r.get("transaction_key") for r in items])
+    tks = sorted(held)
+    paid: dict[str, int] = {}
+    for i in range(0, len(tks), 500):
+        part = tks[i:i + 500]
+        paid.update({str(tk): int(c or 0) for tk, c in conn.execute(
+            f"SELECT transaction_key, claim_paid_total_cents FROM transactions WHERE transaction_key IN ({','.join('?' * len(part))})",
+            part)})
+    for r in items:
+        tk = str(r.get("transaction_key") or "")
+        p = paid.get(tk)
+        if tk in held and p and p > 0 and abs(p - held[tk][1]) <= max(DIFF_MIN, DIFF_SHARE * abs(p)):
+            out.add(r["finding_id"])
     return out
 
 
@@ -1659,7 +1878,9 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
     """A fingerprint of what each item's own claim shows in the data now: the 835 answers on its bill (how many, the
     newest date, the money), and for its EMA claim number EMA's lines (count, insurer paid, balance, newest posting, status
     classes) and the newest A/R rows (claim status, balance), or with no EMA claim number EMA's lines on file for its bill,
-    date and code; for an item with no bill, the remittance feed as a whole.
+    date and code; for an item with no bill, the remittance feed as a whole. An item about an 835 payment itself (a
+    transaction and no line or claim: a payment EMA did not post, a takeback) adds EMA's checks of that payment (how many,
+    the money posted, the first and newest posting), once any check holds it: EMA posting it is new facts on its subject.
     Two runs that see the same fingerprint saw the same facts, so an item that left between them left because a rule
     changed, not because its claim did."""
     out: dict[str, str] = {}
@@ -1668,6 +1889,7 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
     has_835 = _has_table(conn, "claims") and _has_table(conn, "transactions")
     has_lines = _has_table(conn, "ema_lines")
     has_ar = _has_table(conn, "ema_ar")
+    by_trace = _ema_checks_of(conn, [it.get("transaction_key") for it in items if _about_payment(it)])
     feed = list(conn.execute("SELECT COUNT(*), MAX(payment_date) FROM transactions WHERE COALESCE(superseded, 0) = 0")
                 .fetchone()) if has_835 else None
     by_bill: dict[str, list] = {}
@@ -1711,9 +1933,16 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
                 by_service[k] = [n, paid, bal, posted] if n else None
             if by_service[k] is not None:
                 parts.append(by_service[k])
+        if _about_payment(it) and str(it["transaction_key"]) in by_trace:
+            parts.append(["ema_checks", *by_trace[str(it["transaction_key"])]])
         raw = json.dumps(parts, default=str)
         out[it["finding_id"]] = hashlib.sha1(raw.encode()).hexdigest()[:16]
     return out
+
+
+def _about_payment(it: dict) -> bool:
+    """An item about an 835 payment itself (its transaction, and no line or claim of it): REMIT_NOT_POSTED, TAKEBACK."""
+    return bool(it.get("transaction_key")) and not it.get("line_key") and not it.get("claim_key")
 
 
 def _input_position(conn: sqlite3.Connection) -> list:
@@ -1731,18 +1960,25 @@ def _input_position(conn: sqlite3.Connection) -> list:
     return pos
 
 
-def _stored_facts(conn: sqlite3.Connection) -> dict[str, str]:
+def _stored_facts(conn: sqlite3.Connection, before: dict[str, dict] | None = None) -> dict[str, str]:
     """The fingerprints the run before stored, when this build makes them the same way and a source file was read since
-    (else none: never compared, so no departure is excused as new facts)."""
+    (else none: never compared, so no departure is excused as new facts). When only the part of an item about a payment
+    was made another way (FACTS_PAYMENT_VERSION), only those items' fingerprints are left out (`before`: the items as the
+    run found them, which tells which are about a payment)."""
     if meta_get(conn, K_FACTS_VERSION) != FACTS_VERSION:
         return {}
     if meta_get(conn, K_FACTS_INPUT) == _input_position(conn):
         return {}                       # nothing read since the run before: no claim has new facts
     try:
-        return {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
+        facts = {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
     except sqlite3.Error as exc:
         _caught(exc, "facts")
         return {}
+    if facts and meta_get(conn, K_FACTS_PAYMENT) != FACTS_PAYMENT_VERSION:
+        # made before this build's payment part: an item about a payment is not compared (kept once if it left on new
+        # facts alone), every other item's fingerprint is made the same way and still is
+        facts = {f: fp for f, fp in facts.items() if f in (before or {}) and not _about_payment(before[f])}
+    return facts
 
 
 def _save_facts(conn: sqlite3.Connection) -> int:
@@ -1753,6 +1989,7 @@ def _save_facts(conn: sqlite3.Connection) -> int:
     conn.execute("DELETE FROM selfcheck_facts")
     conn.executemany("INSERT OR REPLACE INTO selfcheck_facts (finding_id, fp) VALUES (?, ?)", list(fps.items()))
     meta_set(conn, K_FACTS_VERSION, FACTS_VERSION)
+    meta_set(conn, K_FACTS_PAYMENT, FACTS_PAYMENT_VERSION)
     meta_set(conn, K_FACTS_INPUT, _input_position(conn))
     return len(fps)
 
@@ -2122,7 +2359,8 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
     try:
-        van = check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again"))
+        van = check_vanished(conn, before, after, facts=_stored_facts(conn, before), delivered_again=ctx.get("delivered_again"),
+                             retired=ctx.get("retired"))
         left_record = van.pop("left_record", None)
         results.append(van)
         if left_record:
@@ -4971,6 +5209,11 @@ def panel(conn: sqlite3.Connection) -> dict:
     if gu.get("cents") is not None:
         lines.append(f"Written off with no decision (2025 on): {usd0(gu.get('cents'))}, of which {usd0(gu.get('recoverable_cents'))} can "
                      "still be appealed.")
+    past = second_payer_past_limit(conn)
+    if past:
+        lines.append(f"Patients' shares a second payer on file never paid, now past that payer's filing limit and a month's "
+                     f"grace: {_n(past['n'], 'share')} ({usd0(past['cents'])}). They are no longer work (the second-payer rule "
+                     "counts them every run); the ones that expired on Work now are also in Results' lost to deadlines.")
     gaps = (money.get("gaps") or {}) if isinstance(money, dict) else {}
     if gaps.get("total_cents"):
         lines.append(f"Money the checks could not tie to the cent: {usd0(gaps['total_cents'])} (the Data tab shows each part).")
@@ -4981,7 +5224,24 @@ def panel(conn: sqlite3.Connection) -> dict:
             "checks": checks, "audit": audit, "track": track, "patterns": pats,
             "money": {k: money.get(k) for k in ("at", "ledger_seq", "conservation", "ar_balance", "posted", "gaps")},
             "acceptances": (meta_get(conn, K_ACCEPTED, []) or [])[-10:],
-            "given_up": gu, "blind": blind, "housekeeping": house, "rates": rates}
+            "given_up": gu, "blind": blind, "housekeeping": house, "rates": rates, "second_payer_past_limit": past}
+
+
+def second_payer_past_limit(conn: sqlite3.Connection) -> dict | None:
+    """The second payers' shares the newest analysis counted past their filing limit and a month's grace (detection's
+    run_secondary_not_billed: meta ema:wiring counts snb_past_limit and snb_past_limit_cents): money no list shows any more,
+    retired by its rule. {'n', 'cents'}, or None when there is none. Read from meta, so the dashboard's copy shows it too;
+    the Data tab's panel names it, so a share retired before it was ever Work now (Results counts as lost to deadlines only
+    the items that expired on Work now) is never a silent drop."""
+    w = meta_get(conn, "ema:wiring", {}) or {}
+    counts = w.get("counts") if isinstance(w, dict) else None
+    if not isinstance(counts, dict):
+        return None
+    try:
+        n, cents = int(counts.get("snb_past_limit") or 0), int(counts.get("snb_past_limit_cents") or 0)
+    except (TypeError, ValueError):
+        return None
+    return {"n": n, "cents": cents} if n > 0 else None
 
 
 def banner(conn: sqlite3.Connection) -> dict | None:
