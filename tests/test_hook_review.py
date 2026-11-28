@@ -808,8 +808,8 @@ def test_a_handed_on_analysis_says_the_money_read_and_not_analysed(box):
     assert "5 remittance claims (5 lines)" in un["text"] and "$738" in un["text"] and "none of it is on a list" in un["text"], un["text"]
     done = _cloud(state, client, trigger="continue")
     assert "detect" in done and not done.get("unchecked")
-    header = open(os.path.join(REPO, "remitwatch", "static", "features.js"), encoding="utf-8").read()
-    assert "un.read.claims" in header                     # the header chip says them too
+    header = open(os.path.join(REPO, "remitwatch", "static", "shell.js"), encoding="utf-8").read()
+    assert "un.read.claims" in header                     # the header's health pill says them too (static/shell.js)
 
 
 @pytest.mark.parametrize("kind", ["file", "compact"])
