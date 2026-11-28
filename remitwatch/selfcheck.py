@@ -1132,7 +1132,7 @@ def later_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dic
             own_paid = int(it.get("paid_cents") or 0)
             r835 = same = 0
             first = None
-            repeats = 0
+            mine_rows = []                      # the rows that can be this item's later money, in the order the money came
             for pcn, sd, pc, opc, pd, paid, st, payer, lk, _ck, _cn, cfi in rows:
                 if bill_of(pcn) != bill or is_facility(pcn) or str(sd or "")[:10] != svc or lk == it.get("line_key"):
                     continue
@@ -1143,11 +1143,19 @@ def later_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dic
                 mine = bool(own_group) and _same_payer(_group_kind(payer, cfi)[0], own_group)
                 if own_only and not mine:
                     continue                    # another payer's share, not this payer's rate or level
-                if own_paid > 0 and str(pcn) == own_pcn and paid == own_paid and st != "22":
-                    repeats += 1                # the item's own answer delivered again: no new money
-                    continue
+                mine_rows.append((pcn, pd, paid, st, lk, mine))
+
+            def repeat(pcn, paid, st) -> bool:
+                return own_paid > 0 and str(pcn) == own_pcn and paid == own_paid and st != "22"
+            # the item's own answer delivered again (a reprocessing at the same amount, the plan's network answering under
+            # another payer name) is no new money, and as many reversals of the item's own amount go with those repeats,
+            # whatever order the lines of one day come in (counted first, so a reversal read before its repayment is one)
+            repeats = sum(1 for pcn, _pd, paid, st, _lk, _m in mine_rows if repeat(pcn, paid, st))
+            for pcn, pd, paid, st, lk, mine in mine_rows:
+                if repeat(pcn, paid, st):
+                    continue                    # the item's own answer delivered again: no new money
                 if repeats and st == "22" and str(pcn) == own_pcn and paid == -own_paid:
-                    repeats -= 1                # ... and the reversal of that repeat
+                    repeats -= 1                # ... and the reversal that goes with it
                     continue
                 if paid > 0:
                     paid = max(0, paid - taken.get(lk, 0))      # what a later takeback left of it
@@ -1182,23 +1190,36 @@ def _plb_taken(conn: sqlite3.Connection, rows_of: dict[str, list]) -> dict[str, 
     (later_payments' rows by bill): {line key: cents}. An entry names a claim as detection's ledger and states.py read a
     reference: its whole text is the claim id; else exactly one claim id of these bills inside it (detect.CLAIM_ID_IN_TEXT);
     else a word of it (6 characters or more) is the payer's claim number of exactly one of these claims. It takes from
-    that claim's payments by the same payer (ema_checks._same_payer, by payer group) dated on or before it, the newest
-    first, each at most to nothing."""
+    that claim's payments by the same company (detect.payer_company with LEDGER_COMPANIES, as detection's ledger compares
+    payers: a PLB remittance carries no claim, so its payer name gives the company's commercial group, while a Medicare
+    Advantage or Medicaid plan's payment carries its product) dated on or before it, the newest first, each at most to
+    what is left of it. A claim status 22 reversal, which later_payments counts itself, first takes the payment it
+    reverses (the same claim id, company, date of service and code, dated before it, the newest first): a PLB entry
+    recovering the balance that reversal carried forward takes only what the reversal left, so one takeback is never
+    counted twice (detection's ledger skips such an entry the same way)."""
     out: dict[str, int] = {}
     if not rows_of or not _has_table(conn, "plb") or not {"reference", "amount_cents", "reason_code"} <= set(_cols(conn, "plb")):
         return out
-    from .detect import CLAIM_ID_IN_TEXT
-    from .ema_checks import _same_payer
-    pays: dict[str, list] = defaultdict(list)       # claim id -> [paid on, line, cents, payer group]
+    from .detect import CLAIM_ID_IN_TEXT, LEDGER_COMPANIES, payer_company
+
+    def company(group: Any) -> str:
+        co = payer_company(group)
+        return LEDGER_COMPANIES.get(co, co)
+    pays: dict[str, list] = defaultdict(list)       # claim id -> [paid on, line, cents, company, date of service, codes]
     numbers: dict[str, set] = defaultdict(set)      # the payer's claim number -> claim ids
+    revs: list[tuple] = []                          # status 22 reversals: (claim id, day, cents, company, date of service, codes)
     for rows in rows_of.values():
-        for pcn, _sd, _pc, _opc, pd, paid, st, payer, lk, _ck, cn, cfi in rows:
+        for pcn, sd, pc, opc, pd, paid, st, payer, lk, _ck, cn, cfi in rows:
             if not pcn:
                 continue
             if cn and str(cn).strip():
                 numbers[str(cn).strip().upper()].add(str(pcn))
             if paid > 0 and st in ("1", "2", "3", "19", "20", "21") and lk and pd:
-                pays[str(pcn).upper()].append([str(pd)[:10], lk, int(paid), _group_kind(payer, cfi)[0], str(pcn)])
+                pays[str(pcn).upper()].append([str(pd)[:10], lk, int(paid), company(_group_kind(payer, cfi)[0]),
+                                               str(sd or "")[:10], {pc, opc} - {None, ""}])
+            elif paid < 0 and st == "22" and pd:
+                revs.append((str(pcn).upper(), str(pd)[:10], -int(paid), company(_group_kind(payer, cfi)[0]),
+                             str(sd or "")[:10], {pc, opc} - {None, ""}))
     if not pays:
         return out
     codes = ",".join("'" + c + "'" for c in TAKEBACK_PLB)
@@ -1206,7 +1227,19 @@ def _plb_taken(conn: sqlite3.Connection, rows_of: dict[str, list]) -> dict[str, 
                                FROM plb p JOIN transactions t ON t.transaction_key = p.transaction_key
                                WHERE COALESCE(t.superseded, 0) = 0 AND upper(COALESCE(p.reason_code, '')) IN ({codes})
                                  AND COALESCE(p.amount_cents, 0) > 0 AND COALESCE(p.reference, '') <> ''""").fetchall()
-    left = {lk: cents for ps in pays.values() for _d, lk, cents, _g, _p in ps}
+    if not entries:
+        return out
+    left = {p[1]: p[2] for ps in pays.values() for p in ps}
+    for name, day, cents, co, sd, rcodes in sorted(revs, key=lambda r: (r[1], r[0], r[2])):
+        for d, lk, _paid, g, psd, pcodes in sorted(pays.get(name, ()), key=lambda x: (x[0], x[1]), reverse=True):
+            if cents <= 0:
+                break
+            # only a payment dated before the reversal (a same-day payment beside it is its repayment), of the same service
+            if d >= day or psd != sd or not (pcodes & rcodes) or (co and g and co != g) or left.get(lk, 0) <= 0:
+                continue
+            take = min(cents, left[lk])
+            left[lk] -= take
+            cents -= take
     for ref, cents, day, payer in sorted(entries, key=lambda e: (str(e[2] or ""), str(e[0]), int(e[1] or 0))):
         text = str(ref or "").strip().upper()
         name = text if text in pays else None
@@ -1219,12 +1252,12 @@ def _plb_taken(conn: sqlite3.Connection, rows_of: dict[str, list]) -> dict[str, 
             name = next(iter(found)) if len(found) == 1 else None
         if name is None or name not in pays:
             continue
-        grp = _group_kind(payer)[0] if payer else None
+        co = company(_group_kind(payer)[0]) if payer else None
         rest = int(cents or 0)
-        for d, lk, _paid, g, _pcn in sorted(pays[name], key=lambda x: (x[0], x[1]), reverse=True):
+        for d, lk, _paid, g, _sd, _codes in sorted(pays[name], key=lambda x: (x[0], x[1]), reverse=True):
             if rest <= 0:
                 break
-            if d > str(day or "")[:10] or (grp and g and not _same_payer(grp, g)) or left.get(lk, 0) <= 0:
+            if d > str(day or "")[:10] or (co and g and co != g) or left.get(lk, 0) <= 0:
                 continue
             take = min(rest, left[lk])
             left[lk] -= take

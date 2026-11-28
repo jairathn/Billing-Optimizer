@@ -337,3 +337,127 @@ def test_another_payers_posting_in_ema_is_not_a_downcodes_money(kind):
     c.commit()
     r = guard(kind)
     assert r["examples"] == ["F-ema"], (r["examples"], r["info"])
+
+
+# ================================================================ the review's cases: one takeback, counted once, by company
+def _plan_denial_paid_then_taken(c, bill: str, *, cfi: str, payer: str = "HUMANA") -> None:
+    """A plan (filing indicator 16: Medicare Advantage; MC: Medicaid managed care; CI: commercial) denies the 99213 for
+    authorization, pays it on a later remittance, then takes the payment back in full with a PLB WO naming the paid claim.
+    The PLB remittance carries no claim, so no filing indicator: its payer name alone gives the company's commercial
+    group ('Humana'), while the paid claim's group carries the product ('Humana Medicare Advantage')."""
+    from remitwatch.codes import payer_group_kind
+    lk = remit(c, "2026-03-20", f"{bill}C017", [("99213", 150.00, 0, [("CO", "197", 150.00)])], payer=payer, payer_id="HM001",
+               cfi=cfi)[0]
+    add_item(c, "F-plan", signal="DENIED_AUTH", category="denial", carc="197", line_key=lk, patient_control_number=f"{bill}C017",
+             shortfall_cents=6000, payment_date="2026-03-20", payer_group=payer_group_kind(payer, cfi)[0], payer_name=payer)
+    remit(c, "2026-05-20", f"{bill}C018", [("99213", 150.00, 61.20, [("CO", "45", 85.00), ("PR", "2", 3.80)])], payer=payer,
+          payer_id="HM001", cfi=cfi)
+    plb_takeback(c, "2026-08-20", f"{bill}C018", 61.20, payer=payer, payer_id="HM001")
+
+
+@pytest.mark.parametrize("cfi", ["16", "MC", "CI"])
+def test_a_plb_takeback_by_the_same_company_is_netted_whatever_the_plans_product(kind, cfi):
+    """The PLB entry and the payment are one company's (Humana) whatever product the claim was filed under: the takeback
+    leaves nothing standing, so the guard names nothing (before, a Medicare Advantage or Medicaid plan's payment was
+    compared with the PLB's commercial group, read as another payer's, and left standing)."""
+    _plan_denial_paid_then_taken(kind.conn, "ZZ00RV001", cfi=cfi)
+    r = guard(kind)
+    assert "F-plan" not in r["examples"], (cfi, r["examples"], r["info"])
+
+
+def test_control_another_companys_plb_naming_the_claim_takes_nothing(kind):
+    """A PLB entry of another company (Aetna) that names the claim Humana paid does not take Humana's payment back."""
+    c = kind.conn
+    from remitwatch.codes import payer_group_kind
+    lk = remit(c, "2026-03-20", "ZZ00RV005C017", [("99213", 150.00, 0, [("CO", "197", 150.00)])], payer="HUMANA",
+               payer_id="HM001", cfi="16")[0]
+    add_item(c, "F-other-co", signal="DENIED_AUTH", category="denial", carc="197", line_key=lk,
+             patient_control_number="ZZ00RV005C017", shortfall_cents=6000, payment_date="2026-03-20",
+             payer_group=payer_group_kind("HUMANA", "16")[0], payer_name="HUMANA")
+    remit(c, "2026-05-20", "ZZ00RV005C018", [("99213", 150.00, 61.20, [("CO", "45", 85.00), ("PR", "2", 3.80)])],
+          payer="HUMANA", payer_id="HM001", cfi="16")
+    plb_takeback(c, "2026-08-20", "ZZ00RV005C018", 61.20, payer="AETNA", payer_id="AE001")
+    r = guard(kind)
+    assert r["examples"] == ["F-other-co"], (r["examples"], r["info"])
+
+
+def _underpaid_tpa(c, bill: str) -> None:
+    lk = remit(c, "2026-03-20", f"{bill}C017", [("99214", 224.00, 101.15, [("PR", "2", 11.25), ("CO", "45", 111.60)],
+                                                 {"allowed": 112.40})], payer="NORTHWIND BENEFITS TPA", payer_id="NB003")[0]
+    add_item(c, "F-under", signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, line_key=lk,
+             procedure_code="99214", patient_control_number=f"{bill}C017", payer_group="Self-funded plan TPAs",
+             payer_name="NORTHWIND BENEFITS TPA", paid_cents=10115, shortfall_cents=2010, payment_date="2026-03-20")
+
+
+@pytest.mark.parametrize("order", ["reversal_first", "repayment_first"])
+def test_a_reprocessing_at_the_same_amount_then_a_real_top_up_is_caught_whatever_the_line_order(kind, order):
+    """The administrator reprocesses the claim (a status 22 reversal of the $101.15 and a status 1 repayment of the same
+    $101.15, the same day: no new money), then pays the $20.10 it left on a later remittance: real later money that covers
+    the underpayment. The repayment repeats the item's own answer and the reversal goes with it, whichever line comes
+    first; before, a reversal read before its repayment was counted (-$101.15) and the top-up netted away."""
+    c = kind.conn
+    _underpaid_tpa(c, "ZZ00RV003")
+    rev = ("99214", -224.00, -101.15, [("PR", "2", -11.25), ("CO", "45", -111.60)])
+    pay = ("99214", 224.00, 101.15, [("PR", "2", 11.25), ("CO", "45", 111.60)], {"allowed": 112.40})
+    # one remittance each so the line keys sort in the order asked (later_payments sorts by paid on, then line key)
+    first, second = (rev, pay) if order == "reversal_first" else (pay, rev)
+    for x in (first, second):
+        remit(c, "2026-04-10", "ZZ00RV003C017", [x], payer="NORTHWIND BENEFITS TPA", payer_id="NB003",
+              status="22" if x is rev else "1")
+    remit(c, "2026-05-02", "ZZ00RV003C018", [("99214", 224.00, 20.10, [("CO", "45", 203.90)])],
+          payer="NORTHWIND BENEFITS TPA", payer_id="NB003")
+    r = guard(kind)
+    assert r["examples"] == ["F-under"], (order, r["examples"], r["info"])
+
+
+@pytest.mark.parametrize("order", ["reversal_first", "repayment_first"])
+def test_control_a_reprocessing_at_the_same_amount_alone_is_no_new_money(kind, order):
+    c = kind.conn
+    _underpaid_tpa(c, "ZZ00RV006")
+    rev = ("99214", -224.00, -101.15, [("PR", "2", -11.25), ("CO", "45", -111.60)])
+    pay = ("99214", 224.00, 101.15, [("PR", "2", 11.25), ("CO", "45", 111.60)], {"allowed": 112.40})
+    first, second = (rev, pay) if order == "reversal_first" else (pay, rev)
+    for x in (first, second):
+        remit(c, "2026-04-10", "ZZ00RV006C017", [x], payer="NORTHWIND BENEFITS TPA", payer_id="NB003",
+              status="22" if x is rev else "1")
+    r = guard(kind)
+    assert r["examples"] == [], (order, r["examples"], r["info"])
+
+
+def test_a_reversal_then_a_plb_recovering_the_same_payment_is_taken_once(kind):
+    """A later payment ($61.20) is reversed (status 22), and a later remittance recovers that balance with a PLB WO of
+    +$61.20 naming the claim: one takeback, already counted by the reversal. The payer then pays the service again on a
+    corrected claim, $70.00, which stands: the guard names the item. Before, the PLB entry was netted again from the
+    newest payment (the $70.00) and the real later payment was missed."""
+    c = kind.conn
+    bill = "ZZ00RV004"
+    lk = remit(c, "2026-03-20", f"{bill}C017", [("99213", 150.00, 0, [("CO", "197", 150.00)])])[0]
+    add_item(c, "F-once", signal="DENIED_AUTH", category="denial", carc="197", line_key=lk, patient_control_number=f"{bill}C017",
+             shortfall_cents=6000, payment_date="2026-03-20")
+    remit(c, "2026-05-20", f"{bill}C018", [("99213", 150.00, 61.20, [("CO", "45", 85.00), ("PR", "2", 3.80)])])
+    remit(c, "2026-06-20", f"{bill}C018", [("99213", -150.00, -61.20, [("CO", "45", -85.00), ("PR", "2", -3.80)])], status="22")
+    remit(c, "2026-07-01", f"{bill}C019", [("99213", 150.00, 70.00, [("CO", "45", 80.00)])])
+    plb_takeback(c, "2026-07-20", f"{bill}C018", 61.20)
+    r = guard(kind)
+    assert r["examples"] == ["F-once"], (r["examples"], r["info"])
+
+
+def test_control_a_plb_after_a_reversal_still_takes_a_payment_the_reversal_left(kind):
+    """The reversal took back the May payment; a June payment on the same claim id stands until a PLB WO recovers it:
+    the PLB takes that June payment (what the reversal left), and the corrected claim's $70.00 still stands."""
+    c = kind.conn
+    bill = "ZZ00RV007"
+    lk = remit(c, "2026-03-20", f"{bill}C017", [("99213", 150.00, 0, [("CO", "197", 150.00)])])[0]
+    add_item(c, "F-left", signal="DENIED_AUTH", category="denial", carc="197", line_key=lk, patient_control_number=f"{bill}C017",
+             shortfall_cents=6000, payment_date="2026-03-20")
+    remit(c, "2026-05-20", f"{bill}C018", [("99213", 150.00, 61.20, [("CO", "45", 85.00), ("PR", "2", 3.80)])])
+    remit(c, "2026-06-01", f"{bill}C018", [("99213", -150.00, -61.20, [("CO", "45", -85.00), ("PR", "2", -3.80)])], status="22")
+    remit(c, "2026-06-10", f"{bill}C018", [("99213", 150.00, 58.00, [("CO", "45", 88.20), ("PR", "2", 3.80)])])
+    plb_takeback(c, "2026-07-20", f"{bill}C018", 58.00)
+    items = [dict(zip([d[0] for d in c.execute("SELECT * FROM findings").description], r))
+             for r in c.execute("SELECT * FROM findings WHERE finding_id = 'F-left'").fetchall()]
+    got = sc.later_payments(c, items)["F-left"]
+    assert got["total"] == 0, got                        # +61.20 - 61.20 + 58.00 - 58.00 (the PLB took the June payment)
+    remit(c, "2026-08-01", f"{bill}C019", [("99213", 150.00, 70.00, [("CO", "45", 80.00)])])
+    r = guard(kind)
+    assert r["examples"] == ["F-left"], (r["examples"], r["info"])
