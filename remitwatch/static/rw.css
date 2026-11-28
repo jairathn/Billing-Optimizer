@@ -365,6 +365,8 @@ nav#nav, .sidebar { position: sticky; top: 0; z-index: var(--z-nav); height: 100
 .brand { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 var(--sp-2); margin-bottom: var(--sp-3);
   color: var(--text); font-size: var(--fs-lg); font-weight: var(--fw-semibold); letter-spacing: -.02em; text-decoration: none; }
 .brand:hover { color: var(--text); text-decoration: none; }
+/* the wordmark in Inter's Display cut (the optical size of a title), whatever its pixel size */
+.brand > span:not(.brand-mark) { font-variation-settings: "opsz" 32; }
 /* the mark: a remittance slip with a check, in one flat color (the tile is the inverse of the page) */
 .brand-mark { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--inverse-fg); background: var(--inverse-bg); }
 .brand-mark svg { width: 18px; height: 18px; }

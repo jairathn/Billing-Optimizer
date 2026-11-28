@@ -227,10 +227,13 @@
     const places = Object.keys(NAMES).filter(k => opts.page === 'app' || !['upload', 'setup'].includes(k))
       .map(k => ({k, name: NAMES[k]})).filter(p => !low || p.name.toLowerCase().includes(low) || p.k.includes(low));
     const rows = [];
-    if(opts.find && t.length >= 3) rows.push(`<button class="palette-item" data-find="1">${ICON('search')}<span>Find a claim: <b>${escH(t)}</b></span><kbd>Enter</kbd></button>`);
+    // a place whose name matches what was typed comes first (Enter goes there); otherwise Enter finds the claim typed
+    const find = opts.find && t.length >= 3 ? `<button class="palette-item" data-find="1">${ICON('search')}<span>Find a claim: <b>${escH(t)}</b></span></button>` : '';
+    if(find && !(low && places.length)) rows.push(find);
     if(places.length) rows.push(`<div class="palette-head">Go to</div>` + places.slice(0, 12).map(p => {
       const href = p.k === 'upload' ? '/upload' : p.k === 'setup' ? '/setup' : opts.link + p.k;
       return `<a class="palette-item" href="${href}" data-go="${p.k}">${ICON('arrow-r')}<span>${escH(p.name)}</span></a>`; }).join(''));
+    if(find && low && places.length) rows.push(`<div class="palette-head">Claims</div>` + find);
     if(!rows.length) rows.push(`<div class="palette-empty">Nothing matches. ${opts.find ? 'A claim ID needs three characters or more.' : 'Find a claim from the app\'s search.'}</div>`);
     const list = box.querySelector('#palList'); list.innerHTML = rows.join('');
     const first = list.querySelector('.palette-item'); if(first) first.classList.add('on');

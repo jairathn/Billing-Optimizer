@@ -59,8 +59,16 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
      read the date from the eyebrow. New: the strip adds up and opens its lists, the route's due7 equals the Worklist's
      count, the late-feed-only banner, the board and line placements (tests/test_shell.py).
    - Inline `style=` count: 275.
-4. Brand finish: next.
-5. docs/DESIGN.md.
+4. Brand finish: DONE (commit "ui-a brand").
+   - The mark: a remittance slip with a check, one flat color on an inverse tile (shell.js markSvg; static/brand/icon.svg
+     with its dark variant, icon-32.png, icon-180.png); the wordmark in Inter's Display cut, 600, -0.02em.
+   - Favicons and theme-color for both themes in the three page heads; titles "(N) Work · Denials · RemitWatch" with
+     the count that closes within 7 days and never patient data; the theme (System, Light, Dark) kept per computer
+     and set before the first paint; Ctrl or Cmd K opens Search and go to (a place that matches comes first, then
+     Find a claim); on a phone, Find in the tab bar opens it.
+   - Tests: tests/test_shell.py (a browser run of the shell on a fresh store: palette, theme, titles, icons, Upload in
+     the shell, the phone's tab bar, Find and More) with tests/shell_page.js.
+5. docs/DESIGN.md: next.
 
 ## Numbers measured
 

@@ -117,3 +117,58 @@ def test_the_nine_figures_head_results_and_the_exports_line_heads_data():
     draw = results.split("function rsDraw(v, d, score){", 1)[1].split("\n}\n", 1)[0]
     assert draw.index('<div id="rsBoard"></div>') < draw.index("${rsDueHtml(d)}")
     assert '<div id="dtBlind"></div><div id="dtEmaLine"></div>' in data and "tdEmaInto(v.querySelector('#dtEmaLine'))" in data
+
+
+def _browser_ready() -> bool:
+    return bool(NODE) and subprocess.run([NODE, "-e", "require('playwright')"], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
+def test_the_shell_in_a_browser(tmp_path):
+    """The brand's finish (CRITIQUE_premium change 8 without the sign-in): Ctrl K opens Search and go to and takes the
+    person to the place typed; the theme is kept on this computer and set before the first paint; each page's title
+    names its place; the icons load; Upload sits in the same shell; on a phone the tab bar's Find and More open the
+    palette and the places, and Escape closes them."""
+    import socket
+    import sys
+    import time
+    import urllib.request
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DROPBOX_", "TRIZETTO_", "SRFAX_", "ANTHROPIC_", "SMTP_"))
+           and k not in ("REPORT_TO", "ALERT_WEBHOOK_URL", "REMITWATCH_MODE", "REMITWATCH_OWNER_PASSWORD", "REMITWATCH_SHOW_PHI",
+                         "REMITWATCH_SYNC_INTERVAL_MINUTES", "REMITWATCH_ALLOW_OPEN")}
+    env.update(REMITWATCH_PASSWORD="shell-test-password-41", REMITWATCH_USER="oda", REMITWATCH_DB=str(tmp_path / "store.sqlite"),
+               PYTHONDONTWRITEBYTECODE="1")
+    srv = subprocess.Popen([sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port", str(port),
+                            "--log-level", "warning"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        got = subprocess.run([NODE, os.path.join(ROOT, "tests", "shell_page.js"), str(port), "oda", "shell-test-password-41"],
+                             capture_output=True, text=True, timeout=240, cwd=ROOT)
+    finally:
+        srv.terminate()
+        srv.wait(timeout=20)
+    assert got.returncode == 0, got.stderr[-2000:]
+    out = json.loads(got.stdout.strip().splitlines()[-1])
+    assert out["errors"] == [] and out["failed"] == [], (out["errors"], out["failed"])
+    assert out["places"][:2] == ["today", "worklist"] and {"policy", "providers", "calculator", "data", "/upload", "/setup"} <= set(out["places"])
+    assert out["title_today"].endswith("Today · RemitWatch")
+    assert out["icons"] and all(status == 200 for _href, status in out["icons"]), out["icons"]
+    assert sorted(m for m, _c in out["theme_colors"]) == ["(prefers-color-scheme: dark)", "(prefers-color-scheme: light)"]
+    assert out["palette_focus"] == "palQ"
+    assert out["after_go"]["hash"] == "#denials" and out["after_go"]["title"].endswith("Work · Denials · RemitWatch")
+    assert out["after_go"]["palette_hidden"] and out["after_go"]["active"] == ["denials"] and out["escape_closes"]
+    assert out["dark"] == ["dark", "dark"] and out["dark_at_load"] == "dark" and out["system"] == [None, None]
+    assert out["upload"]["title"] == "Upload from EMA · RemitWatch" and out["upload"]["places"] >= 12 and out["upload"]["pill"]
+    assert out["upload_goto"] and all(h.startswith("/") for h in out["upload_goto"])          # from Upload, the places are the app's
+    ph = out["phone"]
+    assert ph["tabs"] == ["Today", "Work", "Results", "Find", "More"] and not ph["sidebar_shown"] and ph["overflow"] <= 1
+    assert ph["find_opens"] and ph["more_opens"] and ph["more_closes"]
