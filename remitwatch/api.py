@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 from contextvars import ContextVar
 
-from . import __version__, runlog, runtime
+from . import __version__, runlog, runtime, sessions
 from .actions import STATUSES, apply_alert_ack, apply_status
 from .codes import CARC, RARC, member_number
 from .detect import DOWNCODE_SIGNALS, EM_SQL, PATTERN_SQL, ensure_schema, pattern_windows
@@ -307,21 +307,61 @@ def _blocked(who: str, record: bool = False, owner: bool = False) -> bool:
     return len(recent) >= FAIL_LIMIT + (1 if record else 0)
 
 
+def session_key() -> bytes | None:
+    """The key this site's sign-in sessions are signed with (remitwatch.sessions: the session secret, bound to the user
+    name and password), or None while the site signs people in with the browser's own box (no usable secret)."""
+    if not PASSWORD:
+        return None
+    sec, _why = sessions.secret(DB_PATH)
+    return sessions.signing_key(sec, USERNAME, PASSWORD) if sec is not None else None
+
+
+def session_ok(request: Optional[Request]) -> bool:
+    """Whether this request carries a good sign-in session: signed with this site's key, inside its hours."""
+    token = request.cookies.get(sessions.COOKIE) if request is not None else None
+    if not token:
+        return False
+    key = session_key()
+    return key is not None and sessions.issued(key, token) is not None
+
+
+def _signin_refusal(request: Optional[Request]) -> HTTPException:
+    """No sign-in. With the sign-in page on: a browser's navigation goes there and comes back to the same path after, a
+    call from one of the site's pages gets a 401 with no WWW-Authenticate (the browser shows no box; the page sends the
+    person to sign in), and a script gets the Basic challenge as before. Without it, the browser's own box as before."""
+    # a script is answered as before without a look at the session key (which a server makes on first need)
+    if request is not None and (sessions.navigation(request) or sessions.from_browser(request)) and session_key() is not None:
+        if sessions.navigation(request):
+            return HTTPException(status_code=303, detail="Sign in first.",
+                                 headers={"Location": sessions.signin_url(sessions.next_of(request))})
+        if sessions.from_browser(request):
+            return HTTPException(status_code=401, detail=sessions.SIGNED_OUT)
+    return HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic realm=RemitWatch"})
+
+
 def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
-    """Basic auth with a single shared password. When no password is configured the dashboard is open only on a
-    developer's own machine (REMITWATCH_ALLOW_OPEN=1); everywhere else it answers 503 and /setup says why."""
+    """One shared login: the sign-in page's session (a signed cookie, remitwatch.sessions) or the user name and password
+    sent as Basic auth (scripts, and the browser's own box where the site still uses it). When no password is configured
+    the dashboard is open only on a developer's own machine (REMITWATCH_ALLOW_OPEN=1); everywhere else it answers 503
+    and /setup says why."""
     problem = password_problem()
     if problem:
         if not PASSWORD and open_allowed():
             return "anonymous"
         raise HTTPException(status_code=503, detail=f"This site is not set up yet: REMITWATCH_PASSWORD is {problem}. Open /setup.")
+    # a good session first: then a login the browser still sends from its old box is neither needed nor counted as a
+    # wrong try, and colleagues already signed in keep working while one address waits out the brake on guessing
+    if session_ok(request):
+        return USERNAME
     who = _caller(request)
     if _blocked(who):
         raise HTTPException(status_code=429, detail="Too many wrong logins from this address. Wait ten minutes.")
+    if credentials is not None and request is not None and sessions.OUT_COOKIE in request.cookies:
+        credentials = None      # this browser signed out: the login its old sign-in box keeps is not used again
     if not shared_login(credentials):
         if credentials is not None:
             _blocked(who, record=True)
-        raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic realm=RemitWatch"})
+        raise _signin_refusal(request)
     return credentials.username
 
 
@@ -6253,3 +6293,5 @@ from . import api_results  # noqa: E402  (unit R: the Results tab, the scoreboar
 app.include_router(api_results.router)
 from . import api_ops  # noqa: E402  (the Data tab's operations panels, the diagnostic bundle, the decision log, the archive)
 app.include_router(api_ops.router)
+from . import api_signin  # noqa: E402  (unit ui-signin: the sign-in page, sign out, and the session's state)
+app.include_router(api_signin.router)

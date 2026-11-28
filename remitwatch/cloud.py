@@ -2977,6 +2977,9 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     add("password", "Dashboard password (REMITWATCH_PASSWORD)", pw_ok,
         "set" if pw_ok else ("not set" if not pw else "set, but shorter than 12 characters or not plain letters and digits"),
         f"Set REMITWATCH_PASSWORD {where} to 12 or more plain letters and digits, {apply}.")
+    from . import sessions          # the sign-in page's secret (or a server's own key beside the store): never shown
+    s_ok, s_label, s_detail, s_fix = sessions.setup_line(env("REMITWATCH_DB", "data/remitwatch.sqlite"), server, where, apply)
+    add("session_secret", s_label, s_ok, s_detail, s_fix)
     cron = env("CRON_SECRET") or ""
     cron_ok = bool(cron) and cron == cron.strip() and "\n" not in cron and len(cron) >= 16
     if server and not cron:     # the server's own scheduler runs the cycles; the secret only lets an outside caller start one

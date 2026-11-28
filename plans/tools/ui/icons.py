@@ -75,6 +75,8 @@ ICONS = {
     'corner':   '<path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>',
     'inbox':    '<path d="M21.5 13h-5.5l-2 3h-4l-2-3H2.5"/><path d="M5.6 5.2 2.5 13v5.5a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2V13l-3.1-7.8a2 2 0 0 0-1.9-1.2H7.5a2 2 0 0 0-1.9 1.2z"/>',
     'file':     '<path d="M14 2.5H6.5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8z"/><path d="M14 2.5V8h5.5"/>',
+    # sign out (the sidebar's foot): a door frame with an arrow leaving it
+    'sign-out': '<path d="M9.5 20.5h-4a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2h4"/><path d="m15.5 16.5 4.5-4.5-4.5-4.5"/><path d="M20 12H9"/>',
     # a person's status (what they recorded): a mark and a word, never a filled pill
     'st-open':   '<circle cx="12" cy="12" r="8"/>',
     'st-half':   '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="black" stroke="none"/>',

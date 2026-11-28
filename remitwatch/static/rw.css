@@ -1576,3 +1576,36 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 }
 :root[data-theme="dark"] :is(.banner.stale, .banner.warn, .banner[style*="--bad"]) { background: var(--surface-2); border-color: var(--border); box-shadow: inset 3px 0 0 var(--warning); }
 :root[data-theme="dark"] :is(.banner.safe, .banner.danger, #scBar .banner) { background: var(--surface-2); border-color: var(--border); box-shadow: inset 3px 0 0 var(--danger); }
+
+/* == 23. Sign-in page and Sign out ================================================================================= */
+/* /signin (static/signin.html): the mark, one card, the two fields the login has, one filled button. Flat at rest, as
+   every card; the error is a sentence in words beside its icon, never only a red edge. Sign out sits in the sidebar's
+   foot (static/shell.js), shown by static/session.js where the site signs people in on this page. */
+.signin-body { display: flex; min-height: 100vh; min-height: 100dvh; }
+.signin { display: flex; flex: 1; align-items: center; justify-content: center; padding: var(--sp-10) var(--sp-4); }
+.signin-card { width: 100%; max-width: 400px; padding: var(--sp-8); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl); }
+.signin-brand { display: flex; align-items: center; gap: 10px; margin-bottom: var(--sp-6); }
+.signin-word { color: var(--text); font-size: var(--fs-lg); line-height: var(--lh-lg); font-weight: var(--fw-semibold); letter-spacing: -.02em;
+  font-variation-settings: "opsz" 32; }
+.signin-title { font-size: var(--fs-2xl); line-height: var(--lh-2xl); letter-spacing: -.015em; }
+.signin-lead { margin: var(--sp-1) 0 var(--sp-6); color: var(--text-2); }
+.signin-form { display: flex; flex-direction: column; gap: var(--sp-4); }
+.signin-form input { width: 100%; height: 40px; }
+.signin-go { width: 100%; height: 40px; margin-top: var(--sp-1); }
+.signin-note, .signin-error { display: flex; align-items: flex-start; gap: var(--sp-2); margin: 0 0 var(--sp-4); padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); color: var(--text); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.signin-form .signin-error { margin: 0; }
+.signin-error { border-color: var(--danger-border); background: var(--danger-soft); }
+.signin-note::before, .signin-error::before { content: ""; flex: none; width: 16px; height: 16px; margin-top: 1px; background: var(--text-2);
+  -webkit-mask: var(--i-info) center / contain no-repeat; mask: var(--i-info) center / contain no-repeat; }
+.signin-error::before { background: var(--danger); -webkit-mask-image: var(--i-alert); mask-image: var(--i-alert); }
+.signin-note[hidden], .signin-error[hidden] { display: none; }
+.signin-foot { margin: var(--sp-6) 0 0; color: var(--text-3); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+@media (max-width: 640px) {
+  .signin { align-items: flex-start; padding: var(--sp-8) var(--sp-4); }
+  .signin-card { padding: var(--sp-6) var(--sp-5); }
+}
+.icon-btn[hidden] { display: none; }
+#signOutBtn { margin-left: auto; }
+:root[data-sidebar="rail"] nav#nav #signOutBtn { margin-left: 0; }
+@media (min-width: 641px) and (max-width: 1023px) { nav#nav #signOutBtn { margin: 0 auto; } }

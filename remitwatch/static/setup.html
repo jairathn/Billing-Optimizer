@@ -46,9 +46,10 @@
   </div>
 
   <div class="panel" id="gen" style="display:none"><h2>Values you make up yourself</h2>
-    <div class="small muted">These two are passwords you invent. The values below were made in your browser just now and are not stored anywhere. Put each in the host's settings: on the server, type it when configure.sh asks for it; on Vercel, add it in Settings, Environment Variables, then redeploy.</div>
+    <div class="small muted">These are passwords you invent. The values below were made in your browser just now and are not stored anywhere. Put each in the host's settings: on the server, type it when configure.sh asks for it; on Vercel, add it in Settings, Environment Variables, then redeploy.</div>
     <div class="row"><b>REMITWATCH_PASSWORD</b> <span class="val" id="genPw"></span> <button data-copy="genPw">Copy</button></div>
     <div class="row"><b>CRON_SECRET</b> <span class="val" id="genCron"></span> <button data-copy="genCron">Copy</button></div>
+    <div class="row"><b>REMITWATCH_SESSION_SECRET</b> <span class="val" id="genSess"></span> <button data-copy="genSess">Copy</button></div>
     <div class="small muted">Write the dashboard password down for the practice owner. The user name is <code>oda</code> unless REMITWATCH_USER is set.</div>
   </div>
 
@@ -116,6 +117,7 @@
 </div>
 </div>
 <nav class="tabbar" id="tabbar" aria-label="Places"></nav>
+<script src="/static/session.js"></script>
 <script src="/static/shell.js"></script>
 <script>RWShell.mount({page: 'setup', link: '/#'});</script>
 <script>
@@ -162,8 +164,10 @@ async function check(){
   $('#checks').innerHTML = s.checks.map(c => { const cls = c.ok===true?'ok':(c.ok===false?'no':'opt'); const mark = c.ok===true?'✓':(c.ok===false?'✗':'–');
     return `<tr><td class="mark ${cls}">${mark}</td><td><b>${esc(c.label)}</b><div class="small muted">${esc(c.detail||'')}</div>${c.fix?`<div class="fix">${esc(c.fix)}</div>`:''}</td></tr>`; }).join('');
   const missing = k => s.checks.some(c => c.key===k && c.ok===false);
-  $('#gen').style.display = (missing('password') || missing('cron_secret')) ? '' : 'none';
-  if(!$('#genPw').textContent){ $('#genPw').textContent = rand(20); $('#genCron').textContent = rand(40); }
+  // the sign-in page's secret: wanted where it is weak, or on Vercel where it is not set yet (the browser's own box asks)
+  const signinWanted = s.checks.some(c => c.key==='session_secret' && (c.ok===false || (c.ok===null && s.mode==='serverless')));
+  $('#gen').style.display = (missing('password') || missing('cron_secret') || signinWanted) ? '' : 'none';
+  if(!$('#genPw').textContent){ $('#genPw').textContent = rand(20); $('#genCron').textContent = rand(40); $('#genSess').textContent = rand(48); }
   $('#connect').style.display = (s.authorize_url && (s.connect_needed || $('#token').value)) ? '' : 'none';
   if(s.authorize_url) $('#authLink').href = s.authorize_url;
   // a Dropbox notification starts nothing on the Vercel site (it analyses only on a press): no webhook to add there

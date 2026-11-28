@@ -72,6 +72,7 @@
       ${groups}
       <div class="nav-foot">
         <div class="theme-seg" role="group" aria-label="Theme">${seg}</div>
+        <button type="button" class="icon-btn" id="signOutBtn" title="Sign out" aria-label="Sign out" hidden>${ICON('sign-out')}</button>
         <button type="button" class="icon-btn" id="railBtn" title="Narrow the sidebar ([)" aria-label="Narrow or widen the sidebar">${ICON('sidebar')}</button>
       </div>`;
   }
