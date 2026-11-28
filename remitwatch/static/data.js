@@ -110,7 +110,43 @@ function dtEmaHtml(e){
     return `<div class="panel"><h2>EMA's reports</h2><div class="note">${e && e.error ? 'The EMA figures did not come back: ' + esc(e.error) + '. Reload in a minute.'
       : 'No A/R or Production report from EMA has been read yet. The <a href="/upload">Upload page</a> lists what to pull and how.'}</div></div>`;
   }
-  return [dtReportsHtml(e), dtMissingHtml(e), dtUnpostedHtml(e), dtCreditsHtml(e), dtArHtml(e), dtPolicyHtml(e), dtRunHtml(e)].join('');
+  return [dtReportsHtml(e), dtMissingHtml(e), dtUnseenHtml(e), dtUnpostedHtml(e), dtCreditsHtml(e), dtArHtml(e), dtPolicyHtml(e), dtRunHtml(e)].join('');
+}
+
+// the claims sent that no 835 and no EMA report can show an answer to: counted in dollars, by reason and payer, with the
+// export that would let the bridges run on the ones older than EMA's reports, and the list most dollars first
+function dtUnseenHtml(e){
+  const u = e.unseen;
+  if(u && u.error) return `<div class="panel"><h2>Claims no source can show an answer to</h2><div class="small sev-high">The figures did not come back: ${esc(u.error)}. Reload in a minute.</div></div>`;
+  if(!u || !u.n) return '';
+  const row = (a, n, c) => `<tr><td>${esc(a)}</td><td class="num">${Number(n||0).toLocaleString()}</td><td class="num">${money(c)}</td></tr>`;
+  const groups = u.groups || [], top = groups.slice(0, 10), rest = groups.slice(10);
+  return `<div class="panel" id="dtUnseen"><div class="panel-head"><h2>Claims sent that no source can show an answer to</h2>
+    <span class="small muted">${esc(pl(u.n, 'claim'))}, ${money(u.cents)}. No 835 answers them and EMA's reports show no answer, so they are counted here, not listed.</span></div>
+    ${u.host_note ? `<div class="note">${esc(u.host_note)}</div>` : ''}
+    ${u.export ? `<div class="note">To check the ones older than EMA's reports: export ${esc(u.export)}, and put them where the server reads EMA's reports. The next run checks these claims against them.</div>` : ''}
+    <div class="grid two"><div class="scroll"><table class="small"><thead><tr><th>Why they are not listed</th><th class="num">Claims</th><th class="num">Dollars</th></tr></thead>
+      <tbody>${(u.reasons || []).map(r => row(r.words, r.n, r.cents)).join('')}</tbody></table></div>
+    <div class="scroll"><table class="small"><thead><tr><th>Payer</th><th class="num">Claims</th><th class="num">Dollars</th></tr></thead>
+      <tbody>${top.map(g => row(g.payer, g.n, g.cents)).join('')}${rest.length ? row(pl(rest.length, 'more payer'), rest.reduce((t, g) => t + (g.n||0), 0), rest.reduce((t, g) => t + (g.cents||0), 0)) : ''}</tbody></table></div></div>
+    <div class="small"><button class="ghost small" id="dtUnseenList">List the claims, most dollars first</button> · <a href="/api/ema/unseen.csv" download>Download the list (CSV)</a></div>
+    <div id="dtUnseenRows"></div></div>`;
+}
+
+async function dtUnseenRows(v, page){
+  const el = v.querySelector('#dtUnseenRows'); if(!el) return;
+  el.innerHTML = '<div class="muted small">loading…</div>';
+  let r; try { r = await api('/api/ema/unseen?'+qs({page})); } catch(err){ el.innerHTML = `<div class="small sev-high">The claims did not come back: ${esc(err.message)}.</div>`; return; }
+  const rows = r.rows || [], pages = Math.max(1, Math.ceil((r.count||0) / (r.size||100)));
+  const who = x => r.names && x.member_id ? ` · member ${esc(x.member_id)}` : '';
+  const body = dtNarrow() ? `<div>${rows.map(x=>`<div class="check"><div><div class="small"><b>${esc(x.claim_id)}</b>${who(x)} · ${esc(x.payer_group)} · ${money2(x.cents)}</div>
+      <div class="small muted">${[dtDay(x.service_date), (x.codes||[]).join(', '), x.sent ? 'sent ' + dtDay(x.sent) : ''].filter(Boolean).map(esc).join(' · ')}</div><div class="small muted">${esc(x.why)}</div></div></div>`).join('') || '<div class="muted small">No claims.</div>'}</div>`
+    : `<div class="scroll"><table class="small"><thead><tr><th>Claim</th>${r.names ? '<th>Member</th>' : ''}<th>Payer</th><th>Service</th><th>Codes</th><th class="num">Dollars</th><th>Sent</th><th>Why it is not listed</th></tr></thead>
+    <tbody>${rows.map(x=>`<tr><td>${esc(x.claim_id)}</td>${r.names ? `<td>${esc(x.member_id||'')}</td>` : ''}<td>${esc(x.payer_group)}</td><td>${dtDay(x.service_date)}</td><td>${esc((x.codes||[]).join(', '))}</td><td class="num">${money2(x.cents)}</td><td>${dtDay(x.sent)}</td><td>${esc(x.why)}</td></tr>`).join('') || `<tr><td colspan="${r.names ? 8 : 7}" class="muted">No claims.</td></tr>`}</tbody></table></div>`;
+  el.innerHTML = `<h3 class="small" style="margin:10px 0 4px">${esc(pl(r.count, 'claim'))}, ${money(r.cents)}, most dollars first</h3>${body}
+    <div class="pager"><button class="dtPrev" ${page<=1?'disabled':''}>‹ prev</button><span>page ${page} of ${pages}</span><button class="dtNext" ${page>=pages?'disabled':''}>next ›</button></div>`;
+  el.querySelector('.dtPrev').onclick = () => dtUnseenRows(v, page-1);
+  el.querySelector('.dtNext').onclick = () => dtUnseenRows(v, page+1);
 }
 
 function dtFileRow(x){
@@ -291,6 +327,8 @@ function dtRunHtml(e){
 
 function dtBind(v, ema){
   v.querySelectorAll('.dtGo').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab = a.dataset.tab; location.hash = a.dataset.tab; render(); });
+  const unseenList = v.querySelector('#dtUnseenList');
+  if(unseenList) unseenList.onclick = () => dtUnseenRows(v, 1);
   const all = v.querySelector('#dtAllFiles');
   if(all) all.onclick = () => { v.querySelector('#dtFiles').innerHTML = ((ema.catalog||{}).files || []).map(dtFileRow).join(''); all.remove(); };
   const files = (ema.catalog || {}).files || [];

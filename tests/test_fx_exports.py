@@ -838,7 +838,12 @@ def test_production_lists_one_service_once_and_prices_its_parts_at_their_own_rat
     April 25, not due yet there). Blue Cross pays 88305 at $80 whole, $30 for the 26 and $50 for the TC.
     One service is one item per part: the newer charges (the two parts) carry the whole service, so EMA claim 81 is not
     listed; the 26 is priced at $30 and the TC at $50 (before: three items, each part priced at the whole service's $80,
-    $240 in all)."""
+    $240 in all).
+    One claim, one item (gapfix G8): claims 82 and 83 are the weekly exports' own, waiting on the waiting view for the
+    answer to their April 25 send, so on May 3 Production's check leaves them to the exports' pass (their waiting entries
+    say Production would list them) and nothing is listed; once due (June 8, EMA's postings through May 28) the exports'
+    pass lists each once, at its own part's rate, and EMA claim 81 is still carried by the parts. (Before G8, Production
+    listed 82 and 83 on May 3 beside their waiting claims, with its own clock.)"""
     from tests import ema_fixtures as F
     from tests.test_ema_wiring import charge, denial_world, pay, remit as raw_remit
     from tests.test_workable import ema
@@ -863,15 +868,31 @@ def test_production_lists_one_service_once_and_prices_its_parts_at_their_own_rat
         ema(s.conn, F.claim_id(n), family="claim_status", claim_status="Submitted", claim_submission_date="2026-04-25",
             service_date=v.isoformat(), payer=F.PAYERS["bcbs"], payer_id="BCT01", patient_id="EMA081")
     s.conn.commit()
+    def sizes() -> dict:
+        got = {(r["patient_control_number"] or f"link:{r['ema_link']}"): dict(r) for r in s.query(
+            "SELECT patient_control_number, ema_link, shortfall_cents, evidence FROM findings WHERE signal='NO_ANSWER' "
+            "AND COALESCE(stale,0)=0 AND ema_link IN (?, ?, ?)", (F.link_no(81), F.link_no(82), F.link_no(83)))}
+        return {k: v["shortfall_cents"] for k, v in got.items()}
     det = Detector(s, run_id="r1", today="2026-05-03")
     det.run()
     assert det.ema_errors == [], det.ema_errors
+    assert sizes() == {}, sizes()
+    from remitwatch.detect import WAITING_837_META
+    w = json.loads(s.conn.execute("SELECT value FROM meta WHERE key=?", (WAITING_837_META,)).fetchone()[0])
+    notes = {r[0]: r[5] for r in w["claims"] if len(r) > 5}
+    assert {k: v["check"] for k, v in notes.items()} == {F.claim_id(82): "no_answer", F.claim_id(83): "no_answer"}, notes
+    # June 8: Production of June 5, so EMA's postings show Blue Cross's answers through May 28: the April 25 send is due and
+    # unanswered, and the exports' pass lists each claim once
+    from tests.test_ema_wiring import load
+    load(s, lg, tmp_path, [charge(F.link_no(95), cpt="99212", amount=100, patient=3, svc=D(2026, 5, 20), posted=D(2026, 5, 21)),
+                           pay(F.link_no(95), "PAPER-95", 60, cpt="99212", patient=3, svc=D(2026, 5, 20), posted=D(2026, 6, 2)),
+                           charge(F.link_no(96), cpt="99212", patient=2, svc=D(2026, 6, 1), posted=D(2026, 6, 5),
+                                  status="Payment Pending")])
+    det = Detector(s, run_id="r2", today="2026-06-08")
+    det.run()
+    assert det.ema_errors == [], det.ema_errors
     lg.close()
-    got = {(r["patient_control_number"] or f"link:{r['ema_link']}"): dict(r) for r in s.query(
-        "SELECT patient_control_number, ema_link, shortfall_cents, evidence FROM findings WHERE signal='NO_ANSWER' "
-        "AND COALESCE(stale,0)=0 AND ema_link IN (?, ?, ?)", (F.link_no(81), F.link_no(82), F.link_no(83)))}
-    sizes = {k: v["shortfall_cents"] for k, v in got.items()}
-    assert sizes == {F.claim_id(82): 3000, F.claim_id(83): 5000}, sizes
+    assert sizes() == {F.claim_id(82): 3000, F.claim_id(83): 5000}, sizes()
     s.close()
 
 
