@@ -169,8 +169,16 @@ def _signed_money(c) -> str:
 
 
 def _utc(iso: str | None) -> str:
-    """A run's time as people read it: '2026-11-22T10:17:55+00:00' is '2026-11-22 10:17 UTC'."""
-    return f"{iso[:10]} {iso[11:16]} UTC" if iso and len(iso) >= 16 else "an unknown time"
+    """An analysis's time as people read it, on the practice's clock (DESIGN 2.2: never UTC on a page):
+    '2026-11-22T10:17:55+00:00' is 'Nov 22, 2026, 5:17 AM' where the practice is in New York."""
+    from .runtime import practice_zone
+    from .states import day
+    try:
+        t = datetime.fromisoformat(str(iso or "").replace("Z", "+00:00"))
+    except ValueError:
+        return "an unknown time"
+    t = (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(practice_zone())
+    return f"{day(t.date().isoformat())}, {t.strftime('%I:%M %p').lstrip('0')}"
 
 
 def _when(value: Any) -> str:
@@ -269,16 +277,16 @@ def _swing_lead(m: dict) -> str:
     t = m["total"]
     verb = lambda x: "added" if x > 0 else "removed"       # noqa: E731
     if "all items" in m["over"]:
-        return f"One analysis run {verb(t['change_n'])} {abs(t['change_n']):,} open items ({_signed_money(t['change_cents'])})"
+        return f"One analysis {verb(t['change_n'])} {abs(t['change_n']):,} open items ({_signed_money(t['change_cents'])})"
     if "all dollars" in m["over"]:
-        return f"One analysis run {verb(t['change_cents'])} {money(abs(t['change_cents']))} of open items ({_signed(t['change_n'])} items)"
+        return f"One analysis {verb(t['change_cents'])} {money(abs(t['change_cents']))} of open items ({_signed(t['change_n'])} items)"
     net = [c for c in m["by_category"] if c["over"]]
     if not net:
         return _moves_lead(m)
     c = max(net, key=lambda c: (abs(c["change_n"]), abs(c["change_cents"])))
     if "items" in c["over"]:
-        return f"One analysis run {verb(c['change_n'])} {abs(c['change_n']):,} open items in {c['label']} ({_signed_money(c['change_cents'])})"
-    return f"One analysis run {verb(c['change_cents'])} {money(abs(c['change_cents']))} of open items in {c['label']} ({_signed(c['change_n'])} items)"
+        return f"One analysis {verb(c['change_n'])} {abs(c['change_n']):,} open items in {c['label']} ({_signed_money(c['change_cents'])})"
+    return f"One analysis {verb(c['change_cents'])} {money(abs(c['change_cents']))} of open items in {c['label']} ({_signed(c['change_n'])} items)"
 
 
 def _moves_lead(m: dict) -> str:
@@ -291,16 +299,16 @@ def _moves_lead(m: dict) -> str:
         where = f" in {g['label']}"
     a, v = g["appeared_n"], g["vanished_n"]
     if a and v:
-        return (f"One analysis run put {a:,} open items on the list and took {v:,} off{where} ({money(g['appeared_cents'])} "
+        return (f"One analysis put {a:,} open items on the list and took {v:,} off{where} ({money(g['appeared_cents'])} "
                 f"on, {money(g['vanished_cents'])} off)")
     if a:
-        return f"One analysis run put {a:,} new open items on the list{where} ({money(g['appeared_cents'])})"
-    return f"One analysis run took {v:,} open items off the list{where} ({money(g['vanished_cents'])})"
+        return f"One analysis put {a:,} new open items on the list{where} ({money(g['appeared_cents'])})"
+    return f"One analysis took {v:,} open items off the list{where} ({money(g['vanished_cents'])})"
 
 
 def _swing_files(files: dict, since: str) -> str:
     if not files:
-        return "No files were read between the two runs."
+        return "No files were read between the two analyses."
     parts = []
     for k in sorted(files, key=lambda k: (k != "835", k)):
         one, many = SWING_FILE_KINDS[k]
@@ -309,12 +317,12 @@ def _swing_files(files: dict, since: str) -> str:
 
 
 def _swing_levels() -> str:
-    return (f"Alarm levels for one run: more than {SWING_RISE_ITEMS:,} open items or {money(SWING_RISE_CENTS)} added, or more than "
+    return (f"Alarm levels for one analysis: more than {SWING_RISE_ITEMS:,} open items or {money(SWING_RISE_CENTS)} added, or more than "
             f"{SWING_FALL_ITEMS:,} items or {money(SWING_FALL_CENTS)} removed, in all; in one category, more than "
             f"{SWING_RISE_ITEMS_CATEGORY:,} items or {money(SWING_RISE_CENTS_CATEGORY)} added, or more than "
             f"{SWING_FALL_ITEMS_CATEGORY:,} items or {money(SWING_FALL_CENTS_CATEGORY)} removed. The same levels apply to the open "
-            "items that appeared (the added levels) and that vanished (the removed levels) in one run, counted item by item, even "
-            "when the totals hardly move. Changes people made themselves between the two runs do not count.")
+            "items that appeared (the added levels) and that vanished (the removed levels) in one analysis, counted item by item, even "
+            "when the totals hardly move. Changes people made themselves between the two analyses do not count.")
 
 
 class AlertEngine:
@@ -477,13 +485,13 @@ class AlertEngine:
                             payer, "downcoding", npi, rate, rate_other, k, cents[(payer, npi)])
 
     def swing_rule(self) -> None:
-        """SWING: one detection run added or removed far more open items or dollars than a run normally does (the levels,
+        """SWING: one detection run added or removed far more open items or dollars than an analysis normally does (the levels,
         and how they were set, are above SWING_RISE_ITEMS). Every pair of consecutive runs whose later run is less than
         SWING_DAYS old and ran under this code's rules (DETECT_VERSION) is compared, so the alert is raised again by every
         run for seven days after the run that moved and never clears itself at the next quiet run; one a person
         acknowledged keeps that status (run() never resets it). A pair whose later run ran under other rules is history
         (misuse check CH-3): after a release, the old rules' own runs are not raised again as a big change.
-        When the rules version changed between the two runs (a release re-analyses every claim once) the alert says so
+        When the rules version changed between the two analyses (a release re-analyses every claim once) the alert says so
         and is info, not high."""
         from .detect import DETECT_VERSION      # read when the rule runs: the rules of the code that runs it
         have = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -518,29 +526,29 @@ class AlertEngine:
         changed = (before.get("version") or "") != (after.get("version") or "")
         since, at = _utc(before["started_at"]), _utc(after["started_at"])
         lead = _swing_lead(m)
-        title = f"{lead} under new rules from a release" if changed else f"{lead}, far more than a run normally does"
+        title = f"{lead} under new rules from a release" if changed else f"{lead}, far more than an analysis normally does"
         lines = [f"Open items in all categories (To do, Started and Sent): {t['before_n']:,} at the analysis before ({_when(since)}), "
-                 f"{t['after_n']:,} after this run ({at}); {money(t['before_cents'])} before, {money(t['after_cents'])} after."]
+                 f"{t['after_n']:,} after this analysis ({at}); {money(t['before_cents'])} before, {money(t['after_cents'])} after."]
         if t["people_n"] or t["people_cents"]:
             moved = (f"took {abs(t['people_n']):,} items ({money(abs(t['people_cents']))}) off the open list" if t["people_n"] < 0 else
                      f"put {t['people_n']:,} items ({money(abs(t['people_cents']))}) back on the open list" if t["people_n"] > 0 else
                      f"changed the open dollars by {_signed_money(t['people_cents'])}")
-            lines.append(f"People's own status changes between the two runs {moved}; that is left out of what this run did.")
-        lines.append(f"What this run did: {_signed(t['change_n'])} open items, {_signed_money(t['change_cents'])}.")
+            lines.append(f"People's own status changes between the two analyses {moved}; that is left out of what this analysis did.")
+        lines.append(f"What this analysis did: {_signed(t['change_n'])} open items, {_signed_money(t['change_cents'])}.")
         for c in sorted(m["by_category"], key=lambda c: (-abs(c["change_n"]), -abs(c["change_cents"]), c["category"])):
             if c["change_n"] or c["change_cents"]:
-                lines.append(f"{c['label']}: {c['before_n']:,} to {c['after_n']:,} open items, this run {_signed(c['change_n'])} "
+                lines.append(f"{c['label']}: {c['before_n']:,} to {c['after_n']:,} open items, this analysis {_signed(c['change_n'])} "
                              f"({_signed_money(c['change_cents'])}).")
         for c in sorted(m["by_category"], key=lambda c: (-(c["appeared_n"] + c["vanished_n"]), c["category"])):
             if c["appeared_n"] or c["vanished_n"]:
-                lines.append(f"{c['label']}, item by item: {c['appeared_n']:,} appeared and {c['vanished_n']:,} vanished in this run "
+                lines.append(f"{c['label']}, item by item: {c['appeared_n']:,} appeared and {c['vanished_n']:,} vanished in this analysis "
                              f"({money(c['appeared_cents'])} on, {money(c['vanished_cents'])} off).")
         lines.append(_swing_files(m["files"], since))
         if changed:
-            lines.append(f"The rules changed between the two runs (version {before.get('version') or 'unknown'} to "
+            lines.append(f"The rules changed between the two analyses (version {before.get('version') or 'unknown'} to "
                          f"{after.get('version') or 'unknown'}): a release re-checks every claim once, so part or all of this "
                          "change can come from the release.")
-        lines.append(f"This alert stays at the top of every page for {SWING_DAYS} days after the run, unless someone acknowledges it "
+        lines.append(f"This alert stays at the top of every page for {SWING_DAYS} days after the analysis, unless someone acknowledges it "
                      "once the files are checked.")
         lines.append(_swing_levels())
         action = (f"Before working new items, open the Data tab and check the files read since {_when(since)}. "

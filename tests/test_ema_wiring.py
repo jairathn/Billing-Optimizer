@@ -513,7 +513,7 @@ def test_the_weekly_report_and_the_data_checks_say_what_emas_reports_add(store, 
     run(store)
     text = build_report(store)
     assert "## From EMA's reports" in text and "Claims that never left EMA: 1" in text
-    assert "Written off automatically by EMA and still appealable: 1 items" in text
+    assert "Written off automatically by EMA and still appealable: 1 item," in text
     keys = {h["key"] for h in insights.data_health(store.conn, insights.newest_payment(store.conn), TODAY)}
     assert {"ema_reports_missing", "ema_report_held", "remits_missing", "credits"} <= keys
 

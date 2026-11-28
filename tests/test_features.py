@@ -1032,6 +1032,7 @@ def test_the_weekly_report_leaves_out_what_is_stale(tmp_path):
     is new or the context lines."""
     from datetime import date, timedelta
 
+    from remitwatch import report
     from remitwatch.report import build_report
     denied = claim(300, svc("99214", "223.65", "0.00", None, "CAS*CO*16*223.65~"))     # information missing: correct and resubmit
     store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied])
@@ -1051,9 +1052,9 @@ def test_the_weekly_report_leaves_out_what_is_stale(tmp_path):
     assert "Kept Payer" not in text and "CB0000999C017" not in text and "Kept context line" not in text and "$999" not in text
     live = "COALESCE(stale,0)=0 AND category IN ('downcoding','bundling','denial','underpayment')"
     n_open = c.execute(f"SELECT COUNT(*) FROM findings WHERE status='open' AND {live}").fetchone()[0]
-    assert f"| open | {n_open:,} |" in text
+    assert f"| To do | {n_open:,} |" in text          # (ui-words) the status as the pages say it
     n_fix = c.execute("SELECT COUNT(*) FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND signal='DENIED_MISSING_INFO'").fetchone()[0]
-    assert f"- DENIED_MISSING_INFO: {n_fix} lines" in text
-    new = text.split("## New this run")[1].split("##")[0]
-    assert "| denial | DENIED_MISSING_INFO |" in new and "G2211_DENIED" not in new
-    assert "1 findings are due" in build_report(store, detail=False)
+    assert f"- {report.say_what('DENIED_MISSING_INFO')}: {n_fix} line" in text and "DENIED_MISSING_INFO" not in text
+    new = text.split("## New since the last analysis")[1].split("##")[0]
+    assert f"| denial | {report.say_what('DENIED_MISSING_INFO')} |" in new and report.say_what("G2211_DENIED") not in new
+    assert "1 item is due" in build_report(store, detail=False)
