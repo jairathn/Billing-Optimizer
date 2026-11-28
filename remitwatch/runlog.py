@@ -2127,7 +2127,10 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
         a = rowd(acols, after.rows[f])
         kind = kinds[f]
         automatic_status = kind == "closed" or (kind == "reopened" and f not in person) or (kind == "hidden" and f in hidden)
-        if f in person and not automatic_status and kind in ("state", "follow_up", "status", "hidden", "stale", "reopened"):
+        # a change that carries the stale mark is the run's whoever worked the item: Detector.save takes an item off the
+        # lists (or brings it back) by its rules alone, never a person (replay-fix-2a A3: a month-by-month replay left 393
+        # of 719 such changes out of the log, every one on an item a person had worked since the run before)
+        if f in person and not automatic_status and "stale" not in ch and kind in ("state", "follow_up", "status", "hidden", "reopened"):
             counts["after_person"] += 1
             continue
         d = det.get(f, {})
@@ -2139,6 +2142,9 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
             rule = "detect:payment_no_longer_stands"
         elif kind == "hidden":
             rule = f"hide_rule:{a.get('payer_group') or 'payer'}|{a.get('signal') or 'signal'}"
+        elif kind == "state" and "stale" in ch:
+            # the run took the item off the lists (or listed it again): the state change follows from that, not a state rule
+            rule = "detect:no_longer_listed" if (ch["stale"][1] or 0) else "detect:listed_again"
         elif kind == "state":
             rule = f"states:{_slug((rules or {}).get(f) or a.get('work_state'))}"
         elif kind == "outcome":
