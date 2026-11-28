@@ -1097,6 +1097,10 @@ table.rc-fields tr.copyrow > td:nth-child(2) { color: var(--text-3); }
 table.rc-fields tr.rc-empty { background: var(--surface-2); }
 .rc-key kbd { font-size: var(--fs-xs); }
 .rc-attach { margin: 2px 0 4px; padding-left: 18px; }
+/* the whole claim (claim.js): its facts and ids under the head, the export below the lines */
+.cl-facts { margin: var(--sp-1) 0; }
+.cl-ids { margin: 0 0 var(--sp-1); }
+.cl-csv { margin-top: var(--sp-2); }
 .rc-sent { display: flex; flex-wrap: wrap; align-items: end; gap: var(--sp-2) var(--sp-3); padding: var(--sp-3) var(--sp-4); border-radius: var(--r-lg); background: var(--surface-2); }
 .rc-sent label { display: flex; flex-direction: column; gap: 4px; color: var(--text-2); }
 .rc-sent input { width: 16rem; max-width: 100%; }

@@ -185,6 +185,13 @@ hover, 200 ms panel) and off for people who ask their system for less motion.
   steps say `Start`. A done step is one line with a check and a quiet Review link.
 - **Rows and lists**: the due date before the amount; the amount right-aligned in tabular digits; the open row on
   `--surface-3` with the selection rule.
+- **The item panel** (`index.html` openDetail, `features.js` panelHeadHtml and stForm): the head stays put (where you are with
+  Previous, Next and Close; the title; the patient with names on, the payer, the date of service, the code and the claim ID
+  to copy; the state beside the person's status, one button with its menu; At stake and Due). Then the next step with its one
+  filled button, the route the payer takes (its copy rows numbered 1 to 9), Why, and the evidence in folds. A status change
+  opens a small form under the head (Enter saves, Esc cancels; Let go and Lost take a reason as a chip), never a browser box,
+  and each save shows a toast with Undo. The next two items' answers are asked for while one is read, so Next opens at once.
+  The keys: Enter, s, p, l, b, n, e, y, 1 to 9, c, u, j and k (the keyboard sheet lists them).
 - **Icons**: one set of plain 24 px stroke icons drawn for RemitWatch, shown at 16 to 22 px. Pages draw them from the
   sprite (`<svg class="i"><use href="/static/icons.svg#i-search"/></svg>`); the stylesheet draws state marks, kinds of
   work and small marks as masks that take the text color. A pseudo-element draws a mark, never words.
@@ -209,7 +216,8 @@ hover, 200 ms panel) and off for people who ask their system for less motion.
   folder given with `--shots`, outside the repository.
 - **The tests**: `tests/test_style.py` (one stylesheet, the fonts and their licence, served types, every class the pages
   name, every custom property defined, the icon block and sprite, contrast pairs in both themes, inline styles),
-  `tests/test_shell.py` (places, the pill, titles, storage, and the shell in a browser), and the page tests that read
+  `tests/test_shell.py` (places, the pill, titles, storage, and the shell in a browser), `tests/test_panel.py` (the item panel
+  in a browser on both hosts: no browser box, the keys, Undo, the next item asked for ahead), and the page tests that read
   each page.
 
 ## 10. What changed from the first design, and why

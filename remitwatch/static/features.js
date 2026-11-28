@@ -1310,9 +1310,9 @@ function stSay(d, text){ const el = d && d.querySelector && d.querySelector('.st
 // with Undo, and the walk goes on (a status that ends the work here opens the next item; Started and To do stay)
 function panelChanged(f, st, seq, o){
   o = o || {};
+  const what = (state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : (f.title || 'the item')) + (f.payer_group ? ' · ' + f.payer_group : '');
   state.brief = null; state.dirty = true; panelCacheDrop();
   state.panelUndo = st === f.status ? null : {id: f.finding_id, from: f.status, to: st, cents: f.recovered_cents, at: Date.now()};
-  const what = (state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : (f.title || 'the item')) + (f.payer_group ? ' · ' + f.payer_group : '');
   panelToast(o.said || `${ST_SAID[st] || STATUS_WORDS[st] || st}: ${what}.`, {undo: !!state.panelUndo});
   const here = seq == null ? state.detailId === f.finding_id : (typeof panelShows !== 'function' || panelShows(seq, f.finding_id));
   if(!here || typeof openDetail !== 'function') return;
