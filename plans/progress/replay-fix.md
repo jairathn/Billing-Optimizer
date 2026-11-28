@@ -92,6 +92,20 @@ same offset is exactly $611.81.
 - [x] docs test with the private word list: 40 passed
 - [x] pushed wip/replay-fix at each milestone
 
+Round 1 (the review's three findings), on 386f026:
+- [x] red tests 382b77d, fix 995abe7, the reviewer's cases kept as tests 368c053, the offenders label 386f026
+- [x] break and restore of each part (above), restored exactly
+- [x] the 13 self-check files (826 tests): newest libraries 826 passed; 3.12/SQLite 3.45 826 passed (python3 and
+      3.11.1 in the full suites below). Earlier, on 995abe7 (773 tests): python3, newest libraries and 3.12 773 passed;
+      3.11.1 659 passed, 34 skipped, 80 failed or errors, all the serialize limit
+- [x] full suite, python3 (shard.sh) on 386f026: 4,437 passed, 29 skipped, 1 xfailed, 0 failed (a first try stopped on
+      "No space left on device" while other units filled the disk; rerun)
+- [x] full suite, 3.11.1/SQLite 3.40 (shard.sh) on 386f026: 4,196 passed, 53 skipped, 1 xfailed, 217 failed or errors:
+      the same 217 tests as the 3.11.1 run at 0cd46c8, every one `AttributeError: ... no attribute 'serialize'`; none in
+      test_replay_selfcheck.py (85 passed, 39 image cases skipped there)
+- [x] docs test with the private word list: 40 passed; static/ unchanged (no node checks needed)
+- [x] trial merges (`git merge-tree`) with wip/replay-fix-2a, wip/replay-fix-2b, wip/gapfix, wip/routes, wip/ui-a: clean
+
 ## Next command
 
 None: the unit is done (round 1 included). The integrator merges wip/replay-fix (it touches remitwatch/selfcheck.py,
