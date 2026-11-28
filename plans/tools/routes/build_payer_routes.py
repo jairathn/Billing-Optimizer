@@ -376,8 +376,10 @@ CORRECTIONS: list[tuple] = [
                    "sources_add": ["v17"]},
      "fixed", "Contradicted: Humana's tip sheet sets 1 year from the original claim determination.", NEW_SOURCES["v17"]["url"]),
     ("a23", 1, {"notes": "Humana's Claim Disputes and Corrected Claims Tip Sheet: 'Populate loop 2300 in CLM05-3 with claim frequency "
-                         "type code 7 to replace or correct prior claim'.", "sources_add": ["v17"]},
-     "fixed", "Contradicted: a Humana page for Medicare Advantage does state the EDI format.", NEW_SOURCES["v17"]["url"]),
+                         "type code 7 to replace or correct prior claim'. Where the original claim number goes (REF F8) comes only "
+                         "from a CarePlus (Humana affiliate) guide.", "sources_first": ["v17"]},
+     "fixed", "Contradicted: a Humana page for Medicare Advantage does state the EDI format; Humana's own tip sheet is the first source, "
+     "and REF F8 is labelled as the affiliate's guidance (the verifier's correction).", NEW_SOURCES["v17"]["url"]),
     ("a23", 3, {"where": "The claims address on the back of the member's ID card", "sources_add": ["v17"],
                 "notes": "Humana's tip sheet sends paper corrected claims to the address on the ID card. Humana charges $5 per paper "
                          "claim when the reimbursement is $10 or more."},
@@ -530,7 +532,9 @@ NEW_ROWS = [
           "attachments": ["The medical records that support the service", "A signed designation of representative only when "
                           "appealing for the member"]},
          {"channel": "phone", "name": "Provider Services (a clinical appeal can be made verbally; records still go in writing)",
-          "where": "800-345-4344", "minutes": 15, "sources": ["v14", "v15"]},
+          "where": "800-345-4344", "minutes": 15, "sources": ["v14", "v15", "v13", "v12"],
+          # the verifier's correction of a0 and a1 holds here too: 800-345-4344 does not serve individual Exchange members
+          "notes": EXCHANGE},
          {"channel": "payer_portal", "name": "Availity Authorizations & Referrals (only for a denied prior authorization)",
           "where": "https://Availity.com", "minutes": 10, "sources": ["v14", "v15"]}]},
     {"key": "n2", "group": "Anthem / BCBS", "request": "reconsideration_or_first_appeal", "variant": "fep",
@@ -541,23 +545,41 @@ NEW_ROWS = [
          {"channel": "phone", "name": "FEP Provider Services", "where": "800-382-5520", "minutes": 15, "sources": ["v12", "v13"]},
          {"channel": "mail", "name": "Federal Employee Program claims and appeals", "minutes": 20, "sources": ["v12", "v13"],
           "where": "Anthem Blue Cross and Blue Shield Federal Employee Program P.O. Box 105557 Atlanta, GA 30348-5557"}]},
+    # HealthSpring's 2026 participating provider manual (v36), Provider Claims Dispute Process and Appeals: a claim
+    # reconsideration (180 days from the claim payment date) for coordination of benefits, timely filing, missing information,
+    # payment retractions, underpayments, overpayments and coding disputes; an appeal (65 days from the original decision) for a
+    # decision on medical necessity, clinical guidelines, or prior authorization and referral requirements, of which
+    # 'HealthSpring offers participating providers one level' (review routes-r1-3: no second level, SINGLE_LEVEL)
     {"key": "n3", "group": "HealthSpring", "request": "reconsideration_or_first_appeal", "variant": "main", "confidence": "medium",
-     "scope": "HealthSpring Medicare Advantage (Cigna's Medicare Advantage plans since January 1, 2026)",
+     "scope": ("HealthSpring Medicare Advantage (Cigna's Medicare Advantage plans since January 1, 2026): a claim reconsideration for "
+               "coordination of benefits, timely filing, missing information, payment retractions, underpayments, overpayments and "
+               "coding disputes"),
      "time_limit": "180 days from the claim payment date.",
      "channels": [
          {"channel": "payer_portal", "name": "Availity, HealthSpring Medicare Advantage payer space (payer ID 52192)",
           "where": "https://www.availity.com", "minutes": 8, "sources": ["v35", "v36"]},
-         {"channel": "fax", "name": "HealthSpring Reconsiderations", "where": "615-401-4642", "minutes": 12, "sources": ["v35", "v36"]},
-         {"channel": "mail", "name": "HealthSpring Reconsiderations", "where": "HealthSpring Reconsiderations PO Box 1004 Nashville, TN 37202",
-          "minutes": 18, "sources": ["v35", "v36"]}]},
-    {"key": "n4", "group": "HealthSpring", "request": "second_level_appeal", "variant": "main", "confidence": "medium",
-     "scope": "HealthSpring Medicare Advantage, participating providers: post-service appeal",
-     "time_limit": "As the reconsideration decision states.",
+         {"channel": "fax", "name": "HealthSpring provider payment disputes (claim reconsideration)", "where": "615-401-4642", "minutes": 12,
+          "sources": ["v36", "v35"]},
+         {"channel": "mail", "name": "HealthSpring provider payment disputes (claim reconsideration)",
+          "where": "HealthSpring Attn: Provider Payment Disputes PO Box 1004 Nashville, TN 37202", "minutes": 18, "sources": ["v36", "v35"]}]},
+    {"key": "n4", "group": "HealthSpring", "request": "reconsideration_or_first_appeal", "variant": "clinical", "confidence": "medium",
+     "when": "Denied for medical necessity, clinical guidelines, or prior authorization and referral requirements (an appeal)",
+     "scope": ("HealthSpring Medicare Advantage, participating providers: the post-service appeal of a decision on medical necessity, "
+               "clinical guidelines, or prior authorization and referral requirements (one level of appeal)"),
+     "time_limit": "65 days from the original decision, unless the provider agreement states otherwise.",
      "channels": [
-         {"channel": "fax", "name": "HealthSpring Appeals (post-service appeal and claim dispute form)", "where": "855-699-8985",
-          "minutes": 14, "sources": ["v36"]},
-         {"channel": "mail", "name": "HealthSpring Appeals (post-service appeal and claim dispute form)",
-          "where": "HealthSpring Appeals PO Box 650065 Dallas, TX 75265", "minutes": 18, "sources": ["v36"]}]},
+         {"channel": "fax", "name": "HealthSpring Appeals, participating provider post-service appeal (postservice appeal and claim "
+          "dispute form)", "where": "855-699-8985", "minutes": 14, "sources": ["v36"],
+          "fields": ["Explanation of what you are appealing and the rationale for appealing"],
+          "attachments": ["A copy of the denial or remittance advice", "The medical records that support the medical necessity of the service",
+                          "The insurance verification completed on the date of service"],
+          "notes": "HealthSpring offers participating providers one level of appeal; a decision can take up to 60 days. Appeal "
+                   "questions: 800-511-6943."},
+         {"channel": "mail", "name": "HealthSpring Appeals, participating provider post-service appeal (postservice appeal and claim "
+          "dispute form)", "where": "HealthSpring Appeals PO Box 650065 Dallas, TX 75265", "minutes": 18, "sources": ["v36"],
+          "fields": ["Explanation of what you are appealing and the rationale for appealing"],
+          "attachments": ["A copy of the denial or remittance advice", "The medical records that support the medical necessity of the service",
+                          "The insurance verification completed on the date of service"]}]},
     {"key": "n5", "group": "HealthSpring", "request": "claim_status_or_reprocess", "variant": "main", "confidence": "medium",
      "scope": "HealthSpring Medicare Advantage", "time_limit": "None for a status check.",
      "channels": [{"channel": "payer_portal", "name": "Availity Claim Status (HealthSpring Medicare Advantage, payer ID 52192)",
@@ -572,6 +594,31 @@ NEW_ROWS = [
          {"channel": "mail", "name": "Appeals and Grievances Department (filed for the member)", "minutes": 18, "sources": ["v40", "v41"],
           "where": "Attn: Appeals and Grievances Department PO Box 10341 Van Nuys, CA 91410-0341"}]},
 ]
+
+# The research's gaps the verifier contradicted, or that a correction above answered (review routes-r1-6): each research gap
+# that starts with the key is rewritten to the text, or dropped (None), and listed among the corrections.
+GAP_FIXES: dict[str, tuple[str | None, str, str]] = {
+    "Anthem Indiana: no Indiana quick contact guide was found": (
+        None, "Contradicted: Anthem's Indiana contact quick reference guide exists (November 2025).", NEW_SOURCES["v12"]["url"]),
+    "Humana Medicare Advantage and commercial (KY and IN): no Humana page for these lines states the EDI corrected-claim format": (
+        "Humana Medicare Advantage and commercial (KY and IN): Humana's Claim Disputes and Corrected Claims Tip Sheet (August 2026) "
+        "states CLM05-3 = 7; where the original claim number goes (REF F8) comes only from a CarePlus (Humana affiliate, Florida) "
+        "guide and from Humana Healthy Horizons Kentucky's Medicaid notice.",
+        "Contradicted: Humana's own tip sheet states the frequency code; only REF F8 is the affiliate's guidance.", NEW_SOURCES["v17"]["url"]),
+    "WPS timely filing waiver: the form (Request for Waiver to Extend the Timely Filing Limit) and the Claims Manager mailing address": (
+        "WPS timely filing waiver: the waiver request form itself (Request for Waiver to Extend the Timely Filing Limit) was not "
+        "retrieved; the Claims Manager's address and the proof WPS takes come from its Timely Filing of Claims page (content "
+        "updated October 21, 2026).",
+        "The route was corrected from WPS's own page (the Claims Manager's address found; confidence medium).", NEW_SOURCES["v4"]["url"]),
+}
+
+# Payer groups that offer one level of appeal: a second-level card says so in these words instead of a route
+# (review routes-r1-3). Matched by routes.py on the research group.
+SINGLE_LEVEL = {
+    "HealthSpring": {"text": ("HealthSpring offers participating providers one level of appeal (its 2026 participating provider "
+                              "manual): there is no second level to file with HealthSpring."),
+                     "sources": ["v36"]},
+}
 
 GAPS_ADDED = [
     "WPS J8: its IVR number and any telephone reopening were not confirmed in WPS's own sources; no WPS phone route is listed.",
@@ -649,6 +696,9 @@ def build(raw_path: str) -> dict:
                 target["notes"] = (target.get("notes", "").rstrip() + " " + phone(v)).strip()
             elif k == "sources_add":
                 target["sources"] = list(dict.fromkeys(list(target.get("sources", [])) + v))
+            elif k == "sources_first":
+                # the source the card's source line names (routes._source_line reads the first)
+                target["sources"] = list(dict.fromkeys(v + list(target.get("sources", []))))
             elif k == "sources_remove":
                 p = key[0]
                 target["sources"] = [s for s in target["sources"] if s not in {f"{p}{n}" for n in v}]
@@ -690,6 +740,21 @@ def build(raw_path: str) -> dict:
         corrections.append({"route": k, "channel": None, "change": "dropped", "evidence": "",
                             "why": "The research wrote the same UnitedHealthcare Medicare Advantage rows under two group names; one set kept."})
     sources.update(NEW_SOURCES)
+    # the research's gaps the verifier contradicted, or a correction answered: rewritten or dropped (GAP_FIXES)
+    kept_gaps = []
+    for g in gaps:
+        fix = next(((k, v) for k, v in GAP_FIXES.items() if g.startswith(k)), None)
+        if fix is None:
+            kept_gaps.append(g)
+            continue
+        text, why, evidence = fix[1]
+        if text:
+            kept_gaps.append(phone(text))
+        corrections.append({"route": "gaps", "channel": None, "change": "fixed" if text else "dropped", "why": why, "evidence": evidence})
+    missing = [k for k in GAP_FIXES if not any(g.startswith(k) for g in gaps)]
+    if missing:
+        sys.exit(f"GAP_FIXES names gaps the research no longer has: {missing}")
+    gaps = kept_gaps
     # ranks: the research's order, accepted channels first, then the not-accepted ones; each re-numbered 1..n
     for r in rows:
         acc = sorted([c for c in r["channels"] if c["channel"] != "not_accepted"], key=lambda c: c["rank"])
@@ -709,7 +774,8 @@ def build(raw_path: str) -> dict:
         r["channels"] = acc + nac
         r.setdefault("time_limit_verified", r["confidence"] != "low")
         r["sources"] = sorted(set(r.get("sources", [])) | {s for c in r["channels"] for s in c["sources"]})
-    used = {s for r in rows for c in r["channels"] for s in c["sources"]} | {s for r in rows for s in r["sources"]}
+    used = ({s for r in rows for c in r["channels"] for s in c["sources"]} | {s for r in rows for s in r["sources"]}
+            | {s for v in SINGLE_LEVEL.values() for s in v["sources"]})
     out = {
         "checked": CHECKED,
         "about": ("How each payer takes each kind of request, easiest accepted way first, from the payers' own public pages "
@@ -730,6 +796,7 @@ def build(raw_path: str) -> dict:
                      "mail": "Mail", "email": "Email", "not_accepted": "Not accepted"},
         "groups": GROUPS,
         "not_covered": NOT_COVERED,
+        "single_level": SINGLE_LEVEL,
         "sources": {k: v for k, v in sorted(sources.items()) if k in used},
         "routes": rows,
         "gaps": gaps + GAPS_ADDED,

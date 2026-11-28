@@ -297,6 +297,14 @@
   "UnitedHealthcare Medicaid": "UnitedHealthcare Community Plan of Kentucky (Medicaid) takes reconsiderations and appeals electronically only (since June 13, 2025) and has its own Kentucky manual; it was not covered.",
   "Humana Medicaid IN": "Humana Healthy Horizons in Indiana (including Indiana PathWays for Aging) was not covered; Humana posts an Indiana claim-payment inquiry guide on provider.humana.com."
  },
+ "single_level": {
+  "HealthSpring": {
+   "text": "HealthSpring offers participating providers one level of appeal (its 2026 participating provider manual): there is no second level to file with HealthSpring.",
+   "sources": [
+    "v36"
+   ]
+  }
+ },
  "sources": {
   "a1": {
    "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
@@ -6757,12 +6765,12 @@
      ],
      "attachments": [],
      "minutes": 4,
-     "notes": "Humana's Claim Disputes and Corrected Claims Tip Sheet: 'Populate loop 2300 in CLM05-3 with claim frequency type code 7 to replace or correct prior claim'.",
+     "notes": "Humana's Claim Disputes and Corrected Claims Tip Sheet: 'Populate loop 2300 in CLM05-3 with claim frequency type code 7 to replace or correct prior claim'. Where the original claim number goes (REF F8) comes only from a CarePlus (Humana affiliate) guide.",
      "required": false,
      "sources": [
+      "v17",
       "a47",
-      "a39",
-      "v17"
+      "a39"
      ],
      "url": "https://www.availity.com",
      "verified": true
@@ -16173,11 +16181,13 @@
      "fields": [],
      "attachments": [],
      "minutes": 15,
-     "notes": "",
+     "notes": "Individual Exchange members (Anthem Essential Network, formerly Pathway Essentials) use 800-676-2583. Indiana numbers: Anthem's Indiana contact guide.",
      "required": false,
      "sources": [
       "v14",
-      "v15"
+      "v15",
+      "v13",
+      "v12"
      ],
      "url": "",
      "verified": true
@@ -16203,6 +16213,8 @@
    ],
    "time_limit_verified": true,
    "sources": [
+    "v12",
+    "v13",
     "v14",
     "v15"
    ]
@@ -16266,7 +16278,7 @@
    "key": "n3",
    "group": "HealthSpring",
    "request": "reconsideration_or_first_appeal",
-   "scope": "HealthSpring Medicare Advantage (Cigna's Medicare Advantage plans since January 1, 2026)",
+   "scope": "HealthSpring Medicare Advantage (Cigna's Medicare Advantage plans since January 1, 2026): a claim reconsideration for coordination of benefits, timely filing, missing information, payment retractions, underpayments, overpayments and coding disputes",
    "time_limit": "180 days from the claim payment date.",
    "confidence": "medium",
    "variant": "main",
@@ -16293,7 +16305,7 @@
     {
      "rank": 2,
      "channel": "fax",
-     "name": "HealthSpring Reconsiderations",
+     "name": "HealthSpring provider payment disputes (claim reconsideration)",
      "where": "615-401-4642",
      "form": "",
      "fields": [],
@@ -16302,8 +16314,8 @@
      "notes": "",
      "required": false,
      "sources": [
-      "v35",
-      "v36"
+      "v36",
+      "v35"
      ],
      "url": "",
      "verified": true
@@ -16311,8 +16323,8 @@
     {
      "rank": 3,
      "channel": "mail",
-     "name": "HealthSpring Reconsiderations",
-     "where": "HealthSpring Reconsiderations PO Box 1004 Nashville, TN 37202",
+     "name": "HealthSpring provider payment disputes (claim reconsideration)",
+     "where": "HealthSpring Attn: Provider Payment Disputes PO Box 1004 Nashville, TN 37202",
      "form": "",
      "fields": [],
      "attachments": [],
@@ -16320,8 +16332,8 @@
      "notes": "",
      "required": false,
      "sources": [
-      "v35",
-      "v36"
+      "v36",
+      "v35"
      ],
      "url": "",
      "verified": true
@@ -16336,23 +16348,29 @@
   {
    "key": "n4",
    "group": "HealthSpring",
-   "request": "second_level_appeal",
-   "scope": "HealthSpring Medicare Advantage, participating providers: post-service appeal",
-   "time_limit": "As the reconsideration decision states.",
+   "request": "reconsideration_or_first_appeal",
+   "scope": "HealthSpring Medicare Advantage, participating providers: the post-service appeal of a decision on medical necessity, clinical guidelines, or prior authorization and referral requirements (one level of appeal)",
+   "time_limit": "65 days from the original decision, unless the provider agreement states otherwise.",
    "confidence": "medium",
-   "variant": "main",
-   "when": "",
+   "variant": "clinical",
+   "when": "Denied for medical necessity, clinical guidelines, or prior authorization and referral requirements (an appeal)",
    "channels": [
     {
      "rank": 1,
      "channel": "fax",
-     "name": "HealthSpring Appeals (post-service appeal and claim dispute form)",
+     "name": "HealthSpring Appeals, participating provider post-service appeal (postservice appeal and claim dispute form)",
      "where": "855-699-8985",
      "form": "",
-     "fields": [],
-     "attachments": [],
+     "fields": [
+      "Explanation of what you are appealing and the rationale for appealing"
+     ],
+     "attachments": [
+      "A copy of the denial or remittance advice",
+      "The medical records that support the medical necessity of the service",
+      "The insurance verification completed on the date of service"
+     ],
      "minutes": 14,
-     "notes": "",
+     "notes": "HealthSpring offers participating providers one level of appeal; a decision can take up to 60 days. Appeal questions: 800-511-6943.",
      "required": false,
      "sources": [
       "v36"
@@ -16363,11 +16381,17 @@
     {
      "rank": 2,
      "channel": "mail",
-     "name": "HealthSpring Appeals (post-service appeal and claim dispute form)",
+     "name": "HealthSpring Appeals, participating provider post-service appeal (postservice appeal and claim dispute form)",
      "where": "HealthSpring Appeals PO Box 650065 Dallas, TX 75265",
      "form": "",
-     "fields": [],
-     "attachments": [],
+     "fields": [
+      "Explanation of what you are appealing and the rationale for appealing"
+     ],
+     "attachments": [
+      "A copy of the denial or remittance advice",
+      "The medical records that support the medical necessity of the service",
+      "The insurance verification completed on the date of service"
+     ],
      "minutes": 18,
      "notes": "",
      "required": false,
@@ -16476,7 +16500,7 @@
   "WPS J8 Part B IVR number, telephone reopening policy and per-call limits were not found in any WPS source that could be opened.",
   "WPS written clerical error reopening form for J8 Part B (listed on the WPS forms page) and its mailing attention line were not retrievable.",
   "WPS fax and mail destinations for ADR responses were not found; only the 2019 PWK cover sheet (Indiana fax 608-224-3505) was found, and it is for documentation sent with a claim. The WPS ADR response deadline was also not found in WPS sources.",
-  "WPS timely filing waiver: the form (Request for Waiver to Extend the Timely Filing Limit) and the Claims Manager mailing address were not retrieved; route rests on a search-index snippet (low confidence).",
+  "WPS timely filing waiver: the waiver request form itself (Request for Waiver to Extend the Timely Filing Limit) was not retrieved; the Claims Manager's address and the proof WPS takes come from its Timely Filing of Claims page (content updated October 21, 2026).",
   "Palmetto GBA's new Railroad Medicare site (palmettogba.com/rr) renders only in a browser; Railroad Medicare pages were read from the same Palmetto content on files.palmettogba.com. Several are older (2020 to 2022) but match the October 2026 Quick Reference Guide.",
   "Railroad Medicare second level: Palmetto provider pages only say to follow the QIC instructions on the redetermination notice; QIC Part B South comes from Palmetto's Railroad Medicare beneficiary appeals page (February 2026) and C2C's guide (Georgia in Part B South). Confirm against the first notice received.",
   "MAXIMUS is not a Part B QIC per CMS (September 2026): both Part B North and Part B South are C2C Innovative Solutions; Maximus handles Part A West and DME.",
@@ -16487,11 +16511,10 @@
   "Biller minutes per claim are estimates, not payer figures.",
   "Anthem Medicare Advantage: the only MA manual Anthem links for Kentucky and Indiana is the 2027 edition, effective 2027-01-01. Its 120-day reconsideration and 30-day appeal windows were not checked against the 2026 edition in force until then.",
   "Anthem commercial (KY and IN): the number of days for timely filing is in each Provider or Facility Agreement, not in the public manual, so corrected-claim and first-filing limits cannot be computed from public sources.",
-  "Anthem Indiana: no Indiana quick contact guide was found (the KY-style URL returned 404). Provider Services phone numbers come from the Kentucky guide; Indiana mailing addresses come from the Indiana manual.",
   "Anthem commercial: the manual lets a provider ask Anthem to recoup a provider-found overpayment from a future remittance, but does not say where to send that request.",
   "Anthem BlueCard: the BlueCard Provider Manual linked from the 2026 Kentucky manual is the January 1, 2022 edition. No BlueCard-specific time limits for disputes, corrected claims or records were found.",
   "Anthem Medicare Advantage: no list of acceptable proof of timely filing; the Medicare Advantage refund address is in the Kentucky quick contact guide only, with a note to call Provider Services for the address for returning Anthem checks.",
-  "Humana Medicare Advantage and commercial (KY and IN): no Humana page for these lines states the EDI corrected-claim format. CLM05-3 = 7 with REF F8 comes from a June 2026 CarePlus (Humana affiliate, Florida) guide and from Humana Healthy Horizons Kentucky's Medicaid notice.",
+  "Humana Medicare Advantage and commercial (KY and IN): Humana's Claim Disputes and Corrected Claims Tip Sheet (August 2026) states CLM05-3 = 7; where the original claim number goes (REF F8) comes only from a CarePlus (Humana affiliate, Florida) guide and from Humana Healthy Horizons Kentucky's Medicaid notice.",
   "Humana Medicare Advantage and commercial: no published list of acceptable proof of timely filing was found; no time limit for the participating-provider escalation to HumanaProviderServices@humana.com; the fields of the Claim Escalation Form (XLSX) were not opened.",
   "Humana commercial: Humana announced in February 2023 an exit from employer group commercial medical plans over 18 to 24 months, so commercial claims are likely run-off. The 2026 provider manual is filed under Medicare manuals, though its dispute section says 'For all products'. The commercial fax 888-556-2128 is listed under nonparticipating providers in a 2025 guide.",
   "Humana Healthy Horizons in Kentucky: the 2025 provider manual (latest posted) says 60 calendar days for claim appeals, while the current Kentucky web page and KRS 205.534 (amended effective 2026-04-14) allow 120 days for a claim reduction or denial. The 'Kentucky Medicaid MCO Provider Appeal Request Form' link on Humana's page returns 404, so its fields are unknown.",
@@ -16739,7 +16762,7 @@
    "route": "a23",
    "channel": "837 replacement claim to payer ID 61101 (CLM05-3 = 7, REF F8 = original claim number)",
    "change": "fixed",
-   "why": "Contradicted: a Humana page for Medicare Advantage does state the EDI format.",
+   "why": "Contradicted: a Humana page for Medicare Advantage does state the EDI format; Humana's own tip sheet is the first source, and REF F8 is labelled as the affiliate's guidance (the verifier's correction).",
    "evidence": "https://assets.humana.com/is/content/humana/Claim%20Disputes%20and%20Corrected%20Claims%20Tip%20Sheetpdf"
   },
   {
@@ -17105,6 +17128,27 @@
    "change": "dropped",
    "evidence": "",
    "why": "The research wrote the same UnitedHealthcare Medicare Advantage rows under two group names; one set kept."
+  },
+  {
+   "route": "gaps",
+   "channel": null,
+   "change": "fixed",
+   "why": "The route was corrected from WPS's own page (the Claims Manager's address found; confidence medium).",
+   "evidence": "https://www.wpsgha.com/guides-resources/view/timely-filing-of-claims"
+  },
+  {
+   "route": "gaps",
+   "channel": null,
+   "change": "dropped",
+   "why": "Contradicted: Anthem's Indiana contact quick reference guide exists (November 2025).",
+   "evidence": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/in_contact_0002.pdf"
+  },
+  {
+   "route": "gaps",
+   "channel": null,
+   "change": "fixed",
+   "why": "Contradicted: Humana's own tip sheet states the frequency code; only REF F8 is the affiliate's guidance.",
+   "evidence": "https://assets.humana.com/is/content/humana/Claim%20Disputes%20and%20Corrected%20Claims%20Tip%20Sheetpdf"
   }
  ]
 }

@@ -5919,8 +5919,11 @@ def ema_report_decision(file_id: str, request: Request, body: dict = Body(defaul
 
 
 # --------------------------------------------------------------------------- a line in an item's history that changes no status
+# asked: the route card's "I asked the payer" for a claim status request. A status call is no Sent: a Sent would park a
+# claim no payer answered past its first-filing limit, and a later "no" would read as a turned-down appeal (review
+# routes-r1-2). The item stays to do; what the payer said is logged with Log what happened
 EVENT_KINDS = {"posted": "Posted in EMA", "era_requested": "ERA asked for", "billed": "Billed", "outcome": "Outcome logged",
-               "instructions": "Instructions copied"}
+               "instructions": "Instructions copied", "asked": "Asked the payer"}
 
 
 @app.post("/api/findings/{finding_id}/event", dependencies=[Depends(require_xhr)])

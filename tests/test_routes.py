@@ -213,7 +213,9 @@ def test_the_field_rules_read_every_label_the_table_prints():
     assert routes.classify("Patient last name, first 6 letters, then #") == ("field", ("patient_last6",))
     assert routes.classify("Claims & Payments > Look up a Claim") == ("step", ())
     assert routes.classify("CLM05-3 = 7") == ("field", ("frequency_code",))
-    assert routes.classify("Beneficiary Phone Number") == ("field", ())        # the patient's own: filled by hand
+    # the patient's own details: never filled from the store, the field says where they come from
+    assert routes.classify("Beneficiary Phone Number") == ("field", ("patient_contact",))
+    assert routes.values(None, {}, {}, {}, {}, None, True, "2026-05-03")["patient_contact"] == ""
 
 
 # ================================================================================================ the request type
@@ -431,9 +433,17 @@ def test_a_bluecard_member_takes_the_bluecard_rows_and_a_clinical_denial_the_cli
 
 
 def test_cigna_medicare_advantage_is_healthspring(store):
+    # an underpayment takes HealthSpring's claim reconsideration (Availity, payer ID 52192); a medical necessity denial its
+    # appeal (review routes-r1-3, tests/test_routes_review.py)
+    world(store, payer="CIGNA", payer_group="Cigna Medicare Advantage", payer_kind="medicare_advantage", cfi="16", reason=("CO", "45"),
+          signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, expected_cents=9000, shortfall_cents=4000,
+          paid_cents=5000)
+    c, ex = card(store)
+    assert ex["next_step"]["route"] == "rate"
+    assert c["group"] == "HealthSpring" and c["variant"] == "main" and "52192" in c["best"]["name"]
     world(store, payer="CIGNA", payer_group="Cigna Medicare Advantage", payer_kind="medicare_advantage", cfi="16")
     c, _ = card(store)
-    assert c["group"] == "HealthSpring" and "52192" in c["best"]["name"]
+    assert c["group"] == "HealthSpring" and c["variant"] == "clinical" and "855-699-8985" == c["best"]["where"]
 
 
 def test_tricare_picks_its_review_by_the_denial(store):
@@ -812,7 +822,8 @@ def _check_card(seen: dict, want: dict) -> None:
     sent = seen["views"]["phone"]["sent"]
     assert sent["status"] == 200, sent
     assert sent["body"]["status"] == "appealed"
-    assert sent["body"]["notes"] == f"Sent by Portal: {best['name']}. Reference REF-TEST-1"
+    # what was sent is in the note, so a later "no" is read for what it was (routes.sent_request, review routes-r1-1)
+    assert sent["body"]["notes"] == f"Sent {want['sent_words']} by Portal: {best['name']}. Reference REF-TEST-1"
 
 
 @pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
@@ -834,7 +845,7 @@ def test_the_card_in_a_browser_on_the_server_at_desktop_and_phone_width(store, t
         notes = [r[0] for r in conn.execute("SELECT note FROM finding_events WHERE finding_id='F1'")]
     finally:
         conn.close()
-    assert f"Sent by Portal: {want['best']['name']}. Reference REF-TEST-1" in notes
+    assert f"Sent {want['sent_words']} by Portal: {want['best']['name']}. Reference REF-TEST-1" in notes
 
 
 @pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
@@ -850,4 +861,4 @@ def test_the_card_in_a_browser_on_the_serverless_site_from_the_dashboards_copy(s
     _check_card(seen, want)
     # the dashboard's copy is read-only: I sent it waits in the journal for the next run, with its channel and reference
     acts = [a for _name, a in cloud.read_actions(st)]
-    assert len(acts) == 1 and f"Sent by Portal: {want['best']['name']}. Reference REF-TEST-1" in json.dumps(acts[0]), acts
+    assert len(acts) == 1 and f"Sent {want['sent_words']} by Portal: {want['best']['name']}. Reference REF-TEST-1" in json.dumps(acts[0]), acts

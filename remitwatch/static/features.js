@@ -310,7 +310,8 @@ function drawerExtras(f, r){
 // One line of an item's history (its panel, and Activity on Progress): a status change, from → to, or what happened with
 // no change of status: a fax, the visit note looked up by "Build packets from EMA" (none found, or a person has to choose),
 // or a packet built by it (on a serverless host), a change pressed on a page drawn before the run changed the item (kept out).
-const EVENT_WORDS = {fax:'Fax', note_lookup:'Note lookup', packet:'Packet built', note_check:'Note checked by a person', not_applied:'Not applied'};
+const EVENT_WORDS = {fax:'Fax', note_lookup:'Note lookup', packet:'Packet built', note_check:'Note checked by a person', not_applied:'Not applied',
+  asked:'Asked the payer'};
 function eventWhat(e){
   return EVENT_WORDS[e.kind] ? `<b>${EVENT_WORDS[e.kind]}</b>` : `${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>`;
 }
@@ -624,23 +625,54 @@ function xpRouteShown(f, x){
   const nx = ((xpEffective(f, x) || {}).explain || {}).next_step || {};
   return nx.route === 'status' && f.work_state !== 'work_now' ? null : c;
 }
+// a field filled in part (the name and address, no email on file) shows what it still needs beside its value (review r2-8)
 function rcFieldRows(list, at){
   return (list || []).map(v => { const i = at.push(v) - 1;
-    return `<tr><td class="small">${esc(v.label)}</td><td>${v.value ? `<b>${esc(v.value)}</b>` : `<span class="muted small">${esc(v.set ? 'as the label says' : (v.fill ? 'fill: ' + v.fill : ''))}</span>`}</td>
+    const need = v.value && v.fill ? `<div class="muted small">also needed: ${esc(v.fill)}</div>` : '';
+    return `<tr><td class="small">${esc(v.label)}</td><td>${v.value ? `<b>${esc(v.value)}</b>${need}` : `<span class="muted small">${esc(v.set ? 'as the label says' : (v.fill ? 'fill: ' + v.fill : ''))}</span>`}</td>
       <td>${v.value ? `<button class="ghost small" data-rc-copy="${i}" aria-label="Copy ${esc(v.label)}">Copy</button>` : ''}</td></tr>`; }).join('');
 }
-function rcAction(f, b, r, nx){
+// the requests whose mail way is the app's own letter or packet (the panel's Appeal letter); any other mail way prints a cover
+// sheet of the card's filled fields to send with it (a refund check, a corrected claim on paper: review routes-r2-11)
+const RC_LETTER = new Set(['reconsideration_or_first_appeal', 'medicare_redetermination', 'second_level_appeal', 'timely_filing_proof']);
+function rcAction(f, b, r, nx, c){
   const a = b.action || {};
   if(b.channel === 'payer_portal' && a.url) return `<button class="primary" data-rc="open" data-url="${esc(a.url)}">${esc(a.label)}</button>`;
   if(b.channel === 'phone' && a.tel) return `<button class="primary" data-rc="call" data-tel="${esc(a.tel)}">${esc(a.label)}</button>`;
   if(b.channel === 'fax'){
-    const fx = b.fax || {}, ready = (nx.buttons || []).includes('fax_payer') && fx.confirmed;
-    return ready ? `<button class="primary" data-rc="fax">Start the fax</button>` : `<button class="ghost" data-rc="faxes">Confirm the number first</button>`;
+    // the app's own send carries a first-level appeal to the confirmed appeal number: Start the fax only where that number is
+    // the one the payer publishes for this request (sendable); a request the send does not carry is faxed by hand (r1-4)
+    const fx = b.fax || {};
+    if(fx.sendable && (nx.buttons || []).includes('fax_payer')) return `<button class="primary" data-rc="fax">Start the fax</button>`;
+    if(fx.by_hand || fx.sendable) return fx.published ? `<button class="ghost" data-rc="copy_fax">Copy the fax number</button>` : '';
+    return `<button class="ghost" data-rc="faxes">Confirm the number first</button>`;
   }
-  if(b.channel === 'mail') return `<button class="primary" data-rc="letter">${(r.packets || []).length ? 'Print the packet' : 'Print the letter'}</button>`;
+  if(b.channel === 'mail'){
+    const letter = RC_LETTER.has((c || {}).request) && ((r.packets || []).length || f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal));
+    return letter ? `<button class="primary" data-rc="letter">${(r.packets || []).length ? 'Print the packet' : 'Print the letter'}</button>`
+      : `<button class="primary" data-rc="sheet">Print the cover sheet</button>`;
+  }
   if(b.channel === 'email' && b.where) return `<button class="ghost" data-rc="copy_where">Copy the address</button>`;
+  // a clearinghouse way is sent or checked from EMA: its button opens the item's claim there (review routes-r2-13)
+  if(b.channel === 'clearinghouse' && a.label) return `<button class="primary" data-rc="ema">${esc(a.label)}</button>`;
   return '';
 }
+// the cover sheet a mail way with no letter of the app's own goes out with: the clean block Copy all copies (where to send
+// it, every filled field) and what to enclose, in a page of its own to print (review routes-r2-11)
+function rcPrintSheet(c, b){
+  const lines = String(c.copy_all || '').split('\n').filter(Boolean), head = lines.shift() || 'Cover sheet';
+  const rows = lines.map(l => { const i = l.indexOf(': ');
+    return i > 0 ? `<tr><th>${esc(l.slice(0, i))}</th><td>${esc(l.slice(i + 2))}</td></tr>` : `<tr><td colspan="2">${esc(l)}</td></tr>`; }).join('');
+  const att = ((b || {}).attachments || []).map(a => `<li>${esc(a.label)}</li>`).join('');
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(head)}</title><style>body{font:14px/1.5 system-ui,sans-serif;margin:32px;color:#111;background:#fff}
+    th{text-align:left;padding:4px 16px 4px 0;vertical-align:top}td{padding:4px 0}button{margin-bottom:16px}@media print{button{display:none}}</style></head>
+    <body><button onclick="print()">Print</button><h1 style="font-size:18px">${esc(head)}</h1><table>${rows}</table>
+    ${att ? `<p><b>Enclose</b></p><ul>${att}</ul>` : ''}</body></html>`;
+  const url = URL.createObjectURL(new Blob([html], {type: 'text/html'}));
+  window.open(url, '_blank', 'noopener,noreferrer');
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+}
+const rcChip = (v, why) => v === false ? ` <span class="chip hint" title="${esc(why || '')}">not confirmed</span>` : '';
 function rcAttach(list, r, f){
   const out = (list || []).map(a => {
     const k = a.kind, pk = (r.packets || [])[0];
@@ -657,47 +689,69 @@ function rcOther(o, at){
     ${o.fax ? `<div class="muted">${esc(o.fax.words)}</div>` : ''}${o.notes ? `<div class="muted">${esc(o.notes)}</div>` : ''}
     ${rows ? `<table class="small rc-fields"><tbody>${rows}</tbody></table>` : ''}</li>`;
 }
+// the sent words: what "I sent it" records, so a later "no" is read for what was sent (routes.sent_request); a status
+// request records "I asked the payer" as a line in the item's history and changes no status (review routes-r1-2)
+const rcSentHtml = (c, how) => `<div class="rc-sent">${how ? '<label class="small">How you sent it <input id="rcHow" maxlength="80" autocomplete="off" placeholder="the payer\'s portal, fax or mail"></label>' : ''}
+      <label class="small">Reference number (optional) <input id="rcRef" maxlength="60" autocomplete="off" placeholder="the portal's submission ID"></label>
+      <button class="ghost" id="rcSent">${c.request === 'claim_status_or_reprocess' ? 'I asked the payer' : 'I sent it'}</button></div>`;
+const rcNamesOff = c => c.names_shown ? '' : '<div class="small muted">Names are switched off on this site: the patient\'s name and member ID are left for you to fill from EMA.</div>';
 function xpRouteHtml(f, x, r){
   const err = x && x.route_card_error;
   const c = xpRouteShown(f, x);
   if(!c) return err ? `<div class="small muted">${esc(err)}</div>` : '';
-  if(c.fallback) return `<section class="rc-card" id="rcCard" aria-label="How to send it"><div class="small"><b>How to send it:</b> ${esc(c.fallback)}</div></section>`;
+  if(c.fallback && c.single_level) return `<section class="rc-card" id="rcCard" aria-label="How to send it"><div class="small"><b>How to send it:</b> ${esc(c.fallback)}</div>
+    ${c.source_line ? `<div class="small muted rc-source">${esc(c.source_line)}</div>` : ''}</section>`;
+  if(c.fallback){
+    // a payer the table does not cover: the claim's own facts to copy, Copy all, and I sent it with how it went (r2-12)
+    const at = []; xpRouteHtml.vals = at;
+    const facts = rcFieldRows(c.facts, at);
+    return `<section class="rc-card" id="rcCard" aria-label="How to send it"><div class="small"><b>How to send it:</b> ${esc(c.fallback)}</div>
+    <div class="actions rc-actions"><button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button></div>
+    ${facts ? `<table class="small rc-fields"><tbody>${facts}</tbody></table>` : ''}
+    ${rcNamesOff(c)}
+    ${rcSentHtml(c, true)}</section>`;
+  }
   const nx = ((x || {}).explain || {}).next_step || {}, b = c.best, at = [];
   xpRouteHtml.vals = at;
   const due = c.deadline ? ` · by <b${c.deadline_basis ? ` title="${esc(c.deadline_basis)}"` : ''}>${esc(longDate(c.deadline))}</b> <span class="${closesText(c.deadline).cls}">(${esc(closesText(c.deadline).text)})</span>` : '';
   const facts = rcFieldRows(b.fields, at) + rcFieldRows(b.facts, at);
   const others = (c.others || []).map(o => rcOther(o, at)).join('');
+  // the Also fold says what the card's own line says: whether the way was confirmed, the fax words, the limit (r1-5)
+  const ab = (c.also || {}).best || {};
   const also = c.also ? `<details class="dfold rc-also"><summary>Also: ${esc(c.also.request_label)} (${esc(c.also.why || '')})</summary>
-      <div class="small"><b>${esc(RC_CH[c.also.best.channel] || '')}:</b> ${esc(c.also.best.line)}${c.also.best.where && !(c.also.best.action || {}).url ? ' · ' + esc(c.also.best.where) : ''}</div>
-      ${(c.also.best.attachments || []).length ? `<div class="small muted">With: ${esc(c.also.best.attachments.map(a => a.label).join('; '))}</div>` : ''}</details>` : '';
+      <div class="small"><b>${esc(RC_CH[ab.channel] || '')}:</b> ${esc(ab.line)}${ab.where && !(ab.action || {}).url ? ' · ' + esc(ab.where) : ''}${rcChip(ab.verified, ab.unverified_why)}</div>
+      ${ab.fax ? `<div class="small ${ab.fax.sendable ? '' : 'sev-medium'}">${esc(ab.fax.words)}</div>` : ''}
+      ${(ab.attachments || []).length ? `<div class="small muted">With: ${esc(ab.attachments.map(a => a.label).join('; '))}</div>` : ''}
+      ${c.also.time_limit ? `<div class="small muted">Limit: ${esc(c.also.time_limit)}${c.also.time_limit_verified ? '' : ' (not confirmed)'}</div>` : ''}</details>` : '';
   return `<section class="rc-card" id="rcCard" aria-label="How to send it">
     <div class="rc-head"><span class="chip">${esc(RC_CH[b.channel] || b.channel)}</span> <b>${esc(b.line)}</b>${due}
-      ${b.required ? ' <span class="chip">required</span>' : ''}${b.verified ? '' : ` <span class="chip hint" title="${esc(b.unverified_why || '')}">not confirmed</span>`}</div>
+      ${b.required ? ' <span class="chip">required</span>' : ''}${rcChip(b.verified, b.unverified_why)}</div>
     <div class="small muted">${esc(c.payer)}: ${esc(c.request_label)}${c.variant_why ? ' · ' + esc(c.variant_why) : ''}</div>
     ${c.deadline_note ? `<div class="small sev-medium">${esc(c.deadline_note)}</div>` : ''}
     ${b.where && !(b.action || {}).url ? `<div class="small">Send to: <b>${esc(b.where)}</b>${b.form ? ' · form: ' + esc(b.form) : ''}</div>` : (b.form ? `<div class="small">Form: ${esc(b.form)}</div>` : '')}
-    ${b.fax ? `<div class="small ${b.fax.confirmed ? '' : 'sev-medium'}">${esc(b.fax.words)}</div>` : ''}
-    <div class="actions rc-actions">${rcAction(f, b, r, nx)}<button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button></div>
+    ${b.fax ? `<div class="small ${b.fax.sendable ? '' : 'sev-medium'}">${esc(b.fax.words)}</div>` : ''}
+    <div class="actions rc-actions">${rcAction(f, b, r, nx, c)}<button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button></div>
     ${facts ? `<table class="small rc-fields"><tbody>${facts}</tbody></table>` : ''}
-    ${c.names_shown ? '' : '<div class="small muted">Names are switched off on this site: the patient\'s name and member ID are left for you to fill from EMA.</div>'}
+    ${rcNamesOff(c)}
     ${(b.steps || []).length ? `<details class="xp-steps"><summary class="small">Where to click (${b.steps.length})</summary><ol class="small">${b.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
     ${rcAttach(b.attachments, r, f)}
     ${b.notes ? `<div class="small muted">${esc(b.notes)}</div>` : ''}
     ${(c.not_accepted || []).map(n => `<div class="small sev-medium">Not accepted: ${esc(n.name)}${n.notes ? ': ' + esc(n.notes) : ''}</div>`).join('')}
     ${others ? `<details class="dfold rc-others"><summary>Other ways ${esc(c.payer)} takes it (${c.others.length})</summary><ul class="small">${others}</ul></details>` : ''}
-    ${(c.alternatives || []).length ? `<details class="dfold"><summary>Another plan type?</summary><ul class="small">${c.alternatives.map(a => `<li>${esc(a.when)}: ${esc(a.best)}</li>`).join('')}</ul></details>` : ''}
+    ${(c.alternatives || []).length ? `<details class="dfold"><summary>Another plan type?</summary><ul class="small">${c.alternatives.map(a => `<li>${esc(a.when)}: ${esc(a.best)}${rcChip(a.verified, a.unverified_why)}</li>`).join('')}</ul></details>` : ''}
     ${also}
     <div class="small muted rc-source">${b.sources && b.sources[0] && /^https:\/\//.test(b.sources[0].url) ? `<a href="${esc(b.sources[0].url)}" target="_blank" rel="noopener noreferrer">${esc(b.source_line)}</a>` : esc(b.source_line)}${c.time_limit ? ` · Limit: ${esc(c.time_limit)}${c.time_limit_verified ? '' : ' (not confirmed)'}` : ''}</div>
-    <div class="rc-sent"><label class="small">Reference number (optional) <input id="rcRef" maxlength="60" autocomplete="off" placeholder="the portal's submission ID"></label>
-      <button class="ghost" id="rcSent">${c.request === 'claim_status_or_reprocess' ? 'I asked the payer' : 'I sent it'}</button></div>
+    ${rcSentHtml(c, false)}
   </section>`;
 }
 // the card's buttons: a copy, a page or a window to open, the fax only through the app's own send (its confirmed number),
-// and I sent it as the existing Sent with the channel and the reference in its note
+// and I sent it as the existing Sent with what was sent, the channel and the reference in its note; I asked the payer as a
+// line in the item's history that changes no status (review routes-r1-2)
 function xpRouteBind(f, x, r, d, h){
   const c = xpRouteShown(f, x), box = d.querySelector('#rcCard');
-  if(!c || c.fallback || !box) return;
-  const vals = xpRouteHtml.vals || [], b = c.best;
+  if(!c || !box || c.single_level) return;
+  const vals = xpRouteHtml.vals || [], b = c.best || {};
+  const nx = ((xpEffective(f, x) || {}).explain || {}).next_step || {};
   box.querySelectorAll('[data-rc-copy]').forEach(bt => bt.onclick = () => { const v = vals[Number(bt.dataset.rcCopy)]; if(v) h.copy(v.value, v.label); });
   const all = box.querySelector('#rcCopyAll'); if(all) all.onclick = () => h.copy(c.copy_all || '', 'Every filled field');
   box.querySelectorAll('[data-rc]').forEach(bt => bt.onclick = async () => {
@@ -708,7 +762,12 @@ function xpRouteBind(f, x, r, d, h){
     if(k === 'faxes'){ if(typeof closeDetail === 'function') closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); return; }
     if(k === 'letter'){ const pk = (r.packets || [])[0];
       if(pk && bt.textContent.includes('packet')) window.open('/api/packets/' + encodeURIComponent(pk.packet_id) + '/pdf', '_blank', 'noopener');
-      else { const l = d.querySelector('#btnAppeal'); if(l) l.click(); else h.err('No letter for this item: copy the fields instead.'); } return; }
+      else { const l = d.querySelector('#btnAppeal'); if(l) l.click(); else rcPrintSheet(c, b); } return; }
+    if(k === 'sheet'){ rcPrintSheet(c, b); return; }
+    if(k === 'ema'){ const url = xpEmaUrl(f, x, nx);
+      if(url) window.open(url, '_blank', 'noopener,noreferrer');
+      else h.err('Open this claim in EMA and send it from there: no EMA address is set for this site.'); return; }
+    if(k === 'copy_fax'){ h.copy((b.fax || {}).published || '', 'The fax number'); return; }
     if(k === 'packet'){ h.act.build_packet(); return; }
     if(k === 'claim'){ const oc = d.querySelector('#openClaim'); if(oc) oc.click(); return; }
     if(k === 'copy_where'){ h.copy(b.where, 'The address'); return; }
@@ -717,9 +776,20 @@ function xpRouteBind(f, x, r, d, h){
   if(sent) sent.onclick = async () => {
     if(sent.disabled || xpWalkGuarded()) return;
     const ref = (box.querySelector('#rcRef').value || '').trim().slice(0, 60);
-    const verb = c.request === 'claim_status_or_reprocess' ? 'Asked the payer' : 'Sent';
+    const howBox = box.querySelector('#rcHow');
+    const how = howBox ? (howBox.value || '').trim().slice(0, 80) : `${RC_CH[b.channel] || b.channel}: ${b.name}`;
+    if(howBox && !how){ h.err('Say how you sent it (the portal, a fax, the mail): it is kept in its history.'); return; }
     sent.disabled = true;
-    try { await h.status('appealed', `${verb} by ${RC_CH[b.channel] || b.channel}: ${b.name}${ref ? '. Reference ' + ref : ''}`); }
+    try {
+      if(c.request === 'claim_status_or_reprocess'){
+        // a status call is no Sent: the claim no payer answered stays to do until its first-filing limit, and what the
+        // payer said is logged with Log what happened
+        await h.event('asked', `${how}${ref ? '. Reference ' + ref : ''}`);
+        h.say('Noted in its history. When the payer answers, log what it said with Log what happened.');
+      } else {
+        await h.status('appealed', `Sent ${c.sent_words || 'it'} by ${how}${ref ? '. Reference ' + ref : ''}`);
+      }
+    }
     catch(e){ h.err('Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'); }
     finally { sent.disabled = false; }
   };
@@ -849,7 +919,7 @@ function xpBind(f, x, r, d, done){
     try { await fn(); } catch(e){ err('Not done: ' + (e.message || 'no answer from the site') + '. Try again.'); } finally { b.disabled = false; } });
   d.querySelectorAll('a.xp-rows').forEach(a => a.onclick = e => { e.preventDefault(); const st = d.querySelector('#xpStory'); if(!st) return; st.open = true;
     const first = st.querySelector(`tr[data-n="${(a.dataset.rows || '').split(',')[0]}"]`); (first || st).scrollIntoView({block:'center'}); });
-  xpRouteBind(f, x, r, d, {status, err, say, copy, act});
+  xpRouteBind(f, x, r, d, {status, err, say, copy, act, event});
 }
 // Decide what to do, for an item whose next step is a decision (route decide): it needed a fix and was sent again (Sent,
 // with what went), the payer is wrong (the appeal: its packet or letter), or the payer is right (Let go, with the reason)
