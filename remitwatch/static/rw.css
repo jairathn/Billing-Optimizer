@@ -1602,7 +1602,8 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 .wk-bar .wk-go { margin-left: auto; min-width: 96px; }
 .wk-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: var(--sp-1) 0 var(--sp-2); }
 .wk-how { font-size: var(--fs-sm); color: var(--text-2); }
-.wk-ema { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin: var(--sp-1) 0 var(--sp-2); }
+.wk-ema-msg { margin: var(--sp-1) 0; } .wk-ema-msg:empty { display: none; }
+.wk-head #emaBatch { margin-left: auto; }
 .wk-card { margin-top: var(--sp-1); }
 .wk-card > table th { top: calc(var(--topbar-h) + 44px); }
 /* the rows: a fixed table, two lines a cell, each line cut with an ellipsis */
