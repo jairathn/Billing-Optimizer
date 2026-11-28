@@ -138,10 +138,14 @@ date, after the send the item is about, whenever that 837 was read; for an item 
 practice's day it was first seen); the owner's accepted pattern; new facts on its own claim (an item about a payment, such as REMIT_NOT_POSTED or TAKEBACK,
 also counts EMA's postings of that payment); a copy of an answer the payer delivered twice; or a rule that stops raising
 it on purpose and counts its dollars elsewhere (`retired:<counter>`: `snb_past_limit`, a second payer's share a month
-past its last day; `unseen`, a claim no source can show the answer to; `unseen_second_send_nothing_left`;
-`open_claim_second_nothing_left` and `open_claim_second_patient_paid`, a claim to the visit's second payer with nothing
-left for it, or a share the patient paid; the unseen claims are counted in meta ema:unanswered_unseen and on the Data
-tab, the others in meta ema:wiring). Detection hands the check the ids it retired, and the decision log names the same
+past its last day, named with its dollars on the Data tab's "Running on its own" panel every run; `unseen`, a claim no
+source can show the answer to, when EMA's claim for it was not found while it waits or its payer sends no ERA and the
+store has no EMA report; `unseen_second_send_nothing_left`; `open_claim_second_nothing_left` and
+`open_claim_second_patient_paid`, a claim to the visit's second payer with nothing left for it, or a share the patient
+paid; the unseen claims are counted in meta ema:unanswered_unseen and on the Data tab, the others in meta ema:wiring). A
+claim whose payer's remittances stop before its due day is counted unseen too, but it is not retired: a listed one stays
+on Work now and an expired one is counted by `left_record`, so an outage of a payer's remittances never empties the list
+in silence. Detection hands the check the ids it retired, and the decision log names the same
 counter as the rule of the item's "gone" row (`detect:snb_past_limit`, where it used to say `detect:no_longer_raised`).
 The retired route is only for an item nobody worked: one a person worked stays on the list. The fingerprints the facts
 route compares are made one way per release (meta selfcheck:facts_version, 3; the part only an item about a payment has,

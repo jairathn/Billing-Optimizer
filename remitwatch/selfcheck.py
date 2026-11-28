@@ -5198,6 +5198,11 @@ def panel(conn: sqlite3.Connection) -> dict:
     if gu.get("cents") is not None:
         lines.append(f"Written off with no decision (2025 on): {usd0(gu.get('cents'))}, of which {usd0(gu.get('recoverable_cents'))} can "
                      "still be appealed.")
+    past = second_payer_past_limit(conn)
+    if past:
+        lines.append(f"Patients' shares a second payer on file never paid, now past that payer's filing limit and a month's "
+                     f"grace: {_n(past['n'], 'share')} ({usd0(past['cents'])}). They are no longer work (the second-payer rule "
+                     "counts them every run); the ones that expired on Work now are also in Results' lost to deadlines.")
     gaps = (money.get("gaps") or {}) if isinstance(money, dict) else {}
     if gaps.get("total_cents"):
         lines.append(f"Money the checks could not tie to the cent: {usd0(gaps['total_cents'])} (the Data tab shows each part).")
@@ -5208,7 +5213,24 @@ def panel(conn: sqlite3.Connection) -> dict:
             "checks": checks, "audit": audit, "track": track, "patterns": pats,
             "money": {k: money.get(k) for k in ("at", "ledger_seq", "conservation", "ar_balance", "posted", "gaps")},
             "acceptances": (meta_get(conn, K_ACCEPTED, []) or [])[-10:],
-            "given_up": gu, "blind": blind, "housekeeping": house, "rates": rates}
+            "given_up": gu, "blind": blind, "housekeeping": house, "rates": rates, "second_payer_past_limit": past}
+
+
+def second_payer_past_limit(conn: sqlite3.Connection) -> dict | None:
+    """The second payers' shares the newest analysis counted past their filing limit and a month's grace (detection's
+    run_secondary_not_billed: meta ema:wiring counts snb_past_limit and snb_past_limit_cents): money no list shows any more,
+    retired by its rule. {'n', 'cents'}, or None when there is none. Read from meta, so the dashboard's copy shows it too;
+    the Data tab's panel names it, so a share retired before it was ever Work now (Results counts as lost to deadlines only
+    the items that expired on Work now) is never a silent drop."""
+    w = meta_get(conn, "ema:wiring", {}) or {}
+    counts = w.get("counts") if isinstance(w, dict) else None
+    if not isinstance(counts, dict):
+        return None
+    try:
+        n, cents = int(counts.get("snb_past_limit") or 0), int(counts.get("snb_past_limit_cents") or 0)
+    except (TypeError, ValueError):
+        return None
+    return {"n": n, "cents": cents} if n > 0 else None
 
 
 def banner(conn: sqlite3.Connection) -> dict | None:

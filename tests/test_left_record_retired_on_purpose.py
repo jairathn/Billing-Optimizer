@@ -385,3 +385,52 @@ def test_control_the_same_claims_dropped_by_a_bug_are_still_counted(world837, mo
     left = world837.check("left_record")
     assert left["status"] == "fail" and ((left.get("info") or {}).get("by_signal") or {}).get("NO_ANSWER") == 9, left
     assert set(left.get("examples") or []) >= set(ids.values()) or left["n"] >= 9, left
+
+
+# ================================================================== the review's cases: where the retired dollars show
+def test_a_second_payers_share_raised_past_its_last_day_and_retired_is_on_the_data_tab(world):
+    """The share is first seen on a run already past the second payer's last day (listed as expired, never Work now), and
+    the next run retires it past the month's grace (snb_past_limit). Results' lost to deadlines never records it (it
+    counts only items that expired while Work now), and left_record lets it go by its route. Its $30.00 must still be on a
+    page (owner's rules 1 and 2): the Data tab's 'Running on its own' panel names the second payers' shares past their
+    limit, with their dollars, every run (from meta ema:wiring, so the dashboard's copy shows it too)."""
+    world.run("r1", LISTED_EXPIRED)
+    results.refresh(world.conn, today=LISTED_EXPIRED, force=True)
+    got = world.second_payer_items()
+    assert len(got) == 1 and got[0]["work_state"] == "expired", [(g["work_state"],) for g in got]
+    world.reopen()
+    world.run("r2", RETIRED)
+    results.refresh(world.conn, today=RETIRED, force=True)
+    assert world.second_payer_items() == []
+    assert world.counts().get("snb_past_limit_cents") == 3000, world.counts()
+    lost = (results.dashboard(world.conn) or {}).get("lost") or {}
+    assert not lost.get("cents"), lost                          # never Work now: not lost to its deadline on Results
+    left = world.check("left_record")
+    assert left["status"] == "ok" and ((left.get("info") or {}).get("routes") or {}).get("retired:snb_past_limit") == 1, left
+    panel = sc.panel(world.conn)
+    assert panel.get("second_payer_past_limit") == {"n": 1, "cents": 3000}, panel.get("second_payer_past_limit")
+    line = [t for t in panel["lines"] if "second payer" in t and "past" in t]
+    assert line and "$30" in line[0] and "1 share" in line[0], panel["lines"]
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+@pytest.mark.parametrize("reason, retired", [(None, True), ("no_ema_reports", True), ("payer_remittances_stop", False)])
+def test_only_the_named_unseen_reasons_retire_a_claims_item(tmp_path, kind, reason, retired):
+    """Detection retires a never-answered claim's item on purpose when it moves the claim to the claims no source can
+    check: its payer sends no ERA and the store has no EMA report (no_ema_reports), or EMA's claim for it was not found
+    while it waits (no reason). A claim whose payer's remittances stop before its due day (payer_remittances_stop: an ERA
+    outage, or EMA's postings no longer reaching that day) is counted unseen too, but it is not retired: a listed one stays
+    on Work now, kept by the vanished check, and an expired one is counted by left_record, so an outage never empties the
+    billers' list in silence."""
+    s = Store(str(tmp_path / "s.sqlite")) if kind == "file" else Store(":memory:", compact=True)
+    try:
+        det = Detector(s, run_id="u1", today="2026-08-25")
+        cd = {"pcn": "ZZ00T0061C017", "s837": None, "grp": "Testcare Health", "sent": "2026-05-01", "due": "2026-05-31",
+              "source": "837"}
+        det._count_unseen(cd, [("99213", "2026-04-20", 15000, 1, None, None)], None, reason=reason)
+        from remitwatch.detect import OPEN_837_ID, _fid
+        fid = _fid(OPEN_837_ID, "ZZ00T0061C017")
+        assert (det.retired.get(fid) == "unseen") is retired, (reason, det.retired)
+        assert [r["pcn"] for r in det._unseen_rows] == ["ZZ00T0061C017"]       # counted unseen with its dollars either way
+    finally:
+        s.close()

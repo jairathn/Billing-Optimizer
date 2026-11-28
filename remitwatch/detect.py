@@ -304,6 +304,10 @@ EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's 
 # (the service years before it), "claims": [[claim id, 837 claim key or None, reason, group, cents, first service, sent, due,
 # and codes] (most dollars first: what the Data tab lists and the archive holds), "at", "newest_835"}
 UNSEEN_KEY = "ema:unanswered_unseen"
+# the reasons a never-answered claim is moved to the unseen count by design, retiring its item (Detector.retired: the vanished
+# and left_record checks' route out): EMA's claim not found while it waits (None), a payer that sends no ERA and no EMA
+# report to show its answers. A claim whose payer's remittances stop before its due day is counted but not retired
+UNSEEN_RETIRES = (None, "no_ema_reports")
 # why a claim is counted unseen, in the order they are decided (_finish_unseen)
 UNSEEN_REASONS = ("no_ema_reports", "payer_remittances_stop", "ambiguous", "before_ema_reports", "second_payer_not_matched",
                   "voided_in_ema", "ema_claim_not_found")
@@ -9798,9 +9802,15 @@ class Detector:
         r8 = cd.get("s837")
         svcs = sorted({x[1] for x in items if x[1]})
         # the claim's item, if it had one, leaves the record on purpose: its dollars are in the unseen count (the route out
-        # the self-check reads, and the rule the decision log names). The 837 pass's claims carry its id signal
+        # the self-check reads, and the rule the decision log names). The 837 pass's claims carry its id signal. Only for the
+        # claims moved there by design: EMA's claim not found while it waits (no reason), or a payer that sends no ERA with
+        # no EMA report to show its answers (no_ema_reports). A claim whose payer's remittances stop before its due day (an
+        # ERA outage, EMA's postings no longer reaching that day) is counted too but not retired: a listed one stays on Work
+        # now (the vanished check keeps it) and an expired one is counted by left_record, so an outage never empties the
+        # billers' list in silence
         fid = _fid(cd.get("id_signal") or (OPEN_837_ID if cd.get("source") == "837" else "EMA_OPEN_CLAIM"), cd["pcn"])
-        self.retired[fid] = "unseen"
+        if reason in UNSEEN_RETIRES:
+            self.retired[fid] = "unseen"
         self.__dict__.setdefault("_unseen_rows", []).append({
             "pcn": cd["pcn"], "key": r8[7] if r8 is not None and len(r8) > 7 and r8[7] else None, "grp": cd.get("grp") or "Unknown",
             "billed": sum(int(x[2] or 0) for x in items), "svc": svcs[0] if svcs else None, "sent": cd.get("sent"),
