@@ -2005,3 +2005,76 @@ def test_the_data_tab_and_today_count_the_reports_ages_to_the_practices_day_on_b
     check(_site(monkeypatch, db), "server")           # asked before the serverless site switches the mode
     (tmp_path / "vercel").mkdir()
     check(_site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel"), "serverless")
+
+
+# ------------------------------------------------------------------------------- Work (unit ui-work, the list's fields)
+def _items(c, **params):
+    base = {"category": ",".join(MONEY), "live": 1, "state": "todo", "status": "all", "limit": 200}
+    return c.get("/api/findings", params=dict(base, **params)).json()
+
+
+def test_last_chance_closes_on_the_payers_limit_counts_in_7_days_and_sorts_first(worlds, tmp_path, monkeypatch):
+    """CRITIQUE_biller change 3 (unit ui-work): an item past our target date whose payer's own limit is still ahead is the
+    most urgent money, never "passed" in gray. It closes on the payer's limit (api._last_day): inside 7 days it counts in
+    Work now's 7-day part, Today's step 1 and the title (one definition), and its list shows it first, soonest first; it
+    is not among the closed windows. Once the payer's limit passes too, it is closed and counts nowhere as due. The same
+    on both hosts (legal_deadline is in the dashboard's copy)."""
+    db = copied(worlds, tmp_path)
+    conn = sqlite3.connect(db)
+    # our target passed 12 days ago; the payer's own limit is 3 days ahead. The other item is due in 20 days
+    conn.execute("UPDATE findings SET appeal_deadline=?, legal_deadline=? WHERE signal='DENIED_AUTH'", (iso(12), iso(-3)))
+    conn.execute("UPDATE findings SET appeal_deadline=?, legal_deadline=NULL WHERE signal='DENIED_MISSING_INFO'", (iso(-20),))
+    conn.commit()
+    conn.close()
+    want = (1, 9000)
+    (tmp_path / "vercel").mkdir()
+    for c in (_site(monkeypatch, db), _site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel")):
+        due = c.get("/api/ema/today").json()["states"]["todo"]["due7"]
+        assert (due["n"], due["cents"]) == want and _list_total(c, due["go"]) == want
+        total = c.get("/api/brief").json()["work"]["total"]
+        assert (total["due7_n"], total["due7_cents"]) == want
+        soonest = [r["signal"] for r in _items(c, sort="deadline")["items"]]
+        assert soonest.index("DENIED_AUTH") < soonest.index("DENIED_MISSING_INFO")
+        closed = [r["signal"] for r in _items(c, state="", status="open,in_progress", deadline="expired")["items"]]
+        assert "DENIED_AUTH" not in closed
+        # "Window still open" keeps our target date (orchestrator decision 2: bulk appeal and Today's write-off count)
+        assert "DENIED_AUTH" not in [r["signal"] for r in _items(c, state="", status="open,in_progress", deadline="valid")["items"]]
+    # past the payer's own limit too: the window is closed
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET legal_deadline=? WHERE signal='DENIED_AUTH'", (iso(1),))
+    conn.commit()
+    conn.close()
+    srv = _site(monkeypatch, db)
+    assert "DENIED_AUTH" in [r["signal"] for r in _items(srv, state="", status="open,in_progress", deadline="expired")["items"]]
+    due = srv.get("/api/ema/today").json()["states"]["todo"]["due7"]
+    assert (due["n"], due["cents"]) == (0, 0) == _list_total(srv, due["go"])
+
+
+def test_one_payer_in_one_sitting_and_the_owners_work_after_a_billers(worlds, tmp_path, monkeypatch):
+    """CRITIQUE_biller changes 8 and 19 (unit ui-work). "By payer, most money first" lists each payer's items together,
+    the payers by the money the list holds for each, and gives each payer's count and dollars in the whole list (not the
+    rows shown), which add up to the count line. On the Worklist (owner_last) a rate pattern, the owner's contract
+    question, comes after every claim a biller works, whatever the order, and the list says how many there are and their
+    dollars; the count line still counts them (one definition with Today). The same on both hosts."""
+    db = copied(worlds, tmp_path)
+    conn = sqlite3.connect(db)
+    top = conn.execute("SELECT finding_id FROM findings WHERE category IN ('denial','bundling','downcoding','underpayment') "
+                       "AND work_state='work_now' ORDER BY shortfall_cents DESC, finding_id LIMIT 1").fetchone()[0]
+    conn.execute("UPDATE findings SET signal='SECOND_RATE', category='underpayment' WHERE finding_id=?", (top,))
+    conn.commit()
+    conn.close()
+    (tmp_path / "vercel").mkdir()
+    for c in (_site(monkeypatch, db), _site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel")):
+        got = _items(c, sort="payer_money")
+        payers = [r["payer_group"] or "" for r in got["items"]]
+        runs = [p for i, p in enumerate(payers) if i == 0 or p != payers[i - 1]]
+        assert len(runs) == len(set(runs)), "each payer's items come together"
+        groups = got["groups"]
+        assert [g["cents"] for g in groups] == sorted((g["cents"] for g in groups), reverse=True)
+        assert runs == [g["payer_group"] for g in groups if g["payer_group"] in set(payers)]
+        assert sum(g["n"] for g in groups) == got["total"] and sum(g["cents"] for g in groups) == got["shortfall_cents"]
+        plain = _items(c, sort="value")
+        assert plain["items"][0]["finding_id"] == top and "owner_work" not in plain
+        owner = _items(c, sort="value", owner_last=1)
+        assert owner["items"][-1]["finding_id"] == top and owner["total"] == plain["total"]
+        assert owner["owner_work"]["n"] == 1 and owner["owner_work"]["cents"] == plain["items"][0]["shortfall_cents"]

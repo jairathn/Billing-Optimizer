@@ -1578,3 +1578,90 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 }
 :root[data-theme="dark"] :is(.banner.stale, .banner.warn, .banner[style*="--bad"]) { background: var(--surface-2); border-color: var(--border); box-shadow: inset 3px 0 0 var(--warning); }
 :root[data-theme="dark"] :is(.banner.safe, .banner.danger, #scBar .banner) { background: var(--surface-2); border-color: var(--border); box-shadow: inset 3px 0 0 var(--danger); }
+
+/* == 23. Work: the list first (unit ui-work) ======================================================================= */
+/* DESIGN P2 and P11, CRITIQUE_premium changes 3 and 10, CRITIQUE_biller changes 3, 6, 7, 8, 13 and 19. One header row (the
+   view's name and its counts as segments), one sticky toolbar with the view's one filled button, then rows of a fixed
+   height: the first row sits under 220 px on a desk, seven rows fit a 1366 x 650 laptop and seven cards a phone, and a
+   row never changes height when the item panel docks beside it (its columns truncate instead; the full text is on hover
+   and in the panel). Everything else of the old page head lives under the list. */
+.wk-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-5); margin: 0 0 var(--sp-2); }
+.wk-title { font-size: var(--fs-xl); line-height: var(--lh-xl); }
+.wk-segs { flex-wrap: nowrap; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.wk-segs::-webkit-scrollbar { display: none; }
+.wk-segs .seg { flex: none; display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.wk-segs .seg b { font-weight: var(--fw-semibold); color: var(--text); font-variant-numeric: tabular-nums; }
+.wk-segs .wk-c { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.wk-segs .seg.is-red b, .wk-segs .seg.is-red .wk-c { color: var(--danger); }
+.list-head.wk-bar { min-height: 0; margin: 0; padding: 6px 0; flex-wrap: wrap; gap: var(--sp-2); }
+.wk-bar .lh-tools { margin-left: 0; flex: 1 1 auto; min-width: 0; }
+.wk-bar .lh-tools select[data-f="kind"] { max-width: 15rem; }
+.wk-bar .lh-tools select[data-f="payer"] { max-width: 12rem; }
+.wk-bar .lh-tools input[data-f="q"] { width: 8.5rem; transition: width var(--t-fast); }
+.wk-bar .lh-tools input[data-f="q"]:focus { width: 15rem; }
+.wk-bar .wk-go { margin-left: auto; min-width: 96px; }
+.wk-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: var(--sp-1) 0 var(--sp-2); }
+.wk-how { font-size: var(--fs-sm); color: var(--text-2); }
+.wk-ema { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin: var(--sp-1) 0 var(--sp-2); }
+.wk-card { margin-top: var(--sp-1); }
+.wk-card > table th { top: calc(var(--topbar-h) + 44px); }
+/* the rows: a fixed table, two lines a cell, each line cut with an ellipsis */
+table.wl.wk { table-layout: fixed; }
+table.wl.wk th.c-sel { width: 40px; } table.wl.wk th.c-day { width: 172px; } table.wl.wk th.c-who { width: 22%; }
+table.wl.wk th.c-payer { width: 17%; } table.wl.wk th.c-num { width: 104px; text-align: right; }
+main#view table.wl.wk td, main#view table.wl.wk td.who, main#view table.wl.wk td.what { min-width: 0; }
+table.wl.wk tr.row > td { height: 56px; padding-top: 0; padding-bottom: 0; overflow: hidden; vertical-align: middle; font-size: var(--fs-sm); font-weight: var(--fw-regular); }
+table.wl.wk td .l1, table.wl.wk td .l2 { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+table.wl.wk td .l1 { font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: var(--fw-medium); color: var(--text); }
+table.wl.wk td .l2 { margin-top: 2px; min-height: var(--lh-xs); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
+table.wl.wk td .l1.due-now { color: var(--danger); font-weight: var(--fw-semibold); }
+table.wl.wk td .l1.muted { color: var(--text-3); font-weight: var(--fw-regular); }
+table.wl.wk td.payer .l1 { color: var(--text-2); font-weight: var(--fw-regular); }
+table.wl.wk td.what .kind { height: auto; padding: 0; margin-right: 6px; background: none; box-shadow: none; color: var(--text-2); font-size: var(--fs-sm); }
+table.wl.wk td.num { text-align: right; }
+table.wl.wk td.num .l1 b { font-weight: var(--fw-semibold); }
+table.wl.wk td.num .st { display: inline-flex; margin: 0; font-size: var(--fs-xs); }
+table.wl.wk .chance { color: var(--text-3); }
+table.wl.wk .by { color: var(--text-3); }
+/* a claim number copies on a click; it reads as text */
+table.wl.wk button.clm { all: unset; cursor: copy; color: var(--text-2); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "ss02" 1;
+  text-decoration: underline dotted var(--border-control); text-underline-offset: 2px; }
+table.wl.wk button.clm:hover { color: var(--text); }
+table.wl.wk button.clm:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; border-radius: 2px; }
+/* a payer whose remittances stopped: the can't-be-checked mark beside its name, amber (blind), with why on hover */
+.wk-blind { display: inline-block; width: 14px; height: 14px; margin-left: 6px; vertical-align: -2px; background: var(--warning);
+  -webkit-mask: var(--i-s-blind) center / contain no-repeat; mask: var(--i-s-blind) center / contain no-repeat; }
+/* one payer in one sitting: the payer's line with its count, its dollars and the list for the call */
+table.wl.wk tr.group-row td { height: auto; padding: 7px var(--sp-4); }
+.wk-gname { color: var(--text); }
+.wk-copy { height: 24px; margin-left: var(--sp-3); padding: 0 var(--sp-2); font-size: var(--fs-xs); }
+.wk-owner td { color: var(--text-2); font-weight: var(--fw-medium); }
+/* under the list: what needs no work, the notes worth fixing once, what each kind of work means, the details */
+.wk-below { display: flex; flex-direction: column; gap: var(--sp-3); margin-top: var(--sp-4); }
+.wk-quiet a { color: inherit; }
+.wk-fix .fixonce { margin: 0 0 var(--sp-1); }
+.wk-kinds .todo-list { margin-top: var(--sp-2); }
+.wk-all { margin-top: var(--sp-3); }
+.wk-none { padding: var(--sp-2) var(--sp-1); }
+@media (max-width: 640px) {
+  .wk-title { display: none; }                          /* one title on a phone: the header's */
+  .wk-head { margin-bottom: var(--sp-2); }
+  .list-head.wk-bar { padding: 6px var(--sp-4); }
+  .wk-bar .lh-tools { width: auto; flex: 1 1 auto; }
+  .wk-bar .lh-tools > :not(#moreF) { display: none; }
+  .wk-card { margin-top: var(--sp-2); }
+  /* two-line cards (CRITIQUE_premium change 10): the patient and the amount; what happened, the payer and the due date */
+  table.wl.wk tr.row { grid-template-columns: 28px minmax(0, 1.25fr) minmax(0, 1fr) auto; grid-template-areas: "sel who who num" "sel what payer day";
+    align-items: center; gap: 4px var(--sp-2); margin: 0 0 6px; padding: 9px var(--sp-3); }
+  table.wl.wk tr.row > td { height: auto; overflow: hidden; }
+  table.wl.wk td .l2 { display: none; }
+  table.wl.wk td.who .l1 { font-size: var(--fs-md); line-height: var(--lh-md); font-weight: var(--fw-semibold); }
+  table.wl.wk td.num .l1 { font-size: var(--fs-md); line-height: var(--lh-md); }
+  table.wl.wk td.what .l1, table.wl.wk td.payer .l1, table.wl.wk td.day .l1 { font-size: var(--fs-xs); line-height: var(--lh-xs); font-weight: var(--fw-regular); color: var(--text-3); }
+  table.wl.wk td.what .kind { display: none; }
+  table.wl.wk td.day .l1.due-now { color: var(--danger); font-weight: var(--fw-semibold); }
+  table.wl.wk td.day { text-align: right; }
+  table.wl.wk td:first-child { align-self: start; padding-top: 2px; }
+  table.wl.wk tr.group-row { display: block; margin: var(--sp-2) 0 var(--sp-1); padding: 0; background: none; border: 0; }
+  table.wl.wk tr.group-row td { display: block; padding: var(--sp-1) var(--sp-1); background: none; }
+}
