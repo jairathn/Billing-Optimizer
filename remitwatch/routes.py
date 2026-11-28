@@ -35,7 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import codes
+from . import codes, runlog
 
 TABLE_PATH = Path(__file__).with_name("payer_routes.json")
 FALLBACK = "No checked route for this payer yet. Use its provider portal, then note what worked."
@@ -136,8 +136,8 @@ def _carcs(conn: sqlite3.Connection | None, f: dict) -> set[str]:
     if conn is not None and f.get("line_key"):
         try:
             out |= {codes._carc_of(r[0]) for r in conn.execute("SELECT reason_code FROM adjustments WHERE line_key=?", (f["line_key"],))}
-        except sqlite3.Error:
-            pass                # a copy with no adjustments table: the item's own reason stands
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "routes.carcs", level="warning")     # a copy with no adjustments table: the item's own reason stands
     return out - {""}
 
 
@@ -154,7 +154,8 @@ def _first_level_denied(conn: sqlite3.Connection | None, f: dict, st: dict) -> b
         return False
     try:
         rows = conn.execute("SELECT to_status, note FROM finding_events WHERE finding_id=? ORDER BY at, id", (f["finding_id"],)).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "routes.first_level_denied", level="warning")
         return False
     sent = False
     for to, note in rows:
@@ -165,10 +166,27 @@ def _first_level_denied(conn: sqlite3.Connection | None, f: dict, st: dict) -> b
     return False
 
 
+def _first_filing(f: dict, st: dict) -> dict | None:
+    """The first-filing limit of a claim no payer has answered (the window of that name states.windows lists), or None:
+    the date a status request is due by, which the item's own date can run past (a dispute window after the limit)."""
+    if f.get("signal") not in ("NO_ANSWER", "REJECTED_PRE_PAYER"):
+        return None
+    from . import states
+    try:
+        wins = states.windows(f, st.get("deadline"), st.get("deadline_basis"))
+    except (KeyError, TypeError, ValueError) as exc:
+        runlog.caught(exc, "routes.first_filing", level="warning")
+        return None
+    return next((w for w in wins if w.get("what") == "the first-filing limit"), None)
+
+
 def _days(a: str | None, b: str | None) -> int | None:
+    if not a or not b:
+        return None
     try:
         return (date.fromisoformat(str(b)[:10]) - date.fromisoformat(str(a)[:10])).days
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "routes.days", level="warning")
         return None
 
 
@@ -193,7 +211,8 @@ def request_for(conn: sqlite3.Connection | None, f: dict, st: dict, nx: dict, to
         if _first_level_denied(conn, f, st):
             return "second_level_appeal", "The payer turned down the first appeal: the next level.", None
         also = None
-        left = _days(today, st.get("deadline")) if f.get("signal") in ("NO_ANSWER", "REJECTED_PRE_PAYER") else None
+        ff = _first_filing(f, st)
+        left = _days(today, ff["date"]) if ff else None
         if left is not None and left <= NEAR_FILING_DAYS:
             also = "timely_filing_proof"
         return "claim_status_or_reprocess", "Ask the payer where the claim stands, or to reprocess it.", also
@@ -455,9 +474,12 @@ def _money(c: Any) -> str:
 
 
 def _us(d: Any) -> str:
+    if not d:
+        return ""
     try:
         x = date.fromisoformat(str(d)[:10])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "routes.us_date", level="warning")
         return ""
     return x.strftime("%m/%d/%Y")
 
@@ -486,7 +508,8 @@ def _one(conn: sqlite3.Connection, sql: str, args: tuple) -> dict:
     try:
         cur = conn.execute(sql, args)
         r = cur.fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "routes.one", level="warning")
         return {}
     return dict(zip([d[0] for d in cur.description], r)) if r else {}
 
@@ -515,7 +538,8 @@ def _ema_person(conn: sqlite3.Connection, claim_id: str | None) -> dict:
     try:
         rows = conn.execute("SELECT policy_number, patient_id FROM ema_rows WHERE claim_id=? ORDER BY "
                             "COALESCE(transaction_date, posted_date, service_date, ''), row_index", (str(claim_id),)).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "routes.ema_person", level="warning")
         return {}
     member, pid = "", ""
     for pol, p in rows:
@@ -526,7 +550,8 @@ def _ema_person(conn: sqlite3.Connection, claim_id: str | None) -> dict:
         try:
             n = conn.execute("SELECT c.patient_last, c.patient_first FROM ema_rows e JOIN claims c ON c.patient_control_number = e.claim_id "
                              "WHERE e.patient_id=? AND COALESCE(c.patient_last,'') != '' ORDER BY c.payment_date DESC LIMIT 1", (pid,)).fetchone()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "routes.ema_person_name", level="warning")
             n = None
         if n:
             out.update(patient_last=n[0], patient_first=n[1])
@@ -541,7 +566,8 @@ def _ema_facts(conn: sqlite3.Connection, claim_id: str | None, code: str | None)
     try:
         rows = conn.execute("SELECT icd10, auth_number, group_number, cpt FROM ema_rows WHERE claim_id=? ORDER BY row_index",
                             (str(claim_id),)).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "routes.ema_facts", level="warning")
         return {}
     mine = [r for r in rows if not code or str(r[3] or "") == str(code)] or rows
     dx = []
@@ -574,8 +600,8 @@ def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict,
     mods = f.get("modifiers") or line.get("modifiers") or ""
     try:
         mods = json.loads(mods) if isinstance(mods, str) and mods.startswith("[") else mods
-    except ValueError:
-        pass
+    except ValueError as exc:
+        runlog.caught(exc, "routes.modifiers", level="warning")    # read as the text it is
     mods = [m for m in (mods if isinstance(mods, list) else re.split(r"[,\s]+", str(mods))) if m]
     code = str(f.get("procedure_code") or "")
     carcs = []
@@ -583,7 +609,8 @@ def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict,
         try:
             carcs = [f"{g}-{c}" for g, c in conn.execute("SELECT group_code, reason_code FROM adjustments WHERE line_key=? "
                                                          "AND amount_cents != 0 ORDER BY rowid", (f["line_key"],))]
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "routes.denial_codes", level="warning")
             carcs = []
     if not carcs and f.get("carc"):
         carcs = [str(f["carc"])]
@@ -687,9 +714,12 @@ def _source_line(srcs: list[str], checked: str) -> tuple[str, list[dict]]:
 
 
 def _minutes(m: Any) -> str:
+    if m in (None, ""):
+        return ""
     try:
         n = int(m)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "routes.minutes", level="warning")
         return ""
     return f"about {n} minute{'s' if n != 1 else ''}" if n > 0 else ""
 
@@ -746,7 +776,8 @@ def _fax_view(conn: sqlite3.Connection, f: dict, request: str, published: str) -
         return out
     try:
         nb = fax.number_for(conn, f.get("payer_group"), f.get("payer_kind"), level)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "routes.fax_number", level="warning")    # no number on file: the card says to confirm one
         nb = {"number": ""}
     on = nb.get("number") or ""
     out.update(on_file=fax.pretty(on) if on else "", confirmed=bool(on) and bool(nb.get("auto_ok", 1)),
@@ -824,7 +855,8 @@ def card(conn: sqlite3.Connection, finding_id: str, *, explain: dict | None = No
         return None
     try:
         f["evidence"] = json.loads(f.get("evidence") or "{}") if isinstance(f.get("evidence"), str) else (f.get("evidence") or {})
-    except ValueError:
+    except ValueError as exc:
+        runlog.caught(exc, "routes.evidence", level="warning")
         f["evidence"] = {}
     request, why, also = request_for(conn, f, st, nx, today)
     if request is None:
@@ -836,6 +868,11 @@ def card(conn: sqlite3.Connection, finding_id: str, *, explain: dict | None = No
     base = {"checked": t["checked"], "request": request, "request_label": t["requests"][request], "request_why": why,
             "route": nx.get("route") or st.get("route"), "deadline": nx.get("deadline"), "deadline_basis": nx.get("basis"),
             "names_shown": bool(show_names), "payer_group": f.get("payer_group"), "fallback": None}
+    if request == "claim_status_or_reprocess":
+        # a claim no payer has answered is due at the payer by its first-filing limit, which the item's own date can run past
+        ff = _first_filing(f, st)
+        if ff and ff["date"] >= today and (not base["deadline"] or ff["date"] < base["deadline"]):
+            base["deadline"], base["deadline_basis"] = ff["date"], f"The first-filing limit: {ff['basis']}"
     carcs = _carcs(conn, f)
     block = _request_block(conn, f, claim, line, nx, st, request, base["route"] or "", group, show_names, today, carcs) if group else None
     if block is None:

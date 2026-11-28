@@ -295,13 +295,31 @@ def test_a_claim_status_call_near_the_filing_limit_carries_the_timely_filing_pro
     assert ex["next_step"]["route"] == "call"
     assert c["request"] == "claim_status_or_reprocess" and c["also"]["request"] == "timely_filing_proof"
     assert c["best"]["action"]["label"] == "Check it in the clearinghouse"
-    # far from the limit, no proof beside it
+    # far from the first-filing limit (a service of Apr 20: UnitedHealthcare's limit is weeks away), no proof beside it
     item(store, finding_id="F1", appeal_deadline="2026-12-20", payer_group="UnitedHealthcare", payer_kind="commercial",
          payer_name="UNITEDHEALTHCARE", signal="NO_ANSWER", category="no_answer", carc=None, actionable="follow_up",
-         line_key=line_key(store, "TX00001"), claim_key="TX00001-0", transaction_key="TX00001")
+         service_date="2026-04-20", line_key=line_key(store, "TX00001"), claim_key="TX00001-0", transaction_key="TX00001")
     c2, ex2 = card(store)
-    if ex2["next_step"]["route"] == "call" and (ex2["next_step"].get("deadline") or "") > "2026-06-02":
-        assert "also" not in c2
+    assert ex2["next_step"]["route"] == "call" and c2["request"] == "claim_status_or_reprocess"
+    assert "also" not in c2
+
+
+def test_a_claim_status_request_runs_on_the_first_filing_limit_not_on_a_later_window(store):
+    # Kentucky Medicaid: a claim no payer answered must reach it within 12 months of the service (May 23, 2026 here). The
+    # item's own date runs a dispute window 30 days past that limit; the request is due by the limit, so the card says the
+    # limit and puts the proof of timely filing beside the status request once the limit is near (20 days on TODAY)
+    item(store, signal="NO_ANSWER", category="no_answer", carc=None, actionable="follow_up", payer_name="KY MEDICAID",
+         payer_group="Medicaid KY", payer_kind="medicaid", service_date="2025-05-23", payment_date=None, paid_cents=0,
+         appeal_deadline="2026-06-22", deadline_basis="the first-filing limit and the payer's dispute window past it",
+         first_seen="2025-07-01")
+    c, ex = card(store)
+    assert ex["next_step"]["route"] == "call" and ex["state"]["deadline"] == "2026-06-22"
+    assert c["request"] == "claim_status_or_reprocess"
+    assert c["deadline"] == "2026-05-23" and "first-filing limit" in c["deadline_basis"]
+    assert c["also"]["request"] == "timely_filing_proof"
+    # once the limit has passed, the proof stays beside it and the card's date is the item's own (the window still open)
+    c2, _ = card(store, today="2026-06-01")
+    assert c2["deadline"] == "2026-06-22" and c2["also"]["request"] == "timely_filing_proof"
 
 
 @pytest.mark.parametrize("route", sorted(routes.NO_CARD))
