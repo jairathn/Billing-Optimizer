@@ -1054,7 +1054,78 @@ def _rw(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
                 d["number_tail"] = tail(d.pop("number", None))
                 out[d["finding_id"]]["faxes"].append(d)
         _drop(conn, "st_fx")
+    for f in items:
+        if f.get("status") == "in_progress" and not person_started(out[f["finding_id"]]["events"]):
+            out[f["finding_id"]]["handoff"] = _handoff_of(conn, f, out[f["finding_id"]]["events"])
     return out
+
+
+# The run's own history line of a hand-off (detect.save's via_bill): the payer's answer to a claim a person was chasing, or
+# the chase of a bill sent again, is a new item that starts Started when the chase was Started or Sent: "was <signal> on
+# claim <claim id> (<status>), now <signal>"
+HANDOFF_NOTE = re.compile(r"^was (\w+) on claim (.+) \((in_progress|appealed)\), now \w+$")
+
+
+def person_started(events: list[dict]) -> bool:
+    """Whether a person set the item's Started on this item: its newest status a person set (a manual line of its history)
+    is Started. A Started the run handed on from a claim's chase (detect.save's via_bill) is nobody's decision on this item
+    (replay-fix-2a A2); a person's own lines move with a whole hand-off (detect.carry_to_heirs), so such an heir keeps them."""
+    manual = [e for e in events if e["kind"] == "manual"]
+    return bool(manual) and manual[-1].get("to") == "in_progress"
+
+
+def _handoff_of(conn: sqlite3.Connection, item: dict, events: list[dict]) -> dict:
+    """Where a Started no person set on the item came from: {'handed': the run's hand-off is on record, 'status' (the
+    chase's: appealed or in_progress), 'who', 'on'} (who marked the chase, and when, from the chase's own status line). The
+    run's hand-off line names the chase's claim and signal; the run that hands it on decides the item's state before it
+    writes that line, so then the chase is the item of the same bill a person marked Sent or Started, with the notes it
+    handed on."""
+    out: dict = {"handed": False, "status": None, "who": None, "on": None}
+    if not _table(conn, "finding_events"):
+        return out
+    ev = next((e for e in reversed(events) if e["kind"] == "signal_changed" and e.get("to") == "in_progress"), None)
+    if ev is not None:
+        out.update(handed=True, status=ev.get("from"))
+        m = HANDOFF_NOTE.match(str(ev.get("note") or ""))
+        if not m or m.group(2) == "the same EMA claim":
+            return out
+        sig, claim, status = m.groups()
+        out["status"] = status
+        row = conn.execute("""SELECT e.actor, e.at FROM finding_events e JOIN findings f ON f.finding_id = e.finding_id
+                              WHERE f.patient_control_number = ? AND f.signal = ? AND e.kind = 'manual' AND e.to_status = ?
+                                AND e.at <= ? ORDER BY e.at DESC, e.id DESC LIMIT 1""",
+                           (claim, sig, status, ev.get("at") or "~")).fetchone()
+        if row:
+            out["who"], out["on"] = row[0] or "a person", row[1]
+        return out
+    bill = bill_of(item.get("patient_control_number"))
+    if not bill:
+        return out
+    got = []
+    for fid, pcn, notes, actor, at, to in conn.execute(
+            """SELECT f.finding_id, f.patient_control_number, f.notes, e.actor, e.at, e.to_status FROM findings f
+               JOIN finding_events e ON e.finding_id = f.finding_id
+               WHERE f.patient_control_number LIKE ? AND f.finding_id <> ? AND f.status IN ('appealed', 'in_progress')
+                 AND e.kind = 'manual' AND e.to_status IN ('appealed', 'in_progress') ORDER BY e.at DESC, e.id DESC""",
+            (str(bill) + "%", item.get("finding_id") or "")):
+        if bill_of(pcn) == bill:
+            got.append((notes == item.get("notes") and bool(notes), actor, at, to))
+    if got:
+        best = next((g for g in got if g[0]), got[0])
+        out.update(handed=True, status=best[3], who=best[1] or "a person", on=best[2])
+    return out
+
+
+def _handoff_words(hand: dict | None) -> str:
+    """The sentence a Started no person set on the item adds to its basis (replay-fix-2a A2)."""
+    hand = hand or {}
+    if not hand.get("handed"):
+        return "No person set its Started on this item: it is judged as To do"
+    word = "Started" if hand.get("status") == "in_progress" else "Sent"
+    if hand.get("who"):
+        return (f"Its Started came with the claim's chase, which {hand['who']} marked {word} on {day(hand['on'])}: the chase's "
+                "notes are here")
+    return "Its Started came with the claim's chase, which a person worked before this answer: the chase's notes are here"
 
 
 def _export_rows(conn: sqlite3.Connection, items: list[dict]) -> dict[str, list]:
@@ -2956,7 +3027,13 @@ def _decide(fx: dict, today: str) -> dict:
         res["late_window"] = next((w for w in wins if w["date"] >= today and not w["own"]), lastw_)
     past_all = bool(lastw) and today > (_add(lastw, EXPIRE_GRACE_DAYS) or lastw)
 
+    handed: list = []           # a Started the run handed on (below): the sentence its basis ends with, and its row
+
     def put(state: str, rule: str, basis: str, rows: list | None = None, follow: str | None = None) -> dict:
+        if handed:
+            tail = f". {handed[0]}"
+            basis = basis.rstrip(" .")[:max(300 - len(tail), 0)] + tail
+            rows = list(rows or []) + [handed[1]]
         res.update(work_state=state, rule=rule, state_basis=basis[:300], follow_up_on=follow)
         res["evidence"] = list(rows or [])
         return res
@@ -3002,11 +3079,21 @@ def _decide(fx: dict, today: str) -> dict:
         note = f": {last_manual['note']}" if last_manual and last_manual.get("note") else (f": {f['notes']}" if f.get("notes") else "")
         return put("accepted", "person_lost" if st == "lost" else "person_let_go", f"{word} by {who} on {day(when)}{note}",
                    [{"source": "remitwatch", "kind": "status", "text": f"{word} by {who} on {day(when)}{note}"}])
-    if st == "in_progress":
+    if st == "in_progress" and person_started(events):
         res["person"] = True
         base = f"Started by {who} on {day(when)}"
         return put("work_now", "person_started", base + (f".{conflict}" if conflict else ""),
                    [e for e in ev if e["kind"] == "started"][-1:])
+    if st == "in_progress":
+        # Started by the run, not a person (detect.save's via_bill: the payer's answer to a claim a person was chasing starts
+        # Started, a new matter). Nobody decided anything on this item: the automatic states decide it as if it were To do
+        # (expired past every window, waiting on a person's EMA follow-up, done when paid before), its label stays Started,
+        # and its basis says where the Started came from (replay-fix-2a A2)
+        hand = fx["rw"].get("handoff")
+        text = _handoff_words(hand)
+        handed[:] = [text, {"source": "remitwatch", "kind": "handoff", "date": _pday((hand or {}).get("on") or (hand or {}).get("at")),
+                            "text": text}]
+        st = "open"
     if st == "appealed":
         res["person"] = True
         sent = [e for e in ev if e["kind"] in ("sent", "fax", "billed") and e["source"] == "remitwatch"]
