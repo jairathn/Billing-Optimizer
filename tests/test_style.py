@@ -15,7 +15,7 @@ SHELLS = ("index.html", "upload.html", "setup.html")
 FONTS = ("inter-latin-opsz-wght.woff2", "inter-latin-ext-opsz-wght.woff2")
 # the inline style= attributes in remitwatch/static (pages and scripts). It may only go down: lower it when a change
 # removes some, never raise it (a new look goes in rw.css as a class).
-STYLE_ATTRS_MAX = 184
+STYLE_ATTRS_MAX = 183
 # browser boxes (alert, confirm, prompt) in the pages: none (CRITIQUE_biller change 4, review d-3). Only ever lowered.
 BROWSER_BOXES_MAX = 0
 

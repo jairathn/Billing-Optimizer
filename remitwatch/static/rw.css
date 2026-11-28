@@ -1209,6 +1209,7 @@ input.switch:checked::after { transform: translateX(14px); }
 .drop.over { border-color: var(--accent); background: var(--surface-2); }
 .drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
 .drop b { color: var(--text); font-size: var(--fs-lg); }
+.drop .pick { color: var(--text); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 2px; }   /* a link's look, readable in both themes */
 /* the calculator's controls */
 .calc-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
 .calc-row label { display: block; font-size: var(--fs-sm); font-weight: var(--fw-medium); }

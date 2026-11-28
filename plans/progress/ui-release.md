@@ -127,3 +127,17 @@ fixed when the change is one safe line, else they wait with the reason.
 - Waits, with the reason: d-12 (Results' repeated tiles) removes a section that test_results and the Results walk read,
   and needs its own measured change; d-10's other parts (insights and alerts text, faxTime's fallback, day()'s year)
   each move a server sentence or test_practice_day's expectation and are not one line each.
+- d-5 and d-9, measured: checks.js --walk (new) presses Today's Start (the step's first item opens in 227 to 369 ms,
+  "Step 1 · Item 1 of 9") and, in Work, opens a row with o, walks on with j j inside the panel, then Esc and j: the focus
+  is on the row of the item just worked, then the row after it. Broken on purpose: without closeDetail's land(rowFor())
+  the focus went back to the row that opened the panel (row 2 for row 4); without Today's openDetail no item opened.
+  Both restored (git diff empty).
+- The UI checks (plans/tools/ui/checks.js --panel --bulk) on all 22 pages at 1366x650, 1536x730, 1400x900 and 390x844,
+  light and dark (176 screens): the drop zone, now on Upload's first screen, showed its "choose files" words at 3.31:1
+  in dark (an inline accent color); it takes a link's look from rw.css now (.drop .pick) and the inline style count goes
+  from 184 to 183 (STYLE_ATTRS_MAX lowered). Then: 0 sideways overflow, 0 script errors, 0 browser dialogs (the bulk
+  step pressed five bulk buttons), at most 6 font sizes, at most 3 accent elements, at most 1 filled button, 0 contrast
+  failures; Work's first row at 215 px (1400x900), 7 rows at 1366x650, 9 at 1536x730, 12 at 1400x900, 9 cards at
+  390x844; 0 px row change and 0 px bar change when the panel opens; What happened keeps 13 to 27 characters beside the
+  docked panel; 0 panel buttons under 44 px on a phone's first screen.
+- claude/ecstatic-fermi-orfcgo moved by aeb4bb6 (the same HANDOFF tree as 17b2e24): merged, nothing to resolve.

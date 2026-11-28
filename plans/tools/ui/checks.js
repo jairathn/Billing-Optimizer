@@ -4,7 +4,7 @@
 //
 //   NODE_PATH=$(npm root -g) node plans/tools/ui/checks.js --base http://127.0.0.1:8771 --user U --pass P \
 //     [--owner OWNER_PASSWORD] [--pages today,worklist,...] [--sizes 1366x650,1536x730,1400x900,390x844]
-//     [--themes light,dark] [--shots DIR] [--json FILE] [--panel] [--bulk] [--quiet]
+//     [--themes light,dark] [--shots DIR] [--json FILE] [--panel] [--bulk] [--walk] [--quiet]
 //
 // For each page, size and theme, on the first screen (what shows before any scrolling):
 //   overflow   sideways scroll of the page, px (at most 1)
@@ -20,7 +20,10 @@
 // phone every button of the panel's first screen is 44 px tall or more. With --bulk, once, on the
 // Worklist at the first size: two rows ticked and every button of the bulk bar pressed (a question beside a button is
 // cancelled, a status set is set back), and any browser dialog fails the check (review d-3). It changes statuses on the
-// site it runs on: the demo only. Exit code 1 when a check fails.
+// site it runs on: the demo only. With --walk, once, from Today at the first size: Today's Start opens the step's first item
+// within 1 s ("Step 1 · Item 1 of", review d-5), and in Work, an item opened with o and walked on with j j inside the panel:
+// Esc gives the focus back to the row of the item just worked and j goes to the row after it (review d-9). Exit code 1
+// when a check fails.
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -107,6 +110,29 @@ function measure() {
 
 // The bulk bar, pressed button by button with two rows ticked: Mark started, then Back to To do (set back), Let go (its
 // reason form is cancelled), Mark sent, Back to To do. Returns the buttons pressed; the dialog handler counts any box.
+async function walkStep(page) {
+  const out = { startOk: null };
+  const btn = await page.$('#tdPlan button.primary');
+  if (btn) {
+    const t0 = Date.now(); await btn.click();
+    const open = await page.waitForSelector('#drawer.open', { timeout: 1000 }).then(() => true).catch(() => false);
+    out.startMs = Date.now() - t0; await sleep(300);
+    out.startOk = open && await page.evaluate(() => /Step 1 · Item 1 of/.test((document.querySelector('#drawer') || {}).textContent || ''));
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+  await page.evaluate(() => { location.hash = '#worklist'; });
+  await page.waitForSelector('#view tr.row', { timeout: 10000 }).catch(() => {}); await sleep(600);
+  const row = () => page.evaluate(() => { const rows = [...document.querySelectorAll('#view tr.row')], a = document.activeElement;
+    return rows.indexOf(a && a.closest ? a.closest('tr.row') : null) + 1; });
+  for (let i = 0; i < 2; i++) { await page.keyboard.press('j'); await sleep(150); }
+  await page.keyboard.press('o'); await page.waitForSelector('#drawer.open', { timeout: 3000 }).catch(() => {}); await sleep(400);
+  for (let i = 0; i < 2; i++) { await page.keyboard.press('j'); await sleep(400); }
+  out.rowWorked = await page.evaluate(() => [...document.querySelectorAll('#view tr.row')].findIndex(r => r.dataset.id === state.detailId) + 1);
+  await page.keyboard.press('Escape'); await sleep(300); out.rowAfterEsc = await row();
+  await page.keyboard.press('j'); await sleep(250); out.rowAfter = await row();
+  return out;
+}
+
 async function bulkStep(page) {
   const pressed = [];
   for (const key of ['in_progress', 'open', 'dismissed', 'appealed', 'open']) {
@@ -127,7 +153,7 @@ async function bulkStep(page) {
 
 (async () => {
   const browser = await chromium.launch();
-  let bulkDone = false;
+  let bulkDone = false, walkDone = false;
   const results = [], fails = [];
   for (const theme of THEMES) for (const [w, h] of SIZES) {
     const ctx = await browser.newContext({ viewport: { width: w, height: h }, deviceScaleFactor: 1, colorScheme: theme,
@@ -178,6 +204,7 @@ async function bulkStep(page) {
           r.work.panelWhatChars = p2.chars; r.work.panelSmallButtons = p2.small;
           await page.keyboard.press('Escape').catch(() => {});
         }
+        if (name === 'today' && args.walk && !walkDone) { walkDone = true; r.walk = await walkStep(page); }
         if (name === 'worklist' && args.bulk && !bulkDone) {
           bulkDone = true;
           r.bulkPressed = await bulkStep(page);
@@ -193,6 +220,9 @@ async function bulkStep(page) {
         if (r.accent > LIMITS.accent) bad.push(`${r.accent} accent elements`);
         if (r.filled > LIMITS.filled) bad.push(`${r.filled} filled buttons`);
         if (r.low) bad.push(`${r.low} low-contrast texts: ${m.low.slice(0, 4).join('; ')}`);
+        if (r.walk && r.walk.startOk === false) bad.push(`Today's Start did not open the step's first item within 1 s`);
+        if (r.walk && (r.walk.rowWorked < 1 || r.walk.rowAfterEsc !== r.walk.rowWorked || r.walk.rowAfter !== r.walk.rowWorked + 1))
+          bad.push(`row ${r.walk.rowWorked} worked: Esc left the focus on row ${r.walk.rowAfterEsc} and j on row ${r.walk.rowAfter}`);
         if (r.work.panelBarDelta) bad.push(`the list's bar changes height by ${r.work.panelBarDelta} px when the panel opens`);
         if (w >= 1280 && r.work.panelWhatChars != null && r.work.panelWhatChars < 12) bad.push(`What happened keeps ${r.work.panelWhatChars} characters beside the panel (at least 12)`);
         if (w <= 640 && r.work.panelSmallButtons) bad.push(`${r.work.panelSmallButtons} panel buttons under 44 px on the first screen`);
