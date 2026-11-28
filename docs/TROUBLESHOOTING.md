@@ -128,23 +128,26 @@ run still lists add their own. So an item an answer settled before the held run 
 facts, and is not kept as "nothing explains why". Items kept before this was fixed (2026-11-28) stay until a person
 accepts them on the Data tab.
 
-**An item left the list, or left the record, and the self-check says why** (the checks `vanished` for items people
-were shown as work, `left_record` for the others). An item the run no longer makes needs a route out found in the
-store's own records, or it is kept on the list ("nothing explains why"). The routes: a person's decision; an item this
-run made for the same line, claim or service; its remittance superseded; a payment EMA has since posted in full
-(`posted_in_ema`: EMA's checks of the item's 835 trace hold its paid amount within $1 or 0.5%); its claim answered by an
-835; its claim sent again, under a later submission number or under the same claim id after the item was raised
-(`sent_again`: an 837 of it, or EMA's submission date, on or after the day the item was first seen and after the send the
-item is about); the owner's accepted pattern; new facts on its own claim (an item about a payment, such as REMIT_NOT_POSTED
-or TAKEBACK, also counts EMA's postings of that payment); a copy of an answer the payer delivered twice; or a rule that
-stops raising it on purpose and counts its dollars elsewhere (`retired:<counter>`: `snb_past_limit`, a second payer's
-share a month past its last day; `unseen`, a claim no source can show the answer to; `unseen_second_send_nothing_left`).
-Detection hands the check the ids it retired, and the decision log names the same counter as the rule of the item's
-"gone" row (`detect:snb_past_limit`, where it used to say `detect:no_longer_raised`). The retired route is only for an
-item nobody worked: one a person worked stays on the list. The fingerprints the facts route compares are made one way
-per release (meta selfcheck:facts_version, 4 since 2026-11-28): the first run after a release that changes them compares
-none, so an item that leaves in that run on new facts alone is kept once and waits for a person on the Data tab. To do:
-the bundle's examples for the check; an item with no route is a rule change or a bug.
+**An item left the list, or left the record, and the self-check says why** (the checks `vanished` for items people were
+shown as work, `left_record` for the others). An item the run no longer makes needs a route out found in the store's own
+records, or it is kept on the list ("nothing explains why"). The routes: a person's decision; an item this run made for
+the same line, claim or service; its remittance superseded; a payment EMA has since posted in full (`posted_in_ema`:
+EMA's checks of the item's 835 trace hold its paid amount within $1 or 0.5%); its claim answered by an 835; its claim
+sent again, under a later submission number or under the same claim id after the item was raised (`sent_again`: an 837
+of it, or EMA's submission date, on or after the day the item was first seen and after the send the item is about); the
+owner's accepted pattern; new facts on its own claim (an item about a payment, such as REMIT_NOT_POSTED or TAKEBACK,
+also counts EMA's postings of that payment); a copy of an answer the payer delivered twice; or a rule that stops raising
+it on purpose and counts its dollars elsewhere (`retired:<counter>`: `snb_past_limit`, a second payer's share a month
+past its last day; `unseen`, a claim no source can show the answer to; `unseen_second_send_nothing_left`;
+`open_claim_second_nothing_left` and `open_claim_second_patient_paid`, a claim to the visit's second payer with nothing
+left for it, or a share the patient paid; the unseen claims are counted in meta ema:unanswered_unseen and on the Data
+tab, the others in meta ema:wiring). Detection hands the check the ids it retired, and the decision log names the same
+counter as the rule of the item's "gone" row (`detect:snb_past_limit`, where it used to say `detect:no_longer_raised`).
+The retired route is only for an item nobody worked: one a person worked stays on the list. The fingerprints the facts
+route compares are made one way per release (meta selfcheck:facts_version, 4 since 2026-11-28): the first run after a
+release that changes them compares none, so an item that leaves in that run on new facts alone is kept once and waits
+for a person on the Data tab. To do: the bundle's examples for the check; an item with no route is a rule change or a
+bug.
 
 **An item to work was already paid** (the self-check `precision_guard`, critical: it holds the run past 5 new items). It
 looks for money paid on the item's bill, date and code after the item's own answer, from the 835s (net of reversals) and
