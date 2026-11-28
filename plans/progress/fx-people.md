@@ -145,7 +145,7 @@ Failing tests in `plans/progress/fx-people_needs_tests.py` (not collected by the
 4. One of the nine (Anthem, $83.30) answered CO-97 (bundled into another service). Done is right for the patient's
    side; a corrected claim with a modifier may still recover it from Anthem, and that later line has no item of its own.
 5. (For F1, a ledger question, not a need: no failing test because the right reading is not certain.) Finding
-   48db43b8e7b52d16bfe8c545 (Anthem / BCBS, $63.64, second payer): the recoupment read as its takeback is two pairs of
+   item 1 (Anthem / BCBS, $63.64, second payer): the recoupment read as its takeback is two pairs of
    FB (forwarding balance) entries, negative on two remittances of 2025-11 and the same amounts positive on one of
    2026-04, after Anthem reversed and re-paid the line itself. FB pairs move a negative balance from one check to a later
    one; whether the 63.64 payment was taken back at all (or only the reversals already on file settled in cash) is
