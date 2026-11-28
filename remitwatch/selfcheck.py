@@ -440,8 +440,9 @@ K_ANSWER = "selfcheck:answer_days"
 K_FACTS_VERSION = "selfcheck:facts_version"
 K_FACTS_INPUT = "selfcheck:facts_input"
 # the fingerprint's own version (_facts_of): a build that reads another part of an item's claim changes every fingerprint,
-# so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else)
-FACTS_VERSION = "3"
+# so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else). 4: an item
+# about an 835 payment itself (a transaction and no line or claim: REMIT_NOT_POSTED, TAKEBACK) adds EMA's checks of it
+FACTS_VERSION = "4"
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
@@ -1522,8 +1523,9 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
 
 
 def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, facts: dict[str, str] | None) -> list[dict]:
-    """The candidates the store's own records give no route out: not their remittance superseded, not a claim answered or
-    sent again since, not the owner's accepted pattern, not new facts on their own claim (`facts`). Counts the routes."""
+    """The candidates the store's own records give no route out: not their remittance superseded, not an 835 payment EMA
+    has since posted in full, not a claim answered or sent again since, not the owner's accepted pattern, not new facts on
+    their own claim (`facts`). Counts the routes."""
     superseded: set[str] = set()
     tks = sorted({r.get("transaction_key") for r in cands if r.get("transaction_key")})
     if tks and _has_table(conn, "transactions"):
@@ -1532,6 +1534,7 @@ def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, fact
             have = {tk: sup for tk, sup in conn.execute(f"SELECT transaction_key, COALESCE(superseded, 0) FROM transactions "
                                                         f"WHERE transaction_key IN ({','.join('?' * len(part))})", part)}
             superseded.update(tk for tk in part if have.get(tk, 1))     # gone from the store, or superseded
+    posted = _posted_in_ema(conn, [r for r in cands if r.get("signal") == "REMIT_NOT_POSTED" and r.get("transaction_key")])
     claim_items = [r for r in cands if not r.get("line_key") and r.get("signal") in CLAIM_SIGNALS]
     answered = _answered_since(conn, claim_items)
     sent_again = _sent_again(conn, claim_items)
@@ -1541,6 +1544,8 @@ def _no_route(conn: sqlite3.Connection, cands: list[dict], routes: Counter, fact
     for r in cands:
         if r.get("transaction_key") and r["transaction_key"] in superseded:
             routes["superseded"] += 1
+        elif r["finding_id"] in posted:
+            routes["posted_in_ema"] += 1        # EMA now holds the 835's payment: C4 rightly stops listing it (Results counts it)
         elif r["finding_id"] in answered:
             routes["claim_answered"] += 1
         elif r["finding_id"] in sent_again:
@@ -1566,31 +1571,97 @@ _SUB_NO = re.compile(r"C(\d{1,3})$")
 
 
 def _sent_again(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
-    """Items about a whole claim whose bill went out again under a later submission number (EMA's rows with a submission
-    date, an 837 or an 835 claim of the same bill): detection chases only a bill's newest submission, and the earlier
-    one's item waits, stale, until the new one comes due (detect.save hands its notes on)."""
+    """Items about a whole claim whose bill went out again: under a later submission number (EMA's rows with a submission
+    date, an 837 or an 835 claim of the same bill), or under the same claim id after the item was raised (an 837 of it
+    created, or EMA's submission date of it, on or after the day the item was first seen and after the send the item is
+    about, its evidence's `sent`). Detection chases only a bill's newest submission and waits for a send's due day: the
+    earlier item waits, stale, and the claim shows on the Waiting view until the new send comes due (detect.save hands
+    its notes on, and lists it again with them if that send goes unanswered)."""
     out: set[str] = set()
     sources = [(t, col, extra) for t, col, extra in (("ema_rows", "claim_id", " AND COALESCE(claim_submission_date,'') != ''"),
                                                      ("claims_837", "patient_control_number", ""),
                                                      ("claims", "patient_control_number", ""))
                if _has_table(conn, t) and col in _cols(conn, t)
                and (not extra or "claim_submission_date" in _cols(conn, t))]
+    resent = [(t, col, day) for t, col, day in (("claims_837", "patient_control_number", "bht_created"),
+                                                ("ema_rows", "claim_id", "claim_submission_date"))
+              if _has_table(conn, t) and {col, day} <= set(_cols(conn, t))]
     for r in items:
         pcn = str(r.get("patient_control_number") or "")
         b, m = bill_of(pcn), _SUB_NO.search(pcn)
-        if not b or not m:
-            continue
-        mine = int(m.group(1))
-        for t, col, extra in sources:
-            found = False
-            for (other,) in conn.execute(f"SELECT DISTINCT {col} FROM {t} WHERE {col} >= ? AND {col} < ?{extra}", (b + "C", b + "D")):
-                mo = _SUB_NO.search(str(other or ""))
-                if mo and bill_of(other) == b and int(mo.group(1)) > mine:
+        found = False
+        if b and m:
+            mine = int(m.group(1))
+            for t, col, extra in sources:
+                for (other,) in conn.execute(f"SELECT DISTINCT {col} FROM {t} WHERE {col} >= ? AND {col} < ?{extra}", (b + "C", b + "D")):
+                    mo = _SUB_NO.search(str(other or ""))
+                    if mo and bill_of(other) == b and int(mo.group(1)) > mine:
+                        found = True
+                        break
+                if found:
+                    break
+        since = str(r.get("first_seen") or "")[:10]
+        if not found and pcn and since and resent:
+            # the same claim id sent again (a rejected claim fixed and sent, or an unanswered one sent again, with no new
+            # submission number): a send dated on or after the day the item was raised and after the send it is about
+            own = str(_ev(r.get("evidence")).get("sent") or "")[:10]
+            for t, col, day in resent:
+                (newest,) = conn.execute(f"SELECT MAX({day}) FROM {t} WHERE {col} = ? AND COALESCE({day}, '') != ''", (pcn,)).fetchone()
+                d = str(newest or "")[:10]
+                if d and d >= since and (not own or d > own):
                     found = True
                     break
-            if found:
-                out.add(r["finding_id"])
-                break
+        if found:
+            out.add(r["finding_id"])
+    return out
+
+
+def _ema_checks_of(conn: sqlite3.Connection, tks: Iterable[Any]) -> dict[str, list]:
+    """EMA's checks of each of these 835 payments (transaction keys), read as ema_checks.unposted_remits reads them: the
+    checks matched to the payment (trace_key) and the ones C1 paired with it under another number (pair_trace).
+    {transaction key: [checks, cents posted, first posting, newest posting]}; a payment no check holds is left out."""
+    out: dict[str, list] = {}
+    keys = sorted({str(t) for t in tks if t})
+    if not keys or not _has_table(conn, "ema_checks"):
+        return out
+    cols = set(_cols(conn, "ema_checks"))
+    if not {"trace_key", "ins_paid", "first_posted", "last_posted"} <= cols:
+        return out
+    pair = "pair_trace" in cols
+    for i in range(0, len(keys), 400):
+        part = keys[i:i + 400]
+        q = ",".join("?" * len(part))
+        paired = (f"""UNION ALL SELECT pair_trace AS k, ins_paid, first_posted, last_posted FROM ema_checks
+                      WHERE pair_trace IN ({q}) AND COALESCE(trace_key, '') <> pair_trace""" if pair else "")
+        for k, n, cents, first, last in conn.execute(
+                f"""SELECT k, COUNT(*), SUM(COALESCE(ins_paid, 0)), MIN(first_posted), MAX(last_posted) FROM (
+                        SELECT trace_key AS k, ins_paid, first_posted, last_posted FROM ema_checks WHERE trace_key IN ({q})
+                        {paired}) GROUP BY k""", part + (part if pair else [])):
+            out[str(k)] = [int(n or 0), int(cents or 0), str(first or "")[:10] or None, str(last or "")[:10] or None]
+    return out
+
+
+def _posted_in_ema(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
+    """REMIT_NOT_POSTED items whose 835 payment EMA's checks now hold in full: the checks of its trace (and the ones C1
+    paired with it) hold what its claims paid (the transaction's claim_paid_total) within unposted_remits' tolerance,
+    max($1, 0.5%). C4 then rightly stops listing it and Results counts the posting as money found: the work is done."""
+    out: set[str] = set()
+    if not items or not _has_table(conn, "transactions"):
+        return out
+    from .ema_checks import DIFF_MIN, DIFF_SHARE
+    held = _ema_checks_of(conn, [r.get("transaction_key") for r in items])
+    tks = sorted(held)
+    paid: dict[str, int] = {}
+    for i in range(0, len(tks), 500):
+        part = tks[i:i + 500]
+        paid.update({str(tk): int(c or 0) for tk, c in conn.execute(
+            f"SELECT transaction_key, claim_paid_total_cents FROM transactions WHERE transaction_key IN ({','.join('?' * len(part))})",
+            part)})
+    for r in items:
+        tk = str(r.get("transaction_key") or "")
+        p = paid.get(tk)
+        if tk in held and p and p > 0 and abs(p - held[tk][1]) <= max(DIFF_MIN, DIFF_SHARE * abs(p)):
+            out.add(r["finding_id"])
     return out
 
 
@@ -1648,7 +1719,9 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
     """A fingerprint of what each item's own claim shows in the data now: the 835 answers on its bill (how many, the
     newest date, the money), and for its EMA claim number EMA's lines (count, insurer paid, balance, newest posting, status
     classes) and the newest A/R rows (claim status, balance), or with no EMA claim number EMA's lines on file for its bill,
-    date and code; for an item with no bill, the remittance feed as a whole.
+    date and code; for an item with no bill, the remittance feed as a whole. An item about an 835 payment itself (a
+    transaction and no line or claim: a payment EMA did not post, a takeback) adds EMA's checks of that payment (how many,
+    the money posted, the first and newest posting), once any check holds it: EMA posting it is new facts on its subject.
     Two runs that see the same fingerprint saw the same facts, so an item that left between them left because a rule
     changed, not because its claim did."""
     out: dict[str, str] = {}
@@ -1657,6 +1730,7 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
     has_835 = _has_table(conn, "claims") and _has_table(conn, "transactions")
     has_lines = _has_table(conn, "ema_lines")
     has_ar = _has_table(conn, "ema_ar")
+    by_trace = _ema_checks_of(conn, [it.get("transaction_key") for it in items if _about_payment(it)])
     feed = list(conn.execute("SELECT COUNT(*), MAX(payment_date) FROM transactions WHERE COALESCE(superseded, 0) = 0")
                 .fetchone()) if has_835 else None
     by_bill: dict[str, list] = {}
@@ -1700,9 +1774,16 @@ def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
                 by_service[k] = [n, paid, bal, posted] if n else None
             if by_service[k] is not None:
                 parts.append(by_service[k])
+        if _about_payment(it) and str(it["transaction_key"]) in by_trace:
+            parts.append(["ema_checks", *by_trace[str(it["transaction_key"])]])
         raw = json.dumps(parts, default=str)
         out[it["finding_id"]] = hashlib.sha1(raw.encode()).hexdigest()[:16]
     return out
+
+
+def _about_payment(it: dict) -> bool:
+    """An item about an 835 payment itself (its transaction, and no line or claim of it): REMIT_NOT_POSTED, TAKEBACK."""
+    return bool(it.get("transaction_key")) and not it.get("line_key") and not it.get("claim_key")
 
 
 def _input_position(conn: sqlite3.Connection) -> list:
