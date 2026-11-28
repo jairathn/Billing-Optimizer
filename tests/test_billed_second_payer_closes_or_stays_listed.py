@@ -503,3 +503,106 @@ def test_the_open_book_counts_a_worked_chase_taken_off_the_list_as_no_longer_lis
         assert fid in {e[0] for e in results.list_entries(w.conn, "closed:any", day_)}
     finally:
         w.store.close()
+
+
+def _listed_for_service(w: _W) -> list[dict]:
+    return [f for f in _snb(w.s) if not f["stale"]]
+
+
+@pytest.mark.parametrize("kind", KINDS3)
+def test_the_first_payer_paying_the_line_again_keeps_the_persons_item_on_its_own_line(tmp_path, monkeypatch, kind):
+    """After the person billed Testcare Health, Blue Cross takes back its April payment and pays the line again on May 20
+    (a new line of its remittance), while Testcare Health's $30 was posted in EMA on May 12. The rule's candidate for the
+    service is now Blue Cross's new line; the item the person billed keeps its own line and closes as Paid on Testcare's
+    payment. No second item is listed beside it."""
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        remit(w.s, trace="777000555", paid_on="2026-05-20",
+              claims=[{"pcn": F.claim_id(8), "last": "SAMPLE", "first": "DELTA", "status": "22",
+                       "lines": [(S, "99213", -150, -90, [("CO", "45", -30), ("PR", "2", -30)], {"allowed_cents": -12000})]},
+                      {"pcn": F.claim_id(8), "last": "SAMPLE", "first": "DELTA", "status": "1",
+                       "lines": [(S, "99213", 150, 90, [("CO", "45", 30), ("PR", "2", 30)], {"allowed_cents": 12000})]}])
+        _ema(w, _second_paid(30))
+        w.run("2026-05-25", 2)
+        f = w.item(fid)
+        assert not f["stale"] and f["status"] == "resolved" and f["recovered_cents"] == 3000, (f["stale"], f["status"], f["recovered_cents"])
+        assert [x["finding_id"] for x in _listed_for_service(w)] == [fid], [(x["finding_id"] == fid, x["status"]) for x in _listed_for_service(w)]
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS3)
+def test_a_second_payers_payment_posted_with_an_earlier_date_still_closes_it(tmp_path, monkeypatch, kind):
+    """EMA's posting of Testcare Health's $30 arrives after the person billed it, dated March 31 (a posting entered with an
+    earlier date, before Blue Cross's own payment): it is still the second payer's answer to the bill, as the rule itself
+    reads another payer's money on the line, whatever its date. Closed as Paid."""
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        _ema(w, _second_paid(30, posted=D(2026, 3, 31)))
+        w.run(DAY2, 2)
+        f = w.item(fid)
+        assert not f["stale"] and f["status"] == "resolved" and f["recovered_cents"] == 3000, (f["stale"], f["status"], f["recovered_cents"])
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS3)
+def test_the_items_own_ema_claim_still_shows_its_answer_when_the_link_map_lets_go_of_the_bill(tmp_path, monkeypatch, kind):
+    """The link map stops pairing the bill with its EMA claim (a vote split marks the pair a conflict) after the person
+    billed Testcare Health, whose $30 EMA then posts: the item reads its own EMA claim's line and closes as Paid, never
+    dropped for want of the map."""
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        _ema(w, _second_paid(30))
+        w.s.conn.execute("UPDATE ema_link_map SET conflict = 1 WHERE link = ?", (F.link_no(8),))
+        w.s.conn.commit()
+        w.run(DAY2, 2)
+        assert w.s.conn.execute("SELECT conflict FROM ema_link_map WHERE link = ?", (F.link_no(8),)).fetchone()[0] == 1, \
+            "the run mapped the claim again: this case no longer tests the fallback"
+        f = w.item(fid)
+        assert not f["stale"] and f["status"] == "resolved" and f["recovered_cents"] == 3000, (f["stale"], f["status"], f["recovered_cents"])
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS3)
+def test_a_takeback_by_the_first_payer_leaves_the_persons_item_closed_on_the_second_payers_payment(tmp_path, monkeypatch, kind):
+    """After the person billed Testcare Health, Blue Cross takes back its own payment of the line (claim status 22) and
+    pays nothing again, so no line of the service is the rule's candidate any more; Testcare Health pays its $30. The
+    item the person billed is still read on its own line and closes as Paid, never left stale with the person's Sent."""
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        remit(w.s, trace="777000666", paid_on="2026-05-10",
+              claims=[{"pcn": F.claim_id(8), "last": "SAMPLE", "first": "DELTA", "status": "22",
+                       "lines": [(S, "99213", -150, -90, [("CO", "45", -30), ("PR", "2", -30)], {"allowed_cents": -12000})]}])
+        _ema(w, _second_paid(30))
+        w.run(DAY2, 2)
+        f = w.item(fid)
+        assert not f["stale"] and f["status"] == "resolved" and f["recovered_cents"] == 3000, (f["stale"], f["status"], f["recovered_cents"])
+        ev = json.loads(f["evidence"])
+        assert sc.has_proof(ev) and sc.proof_money(ev["paid_later"]["proof"]) == 3000
+        assert ("closed", "paid_later:paid_as_second_payer") in _decisions(w, fid, "r2")
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS3)
+def test_a_takeback_with_no_answer_from_the_second_payer_changes_nothing_of_the_persons_item(tmp_path, monkeypatch, kind):
+    """Control: Blue Cross takes its payment back after the person billed Testcare Health, and Testcare has not answered.
+    No answer, no automatic change: the person's Sent stays as it was, no closure, no decision row for the item."""
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        remit(w.s, trace="777000667", paid_on="2026-05-10",
+              claims=[{"pcn": F.claim_id(8), "last": "SAMPLE", "first": "DELTA", "status": "22",
+                       "lines": [(S, "99213", -150, -90, [("CO", "45", -30), ("PR", "2", -30)], {"allowed_cents": -12000})]}])
+        w.run(DAY2, 2)
+        f = w.item(fid)
+        assert f["status"] == "appealed" and not f.get("auto_note") and not f["recovered_cents"], (f["status"], f["recovered_cents"])
+        assert not [d for d in _decisions(w, fid, "r2") if d[0] == "closed"], _decisions(w, fid, "r2")
+    finally:
+        w.close()

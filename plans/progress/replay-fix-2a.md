@@ -58,6 +58,34 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
 
 Measure A1-A4 on the replay's data, read only (verdict reproductions with this tree), and the release effect on final_world3 (read only); then the four environments for the touched files' tests and the full suite in python3 and venv_sqlite340; merge the newest gapfix and replay-fix tips again before the final push.
 
-## Measured
+## Measured (read only; aggregates)
 
-Nothing yet.
+Scripts in the private folder (`meas/`): states_a1a2.py (states_of on the store, tree given), a3_cover.py and
+a3_rules.py (record_decisions for run 10, write captured), a4_results.py (the verifier's results check, tree given),
+detect_mem.py (one detection on an in-memory copy, nothing written to disk) and a4_replay_compare.py. "Before" is a
+base tree (the integration tip with the same gapfix and replay-fix tips merged, no commit of this unit).
+
+- A1, replay final store at 11-24: 37 unworked rate patterns listed. Before: all Work now (owner_decision). After: 16
+  routine-rate reviews ($8,096.41) and 4 clinician rate gaps ($0 left) Expired, 17 reviews still Work now (a claim still
+  in its window); the scoreboard counts $6,807.75 (reviews) and $9,515.05 (gaps) lost to deadlines; 20 bases say every
+  claim is past its window.
+- A2, replay final store: 31 Started items, none set by a person. Before: 31 Work now person_started, basis "Started by".
+  After: 11 change state ($1,328.52: 4 Expired, 4 Waiting on EMA's follow-up, 3 Done), 20 keep their state; all 31
+  bases name the hand-off.
+- A3, replay run 10 (state_9 before, final after): 101 items set stale ($6,016.30). Before: 39 logged with the stale
+  mark, 62 missing ($3,066.85). After: 101 logged (94 detect:no_longer_listed, 7 detect:follow_up), 0 missing.
+- A4, replay final store, the verdict's 184 items (stale, Sent, Work now, $5,959.00): open book before 184 still open
+  (Work now), 0 closed, 17 'worked, waiting, no money'; after (results only, same rows) 0 still open, 184 closed (154
+  paid, 30 no longer listed), 0 waiting with no money. One detection run of this tree on an in-memory copy of the
+  replay's final store (replay clock 11-25): of the 184, 163 closed as Paid by the second payer ($5,397.76 billed,
+  $4,853.09 recovered), 19 closed as paid by the patient ($476.24), 2 listed with 'work its answer' ($85.00), 0 left
+  stale. Across all 474 second-payer items a person billed in that store (259 stale before): 220 closed Paid by the
+  second payer, 33 by the patient, 148 follow-up due, 45 waiting, 22 work its answer, 6 still stale (3 follow-up due
+  with no answer, the rule's own drop; 3 'mark it Paid' where two billed items share one service: next).
+  The run's decision log: 253 'closed' rows (paid_later:paid_as_second_payer, settled_by_the_patient).
+  Residuals found on the replay and fixed with a test each (break-and-restore B8-B11): the candidate moved to the
+  first payer's later line of the service; EMA's posting dated before the first payer's payment; the link map let
+  go of the bill (the item's own EMA claim is read); the first payer took its payment back and no candidate is left.
+- Release effect, the 11-24 live-store copy (final_world3) at 11-28: A1 one routine-rate review ($42.50) Expires, $8.50
+  counted lost; A2 none (no Started item); A3 none at release (no person's action after the last run); A4 none at
+  release (no second-payer item a person billed: every one of the 492 is To do), and no stale row in an open state.
