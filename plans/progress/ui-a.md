@@ -104,8 +104,25 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
   pages the later units own: Work and its views fail the row limits (first row at 523 to 821 px at 1400x900; 0 to 5
   rows on a laptop or phone screen: ui-work); downcoding, faxes and /upload show 2 filled buttons (their own content:
   ui-work, ui-pages); Results shows 7 sizes (its 34 px hero beside the board's 28 px figures: ui-pages).
-- Tests: see the unit's report (four environments for the touched files; the full suite in python3 and in Python
-  3.11.1 with SQLite 3.40; both node checks).
+- Tests, on the tip f1a4877 (the code; this file's commit adds no code):
+  - The touched files' tests (the 22 test files this unit changed or that read what it moved, and the three that reach
+    api_ema.py: test_decisions_review, test_fx_ema, test_payer_code_rules): the newest libraries (Python 3.13.18,
+    SQLite 3.53.1, FastAPI 0.165.0, Starlette 1.10.0) 1273 passed, 1 skipped; Python 3.12.3 with SQLite 3.45.1 1273
+    passed, 1 skipped. The skip is test_docs' private words check, which needs REMITWATCH_PRIVATE_WORDS; with the
+    private list (outside the repository) it passes. In python3 and in Python 3.11.1 they ran inside the full suites.
+  - Full suite in python3 (3.13.18, SQLite 3.53.1, FastAPI 0.162.0, Starlette 1.7.0), two shards: 4333 passed, 29
+    skipped, 1 xfailed, 1 failed. The failure is test_hooks.py's weekly self-audit test ("attempt to write a readonly
+    database" in cloud.build_serving): the test calls monkeypatch.undo(), which also undoes conftest's per-test
+    REMITWATCH_TMP, so it builds the serving copy in the machine's shared /tmp/remitwatch, where another run's build
+    removed the file mid-write. It passes alone (three times) and with its file (58 passed). Not this unit's code; the
+    owner of tests/test_hooks.py can set REMITWATCH_TMP again after the undo. (A first attempt of this run stopped when
+    the machine's disk filled; its results were thrown away.)
+  - Full suite in Python 3.11.1 with SQLite 3.40.0, two shards: 4132 passed, 14 skipped, 1 xfailed, 169 failed and 48
+    errors, every one of the 217 "Connection has no attribute serialize/deserialize" (that build has no store-image
+    calls; CLAUDE.md allows these there).
+  - Node checks: calc_model_check 79 of 79, lab_review_check 143 of 143.
+  - Full runs used PYTEST_ADDOPTS="-o tmp_path_retention_policy=failed" with plans/tools/shard.sh, so a passed test's
+    temporary folder is removed at once (the machine's disk is short).
 
 ## Next command
 
