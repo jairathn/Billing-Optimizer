@@ -80,12 +80,14 @@ def _plain_store(tmp_path, kind: str) -> Store:
     return s
 
 
-def _worked_item(conn, now: datetime) -> None:
-    """A second payer never billed, listed by the run that ended an hour ago (invented)."""
-    row = dict(finding_id=FID, signal="SECONDARY_NOT_BILLED", category="denial", status="open", work_state="work_now",
+def _worked_item(conn, now: datetime, status: str = "open", auto_note: str | None = None) -> None:
+    """A second payer never billed, listed by the run that ended an hour ago (invented); with auto_note, closed by that run."""
+    row = dict(finding_id=FID, signal="SECONDARY_NOT_BILLED", category="denial", status=status, work_state="work_now",
                payer_group="Testcare Health", line_key="0f0f0f0f0f0f0f0f:1:0001:1:1", claim_key="0f0f0f0f0f0f0f0f:1:0001:1",
                shortfall_cents=3000, appeal_deadline="2027-03-02", follow_up_on=None, stale=0, evidence="{}",
                first_seen=_iso(now - timedelta(hours=2)), last_seen=_iso(now - timedelta(hours=2)))
+    if auto_note:
+        row.update(auto_note=auto_note, prev_status="open")
     cols = list(row)
     conn.execute(f"INSERT INTO findings ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [row[c] for c in cols])
     conn.execute("INSERT INTO detection_runs (run_id, started_at, finished_at, version) VALUES ('run-1', ?, ?, 'x')",
@@ -139,6 +141,37 @@ def test_guard_a_status_a_person_sets_while_the_run_runs_stays_theirs(tmp_path, 
         runlog.record_decisions(c, "run-2", before, rule_version="x")
         rows = c.execute("SELECT kind, rule FROM item_decisions WHERE finding_id=? AND run_id='run-2'", (FID,)).fetchall()
         assert rows == [], f"a person's Let go, pressed while the run ran, was written up as the run's: {rows}"
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("pressed", ["dismissed", "open"], ids=["let_go", "reopened"])
+def test_a_status_pressed_while_the_run_runs_is_never_written_up_as_a_rule_when_the_run_also_sets_stale(tmp_path, kind, pressed):
+    """The guard above with the run's stale mark in the same change (review r1 of replay-fix-2a): the person presses Let go
+    (or reopens an item the run before had closed) after this run took its 'before', and the same run keeps the worked row,
+    stale. The stale mark is the run's and is logged (rule detect:no_longer_listed); the Let go or the reopen is the
+    person's, in their own history, and is never written up as a hide rule's or as 'the payment no longer stands'."""
+    s = _plain_store(tmp_path, kind)
+    try:
+        c = s.conn
+        now = datetime.now(timezone.utc)
+        if pressed == "open":
+            _worked_item(c, now, status="resolved", auto_note="Paid on a later remittance (invented)")
+        else:
+            _worked_item(c, now)
+        before = runlog.snapshot_items(c)
+        assert actions.apply_status(c, FID, pressed, "Pressed while the run ran (invented)", None, "Biller One")
+        c.execute("UPDATE findings SET stale=1 WHERE finding_id=?", (FID,))      # Detector.save: no rule produces it any more
+        c.commit()
+        runlog.record_decisions(c, "run-2", before, rule_version="x")
+        rows = [(k, r, json.loads(ch)) for k, r, ch in c.execute(
+            "SELECT kind, rule, change FROM item_decisions WHERE finding_id=? AND run_id='run-2'", (FID,))]
+        wrong = [(k, r) for k, r, ch in rows if r.startswith("hide_rule:") or r == "detect:payment_no_longer_stands"
+                 or "status" in ch or "hidden" in ch]
+        assert not wrong, f"the person's {pressed} was written up as the run's: {rows}"
+        assert [(k, r) for k, r, ch in rows if ch.get("stale") == [0, 1]] == [("stale", "detect:no_longer_listed")], (
+            f"the run's stale mark is not logged as its own: {rows}")
     finally:
         s.close()
 

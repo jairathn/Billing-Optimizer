@@ -606,3 +606,88 @@ def test_a_takeback_with_no_answer_from_the_second_payer_changes_nothing_of_the_
         assert not [d for d in _decisions(w, fid, "r2") if d[0] == "closed"], _decisions(w, fid, "r2")
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ what counts as the second payer's answer (review r1)
+@pytest.mark.parametrize("kind", KINDS3)
+@pytest.mark.parametrize("who", ["namesake", "same_patient"])
+def test_another_patients_payment_on_another_ema_claim_never_closes_the_persons_billed_item(tmp_path, monkeypatch, kind, who):
+    """Sample Delta's $30 coinsurance is billed to Testcare Health by a person. Another patient with the same name and
+    another date of birth (a son seen the same day, say) has his own EMA claim for a 99213 that day, and his own payer,
+    Optum, pays it. That is not Testcare's answer to this bill: the person's Sent stands, nothing is recovered, no closure
+    is logged. The control ('same_patient'): the same patient's second EMA claim for the service (a claim EMA keeps apart)
+    carries Testcare's payment, and closes the item."""
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        name, dob, _mrn = F.PATIENTS[2]
+        if who == "namesake":
+            kw = dict(patient=name, dob=D(2001, 5, 6), primary=P["optum"])
+            rows = [charge(F.link_no(9), posted=D(2026, 5, 10), **kw),
+                    pay(F.link_no(9), "777000555", 80, posted=D(2026, 5, 12), payer=P["optum"], **kw)]
+        else:
+            kw = dict(patient=name, dob=dob, primary=P["commercial"])
+            rows = [charge(F.link_no(9), posted=D(2026, 5, 10), **kw),
+                    pay(F.link_no(9), "777000555", 30, posted=D(2026, 5, 12), payer=P["commercial"], **kw)]
+        _ema(w, *rows)
+        w.run(DAY2, 2)
+        f = w.item(fid)
+        if who == "same_patient":
+            assert f["status"] == "resolved" and f["recovered_cents"] == 3000, (f["status"], f["auto_note"], f["recovered_cents"])
+            return
+        assert f["status"] == "appealed" and not f["auto_note"] and not f["recovered_cents"], (
+            f"another patient's payment (same name, another date of birth, his own EMA claim and payer) closed the person's "
+            f"billed item as Paid: {f['status']} / {f['auto_note']} / recovered {f['recovered_cents']}")
+        assert not [d for d in _decisions(w, fid, "r2") if d[0] == "closed"], _decisions(w, fid, "r2")
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS3)
+def test_the_first_payers_own_payment_under_another_payer_name_never_closes_it_as_the_second_payers(tmp_path, monkeypatch, kind):
+    """Blue Cross paid the visit and left $30 coinsurance; a person billed Testcare Health. Blue Cross then pays the visit
+    again on a remittance that names it 'BLUE CROSS TEST PLAN' (the same payer group, another payer name: a reprocessing).
+    Testcare has not answered: that is the first payer's money, never the second payer's payment of the share."""
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        remit(w.s, trace="777000666", paid_on="2026-05-12", payer="BLUE CROSS TEST PLAN", status="1",
+              claims=[{"pcn": F.claim_id(8), "last": "SAMPLE", "first": "DELTA",
+                       "lines": [(S, "99213", 150, 90, [("CO", "45", 30), ("PR", "2", 30)])]}])
+        _ema(w)
+        w.run(DAY2, 2)
+        f = w.item(fid)
+        assert f["status"] == "appealed" and not f["auto_note"] and not f["recovered_cents"], (
+            f"the first payer's own second payment closed the person's bill to Testcare as 'paid as second payer': "
+            f"{f['status']} / {f['auto_note']} / recovered {f['recovered_cents']}")
+        assert "second_answer" not in json.loads(f["evidence"] or "{}"), "the first payer's payment was read as the second payer's answer"
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS3)
+def test_the_runs_work_its_answer_change_is_in_the_decision_log_after_a_persons_status(tmp_path, monkeypatch, kind):
+    """A person billed Testcare Health (Sent) and the next run moved the item to Waiting. A week later the person records
+    that they billed it again (Sent again, their own history line). Testcare then pays $20 of the $30: the run moves the
+    item to Work now, 'work its answer', at the $10 left. That change is the run's (the person's Sent was already in the
+    run's 'before'): it is in the decision log with its rule, as every automatic change is."""
+    import time
+    w = _W(tmp_path, kind, monkeypatch)
+    try:
+        fid = _billed(w)
+        w.run("2026-05-06", 2)                        # the person's Sent is judged: Waiting on Testcare
+        assert w.item(fid)["work_state"] == "waiting", w.item(fid)["work_state"]
+        time.sleep(1.1)                               # the log's times are to the second: the press comes after that run
+        assert actions.apply_status(w.s.conn, fid, "appealed", "Billed again (invented)", None, "Biller One")
+        w.s.conn.commit()
+        _ema(w, _second_paid(20))
+        w.run(DAY2, 3)
+        f = w.item(fid)
+        assert (f["work_state"], f["state_rule"], f["shortfall_cents"]) == ("work_now", "work_answered", 1000), \
+            (f["work_state"], f["state_rule"], f["shortfall_cents"])
+        rows = _decisions(w, fid, "r3")
+        assert ("state", "states:work_answered") in rows, (
+            f"the run moved the billed item from Waiting to Work now ('work its answer', $30.00 to $10.00) and the decision "
+            f"log has no row for it: {rows}")
+    finally:
+        w.close()

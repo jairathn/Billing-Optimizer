@@ -207,3 +207,62 @@ def test_a_person_started_is_the_newest_status_line_a_person_set():
     assert states.person_started([mine])
     assert states.person_started([mine, hand])          # carried with a whole hand-off, then the run's own line: still theirs
     assert not states.person_started([mine, later])      # they set it back to To do since
+
+
+# --------------------------------------------------------------------------- review r1: a person's Started moves to an heir
+def _reopened(s: Store, kind: str) -> Store:
+    """The serverless host's next invocation: the store image serialized and opened again ('image'); the others go on."""
+    if kind != "image":
+        return s
+    data = s.to_bytes()
+    s.close()
+    s = Store.from_bytes(data)
+    ensure_schema(s.conn)
+    return s
+
+
+def test_a_persons_started_carried_to_the_lines_new_id_decides_its_state_in_the_run_that_carries_it(tmp_path, kind, monkeypatch):
+    """A person marks a downcoded visit Started themselves, past every window of the payer (they take it up anyway). New
+    claim files then prove the billed level, so the run gives the line's money a new id (DOWNCODE_VS_BILLED) and carries the
+    person's Started and history to it (detect.carry_to_heirs). In the very run that carries it, the person's Started
+    decides the heir's state, as it did on the old id: Work now, rule person_started, named and dated. It is never judged as
+    To do for one run (expired) with a basis that calls it a hand-off from the claim's chase (review r1 of replay-fix-2a:
+    the states were decided while the person's lines still sat on the old id)."""
+    from tests.test_hotfix2d import _claim_files_arrive, _downcode_store, _first_downcode
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    s = _reopened(_downcode_store(tmp_path, kind), kind)
+    c = s.conn
+    day = "2028-06-01"                  # past every window of the April 15, 2026 remittance (the heir's too)
+    old = _first_downcode(c)
+    assert actions.apply_status(c, old, "in_progress", "Taking it up with the payer (invented)", None, "Biller One (invented)",
+                                "2028-05-20T15:00:00+00:00")
+    c.commit()
+    s = _reopened(s, kind)
+    Detector(s, run_id="r1b", today=day).run()
+    c = s.conn
+    c.row_factory = sqlite3.Row
+    got = dict(c.execute("SELECT status, work_state, state_rule FROM findings WHERE finding_id=?", (old,)).fetchone())
+    assert (got["status"], got["work_state"], got["state_rule"]) == ("in_progress", "work_now", "person_started"), got
+    _claim_files_arrive(s)
+    s = _reopened(s, kind)
+    Detector(s, run_id="r2", today=day).run()
+    c = s.conn
+    c.row_factory = sqlite3.Row
+    heirs = [dict(r) for r in c.execute("SELECT finding_id, status, work_state, state_rule, state_basis FROM findings "
+                                        "WHERE signal='DOWNCODE_VS_BILLED' AND status='in_progress'")]
+    assert len(heirs) == 1, heirs
+    h = heirs[0]
+    assert h["finding_id"] != old
+    assert c.execute("SELECT COUNT(*) FROM finding_events WHERE finding_id=? AND kind='manual' AND to_status='in_progress'",
+                     (h["finding_id"],)).fetchone()[0] == 1, "the person's Started moved to the heir"
+    assert (h["work_state"], h["state_rule"]) == ("work_now", "person_started"), (
+        f"the person's own Started, carried to the line's new id, was judged by the automatic rules in the run that carried "
+        f"it: {h['work_state']} / {h['state_rule']}: {h['state_basis']}")
+    assert (h["state_basis"] or "").startswith("Started by Biller One (invented) on May 20, 2028"), h["state_basis"]
+    assert "chase" not in (h["state_basis"] or ""), h["state_basis"]
+    # the decision log holds no automatic state change for the heir in that run, and none the run after
+    Detector(s, run_id="r3", today=day).run()
+    rows = c.execute("SELECT run_id, kind, rule FROM item_decisions WHERE finding_id=? AND kind='state'", (h["finding_id"],)).fetchall() \
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='item_decisions'").fetchone() else []
+    assert not [tuple(r) for r in rows], [tuple(r) for r in rows]
+    s.close()

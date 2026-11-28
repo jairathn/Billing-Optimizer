@@ -346,3 +346,62 @@ def test_a_reviews_claims_already_past_their_window_when_it_was_found_are_not_co
     lost = w.store.conn.execute("SELECT lost_cents FROM results_items WHERE finding_id=?", (item["finding_id"],)).fetchone()[0]
     assert lost == 3 * (11760 - 10000) and item["shortfall_cents"] == 6 * (11760 - 10000), (lost, item["shortfall_cents"])
     w.store.close()
+
+
+# ------------------------------------------------------------- a review listed again for new claims (review r1)
+def _listed_again(tmp_path, kind):
+    """Anthem's routine $100.00 for a 99214 (usual $117.60): 6 claims, found inside their windows, expire unworked (lost:
+    6 x $17.60). Three more visits of the same year are then paid at the same $100.00: the same review is listed again
+    (Work now) for them, with a later last window."""
+    w = World(tmp_path, kind)
+    _feed_rates(w)
+    item = _found_inside_its_window(w, "SECOND_RATE")
+    fid, last = item["finding_id"], item["appeal_deadline"]
+    w.run(_day_after(last))
+    assert w.one("SECOND_RATE")["work_state"] == "expired"
+    lost1 = w.store.conn.execute("SELECT lost_cents FROM results_items WHERE finding_id=?", (fid,)).fetchone()[0]
+    assert lost1 == 6 * 1760, lost1
+    w.remit(clean(500, 3, "99214", "223.65", "100.00"), _day_after(last, 3).replace("-", ""))
+    w.run(_day_after(last, 5))
+    again = w.one("SECOND_RATE")
+    assert again["finding_id"] == fid and again["work_state"] == "work_now", (again["finding_id"] == fid, again["work_state"])
+    assert again["ev"]["lines"] == 9 and again["appeal_deadline"] > last
+    return w, fid, again
+
+
+def test_a_review_listed_again_with_new_claims_counts_their_dollars_lost_when_it_expires_again(tmp_path, kind):
+    """Nobody works the review listed again, and the new claims' windows close too. Rule 5: their 3 x $17.60 are lost to
+    the deadline as well, each dollar once (the 6 counted the first time are not counted again)."""
+    w, fid, again = _listed_again(tmp_path, kind)
+    w.run(_day_after(again["appeal_deadline"]))
+    assert w.one("SECOND_RATE")["work_state"] == "expired"
+    reg = results.load_registry(w.store.conn)[fid]
+    assert reg["lost_cents"] == 9 * 1760, (
+        f"the review counted ${reg['lost_cents'] / 100:,.2f} lost; the 3 claims it was listed again for (${3 * 17.60:,.2f}) "
+        "expired unworked and are lost to no deadline on the scoreboard")
+    assert len(reg["flag_info"]["lost_lines"]) == 9 and len(set(reg["flag_info"]["lost_lines"])) == 9
+    assert reg["lost_on"] == again["appeal_deadline"], (reg["lost_on"], again["appeal_deadline"])
+    lost, _lists = results._lost(results.load_registry(w.store.conn))
+    assert lost["cents"] == 9 * 1760 + 2175, lost        # the review once (9 claims) and the control's one-off
+    # the run after changes nothing: nothing is counted twice
+    w.run(_day_after(again["appeal_deadline"], 2))
+    assert results.load_registry(w.store.conn)[fid]["lost_cents"] == 9 * 1760
+    w.store.close()
+
+
+def test_while_listed_again_the_claims_already_counted_lost_are_not_at_risk_again(tmp_path, kind):
+    """The week before the new claims' windows close, the scoreboard's 'at risk in the next 14 days' and 'lost to
+    deadlines' never both hold the 6 claims already counted lost (each dollar once); the list the figure opens agrees."""
+    w, fid, again = _listed_again(tmp_path, kind)
+    wk = _day_after(again["appeal_deadline"], -7)
+    w.run(wk)
+    figs = results.live_figures(w.store.conn, today=wk)
+    risk = figs["at_risk"]["cents"]
+    lost = results.load_registry(w.store.conn)[fid]["lost_cents"]
+    assert lost == 6 * 1760
+    assert risk == 3 * 1760, (
+        f"at risk ${risk / 100:,.2f} while ${lost / 100:,.2f} of the same review's claims are already counted lost: the 6 "
+        "dead claims are on the scoreboard twice")
+    listed = results.list_entries(w.store.conn, "at_risk", wk)
+    assert sum(e[1] for e in listed) == risk and fid in {e[0] for e in listed}, listed
+    w.store.close()
