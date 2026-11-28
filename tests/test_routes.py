@@ -523,6 +523,26 @@ def test_a_reason_field_holds_the_argument_to_the_payer_and_never_the_billers_ow
     assert {(x["value"], x["fill"]) for x in _reasons(c)} == {("", "why the money is owed back")}, _reasons(c)
 
 
+def test_an_item_no_remittance_reached_shows_no_remittance_date(store):
+    # EMA shows Cigna's denial but no 835 reached the app: the item's date is the day EMA posted it, which is no
+    # remittance date to put on a payer's form or in Copy all
+    item(store, signal="EMA_DENIED", category="denial", carc="50", actionable="appeal", payer_name="CIGNA",
+         payer_group="Cigna", payer_kind="commercial", payment_date="2026-04-02", line_key=None, claim_key=None, transaction_key=None)
+    c, ex = card(store)
+    assert ex["next_step"]["route"] == "eob_first" and c["request"] == "claim_status_or_reprocess"
+    for v in [c["best"]] + c["others"]:
+        assert not any(x["label"] == "Remittance date" for x in v["facts"]), v["facts"]
+        for x in v["fields"]:
+            if "remit_date" in (x.get("keys") or []):
+                assert x["value"] == "" and x["fill"], x
+    assert "04/02/2026" not in c["copy_all"]
+    # with the payer's remittance on file, its date is there
+    world(store, payer="CIGNA", payer_group="Cigna", payer_kind="commercial")
+    c2, _ = card(store)
+    assert {"label": "Remittance date", "value": "03/28/2026"}.items() <= next(
+        x for x in c2["best"]["fields"] + c2["best"]["facts"] if x["label"] == "Remittance date").items()
+
+
 def _ema_row(store, **kw):
     r = {"row_fingerprint": "RF-1", "family": "charge_lines", "row_index": 1, "claim_id": F.claim_id(1), "cpt": "99213",
          "patient_id": "EMA-PAT-TEST-9", "policy_number": "POLICY-TEST-7", "icd10": "L57.0, L82.1", "auth_number": "AUTH-TEST-3",
