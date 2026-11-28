@@ -1443,6 +1443,17 @@ def _explained(f: dict, *, claim_key: str | None = None, bill: str | None = None
         except Exception as exc:        # noqa: BLE001  (shown on the panel and logged: the item's own facts still show)
             out["explain_error"] = f"The story of this {'claim' if claim_key else 'item'} could not be put together ({type(exc).__name__})."
             _say(f"api: story failed for {'claim' if claim_key else 'item ' + str(f.get('finding_id'))}: {type(exc).__name__}: {str(exc)[:160]}")
+        if not claim_key and out.get("explain"):
+            # how the item's request reaches its payer, easiest accepted way first, its fields filled (remitwatch.routes):
+            # built from the same next step, on the copy the page reads (the server's store, Vercel's dashboard copy)
+            try:
+                from . import routes
+                out["route_card"] = routes.card(conn, f["finding_id"], explain=out["explain"], today=_day(0), show_names=SHOW_PHI)
+            except Exception as exc:        # noqa: BLE001  (logged; the rest of the panel shows, and the card says why it is missing)
+                runlog.caught(exc, "api.route_card")
+                out["route_card"] = None
+                out["route_card_error"] = f"How to send it could not be worked out ({type(exc).__name__})."
+                _say(f"api: route card failed for item {f.get('finding_id')}: {type(exc).__name__}")
         try:
             pcn = (f or {}).get("patient_control_number")
             links = [int(f["ema_link"])] if (f or {}).get("ema_link") not in (None, "") else []

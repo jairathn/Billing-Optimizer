@@ -16140,44 +16140,8 @@
    "channels": [
     {
      "rank": 1,
-     "channel": "payer_portal",
-     "name": "Availity Authorizations & Referrals (a denied prior authorization)",
-     "where": "https://Availity.com",
-     "form": "",
-     "fields": [],
-     "attachments": [],
-     "minutes": 10,
-     "notes": "",
-     "required": false,
-     "sources": [
-      "v14",
-      "v15"
-     ],
-     "url": "https://Availity.com",
-     "verified": true
-    },
-    {
-     "rank": 2,
-     "channel": "phone",
-     "name": "Provider Services (a clinical appeal can be made verbally)",
-     "where": "800-345-4344",
-     "form": "",
-     "fields": [],
-     "attachments": [],
-     "minutes": 15,
-     "notes": "",
-     "required": false,
-     "sources": [
-      "v14",
-      "v15"
-     ],
-     "url": "",
-     "verified": true
-    },
-    {
-     "rank": 3,
      "channel": "mail",
-     "name": "Grievances and Appeals",
+     "name": "Grievances and Appeals (in writing, with the records)",
      "where": "Anthem Blue Cross and Blue Shield Attention: Grievances and Appeals P.O. Box 105568 Atlanta, GA 30348-5568",
      "form": "",
      "fields": [
@@ -16198,6 +16162,42 @@
       "v15"
      ],
      "url": "",
+     "verified": true
+    },
+    {
+     "rank": 2,
+     "channel": "phone",
+     "name": "Provider Services (a clinical appeal can be made verbally; records still go in writing)",
+     "where": "800-345-4344",
+     "form": "",
+     "fields": [],
+     "attachments": [],
+     "minutes": 15,
+     "notes": "",
+     "required": false,
+     "sources": [
+      "v14",
+      "v15"
+     ],
+     "url": "",
+     "verified": true
+    },
+    {
+     "rank": 3,
+     "channel": "payer_portal",
+     "name": "Availity Authorizations & Referrals (only for a denied prior authorization)",
+     "where": "https://Availity.com",
+     "form": "",
+     "fields": [],
+     "attachments": [],
+     "minutes": 10,
+     "notes": "",
+     "required": false,
+     "sources": [
+      "v14",
+      "v15"
+     ],
+     "url": "https://Availity.com",
      "verified": true
     }
    ],
