@@ -97,6 +97,29 @@ def test_a_claim_older_than_emas_reports_is_counted_with_that_reason_and_the_rep
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_one_old_open_line_on_the_ar_does_not_move_the_first_day_emas_reports_cover(tmp_path, kind, monkeypatch):
+    """Claim 72 again (January 20, sent March 9, no 835), while Production, the report that shows answers, starts with
+    services on March 2. The A/R, as any A/R does, also lists one old open balance: another patient's 99213 of December 1,
+    2025 ($40). An A/R lists open balances only, so it covers no span of service days: Production still does not reach
+    January 20, the claim is still older than EMA's reports, and the Data tab still names the export that would let the
+    bridges check it (review gapfix-r2-6). Before: the first day was the earliest service of any EMA row, so one old A/R line
+    moved it to December 1, 2025, the reason became 'no claim in EMA's reports matches it' and the export was not named."""
+    from tests import ema_fixtures as F
+    ar = [F.ar_row(claim=F.claim_id(40), link=F.link_no(40), current=40.0, cpt="99213", svc=D(2025, 12, 1), patient=2,
+                   aging=D(2026, 4, 25))]
+    s, lg = _world(tmp_path, kind, monkeypatch, [], ar)
+    send(s, tmp_path, [clm837(F.claim_id(72), [("99213", "150.00", "20260120")], payer=BC, member="MEMBER000072")], "20260309")
+    det, listed, unseen = _run(s, lg)
+    assert F.claim_id(72) not in listed
+    reasons = {k: v["n"] for k, v in (unseen.get("by_reason") or {}).items()}
+    assert reasons == {"before_ema_reports": 1}, (
+        f"ema_reports_from {unseen.get('ema_reports_from')}: reasons {reasons} (one old A/R line moved the first day EMA's "
+        "reports cover)")
+    assert unseen.get("ema_reports_from") == "2026-03-02", unseen.get("ema_reports_from")
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_a_claim_inside_emas_reports_whose_ema_claim_is_not_found_says_so(tmp_path, kind, monkeypatch):
     """Claim 75: a visit March 6 (99213 at $150), inside what EMA's reports cover (from March 2), sent March 9 to Blue Cross;
     no 835 answers it and no EMA claim holds its content. Counted unseen with the reason that EMA's claim was not found
@@ -225,6 +248,63 @@ def sqlite3_connect(db):
     return sqlite3.connect(db)
 
 
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_the_data_tab_before_the_first_analysis_of_this_release_shows_each_payers_dollars_and_lists_what_it_counts(
+        tmp_path, host, monkeypatch):
+    """The store as the 11-27 release's analysis left it: the unseen count in its old form (n, billed_cents, by_group
+    {group: {n, billed_cents}}, the fixed 'why'), with no reasons, no 'cents' and no claim list. On the server this lasts
+    until the first cycle analyses again; on Vercel until someone presses Run the analysis now (review gapfix-r2-7). The
+    Data tab's panel gives each payer its dollars (the billed dollars, as the old count kept them), so the payers add up to
+    the total, and it does not offer a list it cannot fill: it says the list comes with the next analysis.
+    Before: the count said 3 claims, $326.66, while every payer's line said $0.00 and the list returned no claim at all."""
+    from tests.test_ema_pages2 import _site
+    s, lg = _world(tmp_path, "file", monkeypatch)
+    lg.close()
+    old = {"n": 3, "billed_cents": 32666, "due_from": "2026-04-08", "due_to": "2026-04-08", "overdue_30": 0, "overdue_30_cents": 0,
+           "by_group": {"Blue Cross": {"n": 2, "billed_cents": 30000}, "Medicare": {"n": 1, "billed_cents": 2666}},
+           "at": "2026-04-30T10:00:00+00:00", "newest_835": "2026-03-28",
+           "why": "Due only by EMA's postings, and EMA's own claim for each cannot be told apart from others"}
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (UNSEEN_KEY, json.dumps(old)))
+    s.conn.commit()
+    db = str(tmp_path / "s.sqlite")
+    s.close()
+    c = _site(monkeypatch, db, serverless=host == "serverless", tmp=tmp_path)
+    u = c.get("/api/ema/data").json()["unseen"]
+    assert (u["n"], u["cents"]) == (3, 32666), u
+    assert [(g["payer"], g["n"], g["cents"]) for g in u["groups"]] == [("Blue Cross", 2, 30000), ("Medicare", 1, 2666)], u["groups"]
+    assert u.get("listed") is False and u.get("list_note"), u
+    page = c.get("/api/ema/unseen").json()
+    assert page["count"] == 0 and page.get("listed") is False, page
+
+
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_the_data_tab_shows_claims_counted_unseen_for_want_of_any_ema_report(tmp_path, host, monkeypatch):
+    """No EMA report is in the store. Twelve claims went to the VA's network (payer id VACCN, which sends no ERA) on June 14,
+    2026 and no 835 ever answered them: counted unseen, reason no_ema_reports, $1,200. The Data tab (server and Vercel)
+    shows that count in dollars with its list even before any EMA report arrives (review gapfix-r2-8). Before: the Data
+    tab's payload answered only {'ready': False} until an EMA report was read, so the panel never drew."""
+    from tests.test_837_sends import VA, _remits, _visits
+    from tests.test_ema_pages2 import _site
+    s = _store(tmp_path, "file")
+    _remits(s, tmp_path, _visits(25, 1), "20260110")
+    _remits(s, tmp_path, _visits(25, 200), "20261110")
+    old = [f"CB0000V{i:02d}C017" for i in range(12)]
+    send(s, tmp_path, [clm837(c, [("99214", "100.00", "20260612")], payer=VA, member=f"V{i:08d}") for i, c in enumerate(old)],
+         "20260614")
+    Detector(s, run_id="g2", today="2026-11-12").run()
+    meta = _unseen(s)
+    assert meta["n"] == 12 and meta["cents"] == 120000, meta
+    db = str(tmp_path / "s.sqlite")
+    s.close()
+    c = _site(monkeypatch, db, serverless=host == "serverless", tmp=tmp_path)
+    got = c.get("/api/ema/data").json()
+    assert got.get("ready") is False, sorted(got)
+    u = got.get("unseen") or {}
+    assert (u.get("n"), u.get("cents")) == (12, 120000), f"the Data tab's payload carries no unseen count: {sorted(got)}"
+    assert [(r["reason"], r["n"]) for r in u["reasons"]] == [("no_ema_reports", 12)], u["reasons"]
+    assert c.get("/api/ema/unseen").json()["count"] == 12
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_every_payer_that_sends_no_era_is_on_the_data_tab_with_its_dollars(tmp_path, kind):
     """Twelve small plans, each sent ten claims ($100 each) in August, none of which ever got an ERA: each is a payer whose
@@ -306,6 +386,159 @@ def test_claims_sent_after_a_payer_stops_sending_eras_are_counted_not_listed(tmp
     s.close()
 
 
+def _va_sends(s, tmp_path, groups: list[tuple[list, str, str]]) -> None:
+    """Claims to the VA's network (payer id VACCN), one send per group: (claim ids, service day, send day), CCYYMMDD."""
+    from tests.test_837_sends import VA
+    for ids, svc, day in groups:
+        send(s, tmp_path, [clm837(c, [("99214", "100.00", svc)], payer=VA, member=f"{c[6:9]}{i:06d}") for i, c in enumerate(ids)],
+             day)
+
+
+def _va_answers(s, tmp_path, ids: list, svc: str, day: str) -> None:
+    """The VA's network answers these claims with 835s (paid $80 each) on `day`."""
+    from tests.test_837_sends import _remits, answer
+    _remits(s, tmp_path, [answer(c, "1", "80.00", dos=svc, code="99214", charge="100.00") for c in ids], day,
+            payer="OPTUM VA CCN TEST", payer_id="VACCN")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_claims_sent_weeks_before_a_payers_first_era_are_not_listed(tmp_path, kind):
+    """The start of a payer's ERAs inside one claim's window (review gapfix-r1-3). The VA's network sent no ERA for the
+    twelve claims sent January 14 (services January 12); the practice enrolled for its ERAs in February, and the twelve
+    claims sent March 2 are each answered by an 835 (April 1). The January claims were sent before any ERA could come for
+    them: counted unseen by name, never listed as never answered (the brief's G4).
+    Before: each claim was judged on the claims sent in the 90 days either side of its send, so a January claim's window
+    held the answered March claims (12 of 24) and all twelve were listed ($960.00). On the real data a Tricare claim of
+    January 2025 was listed this way (its window: 4 of 75 answered, 5.3%), and is now on the record as lost to its deadline."""
+    from tests.test_837_sends import _chased, _remits, _visits
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    jan = [f"CB0000J{i:02d}C017" for i in range(12)]
+    mar = [f"CB0000M{i:02d}C017" for i in range(12)]
+    _va_sends(s, tmp_path, [(jan, "20260112", "20260114"), (mar, "20260227", "20260302")])
+    _va_answers(s, tmp_path, mar, "20260227", "20260401")
+    found = _chased(s, "t1", today="2026-11-12")
+    listed = sorted(set(jan) & set(found))
+    assert not listed, (f"{len(listed)} claims sent before the payer's ERAs began are listed as never answered "
+                        f"(${sum(found[c]['shortfall_cents'] or 0 for c in listed) / 100:,.2f})")
+    assert sorted(r[0] for r in _unseen(s).get("claims") or []) == sorted(jan), "the January claims are counted unseen, by name"
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_claims_sent_seven_weeks_before_the_payers_eras_began_are_not_listed(tmp_path, kind):
+    """The same start, closer (review gapfix-r2-2). Twelve VA claims sent June 20 got no 835; the VA began sending ERAs in
+    August: the twenty claims sent August 12 are each answered (September 15). A June 20 claim's window (March 22 to
+    September 18) holds 20 answered claims of 32, so judging it on the whole window listed all twelve; with an even flow of
+    claims, any claim sent fewer than about 81 days before a payer's ERAs begin was judged that way. The June claims are
+    counted unseen by name, never listed."""
+    from tests.test_837_sends import _chased, _remits, _visits
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    june = [f"CB0000J{i:02d}C017" for i in range(12)]
+    aug = [f"CB0000A{i:02d}C017" for i in range(20)]
+    _va_sends(s, tmp_path, [(june, "20260618", "20260620"), (aug, "20260810", "20260812")])
+    _va_answers(s, tmp_path, aug, "20260810", "20260915")
+    found = _chased(s, "t1", today="2026-11-12")
+    listed = sorted(set(june) & set(found))
+    assert not listed, f"{len(listed)} of the 12 claims sent before the payer's ERAs began are listed as never answered"
+    assert not set(aug) & set(found), "the August claims are answered by their 835s"
+    assert sorted(r[0] for r in _unseen(s).get("claims") or []) == sorted(june)
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_claims_sent_seven_weeks_after_the_payers_eras_stopped_are_counted_not_listed(tmp_path, kind):
+    """The mirror (review gapfix-r2-2). Twelve VA claims sent June 20 were answered by 835s (July 20); then the VA's ERAs
+    stopped: the twenty claims sent August 12 got none, though the remittances on file reach November 10 for other payers.
+    Nothing on file can say whether the VA answered them outside the 835 feed: not listed as never answered, and counted
+    unseen by name with the reason that the payer's remittances stop before they were due (so the Data tab lists them and
+    the archive keeps their bills)."""
+    from tests.test_837_sends import _chased, _remits, _visits
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    june = [f"CB0000J{i:02d}C017" for i in range(12)]
+    aug = [f"CB0000A{i:02d}C017" for i in range(20)]
+    _va_sends(s, tmp_path, [(june, "20260618", "20260620")])
+    _va_answers(s, tmp_path, june, "20260618", "20260720")
+    _va_sends(s, tmp_path, [(aug, "20260810", "20260812")])
+    found = _chased(s, "t1", today="2026-11-12")
+    listed = sorted(set(aug) & set(found))
+    assert not listed, f"{len(listed)} of the 20 claims sent after the payer's ERAs stopped are listed as never answered"
+    unseen = _unseen(s)
+    assert sorted(r[0] for r in unseen.get("claims") or []) == sorted(aug), unseen.get("by_reason")
+    assert {k: v["n"] for k, v in unseen["by_reason"].items()} == {"payer_remittances_stop": 20}, unseen["by_reason"]
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_claims_sent_weeks_after_a_payers_last_era_are_counted_unseen_and_their_bills_kept(tmp_path, kind):
+    """The stop, a few weeks out (review gapfix-r1-2). The VA's network answered the twelve claims sent January 14, 2022
+    with 835s (February 15, 2022); then its ERAs stopped. Five claims sent March 21, 2022 got no 835, though the
+    remittances on file reach November 10, 2026 for other payers. Their window holds the answered January claims, so the
+    payer is judged to send ERAs, and the payer's remittances stop before the claims were due (the check on payers whose
+    remittances stop, CH-8). That check named the payer, but no claim and no reason: the Data tab's list and CSV did not
+    show the five claims, and the archive's plan at the 24-month floor retired their bills, so they left every count in
+    silence. They are counted unseen by name, with the reason, and the archive keeps their bills at any horizon. (On the
+    real data: five CHAMPVA claims of May and June 2024, $1,665.32, sent after its last remittance in April 2024.)"""
+    from remitwatch import archive
+    from remitwatch.detect import bill_of
+    from tests.test_837_sends import _chased, _remits, _visits
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(25, 1), "20220110")
+    _remits(s, tmp_path, _visits(25, 200), "20261110")
+    jan = [f"CB0000J{i:02d}C017" for i in range(12)]
+    mar = [f"CB0000M{i:02d}C017" for i in range(5)]
+    _va_sends(s, tmp_path, [(jan, "20220112", "20220114")])
+    _va_answers(s, tmp_path, jan, "20220112", "20220215")
+    _va_sends(s, tmp_path, [(mar, "20220318", "20220321")])
+    found = _chased(s, "t1", today="2026-11-12")
+    assert not set(mar) & set(found), "the March claims are listed as never answered"
+    behind = json.loads((s.conn.execute("SELECT value FROM meta WHERE key='feed:payers_behind'").fetchone() or ["[]"])[0])
+    unseen = _unseen(s)
+    counted = sorted(r[0] for r in unseen.get("claims") or [])
+    assert counted == sorted(mar), (
+        f"the March claims are not in the unseen count ({len(set(counted) & set(mar))} of 5; the unseen count holds "
+        f"{unseen.get('n') or 0}); 'payers behind' holds {[(p['payer'], p['claims'], p['billed_cents']) for p in behind]}")
+    assert {k: v["n"] for k, v in unseen["by_reason"].items()} == {"payer_remittances_stop": 5}, unseen["by_reason"]
+    for horizon in (None, 24):
+        p = archive.plan(s.conn, horizon=horizon, today="2026-11-12")
+        leaving = {b[0] for b in p["bills"]}
+        assert not leaving & {bill_of(c) for c in mar}, (
+            f"the {p['horizon']['months']}-month plan retires {len(leaving & {bill_of(c) for c in mar})} of the 5 bills: their 837 "
+            "rows go, and the claims leave every count in silence")
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_one_visits_claims_to_one_payer_id_get_one_verdict_on_its_eras(tmp_path, kind):
+    """Two claims of one visit (the same member, the same service day, the same payer id: the E/M and the biopsy billed
+    apart), sent eight days apart, with the same evidence: no 835 and nothing else on file for either. Thirty claims sent
+    eleven weeks before got one 835 between them; five claims sent between the two sends are answered by 835s (August
+    20, so the payer's remittances reach past both claims' due days). Judged send by send, the first claim's send says
+    the payer sends no ERA (counted unseen) and the second's says it does (listed as never answered), so one visit got two
+    verdicts (review gapfix-r1-3: on the real data two Tricare claims of one patient's day, sent 8 days apart, one listed
+    and one counted). A visit's claims to one payer id are judged together, at the visit's first send to it: none is
+    listed as never answered here."""
+    from tests.test_837_sends import VA, _chased, _remits, _visits
+    s = _store(tmp_path, kind)
+    _remits(s, tmp_path, _visits(), "20261110")
+    old = [f"CB0000O{i:02d}C017" for i in range(30)]
+    mid = [f"CB0000N{i:02d}C017" for i in range(5)]
+    _va_sends(s, tmp_path, [(old, "20260310", "20260312"), (mid, "20260603", "20260605")])
+    _va_answers(s, tmp_path, old[:1], "20260310", "20260415")
+    _va_answers(s, tmp_path, mid, "20260603", "20260820")
+    send(s, tmp_path, [clm837("CB0000V01C017", [("99213", "120.00", "20260529")], payer=VA, member="VISIT00001")], "20260531")
+    send(s, tmp_path, [clm837("CB0000V02C017", [("11102", "150.00", "20260529")], payer=VA, member="VISIT00001")], "20260608")
+    found = _chased(s, "t1", today="2026-11-12")
+    visit = {"CB0000V01C017", "CB0000V02C017"}
+    counted = {r[0] for r in _unseen(s).get("claims") or []}
+    assert not visit & set(found), (
+        f"one visit, two verdicts: {sorted(visit & set(found))} listed as never answered, {sorted(visit & counted)} counted unseen")
+    assert visit <= counted, sorted(counted & visit)
+    s.close()
+
+
 # ------------------------------------------------------------------------------------ G5: a line EMA's A/R holds open
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_claim_whose_line_emas_ar_holds_open_is_listed_not_counted_unseen(tmp_path, kind, monkeypatch):
@@ -327,6 +560,34 @@ def test_a_claim_whose_line_emas_ar_holds_open_is_listed_not_counted_unseen(tmp_
     assert ev["ar_open"]["balance_cents"] == 6400 and ev["ar_open"]["bucket"] == "held for insurance, no claim created", ev["ar_open"]
     assert "holds this service open for insurance ($64.00" in listed[F.claim_id(71)]["hint"]
     assert (unseen.get("n") or 0) == 0, unseen
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("held_for", ["secondary", "other_payer"])
+def test_a_line_the_ar_holds_for_another_coverage_does_not_make_the_claims_payer_never_answered(tmp_path, kind, monkeypatch,
+                                                                                               held_for):
+    """Claim 71 again (88305 at $64, March 5), sent March 9 to Blue Cross as the PRIMARY payer (the 837's SBR01 P); no 835
+    answers it and no Production line holds it. EMA's A/R holds the same patient's 88305 of March 5 open for insurance:
+    'secondary', under the SECONDARY coverage (Blue Cross primary, Medicare secondary: EMA moves a balance to the second
+    coverage once the first payer has answered); 'other_payer', under the primary coverage of another payer (Medicare
+    primary, no secondary). Neither row is Blue Cross's balance as the claim's payer: nothing says Blue Cross left the claim
+    unanswered, so it stays counted unseen (review gapfix-r2-3). Before: G5 took any insurance row of the patient's day
+    and code, and listed the claim as never answered on the strength of another coverage's balance."""
+    from tests import ema_fixtures as F
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    cover = (dict(coverage="Secondary", primary=BCP, secondary=MED) if held_for == "secondary" else
+             dict(coverage="Primary", primary=MED, secondary="None"))
+    ar = [F.ar_row(claim=None, link=None, party="Insurance", current=64.0, cpt="88305", svc=D(2026, 3, 5), patient="Sample, Pat",
+                   status=None, aging=D(2026, 4, 25), **cover)]
+    s, lg = _world(tmp_path, kind, monkeypatch, [], ar)
+    send(s, tmp_path, [clm837(F.claim_id(71), [("88305", "64.00", "20260305")], payer=BC, member="MEMBER000071")], "20260309")
+    det, listed, unseen = _run(s, lg)
+    got = listed.get(F.claim_id(71))
+    assert got is None, (
+        f"the claim to Blue Cross is listed as never answered on the strength of another coverage's balance: "
+        f"{json.loads(got['evidence']).get('ar_open')}")
+    assert [r[0] for r in unseen.get("claims") or []] == [F.claim_id(71)], unseen
     s.close()
 
 
@@ -499,6 +760,107 @@ def test_a_second_payers_claim_the_first_payer_settled_in_full_is_not_listed(tmp
     assert (unseen.get("n") or 0) == 0, unseen
 
 
+def _patient_paid_world(tmp_path, kind, monkeypatch, pat_paid: float):
+    """Claim 75 again: Medicare paid $60 and wrote $6.66 off as contractual (March 6), leaving the patient $20.00; the 837s
+    show the claim sent March 9 to Blue Cross as the visit's second payer, AMT*EAF $20.00; Blue Cross never posted anything.
+    On March 20 the patient paid `pat_paid` dollars in EMA (Patient Payments, posted on the patient side as EMA posts it,
+    joined to the visit's line)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import adj, charge, pay
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    both = {"primary": MED, "secondary": BCP}
+    v = {"cpt": "11102", "patient": 1, "svc": D(2026, 3, 5)}
+    rows = [charge(F.link_no(75), amount=86.66, posted=D(2026, 3, 5), **v, **both),
+            pay(F.link_no(75), "PAPER-75A", 60, posted=D(2026, 3, 6), payer=MED, **v, **both),
+            adj(F.link_no(75), "CO-45", 6.66, posted=D(2026, 3, 6), contractual=True, payer=MED, **v, **both),
+            F.production_row(link=None, pat_paid=pat_paid, posted=D(2026, 3, 20), payer="Patient", **v)]
+    s, lg = _world(tmp_path, kind, monkeypatch, rows)
+    send(s, tmp_path, [clm837_second(F.claim_id(75), [("11102", "86.66", "20260305")], BC, "MEMBER000075", left="20.00")],
+         "20260309")
+    got = s.conn.execute("SELECT SUM(pat_paid_joined), SUM(balance), SUM(noncontractual) FROM ema_lines WHERE link = ?",
+                         (F.link_no(75),)).fetchone()
+    det, listed, unseen = _run(s, lg)
+    s.close()
+    return tuple(got), det, listed, unseen
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_second_payers_share_the_patient_paid_is_not_listed_as_never_answered_work(tmp_path, kind, monkeypatch):
+    """The patient paid the $20.00 the first payer left (review gapfix-r1-1): EMA's balance is $0 and nothing was written
+    off, so the practice holds every dollar of the charge ($60 from Medicare, $6.66 contractual, $20 from the patient). A
+    late answer from Blue Cross could only turn into a refund to the patient: nothing is owed to the practice, so the claim
+    is not listed (counted for the maintainers, meta ema:wiring), as the rule for a second payer never billed treats the
+    same money ('the patient paid the share'). Before: listed as never-answered Work-now work at $20.00 (on the real data
+    four claims to a second payer, $393.57, $351.08 of it in Work now)."""
+    from tests import ema_fixtures as F
+    got, det, listed, unseen = _patient_paid_world(tmp_path, kind, monkeypatch, 20.00)
+    assert got == (2000, 0, 0), got          # the patient paid the $20.00; nothing open, nothing written off
+    item = listed.get(F.claim_id(75))
+    assert item is None, (
+        f"listed as never-answered work at ${(item['shortfall_cents'] or 0) / 100:.2f} ({item['work_state']}; evidence "
+        f"second_payer_left_cents={json.loads(item['evidence']).get('second_payer_left_cents')}): the patient paid the share "
+        "the first payer left, so the second payer owes the practice nothing")
+    assert det.ema_counts.get("open_claim_second_patient_paid") == 1, dict(det.ema_counts)
+    assert (unseen.get("n") or 0) == 0, unseen
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_second_payers_share_the_patient_paid_in_part_is_listed_at_the_rest(tmp_path, kind, monkeypatch):
+    """The patient paid $12.00 of the $20.00 the first payer left, and Blue Cross never answered: $8.00 of the share is
+    still owed. The claim is listed at $8.00 (what the first payer left, less what the patient paid), never at the whole
+    share the practice already holds part of."""
+    from tests import ema_fixtures as F
+    got, det, listed, unseen = _patient_paid_world(tmp_path, kind, monkeypatch, 12.00)
+    assert got[0] == 1200, got
+    item = listed.get(F.claim_id(75))
+    assert item is not None, dict(det.ema_counts)
+    assert item["shortfall_cents"] == 800, item["shortfall_cents"]
+    ev = json.loads(item["evidence"])
+    assert ev.get("second_payer_left_cents") == 2000 and ev.get("ema_patient_paid_cents") == 1200, ev
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("after", ["payment", "write_off"])
+def test_the_first_payers_posting_never_answers_a_second_payers_claim_found_by_its_bill(tmp_path, kind, monkeypatch, after):
+    """The guard of G6 when the claim's EMA claim is found by its bill rather than its content (review gapfix-r2-4). Visit
+    March 5 (11102 at $86.66): EMA's claim 73 has Medicare Test Region as its first payer and Blue Cross as its second; the
+    A/R pairs the first payer's claim (submission 1 of the bill) with EMA claim 73. The 837s show submission 2 of the same
+    bill sent March 9 to Blue Cross as the SECOND payer (SBR01 S; Medicare paid $60 and left $26.66). After that send only
+    Medicare's name is on EMA's claim: 'payment', Medicare's $60 posted March 12 (its ERA posted three days late);
+    'write_off', Medicare's $60 posted March 6 and the practice's CO-206 write-off of the $26.66 posted April 12 under
+    Medicare's name (the real-data pattern: write-offs under the first payer's name 31 days after the send, nothing from
+    the second payer). Blue Cross never posted anything: the claim is listed or counted, never dropped as answered.
+    Before: the bill bridge handed submission 2 EMA claim 73 as its own, with no second-payer mark, so Medicare's posting
+    answered the claim to Blue Cross and it left every list and count (counted only as 837_answered_in_ema)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import adj, charge, pay
+    MED, BCP = F.PAYERS["medicare"], F.PAYERS["bcbs"]
+    both = {"primary": MED, "secondary": BCP}
+    v = {"cpt": "11102", "patient": 1, "svc": D(2026, 3, 5)}
+    rows = [charge(F.link_no(73), amount=86.66, posted=D(2026, 3, 5), **v, **both)]
+    if after == "payment":
+        rows.append(pay(F.link_no(73), "PAPER-73A", 60, posted=D(2026, 3, 12), payer=MED, **v, **both))
+    else:
+        rows += [pay(F.link_no(73), "PAPER-73A", 60, posted=D(2026, 3, 6), payer=MED, **v, **both),
+                 adj(F.link_no(73), "CO-206", 26.66, posted=D(2026, 4, 12), payer=MED, **v, **both)]
+    ar = [F.ar_row(claim=F.claim_id(73, sub=1), link=F.link_no(73), coverage="Secondary", current=26.66, cpt="11102",
+                   svc=D(2026, 3, 5), patient=1, aging=D(2026, 4, 25), primary=MED, secondary=BCP)]
+    s, lg = _world(tmp_path, kind, monkeypatch, rows, ar)
+    sub2 = F.claim_id(73, sub=2)
+    send(s, tmp_path, [clm837_second(sub2, [("11102", "86.66", "20260305")], BC, "MEMBER000073")], "20260309")
+    det, listed, unseen = _run(s, lg)
+    counted = [r[0] for r in unseen.get("claims") or []]
+    assert sub2 in listed or sub2 in counted, (
+        f"the claim to the second payer was dropped as answered (counts: "
+        f"{ {k: v for k, v in det.ema_counts.items() if k.startswith('837_')} }): the only posting after its send is the "
+        "FIRST payer's")
+    if sub2 in listed:
+        item = listed[sub2]
+        assert item["ema_link"] is None and json.loads(item["evidence"]).get("visit_ema_claim") == F.link_no(73), item
+        assert 0 < (item["shortfall_cents"] or 0) <= 2666, item["shortfall_cents"]
+    s.close()
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_small_plan_that_never_sends_eras_is_judged_by_its_nearest_claims(tmp_path, kind):
     """A small plan (payer id SP001) sent no ERA for any of its twelve claims, two a month from January to June: around any
@@ -521,3 +883,39 @@ def test_a_small_plan_that_never_sends_eras_is_judged_by_its_nearest_claims(tmp_
     sp = [p for p in no_era if p.get("payer_id") == "SP001"]
     assert len(sp) == 1 and sp[0]["unchecked"] == 12, no_era
     s.close()
+
+
+# ------------------------------------------------------------------------------------------ the house rules on this code
+# the functions the never-answered gap's unit added (detect, insights, api_ema, ema_checks): every except block logs
+# through runlog.caught or raises (CLAUDE.md, Never: catch an exception without logging it), as tests/test_fx_837.py checks
+# for the 837 pass (review gapfix-r2-9). archive._held_bills is left out: its one silent block was there before the unit.
+GAP_FUNCTIONS = {
+    "remitwatch/detect.py": ("_item_links", "_waiting_claim", "_waiting_ema_claims", "_note_waiting_report", "_ar_held_open",
+                             "_count_unseen", "_ema_reports_from", "_finish_unseen", "_same_group", "_unseen_ema_lines",
+                             "_listed_before", "_left_unsent"),
+    "remitwatch/insights.py": ("_d", "unseen_summary", "_unseen_837", "_usd_words"),
+    "remitwatch/api_ema.py": ("_unseen_rows", "unseen", "_unseen_csv_rows", "unseen_csv"),
+    "remitwatch/ema_checks.py": ("_second_group",),
+}
+
+
+def test_every_except_block_the_gap_fix_added_logs_through_runlog_caught():
+    import ast
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def logs(h: ast.ExceptHandler) -> bool:
+        return any((isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "caught"
+                    and isinstance(n.func.value, ast.Name) and n.func.value.id == "runlog") or isinstance(n, ast.Raise)
+                   for st in h.body for n in ast.walk(st))
+    silent, seen = [], set()
+    for rel, names in GAP_FUNCTIONS.items():
+        with open(os.path.join(root, rel), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in names:
+                seen.add((rel, fn.name))
+                for h in ast.walk(fn):
+                    if isinstance(h, ast.ExceptHandler) and not logs(h):
+                        silent.append(f"{rel}:{h.lineno} {fn.name}")
+    assert len(seen) == sum(len(v) for v in GAP_FUNCTIONS.values()), sorted(seen)
+    assert not silent, "except blocks with no runlog.caught: " + "; ".join(sorted(set(silent)))
