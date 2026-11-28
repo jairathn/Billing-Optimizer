@@ -414,7 +414,7 @@ def _decision_pending(row: dict, run_at: str | None) -> bool:
 @router.get("/api/ema/today")
 def today(user: str = Depends(_user)):
     """Today's counts beside the plan: the money items by state (Work now with the follow-ups due, which is the Worklist's
-    default; the follow-ups due among them; Waiting; and the four that need nothing today), EMA's automatic write-offs
+    default, and what in it closes within 7 days; the follow-ups due among them; Waiting; and the four that need nothing today), EMA's automatic write-offs
     still appealable, the items nobody has worked (inside Work now), the payments to post and credits to refund, the
     patterns that wait for the owner's decision, the payments EMA posted with no remittance last month, the reports'
     ages and what the run noted. Each count carries the Worklist filter it was counted with (`go`): a click opens exactly
@@ -457,6 +457,9 @@ def today(user: str = Depends(_user)):
         if ready:
             for key in TODAY_STATES:
                 out["states"][key] = dict(count({"state": key, "status": "all", "deadline": ""}), label=STATE_WORDS[key])
+            # inside Work now, what closes within 7 days: Today's strip says it as a part of the whole, so it is counted
+            # with the Worklist's own filter (the list a click opens), never taken from another population
+            out["states"]["todo"]["due7"] = count({"state": "todo", "status": "all", "deadline": "week"})
         if has_outcome:
             out["auto_written_off"] = count({"ema": "auto_written_off", "status": TODO, "deadline": "valid", "sort": "shortfall"})
         if has_outcome and through:

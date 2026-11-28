@@ -701,13 +701,18 @@ td.day sup.muted { display: none; } /* the unexplained asterisk: the estimate is
 .plan > .step:first-child { border-top: 0; }
 .step .num { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--surface-2);
   border: 1px solid var(--border); color: var(--text-2); font-size: var(--fs-sm); font-weight: var(--fw-semibold); }
-/* the first step not done is the next one */
-.step.is-next, .plan > .step:not(.is-done):first-child, .plan > .step.is-done + .step:not(.is-done) {
-  background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
-.step.is-next .num, .plan > .step:not(.is-done):first-child .num, .plan > .step.is-done + .step:not(.is-done) .num {
-  background: var(--text); border-color: var(--text); color: var(--surface); }
-.step.is-done .num { background: var(--success-soft); border-color: transparent; color: var(--success); }
-.step.is-done .title { color: var(--text-2); }
+/* the first step not done is the next one (today.js marks it is-next) */
+.step.is-next { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
+.step.is-next .num { background: var(--text); border-color: var(--text); color: var(--surface); }
+/* a done step is one line: a check, its title and its words, a quiet Review link */
+.step.is-done { padding-top: var(--sp-3); padding-bottom: var(--sp-3); }
+.step.is-done .num { width: 22px; height: 22px; margin: 0 3px; background: var(--success-soft); border-color: transparent; color: var(--success); }
+.step.is-done .num .i { width: 14px; height: 14px; }
+.step.is-done .body { display: flex; align-items: baseline; gap: var(--sp-2); }
+.step.is-done .title { flex: none; font-weight: var(--fw-medium); color: var(--text-2); }
+.step.is-done .line { min-width: 0; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-3); }
+.step.is-done .money b { font-size: var(--fs-md); font-weight: var(--fw-medium); color: var(--text-2); }
+.step > .review { grid-column: 4; justify-self: end; font-size: var(--fs-sm); color: var(--text-2); }
 .step .body { min-width: 0; }
 .step .title { font-size: var(--fs-md); line-height: var(--lh-md); font-weight: var(--fw-semibold); color: var(--text); }
 .step .line { margin-top: 2px; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
@@ -717,8 +722,35 @@ td.day sup.muted { display: none; } /* the unexplained asterisk: the estimate is
 .step .money span { font-size: var(--fs-xs); color: var(--text-3); }
 .step > button { grid-column: 4; width: 100%; min-width: 0; }
 /* only the next step's button is filled; the others are secondary until their turn */
-.plan > .step:not(:first-child):not(.is-next) > button.primary { background: var(--surface); border-color: var(--border-strong); color: var(--text); box-shadow: none; }
-.plan > .step.is-done + .step:not(.is-done) > button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.plan > .step:not(.is-next) > button.primary { background: var(--surface); border-color: var(--border-strong); color: var(--text); box-shadow: none; }
+/* Today's strip: the whole and its parts on the left, the week and what deadlines took on the right; hairlines between */
+.td-strip { display: grid; grid-template-columns: minmax(0, 1.8fr) repeat(2, minmax(0, 1fr)); margin: 0 0 var(--sp-3);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); }
+.td-strip > div { min-width: 0; padding: var(--sp-4) var(--sp-5); }
+.td-strip > div + div { border-left: 1px solid var(--border); }
+.td-strip a { display: block; color: inherit; text-decoration: none; }
+.td-strip a:hover .fig, .td-strip a:focus-visible .fig { text-decoration: underline; text-decoration-color: var(--border-control); text-underline-offset: 4px; }
+.td-strip .lbl { display: block; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
+.td-strip .fig { display: block; margin-top: 2px; font-size: var(--fs-2xl); line-height: var(--lh-2xl); font-weight: var(--fw-semibold); letter-spacing: -.02em; color: var(--text); }
+.td-whole .fig { font-size: var(--fs-fig); line-height: var(--lh-fig); }
+.td-strip .fig small { margin-left: var(--sp-2); font-size: var(--fs-sm); font-weight: var(--fw-regular); letter-spacing: 0; color: var(--text-3); }
+.td-sub { display: block; margin-top: var(--sp-1); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-3); }
+.td-comp { display: block; width: 100%; max-width: 420px; height: 6px; margin: var(--sp-3) 0 var(--sp-2); border-radius: var(--r-full); overflow: hidden; }
+.td-comp .new, .td-legend i.new { fill: var(--text-2); background: var(--text-2); }
+.td-comp .fu, .td-legend i.fu { fill: var(--border-control); background: var(--border-control); }
+.td-legend { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); }
+.td-legend a { display: inline; color: inherit; }
+.td-legend a:hover { color: var(--text); text-decoration: underline; }
+.td-legend i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; }
+.td-strip a.td-due { display: inline-block; margin-top: var(--sp-2); font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: var(--fw-semibold); color: var(--danger); }
+.td-strip a.td-due:hover { text-decoration: underline; }
+#tdMoreSlot .oneline { margin: 0 0 var(--sp-2); }
+/* What changed and Bigger wins side by side; each change row is its own link */
+.td-pair { margin-top: var(--sp-6); }
+.td-pair > .panel { margin: 0; }
+a.change { color: inherit; text-decoration: none; }
+a.change:hover > div { text-decoration: underline; text-decoration-color: var(--border-control); }
+a.change .chev { flex: none; width: 16px; height: 16px; color: var(--text-3); }
 .progress { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-3); }
 .progress .track { width: 96px; height: 6px; border-radius: var(--r-full); background: var(--surface-3); overflow: hidden; }
 .progress .track i { display: block; height: 100%; border-radius: var(--r-full); background: var(--success); }
@@ -1069,11 +1101,10 @@ input.switch:checked::after { transform: translateX(14px); }
 .banner.compact { padding-top: var(--sp-2); padding-bottom: var(--sp-2); font-size: var(--fs-sm); align-items: center; }
 .banner.compact::before { width: 16px; height: 16px; top: 10px; }
 .banner.compact:has(> .b-body)::before { margin-top: 0; }
-/* today's banners, told apart by where they sit: safe mode in #scBar; the blind spot draws a red left edge inline */
+/* safe mode sits in #scBar, above every page; a late feed and the blind spot are the stale banner */
 #scBar .banner { background: var(--danger-soft); border-color: var(--danger-border); }
 #scBar .banner::before { background: var(--danger); -webkit-mask-image: var(--i-stop); mask-image: var(--i-stop); }
-.banner[style*="--bad"] { border-left-color: var(--warning-border) !important; background: var(--warning-soft); border-color: var(--warning-border); }
-.banner[style*="--bad"]::before { background: var(--warning); -webkit-mask-image: var(--i-clock); mask-image: var(--i-clock); }
+.banner details.why { margin-top: var(--sp-1); }
 /* a smaller notice inside a card */
 .notice, .warnbox { position: relative; display: block; margin: var(--sp-2) 0; padding: 10px var(--sp-3) 10px 38px;
   border: 1px solid var(--warning-border); border-radius: var(--r-md); background: var(--warning-soft); color: var(--text); font-size: var(--fs-sm); line-height: 20px; }
@@ -1376,6 +1407,11 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
   #drawer, .drawer { width: min(var(--drawer-w), calc(100vw - var(--rail-w))); }
   .batch { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; }
   .batch > .b-due, .batch > .b-prog { display: none; }
+  /* the strip: the whole across the top, the week and the deadlines side by side under it */
+  .td-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .td-strip > .td-whole { grid-column: 1 / -1; }
+  .td-strip > div + div { border-left: 0; border-top: 1px solid var(--border); }
+  .td-strip > div:last-child { border-left: 1px solid var(--border); }
 }
 @media (max-width: 760px) {
   .export { grid-template-columns: 1fr; }
@@ -1426,7 +1462,13 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
   .tile { flex: 0 0 auto; min-width: 150px; padding: 10px 12px; }
   .tile .t-v { font-size: 20px; line-height: 26px; }
   .step { grid-auto-flow: row; grid-template-columns: 28px minmax(0, 1fr) auto; gap: var(--sp-3); padding: 14px var(--sp-4); }
+  .step.is-done .line { display: none; }
+  .step > .review { grid-column: 3; }
+  .td-strip > div { padding: var(--sp-3) var(--sp-4); }
+  .td-whole .fig { font-size: var(--fs-2xl); line-height: var(--lh-2xl); }
+  .td-strip .fig { font-size: var(--fs-xl); line-height: var(--lh-xl); }
   .step > button { grid-column: 1 / -1; width: 100%; height: 44px; }
+  .step:not(.is-next) > button { grid-column: 3; width: auto; height: 36px; }
   .step .money b { font-size: var(--fs-md); }
   .banner { font-size: var(--fs-sm); line-height: 20px; }
   .banner:has(> .b-body) { flex-wrap: wrap; }

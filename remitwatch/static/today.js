@@ -84,77 +84,111 @@ function bindGuide(v){
 function openGuide(){ guideReset(); if(state.tab !== 'today'){ state.tab = 'today'; location.hash = 'today'; } render(); }
 
 // ---------------------------------------------------------------- Today
+// One banner only when a feed is late (safe mode has its own bar above every page); the page head; one strip whose
+// figures add up (Work now as the whole, its new items and follow-ups due as parts, what closes within 7 days inside it,
+// and beside it the week's progress and what deadlines took); the plan; What changed and Bigger wins side by side; the
+// batches last. The money scoreboard and the items by state are on Results (tdBoard), EMA's exports line on Data
+// (tdEmaInto), the self-checks on Data with a dot on Data in the sidebar.
 async function todayTab(v){
-  // The plan comes from the brief and is drawn as soon as the brief answers. EMA's counts by state (/api/ema/today), the
-  // money scoreboard (/api/results/scoreboard) and the five EMA exports' ages (/api/ema/exports) each fill their own
-  // place when their answer comes: a slow one never holds the plan back, a failed one says so in one line, and step 1
-  // never says all clear before an answer says no feed is behind
-  const tdP = api('/api/ema/today').catch(()=>null), sbP = api('/api/results/scoreboard').catch(()=>null),
-    exP = api('/api/ema/exports').catch(()=>null);
+  // The plan comes from the brief and is drawn as soon as the brief answers. EMA's counts by state (/api/ema/today) fill
+  // the strip when they come: a slow answer never holds the plan back, a failed one says so in one line, and step 1 never
+  // says all clear before an answer says no feed is behind
+  const tdP = api('/api/ema/today').catch(()=>null);
   const b = await brief(true);
   if(!b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
   const look = {blind: undefined};       // undefined: no answer yet; null: none came back; true or false: what it said
-  const w = b.work.total;
-  const done = b.done || {};
-  // the day the lists count by (the brief's), not the browser's: the header and "closes today" agree
+  // the day the lists count by (the brief's), not the browser's: the eyebrow and "closes today" agree
   const day = new Date(siteDay()+'T12:00:00Z').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric', timeZone:'UTC'});
   const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED','SWING'].includes(a.kind) && a.severity!=='info').slice(0,3);   // a big change in one run has the banner above every page
-  const missed = b.missed || {};
-  // a phone: the scoreboard and the counts by state stay above the plan; the lines after them (what is not on today's
-  // list, what else waits, the exports' ages) come right below it, so the plan's first step is on the first screen
-  const narrow = tdNarrow(), side = '<div id="tdMoreSlot"></div><div id="tdEmaSlot"></div>';
+  const steps = tdSteps(b, look);
   v.innerHTML = `${guideSeen() ? '' : guideHtml(b)}
     <div id="tdBlind"></div>
     <div id="tdHealth">${tdHealthHtml(b, look.blind)}</div>
-    <div class="today-head"><div><div class="muted small">${esc(day)}</div><h1 class="page-title">Today's plan</h1></div>
-      <div class="donebox"><span>Moved on today <b>${done.today_n||0}</b></span><span>This week <b>${pl(done.week_n, 'item')}</b>, ${money(done.week_cents||0)} sent or paid</span>${(b.recovered||{}).year_cents ? `<span>Paid back in ${esc(b.recovered.year)} <b>${money(b.recovered.year_cents)}</b></span>` : ''}</div></div>
-    <div id="tdScoreSlot"></div>
-    <div id="tdCountsSlot"></div>
-    ${narrow ? '' : side}
-    <div class="plan" id="tdPlan">${tdPlanHtml(tdSteps(b, look))}</div>
-    ${narrow ? side : ''}
-    <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.</span></div>
-      <div class="batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>
-      ${b.batches.length > 8 ? `<button class="ghost" id="allBatches">Show all ${b.batches.length} batches</button>` : ''}</div>
-    ${alerts.length ? `<div class="panel"><div class="panel-head"><h2>What changed</h2><span class="muted small">Payer behaviour that moved recently.</span></div>${alerts.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">Look into it</button></div>`).join('')}<a href="#alerts" class="small">All alerts</a></div>` : ''}
-    <div class="panel wins-teaser"><div class="panel-head"><h2>Bigger wins</h2><span class="muted small">Fixed once, collected on every future claim.</span></div>${winsTeaser(b)}<button id="goWins">Open Bigger wins</button></div>
-    ${missed.n ? `<div class="missed small muted">Missed in the last ${missed.days} days: ${Number(missed.n).toLocaleString()} items worth ${money(missed.cents)} passed their filing window without anyone working them. <a href="#" id="seeMissed">See them</a></div>` : ''}`;
+    <div class="today-head"><div><span class="eyebrow">${esc(day)}</span><h1 class="page-title">Today</h1></div></div>
+    <div id="tdCountsSlot">${tdStripHtml(undefined, b)}</div>
+    <div id="tdMoreSlot"></div>
+    <div class="section-head"><h2 id="tdPlanHead">${tdPlanHead(steps)}</h2></div>
+    <div class="plan" id="tdPlan">${tdPlanHtml(steps)}</div>
+    <div class="grid two td-pair">
+      <section class="panel td-changed"><div class="panel-head"><h2>What changed</h2><a href="#alerts" class="small">All alerts</a></div>
+        ${alerts.length ? alerts.map(a=>`<a href="#" class="change seeA" data-id="${esc(a.alert_id)}"><span class="dot sev-${esc(a.severity)}" aria-hidden="true"></span><div>${esc(a.title)}</div>${TD_CHEV}</a>`).join('')
+          : '<div class="muted small">No payer changed how it pays in the newest runs.</div>'}</section>
+      <section class="panel wins-teaser"><div class="panel-head"><h2>Bigger wins</h2><a href="#wins" class="small" id="goWins">Open Bigger wins</a></div>
+        <div class="muted small">Fixed once, collected on every future claim.</div>${winsTeaser(b)}</section>
+    </div>
+    <div class="section-head"><h2>Batches</h2><span class="hint">One kind of work for one payer, so one person can clear a pile in one sitting. ${pl(b.batches.length, 'batch')}, ${money(b.work.total.cents)} inside a filing window.</span></div>
+    <div class="list-card batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>
+    ${b.batches.length > 8 ? `<button class="ghost" id="allBatches">Show all ${b.batches.length} batches</button>` : ''}`;
   bindGuide(v);
   tdBindPlan(v, b, look);
   tdBindLinks(v.querySelector('#tdHealth'));
+  tdBindStrip(v.querySelector('#tdCountsSlot'), null);
   bindBatches(v, b);
   const all = v.querySelector('#allBatches'); if(all) all.onclick = () => { v.querySelector('#batchList').innerHTML = batchRows(b, b.batches); bindBatches(v, b); all.remove(); };
-  v.querySelectorAll('.seeA').forEach(bt=>bt.onclick=()=>{ const a = alerts.find(x=>x.alert_id===bt.dataset.id); if(a && typeof seeAlert==='function') seeAlert(a); });
-  const gw = v.querySelector('#goWins'); if(gw) gw.onclick = () => { state.tab='wins'; location.hash='wins'; render(); };
-  const sm = v.querySelector('#seeMissed'); if(sm) sm.onclick = e => { e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
-  // what the blind spot says decides step 1 and whether the health banner repeats a stale feed
+  v.querySelectorAll('.seeA').forEach(x=>x.onclick=e=>{ if(e) e.preventDefault(); const a = alerts.find(y=>y.alert_id===x.dataset.id); if(a && typeof seeAlert==='function') seeAlert(a); });
+  const gw = v.querySelector('#goWins'); if(gw) gw.onclick = e => { if(e) e.preventDefault(); state.tab='wins'; location.hash='wins'; render(); };
+  // what the blind spot says decides step 1 and whether the late-feed banner says it (the blind spot says it in dollars)
   const seen = blind => { look.blind = blind;
     const h = v.querySelector('#tdHealth'); if(h){ h.innerHTML = tdHealthHtml(b, blind); tdBindLinks(h); }
     tdBindPlan(v, b, look, true); };
-  await Promise.all([
-    sbP.then(sb => { const el = v.querySelector('#tdScoreSlot'); if(el){ el.innerHTML = tdScoreHtml(sb); tdBindScore(el, sb); } }),
-    tdP.then(async td => {
-      const el = v.querySelector('#tdCountsSlot'), bb = v.querySelector('#tdBlind');
-      if(td){
-        if(el){ el.innerHTML = tdStatesHtml(td); tdBindCounts(el, td); }
-        const more = v.querySelector('#tdMoreSlot'); if(more){ more.innerHTML = tdMoreHtml(td); tdBindCounts(more, td); }
-        if(bb){ bb.innerHTML = tdBlindHtml(td.blind); tdBindLinks(bb); }
-        seen(!!(td.blind && td.blind.blind));
-        return;
-      }
-      // the counts did not come back (a store busy with a run, a cold start): the blind spot is asked on its own, as every
-      // other page asks it, and nothing is ticked as clear while it is not known
-      if(el) el.innerHTML = `<div class="oneline sev-medium" id="tdCountsFail">Today's EMA counts did not come back. Reload in a minute.</div>`;
-      const bl = await tdBlindBanner(bb);
-      seen(bl ? !!bl.blind : null);
-    }),
-    Promise.all([tdP, exP]).then(([td, ex]) => { const el = v.querySelector('#tdEmaSlot');
-      if(el){ el.innerHTML = (td || ex) ? tdEmaLine(td, ex) : ''; tdBindLinks(el); } }),
-  ]);
+  const td = await tdP;
+  const el = v.querySelector('#tdCountsSlot'), bb = v.querySelector('#tdBlind');
+  if(td){
+    if(el){ el.innerHTML = tdStripHtml(td, b); tdBindStrip(el, td); }
+    const more = v.querySelector('#tdMoreSlot'); if(more){ more.innerHTML = tdMoreHtml(td); tdBindCounts(more, td); }
+    if(bb){ bb.innerHTML = tdBlindHtml(td.blind); tdBindLinks(bb); }
+    seen(!!(td.blind && td.blind.blind));
+    return;
+  }
+  // the counts did not come back (a store busy with a run, a cold start): the blind spot is asked on its own, as every
+  // other page asks it, and nothing is ticked as clear while it is not known
+  if(el){ el.innerHTML = tdStripHtml(null, b) + `<div class="oneline sev-medium" id="tdCountsFail">Today's EMA counts did not come back. Reload in a minute.</div>`; tdBindStrip(el, null); }
+  const bl = await tdBlindBanner(bb);
+  seen(bl ? !!bl.blind : null);
+}
+const TD_CHEV = '<svg class="i chev" aria-hidden="true"><use href="/static/icons.svg#i-chev-r"/></svg>';
+
+// The strip: Work now as the whole (its count opens the Worklist's own default list), cut into what is new and the
+// follow-ups that came due, and inside it in red what closes within 7 days; beside it the week (sent or paid) and what
+// passed its filing window unworked in the last 30 days. `td` undefined: the counts have not answered yet (the whole
+// shows a dash; the week's figures come from the brief at once).
+function tdStripHtml(td, b){
+  const st = (td && td.states) || {}, whole = td && td.ready ? st.todo : null, fu = st.followup_due || {n: 0, cents: 0};
+  const bs = (td && td.basis) || {}, done = b.done || {}, missed = b.missed || {}, rec = b.recovered || {};
+  let left;
+  if(whole){
+    const newN = Math.max(0, (whole.n||0) - (fu.n||0)), newC = Math.max(0, (whole.cents||0) - (fu.cents||0));
+    // the parts are shown in whole dollars that add up to the whole as shown (a reader adds them): the new part is the
+    // whole's dollars less the follow-ups' dollars, never off by a rounding
+    const newShown = Math.max(0, Math.round((whole.cents||0) / 100) - Math.round((fu.cents||0) / 100)) * 100;
+    const part = whole.cents > 0 ? Math.round(newC / whole.cents * 1000) / 10 : (whole.n ? Math.round(newN / whole.n * 1000) / 10 : 100);
+    const due = whole.due7;
+    left = `<div class="td-whole">
+      <a href="#" data-td="todo" title="${esc(TD_STATES[0][3] + '. ' + (bs.shortfall || ''))}"><span class="lbl">Work now</span>
+        <span class="fig">${money(whole.cents)}<small>${esc(pl(whole.n, 'item'))}</small></span></a>
+      <svg class="td-comp" viewBox="0 0 100 6" preserveAspectRatio="none" role="img" aria-label="New ${esc(money(newC))}, follow-ups due ${esc(money(fu.cents||0))}"><rect class="new" width="${part}" height="6"/><rect class="fu" x="${part}" width="${100 - part}" height="6"/></svg>
+      <div class="td-legend"><span><i class="new"></i>New ${money(newShown)} (${Number(newN).toLocaleString()})</span>
+        <a href="#" data-td="followup_due" title="${esc(TD_STATES[1][3])}"><i class="fu"></i>Follow-ups due ${money(fu.cents||0)} (${Number(fu.n||0).toLocaleString()})</a></div>
+      ${due && due.n ? `<a href="#" class="td-due" data-td="todo_week" title="Inside Work now: the filing window closes within 7 days">Of which closes in 7 days: ${money(due.cents)} (${Number(due.n).toLocaleString()})</a>`
+        : (due ? '<span class="td-sub">Nothing in it closes within 7 days.</span>' : '')}
+    </div>`;
+  } else left = `<div class="td-whole"><span class="lbl">Work now</span><span class="fig">–</span><span class="td-sub">${td === undefined ? 'Counting…' : ''}</span></div>`;
+  const week = `<div><span class="lbl">Sent or paid this week</span><span class="fig">${money(done.week_cents||0)}<small>${esc(pl(done.week_n||0, 'item'))}</small></span>
+      <span class="td-sub">${Number(done.today_n||0).toLocaleString()} moved on today${rec.year_cents ? ` · ${money(rec.year_cents)} paid back in ${esc(rec.year)}` : ''}</span></div>`;
+  const lost = `<div><a href="#" id="seeMissed" title="Items whose filing window closed in the last ${esc(missed.days || 30)} days while nobody worked them"><span class="lbl">Lost to deadlines, last ${esc(missed.days || 30)} days</span>
+      <span class="fig">${money(missed.cents||0)}<small>${esc(pl(missed.n||0, 'item'))}</small></span></a>
+      <span class="td-sub">${missed.n ? 'passed their window unworked' : 'nothing passed its window unworked'}</span></div>`;
+  return `<div class="td-strip"${whole ? ' id="tdStates"' : ''} aria-label="Today in figures">${left}${week}${lost}</div>`;
+}
+function tdBindStrip(el, td){
+  if(!el) return;
+  const sm = el.querySelector('#seeMissed'); if(sm) sm.onclick = e => { if(e) e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
+  if(td) tdBindCounts(el, td);
 }
 
 // the plan's steps from the brief. Step 1 is ticked "nothing closes this week" only once the blind spot is known to be
-// clear (look.blind === false) and the self-check's line (/api/meta banner: safe mode, or what the app cannot see) is not up
+// clear (look.blind === false) and the self-check's line (/api/meta banner: safe mode, or what the app cannot see) is not up.
+// Each step carries its money and count apart from its words, so they line up in their own column.
 function tdSteps(b, look){
   const blind = look.blind === true;
   const held = look.blind !== false || !!((state.meta || {}).banner);
@@ -164,40 +198,77 @@ function tdSteps(b, look){
   // never "all clear" while blind: what closes is what the files on hand show
   // on a phone the three kinds worth most and how many more, so Start stays on the first screen; the list has them all
   const kinds7 = tdNarrow() && byKind7.length > 3 ? byKind7.slice(0, 3) : byKind7, more7 = byKind7.length - kinds7.length;
-  steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${pl(w.due7_n, 'item')} worth ${money(w.due7_cents)} ${w.due7_n===1?'has':'have'} a filing window that closes within 7 days.`,
-      chips: kinds7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' ') + (more7 ? ` <span class="muted small">and ${more7} more</span>` : ''), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
-    : {n:1, title: blind ? 'Nothing closes this week in the payments on file' : 'Nothing closes this week', line: w.due30_n ? `${pl(w.due30_n, 'item')} worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:!held, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
+  steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`Their filing window closes within 7 days.`,
+      chips: kinds7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' ') + (more7 ? ` <span class="muted small">and ${more7} more</span>` : ''), count: w.due7_n, cents: w.due7_cents, btn: true, go:{deadline:'week', sort:'deadline'}}
+    : {n:1, title: blind ? 'Nothing closes this week in the payments on file' : 'Nothing closes this week', line: w.due30_n ? `${pl(w.due30_n, 'item')} worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:!held,
+       count: w.due30_n || 0, cents: w.due30_n ? w.due30_cents : null, btn: !!w.due30_n, label: 'See the next 30 days', go:{deadline:'month', sort:'deadline'}});
   // money the biller wrote off in EMA while the payer can still be asked for it: the quiet loss
   const wo = b.written_off || {};
-  if(wo.n) steps.push({n:steps.length+1, title:'Work what EMA wrote off', line:`${pl(wo.n, 'item')} worth ${money(wo.cents)} ${wo.n===1?'was':'were'} written off in EMA but ${wo.n===1?'is':'are'} still inside the filing window${(wo.payers||[])[0] ? ` (most: ${esc(wo.payers[0].payer_group)}, ${money(wo.payers[0].cents)})` : ''}. Work ${wo.n===1?'it':'them'}, and reverse the write-off in EMA when the payer pays.`,
-      btn:`Open them (${wo.n})`, go:{handling:'written_off', sort:'shortfall'}});
+  if(wo.n) steps.push({n:steps.length+1, title:'Work what EMA wrote off', line:`Written off in EMA but still inside the filing window${(wo.payers||[])[0] ? ` (most: ${esc(wo.payers[0].payer_group)}, ${money(wo.payers[0].cents)})` : ''}. Reverse the write-off in EMA when the payer pays.`,
+      count: wo.n, cents: wo.cents, btn: true, go:{handling:'written_off', sort:'shortfall'}});
   // claims EMA shows sent and unpaid that no remittance answers: nobody is chasing them, and their filing limit runs
   const na = (b.no_answer || {}).chase || {}, rj = (b.no_answer || {}).rejected || {};
-  if(na.n) steps.push({n:steps.length+1, title:'Chase claims the payer never answered', line:`${pl(na.n, 'claim')} worth ${money(na.cents)} ${na.n===1?'was':'were'} sent and never answered: look ${na.n===1?'it':'them'} up on the payer's portal or call${na.first_deadline ? `; the first one's date is ${esc(longDate(na.first_deadline))}` : ''}.${rj.n ? ` ${Number(rj.n).toLocaleString()} more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit).` : ''}`,
-      chips: kindBadge(b, 'chase'), btn:`Chase them (${na.n})`, go:{kind:'chase', sort:'deadline'}});
-  if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`${pl(fu.n, 'item')} sent to the payer more than ${fu.days} days ago ${fu.n===1?'is':'are'} still unpaid (${money(fu.cents)}). Check the portal or call.${fu.note ? ' <b>' + esc(fu.note) + '</b>' : ''}`, btn:`Follow up (${fu.n})`, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
-  if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}: ${pl(top.n, 'item')} on ${pl(top.claims, 'claim')}, ${money(top.cents)}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
-      chips: kindBadge(b, top.kind), btn:'Open the batch', go:{kind: top.kind, payer: top.payer_group, sort:'deadline'}});
+  if(na.n) steps.push({n:steps.length+1, title:'Chase claims the payer never answered', line:`Sent and never answered: look ${na.n===1?'it':'them'} up on the payer's portal or call${na.first_deadline ? `; the first one's date is ${esc(longDate(na.first_deadline))}` : ''}.${rj.n ? ` ${Number(rj.n).toLocaleString()} more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit).` : ''}`,
+      chips: kindBadge(b, 'chase'), count: na.n, cents: na.cents, unit: 'claim', btn: true, go:{kind:'chase', sort:'deadline'}});
+  if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`Sent more than ${fu.days} days ago and still unpaid. Check the portal or call.${fu.note ? ' <b>' + esc(fu.note) + '</b>' : ''}`, count: fu.n, cents: fu.cents, btn: true, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
+  if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}, on ${pl(top.claims, 'claim')}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
+      chips: kindBadge(b, top.kind), count: top.n, cents: top.cents, btn: true, go:{kind: top.kind, payer: top.payer_group, sort:'deadline'}});
   const older_n = Math.max(0, (b.work.undated_n||0) - (dec ? dec.n : 0)), older_c = Math.max(0, (b.work.undated_cents||0) - (dec ? dec.cents : 0));
-  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`${pl(dec.n, 'item')} worth ${money(dec.cents)} paid in the last ${dec.days||120} days${dec.since ? ` (since ${esc(longDate(dec.since))})` : ''} need a person to say what they are (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${pl(older_n, 'older one')} (${money(older_c)})</a> ${older_n===1?'has':'have'} no filing date either.`:''}`, btn:`Look at them (${dec.n})`, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
-  else if(older_n) steps.push({n:steps.length+1, title:'Items with no filing date', line:`${pl(older_n, 'item')} worth ${money(older_c)} ${older_n===1?'has':'have'} no filing date: a person has to say what they are.`, btn:'Look at them', go:{deadline:'older', status:'open,in_progress', sort:'shortfall'}});
+  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`Paid in the last ${dec.days||120} days${dec.since ? ` (since ${esc(longDate(dec.since))})` : ''}: say what each one is (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${pl(older_n, 'older one')} (${money(older_c)})</a> ${older_n===1?'has':'have'} no filing date either.`:''}`,
+      count: dec.n, cents: dec.cents, btn: true, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
+  else if(older_n) steps.push({n:steps.length+1, title:'Items with no filing date', line:'A person has to say what they are.', count: older_n, cents: older_c, btn: true, go:{deadline:'older', status:'open,in_progress', sort:'shortfall'}});
   return steps;
 }
+function tdPlanHead(steps){ const d = steps.filter(s => s.done).length; return `Plan <span class="muted">· ${d} of ${steps.length} done</span>`; }
+// One row per step on fixed columns (number, words, money, button), so money and buttons line up. The first step not done
+// is the next one: tinted, with the page's one filled button "Start (N)"; the others say "Start". A done step is one line
+// with a check and a quiet Review link.
 function tdPlanHtml(steps){
-  return steps.map(s=>`<div class="step ${s.done?'is-done':''}"><div class="num">${s.done?'✓':s.n}</div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div>${s.chips?`<div class="chips">${s.chips}</div>`:''}</div>${s.btn?`<button class="${s.done?'':'primary'}" data-step="${s.n}">${esc(s.btn)}</button>`:''}</div>`).join('');
+  const next = steps.find(s => !s.done && s.btn);
+  return steps.map(s => {
+    const cell = s.cents != null && s.count ? `<div class="money"><b>${money(s.cents)}</b><span>${esc(pl(s.count, s.unit || 'item'))}</span></div>` : '<div class="money"></div>';
+    if(s.done) return `<div class="step is-done"><div class="num"><svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-check"/></svg></div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div></div>${cell}${s.btn ? `<a href="#" class="review" data-step="${s.n}">Review</a>` : ''}</div>`;
+    const isNext = s === next, label = s.label || 'Start';
+    const btn = s.btn ? `<button class="${isNext ? 'primary' : ''}" data-step="${s.n}">${esc(isNext && s.count ? `${label} (${Number(s.count).toLocaleString()})` : label)}</button>` : '';
+    return `<div class="step${isNext ? ' is-next' : ''}"><div class="num">${s.n}</div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div>${s.chips?`<div class="chips">${s.chips}</div>`:''}</div>${cell}${btn}</div>`;
+  }).join('');
 }
 function tdBindPlan(v, b, look, redraw){
   const el = v.querySelector('#tdPlan'); if(!el) return;
   const steps = tdSteps(b, look);
-  if(redraw) el.innerHTML = tdPlanHtml(steps);
-  el.querySelectorAll('[data-step]').forEach(bt=>bt.onclick=()=>{ const s = steps.find(x=>String(x.n)===bt.dataset.step); if(s) goWork(s.go); });
+  if(redraw){ el.innerHTML = tdPlanHtml(steps); const h = v.querySelector('#tdPlanHead'); if(h) h.innerHTML = tdPlanHead(steps); }
+  el.querySelectorAll('[data-step]').forEach(bt=>bt.onclick=e=>{ if(e && e.preventDefault) e.preventDefault(); const s = steps.find(x=>String(x.n)===bt.dataset.step); if(s) goWork(s.go); });
   el.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'older', status:'open,in_progress', sort:'shortfall'}); });
 }
-// the data checks that are not right: while a feed is behind, the blind-spot banner says so in dollars, so the health
-// banner does not say it a second time (and holds those checks back until the blind spot is known)
+// A feed that is late, when the blind spot does not already say it in dollars: the one banner Today shows of its own (the
+// other self-checks are on the Data tab, with a dot on Data in the sidebar). Held back until the blind spot is known.
 function tdHealthHtml(b, blind){
-  const bad = (b.health||[]).filter(h=>!h.ok && !((blind === true || blind === undefined) && TD_BLIND_KEYS.has(h.key)));
-  return bad.length ? `<div class="banner"><b>Before you start:</b> ${esc(bad[0].title)}.${tdNarrow() ? '' : ' ' + esc(bad[0].detail||'')} <a href="#data" class="go-data">How to fix</a>${bad.length>1?` · <a href="#data" class="go-data">${bad.length-1} more data ${bad.length-1===1?'check':'checks'}</a>`:''}</div>` : '';
+  if(blind !== false) return '';
+  const late = (b.health||[]).filter(h=>!h.ok && TD_BLIND_KEYS.has(h.key));
+  if(!late.length) return '';
+  const anchor = late[0].key === 'feed' ? 'dtMissing' : 'dtReports';
+  return `<div class="banner stale"><b>Before you start:</b> ${esc(late[0].title)}.${tdNarrow() ? '' : ' ' + esc(late[0].detail||'')} <a href="#data" class="go-data" data-anchor="${anchor}">How to fix</a>${late.length>1?` · <a href="#data" class="go-data" data-anchor="dtReports">${late.length-1} more late ${late.length-1===1?'feed':'feeds'}</a>`:''}</div>`;
+}
+
+// Results' top: the money scoreboard and the items by state, each figure opening the list it was counted with (they were
+// Today's tiles; Today keeps the one figure that adds up). Each part is drawn when its answer comes.
+async function tdBoard(el){
+  if(!el) return;
+  el.innerHTML = '<div id="tdScoreSlot"></div><div id="tdBoardStates"></div>';
+  const sbP = api('/api/results/scoreboard').catch(()=>null), tdP = api('/api/ema/today').catch(()=>null);
+  await Promise.all([
+    sbP.then(sb => { const s = el.querySelector('#tdScoreSlot'); if(s){ s.innerHTML = tdScoreHtml(sb); tdBindScore(s, sb); } }),
+    tdP.then(td => { const c = el.querySelector('#tdBoardStates'); if(!c) return;
+      if(td){ c.innerHTML = tdStatesHtml(td); tdBindCounts(c, td); }
+      else c.innerHTML = '<div class="oneline sev-medium">The counts by state did not come back. Reload in a minute.</div>'; }),
+  ]);
+}
+// Data's top: what EMA's exports and reports say (overdue exports, payments with no remittance, reports that wait)
+async function tdEmaInto(el){
+  if(!el) return;
+  const [td, ex] = await Promise.all([api('/api/ema/today').catch(()=>null), api('/api/ema/exports').catch(()=>null)]);
+  el.innerHTML = (td || ex) ? tdEmaLine(td, ex) : '';
+  tdBindLinks(el);
 }
 
 // ---------------------------------------------------------------- Today: the blind spot, the scoreboard, the counts by state
@@ -214,7 +285,7 @@ const TD_STATES = [['todo', 'Work now', 'to work, follow-ups due included', 'Ite
 const TD_QUIET = [['done', 'done'], ['accepted', 'accepted'], ['expired', 'expired'], ['cant_check', "can't be checked"]];
 // where a link into the Data tab lands (data.js scrolls to it once its panels are drawn)
 const TD_DATA = {post: 'dtPostList', refund: 'dtRefundList'};
-// a phone (640 px or less): the figures in two compact lines, so the plan's first step stays on the first screen
+// a phone (640 px or less): the board's figures in two compact lines, and step 1 names three kinds at most
 function tdNarrow(){ return typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth <= 640; }
 
 // What the site cannot check while a feed (the remittances, EMA's A/R or Production report) is behind, in dollars. Any page
@@ -229,8 +300,8 @@ function tdBlindHtml(bl){
   const anchor = (bl.feeds || []).some(f => f.stale && f.feed === '835') ? 'dtMissing' : 'dtReports';
   const go = `<a href="#data" class="go-data" data-anchor="${anchor}">What to do</a>`;
   // on a phone the headline keeps its dollars and the link; why folds away, so the plan stays on the first screen
-  if(tdNarrow()) return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${head}.</b> ${go}<details style="margin-top:4px"><summary>Why</summary>${lines.map(esc).join(' ')}</details></div>`;
-  return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${head}.</b> ${lines.map(esc).join(' ')} ${go}</div>`;
+  if(tdNarrow()) return `<div class="banner stale" role="status"><b>Blind spot${head}.</b> ${go}<details class="why"><summary>Why</summary>${lines.map(esc).join(' ')}</details></div>`;
+  return `<div class="banner stale" role="status"><b>Blind spot${head}.</b> ${lines.map(esc).join(' ')} ${go}</div>`;
 }
 async function tdBlindBanner(el, given){
   if(!el) return undefined;
@@ -326,7 +397,7 @@ function tdEmaLine(td, ex){
 // whichever door), the payments to post and the credits to refund open their lists on the Data tab
 function tdBindCounts(el, td){
   const st = (td && td.states) || {}, other = (td && td.other) || {};
-  const goOf = k => (st[k] || (td||{})[k] || other[k] || {}).go;
+  const goOf = k => k === 'todo_week' ? ((st.todo || {}).due7 || {}).go : (st[k] || (td||{})[k] || other[k] || {}).go;
   el.querySelectorAll('[data-td]').forEach(x => { const key = x.dataset.td, go = goOf(key); if(!go) return;
     const open = e => { if(e) e.preventDefault();
       if(TD_DATA[key]){ tdGoData(TD_DATA[key]); return; }

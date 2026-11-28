@@ -40,8 +40,26 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
      (the pill says how far remittances reach, the newest payment in its hover) and H10 (on a phone, Find in the tab bar);
      swing banner first inside Upload's and Setup's main. New: tests/test_shell.py.
    - Inline `style=` count: 278 (tests/test_style.py STYLE_ATTRS_MAX).
-3. P4 Today: next.
-4. Brand finish.
+3. P4 Today: DONE (commit "ui-a P4").
+   - Order: a banner only for a late feed (safe mode has #scBar above every page); the eyebrow date and the title
+     "Today"; one strip (Work now as the whole with a composition bar, New and Follow-ups due as its parts, which add up
+     to the whole as shown, and inside it in red what closes within 7 days; beside it Sent or paid this week and Lost to
+     deadlines, last 30 days); the quiet "Not on today's list" line; the plan; What changed and Bigger wins side by side;
+     the batches last (ui-work may move "Not on today's list" and the batches to Work).
+   - The plan: fixed columns (number, words, money, button); the next step is marked is-next and has the page's one
+     filled button "Start (N)"; the others say "Start"; a done step is one line with a check and a quiet Review link;
+     "Plan · N of M done".
+   - /api/ema/today: Work now carries `due7`, counted with the Worklist's own filter (state todo, deadline week), so the
+     red part is inside the whole and opens its own list (api_ema.py, one field).
+   - Moved, without losing a figure: the nine tiles (scoreboard and items by state) to the top of Results
+     (today.js tdBoard, one hook in results.js); EMA's exports line to the top of Data (today.js tdEmaInto, one hook in
+     data.js) and to the pill; the other self-checks stay on Data with the dot in the sidebar.
+   - Tests moved: test_ema_pages2 (the tiles, titles, clicks, compact phone lines and scoreboard read Results' board;
+     the exports line and its links read the Data tab; load order); feed_page.js and clock_page.js wait for #tdPlan and
+     read the date from the eyebrow. New: the strip adds up and opens its lists, the route's due7 equals the Worklist's
+     count, the late-feed-only banner, the board and line placements (tests/test_shell.py).
+   - Inline `style=` count: 275.
+4. Brand finish: next.
 5. docs/DESIGN.md.
 
 ## Numbers measured
@@ -52,6 +70,9 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
 - P1, 1400x900 light and dark, 390x844 light and dark, 22 pages each (plans/tools/ui/checks.js): no overflow, no script
   error, no dialog on any page. Left for the page units: downcoding, faxes and /upload show 2 filled buttons (their own
   content); results shows 7 type sizes; overview's dark alerts link fixed here.
+
+- P4, Today at 1366x650, 1536x730, 1400x900 and 390x844, light and dark: sizes 5 to 6, accent 2, one filled button,
+  no overflow, no error. Start (N) on the first screen at every size. Results keeps 7 sizes (its own page: ui-pages).
 
 ## Next command
 

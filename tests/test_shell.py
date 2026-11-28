@@ -106,3 +106,14 @@ def test_browser_storage_holds_only_the_theme_and_the_sidebar_width_and_never_br
         head = read(page).split("</head>", 1)[0]
         no_flash = re.search(r"<script>(.*?)</script>", head, re.S).group(1)
         assert "try {" in no_flash and "catch(e)" in no_flash, page            # the theme is set before the first paint
+
+
+def test_the_nine_figures_head_results_and_the_exports_line_heads_data():
+    """Today's nine tiles moved to the top of Results (static/today.js tdBoard), drawn on both of its paths (the figures
+    read, or not), before every other panel; EMA's exports line moved to the top of the Data tab (tdEmaInto)."""
+    results, data, today = read("results.js"), read("data.js"), read("today.js")
+    assert "async function tdBoard(el)" in today and "async function tdEmaInto(el)" in today
+    assert results.count('<div id="rsBoard"></div>') == 2 and results.count("tdBoard(v.querySelector('#rsBoard'))") == 2
+    draw = results.split("function rsDraw(v, d, score){", 1)[1].split("\n}\n", 1)[0]
+    assert draw.index('<div id="rsBoard"></div>') < draw.index("${rsDueHtml(d)}")
+    assert '<div id="dtBlind"></div><div id="dtEmaLine"></div>' in data and "tdEmaInto(v.querySelector('#dtEmaLine'))" in data
