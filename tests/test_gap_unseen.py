@@ -304,3 +304,27 @@ def test_claims_sent_after_a_payer_stops_sending_eras_are_counted_not_listed(tmp
     assert len(va) == 1 and va[0]["unchecked"] == 20, no_era
     assert sorted(r[0] for r in _unseen(s).get("claims") or []) == sorted(aug)
     s.close()
+
+
+# ------------------------------------------------------------------------------------ G5: a line EMA's A/R holds open
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_claim_whose_line_emas_ar_holds_open_is_listed_not_counted_unseen(tmp_path, kind, monkeypatch):
+    """Claim 71: a pathology line (88305 at $64) of a visit March 5, sent March 9 to Blue Cross (the 837s show it); no 835
+    answers it and no Production line holds it. EMA's A/R holds the same patient's 88305 of March 5 open for insurance
+    ($64, primary, no claim created: the 'unbilled' bucket). EMA's own books say the money is open, and the 837 says the
+    claim went out: it is listed as never answered (with the A/R's balance, bucket and date as its evidence), not counted
+    unseen. Before: no bridge could find an EMA claim (the A/R row has no claim id and no claim number, Production has no
+    line), so the claim was counted unseen and never listed (on the real data: 2 claims, $254.00, both 'unbilled')."""
+    from tests import ema_fixtures as F
+    ar = [F.ar_row(claim=None, link=None, party="Insurance", coverage="Primary", current=64.0, cpt="88305", svc=D(2026, 3, 5),
+                   patient="Sample, Pat", status=None, aging=D(2026, 4, 25))]
+    s, lg = _world(tmp_path, kind, monkeypatch, [], ar)
+    send(s, tmp_path, [clm837(F.claim_id(71), [("88305", "64.00", "20260305")], payer=BC, member="MEMBER000071")], "20260309")
+    det, listed, unseen = _run(s, lg)
+    assert F.claim_id(71) in listed, (
+        f"not listed (unseen {unseen.get('n')}): EMA's A/R holds the line open for insurance and the 837 shows it sent")
+    ev = json.loads(listed[F.claim_id(71)]["evidence"])
+    assert ev["ar_open"]["balance_cents"] == 6400 and ev["ar_open"]["bucket"] == "held for insurance, no claim created", ev["ar_open"]
+    assert "holds this service open for insurance ($64.00" in listed[F.claim_id(71)]["hint"]
+    assert (unseen.get("n") or 0) == 0, unseen
+    s.close()

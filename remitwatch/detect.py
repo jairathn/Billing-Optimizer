@@ -7504,6 +7504,8 @@ class Detector:
             ev["secondary_answer"].update(after_coordination_denial=True, denied_as_primary_on=cob["denied_on"], reason=cob["reason"])
         if cd.get("ema_bridge"):
             ev["ema_bridge"] = cd["ema_bridge"]         # how EMA's claim for it was found: its claim id, its bill or its content
+        if cd.get("ar_open"):
+            ev["ar_open"] = cd["ar_open"]               # the line EMA's A/R holds open for insurance (no bridge found its claim)
         if cd.get("through") and cd["through"] != newest:
             ev["answers_through"] = cd["through"]       # EMA's postings show this payer's answers through this day
         label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
@@ -7590,6 +7592,11 @@ class Detector:
         if cd.get("status_context"):
             hints.append(cd["status_context"] + ", but no payment, $0 answer or payer's reason is posted on it: check the payer's portal "
                          "before you send it again")
+        ao = cd.get("ar_open")
+        if ao:
+            hints.append(f"EMA's A/R of {ao.get('as_of')} holds this service open for insurance (${int(ao.get('balance_cents') or 0) / 100:,.2f}, "
+                         f"{ao.get('bucket')}), and the 837s show the claim sent {sent}: no payer's answer is on file. Check the "
+                         "payer's portal, then send it again or post the answer in EMA")
         if cd.get("ema_bare_zero"):
             from . import ema_checks as ec
             hints.append(ec.bare_zero_note(cd["ema_bare_zero"]))
@@ -9516,6 +9523,7 @@ class Detector:
         # the one answered rule every never-answered claim meets, whatever listed it (_answered_rule)
         rule = self._answered_rule("answered_837", cds, answers)
         out = []
+        pending: list[tuple] = []          # claims no source shows an answer to, before the A/R's open lines are read
         for cd in cds:
             a = answers.get(cd["pcn"]) or {}
             ne = no_era.get(cd.get("no_era") or "")
@@ -9554,15 +9562,64 @@ class Detector:
                               status_class=cls)
             if a.get("link") is None and ((cd.get("due") or "") > newest or ne is not None):
                 # due only by EMA's postings (or a payer that sends no ERA), and EMA's own claim for it was not found: its
-                # answer cannot be seen. Never a silent drop: counted with its dollars and due day
-                self.ema_counts["837_waits_unfound"] += 1
-                if ne is not None:
-                    ne["unchecked"] += 1
-                    ne["unchecked_cents"] += sum(int(x[2] or 0) for x in cd["items"])
-                self._count_unseen(cd, cd["items"], a)
+                # answer cannot be seen, unless EMA's A/R holds its line open (below). Never a silent drop
+                pending.append((cd, a, ne))
                 continue
             out.append(dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"),
                             ema_bare_zero=a.get("bare_zero")))
+        # a claim no bridge finds whose line EMA's own A/R holds open for insurance past its due day (the same keyed patient,
+        # day and code, in any bucket: "held for insurance, no claim created" too): EMA's books say the money is open and the
+        # 837 says the claim went out, so it is listed as never answered, the A/R row its evidence (gapfix G5)
+        held = (self._ema_step("ar_held_open", self._ar_held_open, [cd for cd, _a, _ne in pending]) or {}) if pending else {}
+        for cd, a, ne in pending:
+            if cd["pcn"] in held:
+                self.ema_counts["837_ar_held_open"] += 1
+                out.append(dict(cd, ema_bridge="ar_open", ema_link=None, ar_open=held[cd["pcn"]], ema_bare_zero=a.get("bare_zero")))
+                continue
+            # counted with its dollars and due day (the unseen count, and the Data tab's line for a payer that sends no ERA)
+            self.ema_counts["837_waits_unfound"] += 1
+            if ne is not None:
+                ne["unchecked"] += 1
+                ne["unchecked_cents"] += sum(int(x[2] or 0) for x in cd["items"])
+            self._count_unseen(cd, cd["items"], a)
+        return out
+
+    def _ar_held_open(self, cds: list[dict]) -> dict[str, dict]:
+        """For never-answered 837 claims no bridge found: the line EMA's A/R holds open for insurance with a balance, for the
+        claim's patient (its 837's keyed name, as EMA keys the A/R's patients), day and code, on an A/R dated after the
+        claim's due day. {claim id: {'balance_cents', 'as_of', 'bucket', 'status', 'coverage', 'lines'}}."""
+        c = self.conn
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ema_ar'").fetchone():
+            return {}
+        info = self._837_send_info([cd["s837"][7] for cd in cds if cd.get("s837") is not None and cd["s837"][7]])
+        want = []
+        for cd in cds:
+            r8 = cd.get("s837")
+            pk = (info.get(r8[7]) or {}).get("patient_key") if r8 is not None and r8[7] else None
+            if pk is None or not cd.get("due"):
+                continue
+            want += [(cd["pcn"], int(pk), x[1], x[0], cd["due"]) for x in cd["items"] if x[0] and x[1]]
+        if not want:
+            return {}
+        c.execute("DROP TABLE IF EXISTS temp.d_aropen")
+        c.execute("CREATE TEMP TABLE d_aropen (pcn TEXT, nk INTEGER, svc TEXT, cpt TEXT, due TEXT)")
+        c.executemany("INSERT INTO temp.d_aropen VALUES (?, ?, ?, ?, ?)", want)
+        out: dict[str, dict] = {}
+        for pcn, cents, as_of, cid, lk, st, cov, svc, cpt in c.execute(
+                """SELECT u.pcn, COALESCE(a.exposure_cents, a.balance_cents), a.as_of, a.claim_id, a.link, a.claim_status, a.coverage,
+                          a.svc, a.cpt
+                   FROM temp.d_aropen u JOIN ema_ar a ON a.name_key = u.nk AND a.svc = u.svc AND a.cpt = u.cpt
+                   WHERE lower(COALESCE(a.party, '')) LIKE 'insur%' AND COALESCE(a.exposure_cents, a.balance_cents, 0) > 0
+                     AND SUBSTR(a.as_of, 1, 10) > u.due
+                   ORDER BY u.pcn, a.as_of, a.svc, a.cpt"""):
+            o = out.setdefault(pcn, {"balance_cents": 0, "as_of": None, "bucket": None, "status": None, "coverage": None, "lines": []})
+            o["balance_cents"] += int(cents or 0)
+            o["as_of"] = max(o["as_of"] or "", str(as_of or "")[:10]) or None
+            o["bucket"] = o["bucket"] or ("held for insurance, no claim created" if not cid and lk is None else "open with a claim")
+            o["status"] = o["status"] or st
+            o["coverage"] = o["coverage"] or cov
+            o["lines"].append([cpt, svc, int(cents or 0)])
+        c.execute("DROP TABLE IF EXISTS temp.d_aropen")
         return out
 
     def _count_unseen(self, cd: dict, items: list, a: dict | None, reason: str | None = None) -> None:
