@@ -77,6 +77,21 @@ payer's accepted channel, easiest first, with the fields prefilled; and say whet
   both sites; then the UI units ui-work, ui-panel, ui-pages, ui-words, ui-signin (brief section "The units after ui-a"),
   suites, deploy.
 
+### UI release: what waits after its review (review d-15, 2026-11-28, `wip/ui-release`)
+
+The one review of the UI release (findings d-1 to d-15, e-1 to e-4; `plans/progress/ui-release.md`) fixed every high and
+medium. These can wait; none hides money or a person's decision:
+- Results: its repeated tiles (This week, Scoreboard and Week by week say the same figures) and its length (review d-12).
+- Dates: insights and alerts lines say "paid in 2026-11" and cents in a list; faxes fall back to a UTC time where the
+  practice's time zone is not known yet; day() writes the current year (review d-10; the panel's filing date is fixed).
+- From the units' own lists: the Progress chart's colors and its move into Results; Data's section tabs and the folded
+  checks line; payer fax numbers moving to Settings; Setup grouping beyond ModMed; phones opening on the Summary; analyst
+  tables on a phone; the call log's follow-up date and answer rules; a fax that came in leading the panel; "Appeal late
+  anyway" on Expired; steps as a stepper and tabs; two-minute kept answers; the four prefetch requests per open; "Log one
+  call" per payer group; the portal-first sentence; payer names in display case; the weekly email's 7-day wording; "Who:"
+  as a role; the three "Your name" boxes (Policy, Results, Upload); Start skipping someone else's items and a Mine view;
+  empty and loading states.
+
 ### Before that (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
 
 The owner asked (2026-11-27) to stop fanning out agents, finish within the usage limit, and release: merge, fix, test,

@@ -40,12 +40,6 @@
   <div id="pressLine" class="small" hidden></div>
   <div class="muted">EMA's reports and visit notes come in by hand: export them from EMA and drop them here (or in the Dropbox folder). Each week, pull the five exports below. They go through the same reading and analysis as the files from Dropbox. Large reports are fine: this page compresses them and sends them in pieces, and a broken upload carries on where it stopped.</div>
 
-  <div class="panel" id="exportsPanel">
-    <div class="top"><h2 style="margin:0">EMA exports RemitWatch needs</h2><span class="small muted" id="exportsNote"></span></div>
-    <div class="small muted mt-1">Each row says what the export is for, how to filter it, the columns it must have, and when it last arrived. Drop a file on its row (or use its Upload button): the page first checks it is that export and that no column is missing, before anything is sent.</div>
-    <div id="exports"><div class="muted small mt-3">Loading the checklist…</div></div>
-  </div>
-
   <div class="panel">
     <label class="drop" id="drop" tabindex="-1">
       <input type="file" id="files" multiple accept=".xlsx,.csv,.tsv,.txt,.zip,.835,.837,.edi,.rmt,.era,.x12,.dat,.pdf,.docx,.rtf,.html,.htm">
@@ -55,6 +49,12 @@
     <div id="now"></div>
   </div>
 
+  <div class="panel" id="exportsPanel">
+    <div class="top"><h2 style="margin:0">EMA exports RemitWatch needs</h2><span class="small muted" id="exportsNote"></span></div>
+    <div class="small muted mt-1">Each row says what the export is for, how to filter it, the columns it must have, and when it last arrived. Drop a file on its row (or use its Upload button): the page first checks it is that export and that no column is missing, before anything is sent.</div>
+    <div id="exports"><div class="muted small mt-3">Loading the checklist…</div></div>
+  </div>
+
   <div class="panel" id="recentPanel" hidden><h2>Reports and large files you sent</h2>
     <div class="small muted">The last 30 days. An upload that was cut off carries on when you choose the same file again.</div>
     <div id="recent" class="small"></div></div>
@@ -62,12 +62,12 @@
   <div id="away" class="panel" hidden><h2>Visit notes</h2><div id="awayMsg" class="small"></div></div>
 
   <div id="here" hidden>
-    <div class="panel"><div class="top"><h2 style="margin:0">Waiting to be read</h2><button id="runNow">Read them now</button></div>
-      <div id="cycle" class="small mt-2">…</div></div>
-
     <div class="panel"><h2>Visit notes appeals are waiting for</h2>
       <div class="small muted">Open items that rest on the visit note, inside their filing window, with no appeal packet yet, soonest first. Save each note from EMA as a PDF and drop it above (RemitWatch reads the patient's name and the date of service from it), or attach it on its row.</div>
       <div id="needed" class="small mt-2">…</div></div>
+
+    <div class="panel"><div class="top"><h2 style="margin:0">Waiting to be read</h2><button id="runNow">Read them now</button></div>
+      <div id="cycle" class="small mt-2">…</div></div>
 
     <div class="panel"><h2>Other files uploaded</h2><div id="hist" class="small">…</div></div>
   </div>

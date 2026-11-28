@@ -15,7 +15,9 @@
 //   filled     filled (primary) buttons on the screen (at most 1)
 //   contrast   text under 4.5:1 against its rendered background (3:1 for large text), with the element's path
 // and on the Work pages: the first row's top, the rows wholly on the first screen (all of them when the list is shorter
-// than the bar), and (with --panel) whether any row changes height when an item's panel opens. With --bulk, once, on the
+// than the bar), and (with --panel) whether any row changes height when an item's panel opens, and (review d-8) whether the
+// list's bar keeps its height, the first row's What happened keeps 12 characters or more beside the docked panel, and on a
+// phone every button of the panel's first screen is 44 px tall or more. With --bulk, once, on the
 // Worklist at the first size: two rows ticked and every button of the bulk bar pressed (a question beside a button is
 // cancelled, a status set is set back), and any browser dialog fails the check (review d-3). It changes statuses on the
 // site it runs on: the demo only. Exit code 1 when a check fails.
@@ -157,10 +159,23 @@ async function bulkStep(page) {
           filled: m.filled, low: m.low.length, work: m.work };
         if (WORK.has(name) && args.panel && m.work.rowHeights && m.work.rowHeights.length) {
           const before = m.work.rowHeights;
+          const barOf = () => { const b = document.querySelector('#listHead'); return b ? Math.round(b.getBoundingClientRect().height) : null; };
+          const bar0 = await page.evaluate(barOf);
           await page.click('#view table.wl tbody tr.row td.day', { timeout: 5000 }).catch(() => {});
           await page.waitForSelector('#drawer.open', { timeout: 8000 }).catch(() => {}); await sleep(600);
           const after = await page.evaluate(() => [...document.querySelectorAll('#view table.wl tbody tr.row')].slice(0, 12).map(x => Math.round(x.getBoundingClientRect().height)));
           r.work.panelRowDelta = Math.max(0, ...before.map((v, i) => Math.abs(v - (after[i] == null ? v : after[i]))));
+          const p2 = await page.evaluate((barOf) => {
+            const bar = eval(barOf)(), cell = document.querySelector('#view table.wl tbody tr.row td.what');
+            let chars = null;
+            if (cell && cell.getBoundingClientRect().width > 0) { const s = document.createElement('span'); s.style.font = getComputedStyle(cell).font; s.textContent = 'x'.repeat(20);
+              document.body.appendChild(s); chars = Math.floor(cell.getBoundingClientRect().width / (s.getBoundingClientRect().width / 20)); s.remove(); }
+            const small = [...document.querySelectorAll('#drawer button')].filter(b => { const q = b.getBoundingClientRect(), cs = getComputedStyle(b);
+              return q.width > 0 && q.height > 0 && q.bottom > 0 && q.top < innerHeight && cs.visibility !== 'hidden' && q.height < 44; }).length;
+            return { bar, chars, small };
+          }, barOf.toString());
+          r.work.panelBarDelta = bar0 == null || p2.bar == null ? 0 : Math.abs(p2.bar - bar0);
+          r.work.panelWhatChars = p2.chars; r.work.panelSmallButtons = p2.small;
           await page.keyboard.press('Escape').catch(() => {});
         }
         if (name === 'worklist' && args.bulk && !bulkDone) {
@@ -178,6 +193,9 @@ async function bulkStep(page) {
         if (r.accent > LIMITS.accent) bad.push(`${r.accent} accent elements`);
         if (r.filled > LIMITS.filled) bad.push(`${r.filled} filled buttons`);
         if (r.low) bad.push(`${r.low} low-contrast texts: ${m.low.slice(0, 4).join('; ')}`);
+        if (r.work.panelBarDelta) bad.push(`the list's bar changes height by ${r.work.panelBarDelta} px when the panel opens`);
+        if (w >= 1280 && r.work.panelWhatChars != null && r.work.panelWhatChars < 12) bad.push(`What happened keeps ${r.work.panelWhatChars} characters beside the panel (at least 12)`);
+        if (w <= 640 && r.work.panelSmallButtons) bad.push(`${r.work.panelSmallButtons} panel buttons under 44 px on the first screen`);
         if (r.work.firstRowTop != null) {
           if (w === 1400 && h === 900 && r.work.firstRowTop > WORK_LIMITS.firstRowTop) bad.push(`first row at ${r.work.firstRowTop} px (at most ${WORK_LIMITS.firstRowTop})`);
           // a list shorter than the bar shows all its rows (review d-14: Fees has 5 rows on the demo)

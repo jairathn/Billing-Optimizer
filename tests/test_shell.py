@@ -220,3 +220,47 @@ def test_the_modmed_test_says_when_nothing_is_set_up(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     r = modmed.check()
     assert r["ok"] is False and r["configured"] is False
+
+
+def test_upload_puts_the_drop_zone_first_and_folds_each_export_s_details():
+    """Review d-6: the drop zone was 2.3 screens down a 7,000 px page behind five export cards. It now comes first under
+    the title; each export shows its title, what it is for, when it last arrived, the practice's own steps and its Upload
+    button, with its filters, columns and format in a closed fold; the notes appeals wait for lead the server's lists."""
+    html = read("upload.html")
+    assert html.index('class="page-title"') < html.index('id="drop"') < html.index('id="exportsPanel"')
+    assert html.index("Visit notes appeals are waiting for") < html.index("Waiting to be read") < html.index("Other files uploaded")
+    js = read("upload.js")
+    row = js[js.index("function exportRow"):js.index("function bindPick")]
+    fold = row[row.index('<details class="exp-more">'):row.index("</dl></details>")]
+    assert "<details class=\"exp-more\" open" not in row and "<dt>Filters</dt>" in fold and "<dt>Format</dt>" in fold
+    assert "data-arrived" in row and "data-arrived" not in fold and "data-edit" not in fold and "data-pick" not in fold
+
+
+def test_an_open_panel_that_waits_for_its_note_asks_again_when_its_tab_is_shown():
+    """Review d-6: a note dropped on the Upload page in another tab reaches an open panel whose step waits for the note,
+    when its tab is shown again (visibilitychange, never window focus: a file chooser closing gives the focus back)."""
+    js = read("features.js")
+    at = js.index("document.addEventListener('visibilitychange'")
+    body = js[at:js.index("});", at)]
+    assert "'upload_note', 'attach_note', 'find_note'" in body and "panelCacheDrop(); openDetail(state.detailId)" in body
+    assert "addEventListener('focus'" not in js
+
+
+def test_the_list_s_bar_keeps_one_line_beside_the_docked_panel_and_the_phone_card_folds():
+    """Review d-8: with the panel docked (1280 px and up) the Work bar wrapped to three or four lines and the list jumped
+    84 px down. Kind of work, Order and Export move into the Filters fold (Export keeps a button there), Start goes while
+    an item is open; on a phone the route card shows three fields and folds the rest, and its buttons are 44 px tall.
+    plans/tools/ui/checks.js --panel measures it in a browser (the bar's height, What happened's characters, 44 px)."""
+    css = read("rw.css")
+    dock = css[css.index("@media (min-width: 1280px) {\n  body:has(#drawer.open) .wk-bar"):]
+    dock = dock[:dock.index("\n}\n")]
+    for part in ('select[data-f="kind"]', 'select[data-f="sort"]', "#wlCsv", "#startFirst", ".more-f .ph-only", ".more-f .dock-only"):
+        assert part in dock, part
+    desk = read("desk.js")
+    assert 'id="wlCsvDock"' in desk and "querySelectorAll('#wlCsv, #wlCsvDock')" in desk
+    phone = css[css.index("@media (max-width: 640px) {\n  #drawer :is(.st-btn"):]
+    phone = phone[:phone.index("\n}\n")]
+    assert ".rc-actions button" in phone and ".copy-inline" in phone and "min-height: 44px" in phone
+    assert "#rcCard > table.rc-fields:not(.all) tr.copyrow:nth-child(n+4) { display: none; }" in phone
+    feat = read("features.js")
+    assert 'id="rcMore"' in feat and "function showAll(on)" in feat and "if(t2 && t2.offsetParent === null) showAll(true);" in feat

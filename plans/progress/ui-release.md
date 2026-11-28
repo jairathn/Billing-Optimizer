@@ -23,10 +23,14 @@ fixed when the change is one safe line, else they wait with the reason.
 | d-9 | medium | yes in code: closeDetail focused the row that opened the panel | fixed |
 | d-13 | low | yes in code: no toast; Undo toast 8 s, Undo 10 s | fixed |
 | d-7 | medium | yes: 5 of 10 headlines over 20 words on the invented world | fixed (headlines); X12 words on the card fixed |
-| d-8 | medium | yes in CSS: docked panel 36vw, Payer column kept, phone buttons 28 px | fixed in part (see log) |
-| d-6 | medium | yes in code: upload_note opened /upload in a new tab | fixed in the panel; Upload page order waits |
+| d-8 | medium | yes: docked panel 36vw, Payer column kept, phone buttons 28 px; the bar wrapped to 3-4 lines (48 to 132 px) when the panel opened | fixed |
+| d-6 | medium | yes in code: upload_note opened /upload in a new tab; #drop at 2,100 px of 6,193 | fixed |
 | d-14 | low | yes in code | fixed (checks.js) |
-| d-11 | low | yes | fixed in part ("changed today", the filing limit's words) |
+| d-11 | low | yes | fixed ("changed today", the filing limit's words, "Open the batch", no stray dot before Hidden) |
+| e-4 | low | yes: no doc said the chosen name is not a sign-in | fixed |
+| d-10 | low | yes | fixed in part (the panel's filing date); the rest waits |
+| d-12 | low | yes | waits |
+| d-15 | low | yes | fixed (HANDOFF wait list) |
 
 ## Log
 
@@ -96,3 +100,30 @@ fixed when the change is one safe line, else they wait with the reason.
   route card's fold after three fields (a menu and a fold of their own, measured first).
 - d-6: the panel's "Upload the note" opens the appeal step's fold and focuses its file field. Waits: the Upload page's
   order (drop zone first) and a panel redrawn when a note arrives on another tab.
+- e-4 (ab6272f): README.md and docs/OPERATIONS.md say who is working is a label each person picks, not a sign-in, and
+  name the X-RemitWatch-Person header; the person card says "This is not a sign-in: anyone using this computer can
+  change it." tests/test_docs.py checks both.
+
+### Second session (resumed at ab6272f, 2026-11-28)
+
+- d-8, the rest. Measured on the demo (port 8771) with the panel docked: the Work bar went from 48 to 132 px (three
+  lines at 1400x900, four at 1366x650, three at 1536x730), so the list jumped 84 px down when an item opened. Now, with
+  the panel docked (1280 px and up), Kind of work and Order move into the Filters fold (as on a phone), Export too (a
+  second button there, #wlCsvDock, bound to the same export), Start goes while an item is open: the bar stays 48 px at
+  all three sizes. On a phone the route card shows its first three fields and folds the rest behind "All N fields"
+  (it opens by itself when the next field to paste is folded); the claim's copy button, the card's own buttons and the
+  fold's button are 44 px tall. checks.js --panel now measures the bar's height before and after, What happened's
+  characters beside the docked panel (12 or more) and the phone panel's buttons under 44 px (it found 3; now 0).
+- d-6, the rest. Upload: the drop zone comes first under the title (#drop 2,100 to 273 px), each export keeps its
+  title, purpose, last arrival, the practice's steps and its button, with filters, columns and format in a closed fold
+  (page 6,193 to 5,607 px); the notes appeals wait for lead the server's lists (2,393 to 1,688 px). An open panel whose
+  step waits for its note asks again when its tab is shown again (visibilitychange; never window focus, which a file
+  chooser closing also fires). The panel's own "Upload the note" was fixed in the first session; on the demo no Work
+  item in the first 80 leads with it (build_packet leads), so it was checked in code.
+- Lows: d-11 "Open the batch" on Today's batches (13 buttons named Start before) and no stray " · " before Hidden on
+  Work lists; d-10 the panel's filing date in the practice's long form; d-15 the wait list in plans/HANDOFF.md.
+- Tests: tests/test_shell.py (the Upload order and fold, the redraw on visibilitychange, the docked bar and the phone
+  card). Broken on purpose (the static changes stashed): all three fail; restored (the diff compared byte for byte).
+- Waits, with the reason: d-12 (Results' repeated tiles) removes a section that test_results and the Results walk read,
+  and needs its own measured change; d-10's other parts (insights and alerts text, faxTime's fallback, day()'s year)
+  each move a server sentence or test_practice_day's expectation and are not one line each.

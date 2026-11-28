@@ -286,7 +286,7 @@ function drawerExtras(f, r){
   const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${esc(atTime(e.at))}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${e.by ? 'by ' + esc(e.by) : esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
   const factsHtml = `${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
-      <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
+      <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(typeof longDate === 'function' ? longDate(f.appeal_deadline) : f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
   const ema = typeof state !== 'undefined' && !!(state.meta && (state.meta.modmed || state.meta.uploads));     // no page state when evaluated on its own
   const byHand = ema && !state.meta.modmed;         // no API yet: the note uploaded from EMA on the Upload page
   const builder = f.claim_key ? `${ema ? `<div class="filters" style="margin-bottom:6px"><button id="noteEma">${byHand ? 'Use the note uploaded from EMA and build the packet' : 'Get the note from EMA and build the packet'}</button>${byHand ? ' <a class="small" href="/upload">Upload notes</a>' : ''}</div><div id="emaMsg" class="small muted"></div>` : ''}<div class="note">${ema ? 'Or attach' : 'Attach'} the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
@@ -764,6 +764,7 @@ function xpRouteHtml(f, x, r, quiet){
     ${b.where && !(b.action || {}).url ? `<div class="small">Send to: <b>${esc(b.where)}</b>${b.form ? ' · form: ' + esc(b.form) : ''}</div>` : (b.form ? `<div class="small">Form: ${esc(b.form)}</div>` : '')}
     ${b.fax ? `<div class="small ${b.fax.sendable ? '' : 'sev-medium'}">${esc(b.fax.words)}</div>` : ''}
     ${facts ? `<table class="small rc-fields"><tbody>${facts}</tbody></table>` : ''}
+    ${(c.facts || []).length > 3 ? `<button type="button" class="ghost small rc-more" id="rcMore" aria-expanded="false">All ${c.facts.length} fields</button>` : ''}
     ${facts ? '<div class="privacy-note">Copied details stay on this computer\'s clipboard until you copy something else. RemitWatch keeps no record of what you copied.</div>' : ''}
     ${rcNamesOff(c)}
     ${(b.steps || []).length ? `<details class="xp-steps"><summary class="small">Where to click (${b.steps.length})</summary><ol class="small">${b.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
@@ -790,11 +791,16 @@ function xpRouteBind(f, x, r, d, h){
   const mark = bt => { if(!own.includes(bt)) return; done.add(bt); const tr = bt.closest('tr'); if(tr) tr.classList.add('copied'); bt.textContent = 'Copied';
     own.forEach(o => { const t = o.closest('tr'); if(t) t.classList.remove('is-next'); });
     const nx2 = own.find(o => !done.has(o)), t2 = nx2 && nx2.closest('tr'); if(t2) t2.classList.add('is-next');
+    if(t2 && t2.offsetParent === null) showAll(true);
     if(count) count.textContent = `${done.size} of ${own.length} copied`; };
   if(own[0] && own[0].closest('tr')) own[0].closest('tr').classList.add('is-next');
   if(count && own.length) count.textContent = `${own.length} ${own.length === 1 ? 'field' : 'fields'} to copy`;
   box.querySelectorAll('[data-rc-copy]').forEach(bt => bt.onclick = async () => { const v = vals[Number(bt.dataset.rcCopy)]; if(v && await h.copy(v.value, v.label)) mark(bt); });
   const all = box.querySelector('#rcCopyAll'); if(all) all.onclick = () => h.copy(c.copy_all || '', 'Every filled field');
+  // on a phone the card shows its first three fields; the rest open on a press, or when the next field to paste is folded
+  function showAll(on){ const t = box.querySelector(':scope > table.rc-fields'), m = box.querySelector('#rcMore'); if(!t || !m) return;
+    t.classList.toggle('all', on); m.setAttribute('aria-expanded', String(on)); m.textContent = on ? 'Fewer fields' : `All ${(c.facts || []).length} fields`; }
+  const more = box.querySelector('#rcMore'); if(more) more.onclick = () => showAll(more.getAttribute('aria-expanded') !== 'true');
   box.querySelectorAll('[data-rc]').forEach(bt => bt.onclick = async () => {
     const k = bt.dataset.rc;
     if(k === 'open'){ window.open(bt.dataset.url, '_blank', 'noopener,noreferrer'); return; }
@@ -1155,6 +1161,14 @@ const PANEL_ICON = n => `<svg class="i" aria-hidden="true"><use href="/static/ic
 const PANEL_CACHE = new Map(), PANEL_TTL_MS = 120000;
 const panelStamp = () => String(((state.meta || {}).remits || {}).last_payment || '');
 function panelCacheDrop(){ PANEL_CACHE.clear(); }
+// a note dropped on the Upload page in another tab: an open panel whose step waits for the note asks again when this tab
+// is shown again, so the note is there (review d-6). Not on window focus: a file chooser closing gives the focus back too.
+if(typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState !== 'visible' || typeof state === 'undefined' || !state.detailId || typeof openDetail !== 'function') return;
+  const d = document.getElementById('drawer'), m = d && d.classList.contains('open') && d.querySelector('#xpMain');
+  if(!m || !['upload_note', 'attach_note', 'find_note'].includes(m.dataset.xp)) return;
+  panelCacheDrop(); openDetail(state.detailId);
+});
 function panelAnswers(id){
   const had = PANEL_CACHE.get(id);
   if(had && Date.now() - had.at < PANEL_TTL_MS && had.stamp === panelStamp()) return had;

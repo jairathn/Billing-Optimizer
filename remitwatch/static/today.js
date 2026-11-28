@@ -437,7 +437,7 @@ function batchRows(b, rows){
       <div class="b-num"><b>${money(x.cents)}</b><div class="small muted">${pl(x.n, 'item')} · ${pl(x.claims, 'claim')}</div></div>
       <div class="b-due"><span class="${c.cls}">${esc(c.text === 'closes today' ? 'first one closes today' : 'first one closes ' + c.text)}</span><div class="small muted">${x.due14_n} ${x.due14_n===1?'closes':'close'} within 14 days</div></div>
       <div class="b-prog small muted">${done ? [x.started_n ? `${x.started_n} started` : '', x.sent_n ? `${x.sent_n} sent` : ''].filter(Boolean).join(' · ') : 'not started'}</div>
-      <button data-batch="${i}">Start</button></div>`; }).join('');
+      <button data-batch="${i}">Open the batch</button></div>`; }).join('');
 }
 function bindBatches(v, b){ v.querySelectorAll('[data-batch]').forEach(bt=>bt.onclick=()=>{ const x = b.batches[Number(bt.dataset.batch)]; if(x) goWork({kind:x.kind, payer:x.payer_group, sort:'deadline'}); }); }
 function winsTeaser(b){

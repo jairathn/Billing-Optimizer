@@ -262,7 +262,7 @@ async function deskTab(v, key){
       <span class="lh-tools">${sel('kind','Kind of work',kopts,f.kind||'')}${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search this list" placeholder="Search  /" title="${showPhi()?'Patient, claim number or code':'Claim number or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">Filters</button><button class="ghost" id="wlCsv">Export</button></span>
       ${startLbl ? `<button class="primary wk-go" id="startFirst" title="Open the first item of this list; j and k move through it">${startLbl}</button>` : ''}</div>
-    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('kind','Kind of work',kopts,f.kind||'')}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search this list" placeholder="Claim number or code" value="${esc(f.q)}"></span>${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('state','State',WL_STATES,f.state||'')}${sel('year','Service year',[['','Any service year'],...years.map(y=>[y,'Services of '+y])],f.year||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
+    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('kind','Kind of work',kopts,f.kind||'')}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search this list" placeholder="Claim number or code" value="${esc(f.q)}"></span>${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('state','State',WL_STATES,f.state||'')}${sel('year','Service year',[['','Any service year'],...years.map(y=>[y,'Services of '+y])],f.year||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button><button class="ghost dock-only" id="wlCsvDock">Export</button></div>
     ${chips.length || f.kind ? `<div class="wk-chips">${chips.join('')}${f.kind ? `<span class="wk-how"><b>What to do:</b> ${esc(doText(f.kind))}</span>` : ''}</div>` : ''}
     ${f.kind ? reasonChips : ''}
     ${emaOn ? '<div id="emaBatchMsg" class="small muted wk-ema-msg" role="status"></div>' : ''}
@@ -331,7 +331,8 @@ async function deskTab(v, key){
   bindRows(v);
   bindBulk(v);
   bindCopies(v);
-  v.querySelector('#wlCsv').onclick = () => exportCsv(Object.assign({}, scope, {kind:f.kind, view:'worklist'}), find, key);
+  // Export sits in the bar, and in the Filters fold while an item's panel is docked beside the list (review d-8)
+  v.querySelectorAll('#wlCsv, #wlCsvDock').forEach(b => b.onclick = () => exportCsv(Object.assign({}, scope, {kind:f.kind, view:'worklist'}), find, key));
   const fold = v.querySelector('#fold');
   if(fold){
     const load = () => { if(fold.open && !fold.dataset.done){ fold.dataset.done = '1';
@@ -820,7 +821,7 @@ async function hiddenLine(el){
   let h; try { h = await api('/api/hide'); } catch(e){ return; }
   const rules = h.rules || []; if(!rules.length) return;
   const n = rules.reduce((a, r) => a + (r.n || 0), 0);
-  el.innerHTML = ` · <a href="#" id="hiddenMgr">Hidden: ${pl(rules.length, 'reason')} (${pl(n, 'item')})</a>`;
+  el.innerHTML = `<a href="#" id="hiddenMgr">Hidden: ${pl(rules.length, 'reason')} (${pl(n, 'item')})</a>`;   // after a sentence: no stray dot (review d-11)
   el.querySelector('#hiddenMgr').onclick = e => { e.preventDefault(); hiddenManage(rules); };
 }
 function hiddenManage(rules){

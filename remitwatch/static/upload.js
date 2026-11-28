@@ -505,13 +505,14 @@
       <div>
         <div class="top"><h3>${esc(e.title)}</h3>${chip(FLAG_CHIP[rowFlag(e)] || 'fresh')}</div>
         <div class="big mt-1">${esc(e.purpose)}</div>
+        <dl><dt>Last arrived</dt><dd data-arrived>${arrivedHtml(e)}</dd></dl>
+        <details class="exp-more"><summary class="small">What to pull: filters, columns and format</summary>
         <dl>
           <dt>Filters</dt><dd><ul>${e.filters.map(f => `<li>${esc(f)}</li>`).join('')}</ul></dd>
           <dt>Columns</dt><dd>${esc(e.columns_note || '')} <details><summary class="small">The ${e.columns.length} columns it must have (checked when you drop it)</summary><ul class="cols">${cols}</ul></details></dd>
           <dt>Format</dt><dd>${esc(e.format)}</dd>
           <dt>How often</dt><dd>${esc(e.cadence)}</dd>
-          <dt>Last arrived</dt><dd data-arrived>${arrivedHtml(e)}</dd>
-        </dl>
+        </dl></details>
       </div>
       <div>
         <div class="howto">

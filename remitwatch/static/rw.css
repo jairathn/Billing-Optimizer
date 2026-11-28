@@ -1502,6 +1502,7 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 .export dt { color: var(--text-3); font-size: var(--fs-sm); }
 .export dd { margin: 0; }
 .export dd ul { margin: 0; padding-left: 18px; }
+.export details.exp-more { margin-top: var(--sp-1); }
 .export .cols { columns: 2; column-gap: 18px; margin: 4px 0 0; padding-left: 18px; font-size: var(--fs-sm); }
 .export .cols li { break-inside: avoid; margin: 2px 0; }
 /* how a practice pulls an export: a quiet note, not a warning (it was an orange line, five times on one page) */
@@ -1909,14 +1910,26 @@ table.wl.wk tr.group-row td { height: auto; padding: 7px var(--sp-4); }
    drops its Payer column (the payer rides in the patient cell's second line), so What happened keeps its words. On a
    phone every control in the sheet is 44 px tall at least, and the next step's main button sits in a bar pinned to the
    foot of the sheet with Next beside it. */
-.who-payer, .ph-next { display: none; }
+.who-payer, .ph-next, .dock-only, .rc-more { display: none; }
+/* With the panel docked the list is narrower, so the bar keeps one line: Kind of work and Order move into the Filters fold
+   (as on a phone), Export too, and Start goes (an item is open already; j and k walk the list). */
+@media (min-width: 1280px) {
+  body:has(#drawer.open) .wk-bar :is(.lh-tools select[data-f="kind"], .lh-tools select[data-f="sort"], #wlCsv, #startFirst),
+  body.drawer-open .wk-bar :is(.lh-tools select[data-f="kind"], .lh-tools select[data-f="sort"], #wlCsv, #startFirst),
+  body:has(#drawer.open) .more-f .ph-only input[data-f="q"], body.drawer-open .more-f .ph-only input[data-f="q"] { display: none; }
+  body:has(#drawer.open) .more-f .ph-only, body.drawer-open .more-f .ph-only { display: contents; }
+  body:has(#drawer.open) .more-f .dock-only, body.drawer-open .more-f .dock-only { display: inline-flex; }
+  body:has(#drawer.open) .wk-bar .lh-tools select[data-f="payer"], body.drawer-open .wk-bar .lh-tools select[data-f="payer"] { max-width: 10rem; }
+}
 @media (min-width: 1280px) and (max-width: 1535px) {
   body:has(#drawer.open), body.drawer-open { --drawer-w: 440px; }
   body:has(#drawer.open) table.wl :is(th.c-payer, td.payer), body.drawer-open table.wl :is(th.c-payer, td.payer) { display: none; }
   body:has(#drawer.open) table.wl .who-payer, body.drawer-open table.wl .who-payer { display: inline; }
 }
 @media (max-width: 640px) {
-  #drawer :is(.st-btn, #prevItem, #nextItem, #closeD, .copy-btn, .ph-next, .next-actions button) { min-height: 44px; min-width: 44px; }
+  #drawer :is(.st-btn, #prevItem, #nextItem, #closeD, .copy-btn, .copy-inline, .ph-next, .next-actions button, .rc-actions button, .rc-more) { min-height: 44px; min-width: 44px; }
+  #rcCard > table.rc-fields:not(.all) tr.copyrow:nth-child(n+4) { display: none; }
+  #rcCard > .rc-more { display: inline-flex; align-items: center; justify-content: center; }
   #drawer .next-actions { position: sticky; bottom: 0; z-index: 2; margin-left: 0 !important; margin-right: 0 !important;
     padding: var(--sp-2) var(--sp-4); background: var(--surface); border-top: 1px solid var(--border); }
   #drawer .next-actions .ph-next { display: inline-flex; align-items: center; justify-content: center; }
