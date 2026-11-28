@@ -40,7 +40,7 @@ The review's nine findings, each checked with its failing test (copies of the re
 | r1-b2-unseen-breadth (low) | yes (code reading: every reason set `retired`) | `Detector._count_unseen` retires only for UNSEEN_RETIRES (None, no_ema_reports); payer_remittances_stop is counted unseen but not retired | same file: the reasons that retire (file, compact) |
 | r1-facts-version (low) | yes: the first run after the bump compared no fingerprints | FACTS_VERSION back to 3; FACTS_PAYMENT_VERSION 1 (meta selfcheck:facts_payment_version) versions the payment part alone; `_stored_facts(conn, before)` leaves out only the payment items' fingerprints while it differs | test_vanished_posted_or_sent_again.py: the first run after the payment part came still compares the others |
 | r1-b5-order (low) | yes: the reverse order fails on the tip (link to the processed bill) | `_map`: each vote says whether its 835 claim was the payer's denial (status 4); a visit's link goes to that bill unless another link holds it (`pb_held`), else to its first vote's bill; MAP_RULE 2 -> 3 | test_link_map_same_visit_bills.py: the review's order; control: a denied bill another link holds is not taken |
-| r1-b5-results-lost (medium) | yes: fails on the tip, the base and replay-fix-2a's tip 8ed9355 | not here: results.py is replay-fix-2a's. Patch and test ready for the integrator, checked on 8ed9355 (`$U/r1/results_lost_done.patch`, `$U/r1/test_results_expired_then_done_is_not_lost.py`: `_lost` leaves out a row whose last state is done; a person's let-go after expiry stays lost; 195 results tests pass with it) | (routed) |
+| r1-b5-results-lost (medium) | yes: fails on the tip, the base and replay-fix-2a's tips 8ed9355 and 1873731 | not here: results.py is replay-fix-2a's. Patch and test ready for the integrator, checked on replay-fix-2a's 1873731 (results.py the same at 3ad88c7): `$U/r1/results_lost_done.patch`, `$U/r1/test_results_expired_then_done_is_not_lost.py` (see Open questions) | (routed) |
 
 Each fix was broken on purpose and its cases failed; each file restored exactly (sha1 in `$U/r1/*.sha`).
 
@@ -51,8 +51,14 @@ Measured, read only (replay final store, the previous tip 8a1cdfc against this o
   replay store does not keep; the tests carry it).
 - B5 order: the conflicts remapped by rule 2 and by rule 3, on the replay final store and on the world store: no link
   changes. Without the held-bill guard one link would move onto a bill another patient's EMA claim holds.
+- The world store (final_world3), one analysis run at its day on in-memory copies, the reviewed tip 8a1cdfc against this
+  one: the same items, states, self-checks and decision log; detection's retired map holds 19 claims fewer (counted
+  unseen because their payer's remittances stopped; none has a row, so nothing moves). See Release effect.
 
 ## Done, by bug
+
+As first built (8a1cdfc). Fix round 1 (above) changed B1's day of a send again, B2's unseen reasons that retire, B3's
+payer match (by company) and its order of lines, and B5's choice of bill (the denied one).
 
 - B1 (selfcheck.py): `_no_route` has a route `posted_in_ema` (`_posted_in_ema`: EMA's checks of the item's trace,
   trace_key plus pair_trace, hold the transaction's claim_paid_total within max($1, 0.5%), ema_checks' DIFF_MIN and
@@ -107,12 +113,28 @@ Measured, read only (replay final store, the previous tip 8a1cdfc against this o
 ## Next command
 
 None in this unit: the work is done and reported to the workflow. For the integrator: trial merges (`git merge-tree`) of
-this tip with wip/replay-fix-2a, wip/ui-words and wip/ui-signin are clean; wip/ui-a conflicts in
-remitwatch/static/index.html, as the integration tip itself does (the routes card against ui-a's shell; this unit
-changes nothing under static/).
+this tip with wip/replay-fix-2a (3ad88c7), wip/ui-words, wip/ui-signin, wip/ui-work, wip/ui-panel and wip/ui-pages are
+clean; wip/ui-a conflicts in remitwatch/static/index.html, as the integration tip itself does (the routes card against
+ui-a's shell; this unit changes nothing under static/). After merging replay-fix-2a, apply the routed Results fix
+(r1-b5-results-lost, Open questions) and run tests/test_results.py with its test.
 
 ## Tests
 
+Fix round 1 (code at e4a6df4; gapfix cdd3463 and replay-fix eef678f, both already merged, did not move):
+- The touched files' tests (26 files: the five of this unit, test_selfcheck, test_replay_selfcheck,
+  test_merge_vanished_policy, test_ema_ledger, test_runlog, test_docs, test_gap_unseen, test_gap_one_claim,
+  test_ema_wiring, test_837_sends, test_fx_exports, test_fx_ema, test_fx_837, test_fx_hosts, test_hooks,
+  test_hook_review, test_insights, test_routes, test_workable, test_archive, test_upload_chunks), 1,585 tests: python3
+  1,584 passed, 1 skipped; venv2_compat (newest libraries) 1,584 passed, 1 skipped; venv2_compat312 (Python 3.12.3,
+  SQLite 3.45.1) 1,584 passed, 1 skipped; venv_sqlite340 1,406 passed, 96 skipped, 60 failed and 23 errors, all 83 the
+  serialize limit (test_hook_review 34, test_hooks 30, test_fx_hosts 8, test_runlog 4, test_archive 4, test_ema_ledger
+  3; none in this unit's files, whose image cases skip there).
+- The full suite in python3: 4,818 passed, 29 skipped, 1 xfailed, none failed. In venv_sqlite340: 4,533 passed, 97
+  skipped, 1 xfailed; 169 failed and 48 errors, all 217 tracebacks the missing Connection.serialize or deserialize (as
+  many as the last round's run).
+- Each run one environment at a time, pytest's temp folders in a private folder deleted after it.
+
+Before fix round 1:
 - python3 (3.13.18, SQLite 3.53.1), the full suite on the merge of gapfix 4f5d8b1 and replay-fix 995abe7: 4,432 passed,
   29 skipped, 1 xfailed; 3 failed and 162 errors, every one "No space left on device" or "disk is full" (the shared disk
   filled during the run); the 3 files they were in (test_fx_ledger, test_fx_hosts, test_hooks) run again once space was
@@ -189,33 +211,36 @@ changes nothing under static/).
 
 ## Release effect (final_world3, read only)
 
-One analysis run at the world's day (2026-11-24) on two in-memory copies of world.sqlite (sqlite backup into memory, the
-store opened mode=ro; the EMA work database in memory; private scripts mem_run.py and mem_compare.py): before = the tips
-this unit merged (gapfix, replay-fix) without its changes, after = this branch. Every difference is this unit's.
-- B5: the refresh redoes the link map once (meta ema:map_rule absent; Part B, 12 s): 39 EMA claims stop being payment
-  conflicts (41 -> 2, plus 1 A/R conflict); no link joins two patients. One item moves: a CLAIM_DENIED_UNPAID, $50.33,
-  from expired (counted lost to its deadline) to done, paid before the denial by the other payer ($80.33). One
-  EM_BUNDLED item stays done (its EMA outcome reads contractual_later instead of not_found).
+One analysis run at the world's day (2026-11-24) on in-memory copies of world.sqlite (sqlite backup into memory, the
+store opened mode=ro; the EMA work database in memory; private scripts mem_run.py and mem_compare.py), once per tree:
+before = the integration tip this unit merged (fa0aafa) without its changes, then the reviewed tip (8a1cdfc) and this
+tip (fix round 1). Every difference is this unit's.
+- B5: the refresh redoes the link map once (meta ema:map_rule is not "3"; Part B, 9 s): 39 EMA claims stop being payment
+  conflicts (41 -> 2, plus 1 A/R conflict); no link joins two patients; rule 3 maps every link as rule 2 did on this
+  store. One item moves: a CLAIM_DENIED_UNPAID, $50.33, from expired (lost to its deadline) to done, paid before the
+  denial by the other payer ($80.33). One EM_BUNDLED item stays done (its EMA outcome reads contractual_later instead of
+  not_found). The second-payer rule finds 24 more shares answered in EMA, so 109 shares ($4,105.99) are past their
+  payer's limit instead of 130 ($4,551.93).
 - B2: 41 items the 837 pass moves to the unseen count leave with route retired:unseen: 3 listed NO_ANSWER ($462.86) that
   the vanished check kept on Work now before ("nothing explains why") and 38 unlisted ($6,680.21) the left_record check
-  failed on; left_record goes from fail (38, $6,680.21) to ok. The decision log names them detect:unseen (41) instead of
-  detect:no_longer_raised (38 rows, the 3 kept ones had none). The vanished check still keeps 2 NO_ANSWER ($121.10) in
-  both runs (no rule retired them: not this unit's).
+  failed on; left_record goes from fail (38, $6,680.21) to ok; the vanished check from fail (5, $583.96) to fail (2,
+  $121.10: no rule retired those two, not this unit's). The decision log names them detect:unseen (41) instead of
+  detect:no_longer_raised (38 rows, the 3 kept ones had none). Fix round 1: the Data tab's "Running on its own" names
+  the 109 second payers' shares past their limit ($4,105.99) every run; 19 claims counted unseen because their payer's
+  remittances stopped are no longer retired (none has a row: nothing moves).
 - B3: the precision guard (critical) goes from fail (1, $40.72: an EM_BUNDLED_MOD57_MAJOR whose reprocessing the payer
-  took back by PLB WO) to ok.
+  took back by PLB WO) to ok. Fix round 1 changes nothing more here (ok in both).
 - B1 and B4: no item moves in this run (no payment EMA posted in full, no claim sent again under its claim id, no let-go
   line under a claim item that never listed it, between the world's last run and this one).
-- Work now after the run: 4,450 items, $1,816,938.95 before; 4,447 items, $1,816,476.09 after.
-- Once, at the first run after the release (fix round 1): FACTS_VERSION stays 3 and only the payment part has a new
-  version (selfcheck:facts_payment_version 1), so that run still compares every item's fingerprint but those of items
-  about a payment (REMIT_NOT_POSTED, TAKEBACK): only such an item that leaves on new facts alone is kept once and waits
-  for Accept on the Data tab. In the measured run nothing was read since the world's last run, so the facts route was
-  unused before and after.
-- Fix round 1, read only on the world store: the link map by rule 2 and by rule 3 is the same (no link changes). The
-  analysis run on the world (mem_run.py) was not repeated this round (the world store keeps no states of its own: the
-  guard needs a run of this code). The B3 changes move the guard only where a PLB took back a payment of a company's
-  other product (187 such takebacks in the replay store) or after a reversal, or where a same-amount reprocessing's
-  lines come in the other order.
+- Work now after the run: 4,450 items, $1,816,938.95 before; 4,447 items, $1,816,476.09 after (the 3 NO_ANSWER,
+  $462.86). The reviewed tip and this tip give the same items, states, self-checks and decision log.
+- Results: the world store keeps no Results registry (it is written only when the Results page is opened on a server).
+  Where a registry recorded the B5 denial as lost, it stays counted lost until the routed Results fix is applied.
+- Once, at the first run after the release: FACTS_VERSION stays 3 and only the payment part has a new version
+  (selfcheck:facts_payment_version 1), so that run still compares every item's fingerprint but those of items about a
+  payment (REMIT_NOT_POSTED, TAKEBACK): only such an item that leaves on new facts alone is kept once and waits for
+  Accept on the Data tab. In the measured run nothing was read since the world's last run, so the facts route was
+  unused in every tree.
 
 ## Open questions
 
@@ -227,10 +252,17 @@ this unit merged (gapfix, replay-fix) without its changes, after = this branch. 
 - Results keeps a loss it recorded: once an item went from Work now to expired, the registry's expired_on and lost_cents
   stay when the item later turns done (results.py `_lost` lists every row with expired_on). The B5 denial the release
   moves from expired to done ($50.33, paid before by the other payer) stays counted as lost to its deadline if Results
-  recorded it so. results.py is not this unit's file (replay-fix-2a edits it): the patch and its test are ready in
-  `$U/r1/results_lost_done.patch` and `$U/r1/test_results_expired_then_done_is_not_lost.py` (invented data, both store
-  kinds), checked on replay-fix-2a's tip 8ed9355 (the test fails there and passes with the patch; test_results.py
-  passes). The integrator applies them after merging replay-fix-2a.
+  recorded it so. results.py is not this unit's file (replay-fix-2a edits it). The routed fix, for the integrator after
+  merging replay-fix-2a: `update_registry` reads the state's rule (findings.state_rule, added to FINDING_FIELDS) and,
+  for a row with an expiry, keeps it as flag_info `done_rule` while the item is done (dropped when it is not);
+  `_lost` leaves out a row whose last state is done by a rule that brought or proved money. A person's Done (nothing
+  recovered), a stale row, a rule the store did not keep and a let-go stay lost: the loss came at the deadline; money
+  taken back later counts the loss again. Patch `$U/r1/results_lost_done.patch` and test
+  `$U/r1/test_results_expired_then_done_is_not_lost.py` (14 cases, invented data, both store kinds), checked on
+  replay-fix-2a's 1873731 (results.py is the same at 3ad88c7): 6 cases fail there without the fix and all pass with
+  it; four breaks each fail their cases; restored (sha1); test_results, the rate-review test and the six other files
+  that use Results pass (711 tests). The first version of the patch (`_lost` left out every row whose last state is
+  done) would also have hidden a person's Done after the deadline: superseded.
 - B3: the replay's last guard offender ($127.80, DENIED_DUPLICATE_UNPAID, work_answered: another payer's later 835
   covers a duplicate denial a person worked) was not traced. The own-payer rule covers downcoding and underpayment items
   only, as the brief says; a denial still counts any payer's later money.
