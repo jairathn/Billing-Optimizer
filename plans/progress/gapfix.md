@@ -193,8 +193,11 @@ of 27 pass, and the 2 left are r2-7's two hosts, by design (below). All 14 findi
   Hand-check those in the private real-data run.
 - replay-fix-2a and replay-fix-2b were built on this branch at 89acb3c, before this round. A trial merge (git
   merge-tree) of wip/replay-fix-2b, wip/replay-fix-2a, wip/routes and wip/replay-fix onto this branch finds no
-  conflicting file. Run 2b's tests after its merge: its Detector.retired should pick up this round's `_retire` calls
-  and the CH-8 claims this round sends through `_count_unseen`.
+  conflicting file. On a private trial merge of wip/replay-fix-2b (7a4b96b) onto this branch, its
+  tests/test_left_record_retired_on_purpose.py and this unit's three gap test files pass (126 tests), including its
+  case of claims moved to the unseen count, which leave the record with the route retired:unseen (r1-5's case). Its
+  vanished and left_record checks route any id in Detector.retired, so this round's `_retire` calls and the CH-8
+  claims this round sends through `_count_unseen` leave with a route too. Run 2b's tests again after its real merge.
 - r2-4 is older than this unit (the base fails the same way). After the fix, a claim to a second payer found by its claim
   id or its bill, which the first payer's payment or write-off used to answer, comes back to the list. The real data's
   count is not known (no run here).
@@ -204,3 +207,12 @@ of 27 pass, and the 2 left are r2-7's two hosts, by design (below). All 14 findi
   first sent before, is counted unseen by name rather than listed. Nothing is dropped; its bill is kept.
 - r2-7: the panel shows "the list comes with the next analysis" until the server's next cycle (the rules changed, so it
   analyses) or, on Vercel, until someone presses Run the analysis now.
+
+## Suites at the end of the fix round (branch 4f5d8b1, code as pushed)
+
+- python3 (3.13, SQLite 3.53), the whole suite in three shards: 4,418 passed, 29 skipped, 1 xfailed, 0 failed.
+- Python 3.11.1 with SQLite 3.40.0 (Vercel's SQLite): 4,216 passed, 14 skipped, 1 xfailed, 169 failed and 48 errors. All
+  217 tracebacks are that build's missing Connection.serialize or deserialize (the store image), which CLAUDE.md allows
+  there; none is in this unit's test files.
+- node tests/calc_model_check.js 79 of 79, node tests/lab_review_check.js 143 of 143 (static/data.js changed).
+- tests/test_docs.py with REMITWATCH_PRIVATE_WORDS: 40 passed.
