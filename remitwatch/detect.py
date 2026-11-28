@@ -1085,6 +1085,10 @@ class Detector:
         self.ema_outcomes: dict[str, dict] = {}
         self.ema_errors: list[dict] = []
         self.ema_counts: Counter = Counter()
+        # the items this run stops raising on purpose, each with the counter that holds its dollars (a second payer's share
+        # past its limit: snb_past_limit; a claim no source can show the answer to: unseen). The self-check's vanished and
+        # left_record checks read it as the route out, and the decision log names it as the rule (_after_save_checks)
+        self.retired: dict[str, str] = {}
         self._export_claims: set[str] = set()       # claim ids the weekly exports' path listed (that path wins)
         self._export_links: set[int] = set()        # their EMA claim numbers, as claim_answers tied them
         self._837_claims: set[str] = set()          # claim ids the 837s' pass judged (run_837_open_claims: that pass wins)
@@ -9692,11 +9696,15 @@ class Detector:
         the reason 'ambiguous'); `reason` when the caller knows it."""
         r8 = cd.get("s837")
         svcs = sorted({x[1] for x in items if x[1]})
+        # the claim's item, if it had one, leaves the record on purpose: its dollars are in the unseen count (the route out
+        # the self-check reads, and the rule the decision log names). The 837 pass's claims carry its id signal
+        fid = _fid(cd.get("id_signal") or (OPEN_837_ID if cd.get("source") == "837" else "EMA_OPEN_CLAIM"), cd["pcn"])
+        self.retired[fid] = "unseen"
         self.__dict__.setdefault("_unseen_rows", []).append({
             "pcn": cd["pcn"], "key": r8[7] if r8 is not None and len(r8) > 7 and r8[7] else None, "grp": cd.get("grp") or "Unknown",
             "billed": sum(int(x[2] or 0) for x in items), "svc": svcs[0] if svcs else None, "sent": cd.get("sent"),
             "due": cd.get("due"), "lines": sorted({(x[0], x[1]) for x in items if x[0] and x[1]}),
-            "candidates": int((a or {}).get("candidates") or 0), "reason": reason})
+            "candidates": int((a or {}).get("candidates") or 0), "reason": reason, "fid": fid})
 
     def _ema_reports_from(self) -> str | None:
         """The first service date any EMA source in the store covers (Production's lines, the A/R, the weekly exports): a
@@ -9734,6 +9742,8 @@ class Detector:
                 if left is not None and left <= 0:
                     # the payer before it left the patient nothing: nothing is owed, as _emit_open_claim leaves such a claim
                     self.ema_counts["unseen_second_send_nothing_left"] += 1
+                    if r.get("fid"):
+                        self.retired[r["fid"]] = "unseen_second_send_nothing_left"
                     continue
                 if left is not None:
                     r["cents"] = min(r["cents"], int(left)) if r["cents"] else int(left)
@@ -11312,6 +11322,7 @@ class Detector:
                 # window that closed is never dropped without a trace
                 self.ema_counts["snb_past_limit"] += 1
                 self.ema_counts["snb_past_limit_cents"] += max(0, owed)
+                self.retired[_fid("SECONDARY_NOT_BILLED", l["line_key"])] = "snb_past_limit"
                 continue
             share = ", ".join(w for rc, w in (("1", "deductible"), ("2", "coinsurance"), ("3", "copay"))
                               if any(g == "PR" and c == rc for g, c, _a in self.adj.get(l["line_key"], [])))
@@ -12694,8 +12705,10 @@ class Detector:
             self.value_summary = selfcheck.apply_expected_values(self.conn, selfcheck.recovery_rates(self.conn))
         except Exception as exc:       # noqa: BLE001  (the ranking waits for the next run; the items stand)
             runlog.caught(exc, "selfcheck:values")
-        # the lines passed by as copies of an answer delivered again the same day: their one item is the other delivery's
-        ctx = dict(getattr(self, "_selfcheck_ctx", None) or {}, delivered_again=sorted(getattr(self, "answer_copies", ()) or ()))
+        # the lines passed by as copies of an answer delivered again the same day: their one item is the other delivery's;
+        # and the items the run stopped raising on purpose, with the counter that holds their dollars
+        ctx = dict(getattr(self, "_selfcheck_ctx", None) or {}, delivered_again=sorted(getattr(self, "answer_copies", ()) or ()),
+                   retired=dict(getattr(self, "retired", None) or {}))
         try:
             self.selfcheck = selfcheck.after_detection(self.conn, ctx,
                                                        mode="serverless" if runtime.serverless() else "server",
@@ -12731,7 +12744,8 @@ class Detector:
         from . import runlog
         try:
             self.decisions = runlog.record_decisions(self.conn, self.run_id, self._decisions_before,
-                                                     rules=getattr(self, "state_rules", None), rule_version=DETECT_VERSION)
+                                                     rules=getattr(self, "state_rules", None), rule_version=DETECT_VERSION,
+                                                     retired=getattr(self, "retired", None))
             rl = runlog.current()
             if rl is not None:
                 rl.set("decisions", self.decisions)

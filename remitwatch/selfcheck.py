@@ -1431,7 +1431,7 @@ def _is_listed(r: dict, states_kept: bool) -> bool:
 
 
 def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dict[str, dict], *,
-                   facts: dict[str, str] | None = None, delivered_again: Any = None) -> dict:
+                   facts: dict[str, str] | None = None, delivered_again: Any = None, retired: Any = None) -> dict:
     """Open items people were shown as work (Work now or Waiting) before the run that the run no longer has, or keeps only
     as a stale row (an item a person worked that no rule produces any more: it is on no list), with no route out: a
     person's own decision on it while the run ran; an item THIS run made for the same line, claim and code, or service (an
@@ -1441,10 +1441,14 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
     (`facts`: the fingerprints that run stored, selfcheck_facts: the 835 answers on its bill, EMA's lines and newest A/R
     rows for its EMA claim number), as the rules' answer may then rightly change; or its line is a copy of an answer the
     payer delivered again the same day (`delivered_again`: the lines the detector passed by, detect._answer_copies), whose
-    one item the other delivery keeps."""
+    one item the other delivery keeps; or detection stopped raising it on purpose and counts its dollars elsewhere
+    (`retired`: {finding id: the counter}, Detector.retired: a second payer's share past its limit and a month's grace,
+    snb_past_limit; a claim no source can show the answer to, the unseen count). That route is only for an item nobody
+    worked: one a person worked is kept as a stale row, and a dropped rule keeps people's work on the list."""
     if not before:
         return _skip("vanished", "no items before this run")
     again = {str(x) for x in (delivered_again or ()) if x}
+    gone_by_rule = {str(k): str(v) for k, v in dict(retired or {}).items() if k and v}
     states_kept = any(r.get("work_state") for r in before.values())
     new_rows = [r for f, r in after.items() if f not in before and not r.get("stale")]
     lines = {r["line_key"] for r in new_rows if r.get("line_key")}
@@ -1507,6 +1511,8 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
             rt["regrouped"] += 1                # a pattern whose lines this run lists one by one again
         elif lk and lk in again:
             rt["delivered_again"] += 1          # one answer delivered twice is one item: the other delivery keeps it (T-I3)
+        elif a is None and fid in gone_by_rule:
+            rt["retired:" + gone_by_rule[fid]] += 1     # retired by its rule on purpose, its dollars in that counter
         else:
             (cands if listed else ucands).append(r)
     left = _no_route(conn, cands, routes, facts)
@@ -2182,7 +2188,8 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
     try:
-        van = check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again"))
+        van = check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again"),
+                             retired=ctx.get("retired"))
         left_record = van.pop("left_record", None)
         results.append(van)
         if left_record:

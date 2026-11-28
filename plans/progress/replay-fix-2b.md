@@ -17,7 +17,7 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
 | Bug | What | Test | State |
 |-----|------|------|-------|
 | B1 | vanished check: routes for a payment EMA posted and a claim sent again under the same claim id | tests/test_vanished_posted_or_sent_again.py (21: 7 cases x 3 store kinds) | done: failed 9/9 on the base; passes; each of the 4 parts broken fails its cases; restored (sha1) |
-| B2 | detection hands the checks the ids it retires on purpose (left_record) | | not started |
+| B2 | detection hands the checks the ids it retires on purpose (left_record) | tests/test_left_record_retired_on_purpose.py (21) | done: failed 9/15 on the base; passes; 5 breaks each fail; restored (sha1) |
 | B3 | precision_guard: own payer only, PLB takebacks netted, own answer repeated skipped | | not started |
 | B4 | a let-go line settles a never-listed whole-claim denial | | not started |
 | B5 | a same-visit vote split keeps its EMA link | | not started |
@@ -33,9 +33,22 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
   ema_rows.claim_submission_date on or after the first_seen day and after the evidence's `sent` (the send the item is
   about is never a new one).
 
+- B2 (detect.py, selfcheck.py, runlog.py): `Detector.retired` {finding id: counter}: run_secondary_not_billed's
+  past-limit branch (snb_past_limit), `_count_unseen` (every claim counted unseen: the 837 pass's no-ERA branch, its
+  waits-unfound branch and the exports' waits-unfound branch; the item id from cd's id_signal, OPEN_837_ID for the 837
+  pass), and `_finish_unseen`'s second-send-nothing-left drop. `_after_save_checks` hands `retired` in ctx;
+  `after_detection` passes it to `check_vanished(retired=)`, which routes `retired:<counter>` beside delivered_again
+  for listed and unlisted items, only when detection deleted the row (a person's worked item keeps its stale row and
+  stays kept). `runlog.record_decisions(retired=)` names `detect:<counter>` on the item's 'gone' row (runlog.py is
+  outside the owned list: one parameter and the gone branch; replay-fix-2a edits other lines of record_decisions).
+  Figures: a share that expired while Work now stays in Results' lost to deadlines after its retirement (registry);
+  the no-ERA plan's claims are on the Data tab's unseen figure. A share raised already past its last day was never
+  Work now, so Results does not count it as lost; its dollars are only in meta ema:wiring snb_past_limit_cents (see
+  Open questions).
+
 ## Next command
 
-B2: port `$S/tk/replay/proposed_tests/test_left_record_rule_retired.py`, see it fail, add Detector.retired.
+B3: port `$S/tk/replay/proposed_tests/test_precision_guard_false_offenders.py`, see it fail, fix later_payments.
 
 ## Measurements (replay data, read only)
 
@@ -43,4 +56,6 @@ None yet.
 
 ## Open questions
 
-None yet.
+- B2: a second payer's share raised already past its last day (never Work now) and then retired has its dollars only
+  in meta ema:wiring (snb_past_limit, snb_past_limit_cents): no page shows that counter. Not changed here (pages are
+  the UI units'); measured on the replay below.
