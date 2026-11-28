@@ -669,10 +669,8 @@ def _last_day(today: str | None = None) -> str:
     the limit, it counts in "Closes in 7 days" and Today's step 1, it sorts by that day, never as passed, and it is not
     among the closed windows. One definition for the soon and the closed ranges and the sorts by date ("valid" alone
     keeps our target date: _filters says why). `today` is the practice's day."""
-    day = today or _day(0)
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)) or "legal_deadline" not in _columns():
-        return "appeal_deadline"
-    return f"(CASE WHEN appeal_deadline < '{day}' AND legal_deadline >= '{day}' THEN legal_deadline ELSE appeal_deadline END)"
+    from .states import last_day_sql
+    return last_day_sql(today or _day(0), has_legal="legal_deadline" in _columns())
 
 
 def _range(deadline: str) -> tuple[str, str | None]:

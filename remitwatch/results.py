@@ -2245,6 +2245,12 @@ def _fix_markers(conn: sqlite3.Connection) -> list[dict]:
 
 
 # --------------------------------------------------------------------------------------- live counts (both hosts)
+def _last_day_sql(today: str) -> str:
+    """states.last_day_sql over `findings f` (every store kind keeps legal_deadline: store.DDL and the dashboard's copy)."""
+    from .states import last_day_sql
+    return last_day_sql(today, "f")
+
+
 def live_sql(key: str, today: str) -> tuple[str, list]:
     """A figure counted on the findings table alone, as one condition over `findings f`: the count and the list it opens
     run the same condition, so they agree on either host. Raises KeyError for a key that is not one of these."""
@@ -2255,19 +2261,21 @@ def live_sql(key: str, today: str) -> tuple[str, list]:
         if st not in STATE_LABELS:
             raise KeyError(key)
         return f"f.category IN ({scope}) AND COALESCE(f.stale,0)=0 AND f.work_state=?", [st]
+    last = _last_day_sql(today)
     if key == "at_risk":
-        return (f"f.category IN ({money}) AND COALESCE(f.stale,0)=0 AND f.work_state='work_now' AND f.appeal_deadline >= ? "
-                f"AND f.appeal_deadline <= ?", [today, _add(today, AT_RISK_DAYS)])
+        # the last day the money can be asked for, as Work and Today date it (states.last_day_sql, review e-1)
+        return (f"f.category IN ({money}) AND COALESCE(f.stale,0)=0 AND f.work_state='work_now' AND {last} >= ? "
+                f"AND {last} <= ?", [today, _add(today, AT_RISK_DAYS)])
     if key in ("given_up", "given_up:recoverable", "given_up:past"):
         cond = (f"f.category IN ({money}) AND COALESCE(f.stale,0)=0 AND COALESCE(f.written_off_cents,0) > 0 AND f.service_date >= ? "
                 f"AND f.status='open' AND COALESCE(f.work_state,'') NOT IN ('accepted') "
                 f"AND NOT EXISTS (SELECT 1 FROM finding_events e WHERE e.finding_id=f.finding_id AND e.kind IN ('manual','hidden'))")
         params: list = [GIVEN_UP_FROM]
         if key == "given_up:recoverable":
-            cond += " AND f.appeal_deadline >= ?"
+            cond += f" AND {last} >= ?"
             params.append(today)
         elif key == "given_up:past":
-            cond += " AND (f.appeal_deadline IS NULL OR f.appeal_deadline < ?)"
+            cond += f" AND ({last} IS NULL OR {last} < ?)"
             params.append(today)
         return cond, params
     if key == "hours:investigate":
@@ -2747,7 +2755,7 @@ def list_entries(conn: sqlite3.Connection, key: str, today: Any = None, lists: d
         w, p = live_sql(key, t)
         col, cp = live_cents(key, t)        # the same dollars the figure adds (live_figures)
         if key == "at_risk":
-            sql, args = f"SELECT f.finding_id, {col} FROM findings f WHERE {w} ORDER BY f.appeal_deadline, f.finding_id", cp + p
+            sql, args = f"SELECT f.finding_id, {col} FROM findings f WHERE {w} ORDER BY {_last_day_sql(t)}, f.finding_id", cp + p
         else:
             sql, args = f"SELECT f.finding_id, {col} FROM findings f WHERE {w} ORDER BY COALESCE({col},0) DESC, f.finding_id", cp + p + cp
         return [[r[0], int(r[1] or 0)] for r in conn.execute(sql, args)]

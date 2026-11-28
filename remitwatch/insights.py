@@ -302,6 +302,11 @@ def feed_hole(conn: sqlite3.Connection, today: str) -> dict | None:
     return {k: str(gap[k])[:10] for k in ("from", "to", "newest")}
 
 
+def _legal_col(conn: sqlite3.Connection) -> str:
+    """The payer's own limit as a column to select, or NULL on a store that predates it."""
+    return "legal_deadline" if "legal_deadline" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else "NULL"
+
+
 def work(conn: sqlite3.Connection, today: str) -> dict:
     """Work still to do (not yet sent to the payer) inside its filing window, by the kind of work it takes, with what
     falls due in 7 and 30 days, and what is sent and waiting on the payer. A routine-rate pattern counts its claims by
@@ -311,10 +316,13 @@ def work(conn: sqlite3.Connection, today: str) -> dict:
     wins = claim_windows(conn, TODO)
     out = {t["key"]: dict(t, n=0, cents=0, due7_n=0, due7_cents=0, due30_n=0, due30_cents=0, working_n=0) for t in WORK_TYPES}
     expired_n = expired_cents = small_n = small_cents = 0
-    for fid, sig, act, carc, status, dl, cents in conn.execute(
-            f"""SELECT finding_id, signal, actionable, carc, status, appeal_deadline, COALESCE(shortfall_cents,0) FROM findings
+    from .states import last_day
+    legal = _legal_col(conn)
+    for fid, sig, act, carc, status, dl0, lg, cents in conn.execute(
+            f"""SELECT finding_id, signal, actionable, carc, status, appeal_deadline, {legal}, COALESCE(shortfall_cents,0) FROM findings
                 WHERE status IN ({','.join('?' * len(TODO))}) AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL
                   AND category IN ('denial','bundling','downcoding','underpayment')""", TODO):
+        dl = last_day(dl0, lg, today)       # inside its window until the payer's own limit passes (states.last_day, e-1)
         if fid in wins:
             n_in, c_in = _in(wins[fid], today)
             n7, c7 = _in(wins[fid], today, soon7)
@@ -1149,12 +1157,15 @@ def to_decide(conn: sqlite3.Connection, newest: str | None, days: int = 120, tod
 def missed(conn: sqlite3.Connection, today: str, days: int = 30) -> dict:
     """Open items whose filing window closed in the last `days` days without anyone working them. A routine-rate pattern
     counts when one of its claims closed then, with those claims' cents."""
+    from .states import last_day
     since = (date.fromisoformat(today) - timedelta(days=days)).isoformat()
     wins = claim_windows(conn, ("open",))
     n = cents = 0
-    for fid, dl, c in conn.execute(f"""SELECT finding_id, appeal_deadline, COALESCE(shortfall_cents,0) FROM findings WHERE status='open'
+    legal = _legal_col(conn)
+    for fid, dl0, lg, c in conn.execute(f"""SELECT finding_id, appeal_deadline, {legal}, COALESCE(shortfall_cents,0) FROM findings WHERE status='open'
                                        AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""",
-                                   MONEY_CATEGORIES):
+                                        MONEY_CATEGORIES):
+        dl = last_day(dl0, lg, today)       # a last-chance item closes on the payer's own limit (states.last_day, e-1)
         if fid in wins:
             got = [x for d, x, _l in wins[fid] if d and since <= d < today]
             if got:

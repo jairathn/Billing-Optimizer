@@ -1647,6 +1647,28 @@ def _later(*dates: Any) -> str | None:
     return max(got) if got else None
 
 
+# --------------------------------------------------------------------------- the last day the money can be asked for
+# One definition for every page and figure that dates an item (Work's soon and closed ranges and its sorts, Today's
+# "closes in 7 days" and "lost to deadlines", Results' "at risk in the next 14 days" and "given up", the insights): our
+# own target date (appeal_deadline) until it passes, then the payer's own limit while that is still ahead
+# (legal_deadline). An item past our target and inside the payer's limit is the "last chance" (CRITIQUE_biller change 3):
+# it closes on the limit, it is at risk until then, and it is never counted lost before the limit passes (review e-1).
+def last_day(appeal: Any, legal: Any, today: str) -> str | None:
+    """The last day for one item, from its two dates and the practice's day."""
+    a, lg = (str(appeal)[:10] if appeal else None), (str(legal)[:10] if legal else None)
+    return lg if (a and a < today and lg and lg >= today) else a
+
+
+def last_day_sql(today: str, alias: str = "", has_legal: bool = True) -> str:
+    """The same as SQL over the findings table (`alias.` before the columns when given). `today` is written into the SQL,
+    so it must be a date; a store without legal_deadline (has_legal false) dates by the target alone."""
+    a = f"{alias}." if alias else ""
+    if not has_legal or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(today or "")):
+        return f"{a}appeal_deadline"
+    return (f"(CASE WHEN {a}appeal_deadline < '{today}' AND {a}legal_deadline >= '{today}' THEN {a}legal_deadline "
+            f"ELSE {a}appeal_deadline END)")
+
+
 def windows(f: dict, deadline: str | None = None, dbasis: str | None = None, fx: dict | None = None) -> list[dict]:
     """Every window the item can still be worked in, by date: {'what', 'date', 'basis', 'process', 'own'}. process: what
     the window is for ('appeal': a dispute or appeal to the payer, 'corrected': a corrected claim, 'reopening': a Medicare
