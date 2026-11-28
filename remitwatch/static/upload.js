@@ -503,7 +503,7 @@
     return `<div class="export" data-key="${esc(e.key)}">
       <div>
         <div class="top"><h3>${esc(e.title)}</h3>${chip(FLAG_CHIP[rowFlag(e)] || 'fresh')}</div>
-        <div class="big" style="margin-top:4px">${esc(e.purpose)}</div>
+        <div class="big mt-1">${esc(e.purpose)}</div>
         <dl>
           <dt>Filters</dt><dd><ul>${e.filters.map(f => `<li>${esc(f)}</li>`).join('')}</ul></dd>
           <dt>Columns</dt><dd>${esc(e.columns_note || '')} <details><summary class="small">The ${e.columns.length} columns it must have (checked when you drop it)</summary><ul class="cols">${cols}</ul></details></dd>
@@ -519,7 +519,7 @@
           <div class="small muted">${who}${h.versions ? ` <a href="#" data-hist>${h.versions} earlier version${h.versions === 1 ? '' : 's'}</a>` : ''}</div>
           <div class="hist" hidden></div>
         </div>
-        <div class="row" style="margin-top:12px"><span class="attach"><button type="button" class="primary" data-pick>Upload the ${esc(e.title)}</button>
+        <div class="row mt-3"><span class="attach"><button type="button" class="primary" data-pick>Upload the ${esc(e.title)}</button>
           <input type="file" tabindex="-1" data-upload="${esc(e.key)}" accept=".xlsx,.csv,.tsv,.txt,.zip" aria-label="Upload the ${esc(e.title)}"></span></div>
         <div class="row-now"></div>
       </div>
@@ -535,7 +535,7 @@
 
   async function loadExports() {
     try { EX = await apiCall('/api/ema/exports'); }
-    catch (e) { $('#exports').innerHTML = `<div class="no small" style="margin-top:10px">${esc(e.message)}</div>`; return; }
+    catch (e) { $('#exports').innerHTML = `<div class="no small mt-3">${esc(e.message)}</div>`; return; }
     info.show_phi = EX.show_phi;
     $('#exports').innerHTML = EX.exports.map(exportRow).join('');
     exportsNote(EX.exports);

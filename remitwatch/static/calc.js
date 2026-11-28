@@ -383,7 +383,7 @@ function calcInputs(v){
       <label class="small" style="display:block"><input type="checkbox" id="calcMASD" ${x.ma_same_day!==false?'checked':''}> Medicare Advantage plans that move with Medicare (ticked under Contracts) take on the ${esc(d.next_year)} changes too: modifier B1 in place of G2211, and this rule. The rule binds traditional Medicare; a plan follows it only if its contract follows Medicare's payment rules.</label>
       <label class="small" style="display:block"><input type="checkbox" id="calcAdd" ${x.cut_add_ons?'checked':''}> It cuts add-on codes too (extra Mohs stages, extra biopsies, 17003). The rule says every service but the highest; CMS has not said how add-ons are handled.</label>
       ${s57 != null && calcMohsOk(cs) ? `<label class="small" style="display:block"><input type="checkbox" id="calcM57" ${x.mohs_57?'checked':''}> If CMS's edits also catch a visit with modifier 57 beside a 0-day Mohs (${Math.round(s57 * 100)} of every 100 Mohs cases here). A sensitivity, not a reading of the rule.</label>` : ''}
-      <div class="small sev-medium" style="margin-top:4px">Do not change modifier 25 to 57 to avoid this rule; 57 is only for the visit that decides a 90-day procedure.</div>
+      <div class="small sev-medium mt-1">Do not change modifier 25 to 57 to avoid this rule; 57 is only for the visit that decides a 90-day procedure.</div>
     </details>` : ''}
     <details style="margin-top:6px" data-fold="ancillary" ${calcFold('ancillary', false)}><summary><b>The practice's ancillary and product revenue</b> <span class="small muted">not this clinician's production</span></summary>
       <div class="small muted" style="margin:4px 0">Radiation, skin-substitute products, pathology, drugs and staff services come to the practice and carry costs of their own. Pathology technical component, lab, radiation delivery and drugs not given incident to your own service are designated health services and may not be credited for your referrals; services you personally perform (including slides you read) and incident-to services may be. They are left out of the figures above unless you add them here.</div>
@@ -466,7 +466,7 @@ function calcUpdate(){
       <tr class="calc-total"><td><b>Estimated collections, a year</b><div class="small muted">likely ${moneyK(lo)} to ${moneyK(hi)}: ${esc(calcBandWhy(d, x))}</div></td>
         <td class="num"><b style="font-size:22px">${moneyK(R[3])}</b><div class="small muted">${money(fixed.totalCollections / Math.max(1, fixed.daysYear))} a clinic day · ${(fixed.daysYear||0).toFixed(0)} days</div></td></tr>
     </tbody></table>
-    <div class="small muted" style="margin-top:6px">Of this, patient balances are about ${moneyK(fixed.patientBalances)} at the shares set under Patient balances.
+    <div class="small muted mt-2">Of this, patient balances are about ${moneyK(fixed.patientBalances)} at the shares set under Patient balances.
       ${x.include_ancillary ? 'Ancillary and product revenue is included.' : `The practice's ancillary and product revenue (${moneyK(fixed.ancillaryCollections)} a year at this pace) is not included.`}</div>`;
   // where the money comes from: rows rounded so that they add up to the totals
   const lines = CalcModel.LINES.map(([k, label]) => [k, label, (nowNext.byLine[k] || {}).collections || 0, (fixed.byLine[k] || {}).collections || 0])
@@ -538,7 +538,7 @@ function calcPayers(v, plain){
     </tbody></table>
     ${small.length ? `<details style="margin-top:6px" data-fold="payers-small" ${calcFold('payers-small', false)}><summary class="small">${small.length} payers with under half a percent of the money each</summary>
       <table class="calc-payers"><tbody>${small.map(row).join('')}</tbody></table></details>` : ''}
-    <div class="small muted" style="margin-top:6px">est. = most of this payer's rates for these codes are not in the remittances and are estimated from its own percentage of Medicare. Medicaid managed care contracts mostly follow the state's schedule and are rarely negotiable, so they are not counted as correctable.</div>`);
+    <div class="small muted mt-2">est. = most of this payer's rates for these codes are not in the remittances and are estimated from its own percentage of Medicare. Medicaid managed care contracts mostly follow the state's schedule and are rarely negotiable, so they are not counted as correctable.</div>`);
   // changes redraw on the next frame, after the focus has moved on (Tab), so the focus stays where the reader put it
   box.querySelectorAll('[data-calc-fix]').forEach(cb => cb.onchange = () => { x.corrected[cb.dataset.calcFix] = cb.checked; calcSoon(); });
   box.querySelectorAll('[data-calc-idx]').forEach(cb => cb.onchange = () => { x.indexed[cb.dataset.calcIdx] = cb.checked; calcSoon(); });
@@ -616,7 +616,7 @@ function calcGoal(){
   const short = t => /^not enough/.test(t), said = ways.map(m => [m, say(m)]).sort((a, b) => short(a[1]) - short(b[1]));
   out.innerHTML = head + `<p>${moneyK(gap)} a year short. ${said.some(r => !short(r[1])) ? 'Any one of these closes it on its own:' : 'None of these closes it on its own:'}</p>
     <table class="calc-goal"><tbody>${said.map(([m, t]) => `<tr><td>${esc(m.name)}</td><td class="num">${esc(t)}</td></tr>`).join('')}</tbody></table>
-    <div class="muted" style="margin-top:4px">Biopsies, frozen lesions, excisions, stages, closures and visit levels are left out on purpose: they follow the patient.</div>`;
+    <div class="muted mt-1">Biopsies, frozen lesions, excisions, stages, closures and visit levels are left out on purpose: they follow the patient.</div>`;
 }
 
 // what a clinic day has to bring for a target, like with like: allowed for the clinician's own services at this plan's

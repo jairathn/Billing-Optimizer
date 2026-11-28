@@ -42,15 +42,15 @@
 
   <div class="panel" id="exportsPanel">
     <div class="top"><h2 style="margin:0">EMA exports RemitWatch needs</h2><span class="small muted" id="exportsNote"></span></div>
-    <div class="small muted" style="margin-top:4px">Each row says what the export is for, how to filter it, the columns it must have, and when it last arrived. Drop a file on its row (or use its Upload button): the page first checks it is that export and that no column is missing, before anything is sent.</div>
-    <div id="exports"><div class="muted small" style="margin-top:10px">Loading the checklist…</div></div>
+    <div class="small muted mt-1">Each row says what the export is for, how to filter it, the columns it must have, and when it last arrived. Drop a file on its row (or use its Upload button): the page first checks it is that export and that no column is missing, before anything is sent.</div>
+    <div id="exports"><div class="muted small mt-3">Loading the checklist…</div></div>
   </div>
 
   <div class="panel">
     <label class="drop" id="drop" tabindex="-1">
       <input type="file" id="files" multiple accept=".xlsx,.csv,.tsv,.txt,.zip,.835,.837,.edi,.rmt,.era,.x12,.dat,.pdf,.docx,.rtf,.html,.htm">
       <div><b>Drop files here</b>, or <span style="color:var(--accent);text-decoration:underline">choose files</span></div>
-      <div class="small muted" style="margin-top:4px" id="dropHint">EMA's reports and exports (Excel or CSV, any size), remittance (835) and claim (837) files, a .zip of those, and visit notes (PDF, Word or text). Several at once is fine.</div>
+      <div class="small muted mt-1" id="dropHint">EMA's reports and exports (Excel or CSV, any size), remittance (835) and claim (837) files, a .zip of those, and visit notes (PDF, Word or text). Several at once is fine.</div>
     </label>
     <div id="now"></div>
   </div>
@@ -63,11 +63,11 @@
 
   <div id="here" hidden>
     <div class="panel"><div class="top"><h2 style="margin:0">Waiting to be read</h2><button id="runNow">Read them now</button></div>
-      <div id="cycle" class="small" style="margin-top:6px">…</div></div>
+      <div id="cycle" class="small mt-2">…</div></div>
 
     <div class="panel"><h2>Visit notes appeals are waiting for</h2>
       <div class="small muted">Open items that rest on the visit note, inside their filing window, with no appeal packet yet, soonest first. Save each note from EMA as a PDF and drop it above (RemitWatch reads the patient's name and the date of service from it), or attach it on its row.</div>
-      <div id="needed" class="small" style="margin-top:8px">…</div></div>
+      <div id="needed" class="small mt-2">…</div></div>
 
     <div class="panel"><h2>Other files uploaded</h2><div id="hist" class="small">…</div></div>
   </div>

@@ -48,7 +48,7 @@ function labReadProblem(){
   return `The saved figures could not be read (${state.calc.Aerror || 'no answer'}). Saving is off, so nothing saved is overwritten. Open this view again to try again.`;
 }
 function labReadNote(){
-  return state.calc.Aok ? '' : `<div class="note sev-high" style="margin-top:8px">${esc(labReadProblem())}</div>`;
+  return state.calc.Aok ? '' : `<div class="note sev-high mt-2">${esc(labReadProblem())}</div>`;
 }
 
 // change(doc) makes one change to a copy of the saved figures; returns {rebased} (true when another window had saved)
@@ -162,7 +162,7 @@ function labCard(S){
     let head = '';
     if(q[7] && q[7] !== section){
       const [t, tc] = q[8] ? (LAB_TIER[q[8]] || ['', '']) : ['', ''];
-      head = `<div class="small" style="margin-top:10px"><b>${esc(q[7])}</b>${t ? ` <span class="chip ${tc}">${esc(t)}</span>` : ''}</div>`;
+      head = `<div class="small mt-3"><b>${esc(q[7])}</b>${t ? ` <span class="chip ${tc}">${esc(t)}</span>` : ''}</div>`;
     }
     section = q[7] || null;
     return head + ctl(q);
@@ -210,7 +210,7 @@ function labUpdate(v){
     if(Math.abs(st.minutesDay) >= 0.5) bits.push(`${labSign(st.minutesDay)}${Math.abs(st.minutesDay).toFixed(0)} clinician minutes a day`);
     if(st.oneTime) bits.push(`one-time ${moneyK(st.oneTime)}`);
     el.innerHTML = bits.join(' · ') + (S.id === 'asc' && st.detail ? labAscViews(st.detail) : '')
-      + (st.notes.length ? (S.id === 'asc' ? st.notes.map(n => `<div class="muted" style="margin-top:3px">${esc(n)}</div>`).join('')
+      + (st.notes.length ? (S.id === 'asc' ? st.notes.map(n => `<div class="muted mt-1">${esc(n)}</div>`).join('')
                                              : `<div class="muted">${st.notes.map(esc).join(' ')}</div>`) : '')
       + (st.needs.length ? labNeeds(S, st.needs) : '') + (S.id === 'asc' && st.detail ? labAscTypes(st.detail) + labAscKy(st.detail) : '');
   }
@@ -246,7 +246,7 @@ function labUpdate(v){
       ${ifRows.map(([s, dv]) => `<tr><td>${esc(s.title)}</td><td class="num">${labSigned(dv)}</td></tr>`).join('')}
       ${W ? `<tr><td>Collections a year with the what-ifs</td><td class="num">${moneyK(W.collections)}${W.cost && !ifCostOpen ? ` <span class="small muted">(after costs ${moneyK(W.collections - W.cost)})</span>` : ''}</td></tr>` : ''}` : ''}
     </tbody></table>
-    ${r.needs.length ? `<div class="small sev-medium" style="margin-top:4px">Not entered yet for the strategies above: ${r.needs.map(n => esc(needLabel(n))).join('; ')}. ${costOpen ? 'Costs a year leave out what is not entered, so nothing is shown after costs. ' : ''}${params.includes('param.own') ? 'The ASC counts the lower of its two views (with and without the facility fee, after costs once the ASC\'s cost per case is entered) until the practice\'s share is entered. ' : ''}${params.includes('param.commercial_pct') ? 'Medicare Advantage and commercial cases are not moved until their facility fee is entered.' : ''}</div>` : ''}
+    ${r.needs.length ? `<div class="small sev-medium mt-1">Not entered yet for the strategies above: ${r.needs.map(n => esc(needLabel(n))).join('; ')}. ${costOpen ? 'Costs a year leave out what is not entered, so nothing is shown after costs. ' : ''}${params.includes('param.own') ? 'The ASC counts the lower of its two views (with and without the facility fee, after costs once the ASC\'s cost per case is entered) until the practice\'s share is entered. ' : ''}${params.includes('param.commercial_pct') ? 'Medicare Advantage and commercial cases are not moved until their facility fee is entered.' : ''}</div>` : ''}
     ${r.capacity && r.capacity.share > 1 ? `<div class="small sev-high">The plan needs more clinician minutes than a clinic day holds. Either the minutes entered are hands-on minutes the clinician can overlap across rooms (then raise the day's minutes), or the plan does not fit.</div>` : ''}`;
   body.querySelectorAll('[data-goto-figures]').forEach(a => a.onclick = e => { e.preventDefault(); cs.view = 'figures'; calcDraw(cs.el); });
   // what earns the most per minute
@@ -274,7 +274,7 @@ function labAscViews(D){
 function labAscTypes(D){
   if(!D.types || !D.types.length) return '';
   const low = D.types.filter(t => t.lowMargin);
-  return `<table class="calc-cards lab-asc" style="margin-top:6px"><thead><tr><th>Closure, after a clinic Mohs</th><th class="num">A year: clinic / ASC now</th><th class="num">ASC fee a case</th>
+  return `<table class="calc-cards lab-asc mt-2"><thead><tr><th>Closure, after a clinic Mohs</th><th class="num">A year: clinic / ASC now</th><th class="num">ASC fee a case</th>
       <th class="num">Practice, with the fee</th><th class="num">Practice, without it</th><th class="num">Patient pays more</th><th class="num">A later day adds</th></tr></thead><tbody>
     ${D.types.map(t => `<tr><td>${esc(t.label)}${t.lowMargin ? `<div class="small sev-medium">Small ASC fee: with the ASC's own staff and supplies it may not cover the ASC's cost, even for an owner.</div>` : ''}</td>
       <td class="num" data-label="A year: clinic / ASC now">${Math.round(t.clinic)} / ${Math.round(t.asc)}</td>
@@ -289,9 +289,9 @@ function labAscTypes(D){
 function labAscKy(D){
   const K = D.ky;
   if(!K || !K.here) return '';
-  if(!K.available) return `<div class="small muted" style="margin-top:6px"><b>Kentucky closures to the Newburgh ASC:</b> not available yet. The page does not have Medicare's Kentucky amounts for these codes.</div>`;
+  if(!K.available) return `<div class="small muted mt-2"><b>Kentucky closures to the Newburgh ASC:</b> not available yet. The page does not have Medicare's Kentucky amounts for these codes.</div>`;
   if(!K.types.length) return '';
-  return `<table class="calc-cards lab-asc" style="margin-top:6px"><thead><tr><th>Kentucky closure, after a Kentucky clinic Mohs</th><th class="num">A year in the Kentucky clinics</th><th class="num">ASC fee a case</th>
+  return `<table class="calc-cards lab-asc mt-2"><thead><tr><th>Kentucky closure, after a Kentucky clinic Mohs</th><th class="num">A year in the Kentucky clinics</th><th class="num">ASC fee a case</th>
       <th class="num">Practice, with the fee</th><th class="num">Practice, without it</th><th class="num">Patient pays more</th></tr></thead><tbody>
     ${K.types.map(t => `<tr><td>${esc(t.label)}${t.sent ? '' : ' <span class="small muted">(not sent)</span>'}${t.lowMargin ? `<div class="small sev-medium">Small ASC fee: it may not cover the ASC's cost.</div>` : ''}</td>
       <td class="num" data-label="A year in the Kentucky clinics">${Math.round(t.perYear)}</td>
@@ -425,7 +425,7 @@ async function figuresDraw(v, note){
     <div class="panel"><h2>Practice figures</h2>
       <div class="small muted">The practice's own numbers, used by the Strategy lab and the Provider sheet. Leave a box empty until you have the figure: anything that depends on it is shown as not entered, never guessed. Saved to the site for the owner only${cs.Asaved ? `; last saved ${esc(typeof practiceTime === 'function' ? practiceTime(cs.Asaved) : cs.Asaved.replace('T', ' ').slice(0, 16) + (/T\d\d:\d\d/.test(cs.Asaved) ? ' UTC' : ''))}` : ''}. Only the boxes you change are saved, so figures saved in another window are kept.</div>
       ${labReadNote()}
-      <div class="actions" style="margin-top:8px"><button class="primary" id="figSave" ${cs.Aok ? '' : 'disabled'}>Save</button> ${cs.Aok ? '' : '<button id="figRetry">Read them again</button>'} <span id="figMsg" class="small" role="status"></span></div></div>
+      <div class="actions mt-2"><button class="primary" id="figSave" ${cs.Aok ? '' : 'disabled'}>Save</button> ${cs.Aok ? '' : '<button id="figRetry">Read them again</button>'} <span id="figMsg" class="small" role="status"></span></div></div>
     <div class="grid two">
       <div class="panel"><h2>Clinician minutes</h2><div class="small muted">Hands-on minutes of the clinician for each piece of work, not room time. A Mohs surgeon running several rooms counts only the minutes spent with each patient and at the microscope.</div>
         ${field('session', 'minutes', 'Minutes the clinician has in a clinic day', 'minutes')}
@@ -521,7 +521,7 @@ async function sheetDraw(v){
   const app = d.tier === 'nonphysician';
   v.querySelector('#calcBody').innerHTML = `
     <div class="panel no-print"><div class="small muted">A one-page sheet for ${esc(d.who.name)}: where the year stands, and what a pay target needs, with nothing about any other clinician. Print it or save it as a PDF.</div>
-      <div class="filters" style="margin-top:6px"><label class="small">Pay target, a year <input id="sheetTarget" inputmode="decimal" placeholder="e.g. 650,000 or 650k" value="${esc(target)}" style="width:140px"></label>
+      <div class="filters mt-2"><label class="small">Pay target, a year <input id="sheetTarget" inputmode="decimal" placeholder="e.g. 650,000 or 650k" value="${esc(target)}" style="width:140px"></label>
       <button id="sheetPrint">Print</button></div>
       ${!cs.Aok ? labReadNote() : plan ? '' : `<div class="small sev-medium">No pay plan entered for ${esc(d.who.name)} under Practice figures: the sheet shows collections only.</div>`}
       <div id="sheetNote" class="small sev-medium"></div></div>

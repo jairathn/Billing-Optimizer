@@ -45,7 +45,7 @@ function opAnalysisHtml(a){
     ${run ? `<div class="note small">A run is going (asked for or started ${opWhen(run.since)} UTC). It finishes by itself, and the lists change when it has.</div>` : ''}
     ${stopped}
     ${un && un.text ? `<div class="warnbox small"><b>What the last run could not check.</b> ${esc(un.text)}</div>` : ''}
-    <div style="margin-top:8px"><button class="primary" data-op-press="1" ${run ? 'disabled' : ''}>Run the analysis now</button>
+    <div class="mt-2"><button class="primary" data-op-press="1" ${run ? 'disabled' : ''}>Run the analysis now</button>
       <span class="small muted" data-op-press-said></span></div>
   </div>`;
 }
@@ -80,10 +80,10 @@ function opSelfcheckHtml(s){
   const acc = s.acceptances || [], asked = (state.opAsked || {})[last.run_id] || [];
   const took = new Set([].concat(...acc.filter(x => !x.stale && x.run_id === last.run_id).map(x => Object.keys(x.checks || {}))).concat(asked));
   const acceptable = checks.filter(c => c.status === 'fail' && c.severity === 'critical' && !took.has(c.id)).map(c => c.id);
-  const tookLine = took.size && last.run_id ? `<div class="small ok" style="margin-top:6px">Accepted: what run ${esc(last.run_id)} found (${esc(checks.filter(c => took.has(c.id)).map(c => c.title || c.id).join('; ') || [...took].join(', '))}).${asked.length ? ' The next run takes it.' : ''}</div>` : '';
+  const tookLine = took.size && last.run_id ? `<div class="small ok mt-2">Accepted: what run ${esc(last.run_id)} found (${esc(checks.filter(c => took.has(c.id)).map(c => c.title || c.id).join('; ') || [...took].join(', '))}).${asked.length ? ' The next run takes it.' : ''}</div>` : '';
   const refused = acc.filter(x => x.stale).slice(-1)[0];
   const refusedLine = refused && refused.run_id !== last.run_id ? `<div class="warnbox small">Not accepted: the acceptance of what run ${esc(refused.run_id)} found (${opWhen(refused.at)} UTC) reached the store after the checks ran again. Look at the new results below, then accept them if they are intended.</div>` : '';
-  const accept = acceptable.length && last.run_id ? `<div class="small" style="margin-top:6px">If these changes are what you intended (a new rule, a payer's new policy), the owner can accept exactly what this run found:
+  const accept = acceptable.length && last.run_id ? `<div class="small mt-2">If these changes are what you intended (a new rule, a payer's new policy), the owner can accept exactly what this run found:
       <button class="btn" data-op-accept="${esc(acceptable.join(','))}" data-op-run="${esc(last.run_id)}">Accept what run ${esc(last.run_id)} found</button>
       <div class="small" data-op-owner></div></div>` : '';
   const audit = au.today ? `<div class="check"><div><b>The weekly self-audit</b> <span class="small muted">of ${esc(au.today)}</span>
@@ -122,7 +122,7 @@ function opLogsHtml(l){
     ${l.error ? `<div class="note">${esc(l.error)}</div>` : ''}
     ${problems}
     ${table}
-    <div style="margin-top:8px"><a class="btn" href="/api/ops/diagnostic-bundle?days=7" download>Download the diagnostic bundle</a>
+    <div class="mt-2"><a class="btn" href="/api/ops/diagnostic-bundle?days=7" download>Download the diagnostic bundle</a>
       <div class="small muted">${esc(bundle.what || 'Give this file and the repository to Claude to find the cause of a problem. It holds no patient data.')}</div></div>
   </div>`;
 }
@@ -221,7 +221,7 @@ function opBindOpen(box){
 // when, and offers to bring it back to the lists with the next analysis (POST /api/archive/reopen).
 function opArchivedHtml(text, at){
   return `<div class="note" data-op-archived="1"><b>In the archive${at ? ' since ' + esc(String(at).slice(0, 10)) : ''}.</b> ${esc(text || '')}
-    <div style="margin-top:6px"><button class="btn" data-op-reopen="1">Bring it back to the lists</button> <span class="small muted" data-op-reopen-said></span></div></div>`;
+    <div class="mt-2"><button class="btn" data-op-reopen="1">Bring it back to the lists</button> <span class="small muted" data-op-reopen-said></span></div></div>`;
 }
 
 function opBindReopen(root, body){
