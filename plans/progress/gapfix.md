@@ -16,6 +16,7 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
 | G5 A/R held-open line | done, tests green, break and restore done | detect.py `_837_ema_answers` (pending unseen, then `_ar_held_open`), `_ar_held_open`, `_emit_open_claim` (evidence 'ar_open' and hint); count 837_ar_held_open; tests/test_gap_unseen.py::test_a_claim_whose_line_emas_ar_holds_open_* |
 | G7 waiting view names all or the remainder in dollars | done, tests green, break and restore done | detect.py `_finish_waiting` ('unnamed', 'ema_reports' from the notes); insights `_waiting_837` (remainder and notes in the detail); tests/test_gap_print_batch.py::test_the_waiting_view_counts_* |
 | G6 second-payer bridge | done in the content bridge, with the guard; fixed after the real-data run (value, own status); tests green, break and restore done | ema_checks.claim_answers (`by_second`, `second_of`, `_second_group`, answers only by role 'secondary' postings and the second payer's reasons; 'second_payer', 'first_left_cents', 'open_cents' in the answer); detect `_answered_rule` (no patient or name answer for a second-payer claim), `_emit_open_claim` (valued at what the first payer left: the 837's AMT*EAF, else EMA's charge less insurance's payments and contractual adjustments; not listed only when that is $0: open_claim_second_nothing_left), `_837_ema_answers` (no EMA-claim status for it), the 837 and exports' passes (no `_export_links`, no heir key), `_waiting_ema_claims`, `_item_links`; tests/test_gap_unseen.py::test_a_claim_sent_to_the_visits_second_payer_*, ::test_the_first_payers_payment_*, ::test_a_second_payers_claim_*, ::test_a_claim_to_the_second_payer_never_stands_* |
+| Fix round (reviews r1-1..r1-5, r2-1..r2-9) | done: 12 fixed as asked, r2-7 fixed in part by design, r1-5 left to replay-fix-2b B2 (its hook is here); tests green, break and restore done | detect.py, ema_checks.py, insights.py, api_ema.py, static/data.js; see "Fix round" below |
 
 ## G8: what was built
 
@@ -134,9 +135,8 @@ Aggregates only; the snapshots stayed in the unit's private folder and were dele
   named and the rest counted (291, $98,565.10, due over the next nine months); notes: 2 claims in EMA's print batch ($260.32).
   13 report-check items listed before their claim began waiting stay listed (not_sent 2, rejected 6, no answer 5).
 - No-ERA payers: tip 23 (3,988 claims, 1,557 unchecked, 67 listed); branch 30 (4,054 claims, 1,570 unchecked, 88 listed).
-- The brief's four claims: the two print-batch claims (0da1ade542a70bf0b15bfd66, 8bd74fff5e62cad10064f9b6) are on the
-  waiting view, due in one and two days, with their print-batch notes; the two A/R claims (8689f0c68f33904741b4fd57,
-  b9b25665e23f548ce1d8a3a1) are listed (NO_ANSWER, the A/R row their evidence).
+- The brief's four claims: the two print-batch claims are on the waiting view, due in one and two days, with their
+  print-batch notes; the two A/R claims are listed (NO_ANSWER, the A/R row their evidence).
 - Hand-trace (every moved item, from the raw rows): the 12 that appear, the 4 that change and the 32 that vanish match their
   rule (837 sends, AMT*EAF, EMA lines and postings by role, A/R rows, the payer's 835 flow around the send). The first branch
   run's three over-reaches were fixed and re-measured: second-payer claims valued at EMA's open balance and dropped at $0;
@@ -156,3 +156,51 @@ Aggregates only; the snapshots stayed in the unit's private folder and were dele
   (it would read ema_line_payments by the evidence's 'visit_ema_claim' and role 'secondary') would end that.
 - A claim held on the waiting view whose EMA claim a newer report calls Rejected waits for its own due day (the brief's
   rule; its waiting entry says so). Consider making such a claim due at once.
+
+## Fix round (the two reviews, 2026-11-28)
+
+Base: wip/gapfix at 89acb3c, merged with the integration tip (3fdf128; then ed245a1, a handoff note only). The reviewers'
+tests were ported with invented data (both store kinds; both hosts for the Data tab) into tests/test_gap_unseen.py,
+tests/test_gap_one_claim.py and tests/test_gap_print_batch.py. Each fix was broken on purpose (its tests failed) and
+restored (md5 identical). The reviewers' own test files, run against this branch: reviewer 1, 6 of 6 pass; reviewer 2, 25
+of 27 pass, and the 2 left are r2-7's two hosts, by design (below). All 14 findings were real.
+
+| finding | outcome | tests |
+|---|---|---|
+| r1-1 (medium) a second payer's share the patient already paid is listed as work | fixed: claim_answers returns the patient's payments on the visit's lines (pat_paid_cents); `_emit_open_claim` takes them off what the first payer left. All of it paid (to within a dollar): not listed, counted open_claim_second_patient_paid (and _cents). Part paid: listed at the rest (evidence ema_patient_paid_cents). Follow-up: the bridge's guard stands aside when the claim's payer is EMA's first payer for the visit (an 837 may call it second) | test_a_second_payers_share_the_patient_paid_is_not_listed_as_never_answered_work, test_a_second_payers_share_the_patient_paid_in_part_is_listed_at_the_rest, test_a_claim_whose_payer_is_its_ema_claims_first_payer_is_answered_by_its_postings_whatever_its_837_says |
+| r1-2 (medium) claims sent after a payer's last ERA go to "payers behind" with no list, and the archive drops their bills | fixed: a claim due after its payer's last remittance (CH-8 "payers behind", both passes) is now counted unseen by name, reason payer_remittances_stop: the Data tab lists it and the archive keeps its bill. The window's after side is unchanged on purpose: claims sent after a claim never make it blind, since a batch that never reached the payer looks the same and must stay listed | test_claims_sent_weeks_after_a_payers_last_era_are_counted_unseen_and_their_bills_kept, test_claims_sent_after_a_payer_stops_sending_eras_are_counted_not_listed |
+| r1-3 (medium) claims sent weeks before a payer's first ERA are listed; the window decides claim by claim | fixed: `no_era_at` also judges a claim on the claims sent in the 90 days up to its own send (its day included; the last ten when fewer): none of them answered, it is blind (counted unseen, never listed). One visit's claims to one payer id (member, first service day) are judged at the visit's first send | test_claims_sent_weeks_before_a_payers_first_era_are_not_listed, test_one_visits_claims_to_one_payer_id_get_one_verdict_on_its_eras |
+| r1-4 (low) one visit remainder counted twice (a second payer's claim and the first payer's EMA_DENIED on the same lines) | fixed: `_second_remainder_once`, right after C5. The denial keeps its dollars; the second payer's claim stays listed (its payer never answered) at what is left, by the share of the denial's charges on its lines; evidence remainder_also_on and second_payer_value_before_cents; the hint says where the money is counted. Counted open_claim_second_remainder_on_denial (and _cents) | test_one_remainder_is_counted_once_when_the_first_payers_denial_of_it_is_listed_too |
+| r1-5 (low) the self-check reports 32 items gone with no reason | real, but a warning, not lost money: each claim is in the unseen list by name. Left to replay-fix-2b B2 (05b4946: Detector.retired, filled in `_count_unseen`, routed by the self-check's left_record), which is built on this branch and merges after it; selfcheck.py is not this unit's file. Here: the two new second-payer exits name their item through `_retire` (a no-op until B2 merges), and this note | test_a_second_payers_claim_left_off_for_the_patients_payment_is_named_retired_on_purpose |
+| r2-1 (medium) a bill sent again takes over a person's Let go or Paid recorded under the EMA claim number | fixed: save() hands a worked item keyed only by the EMA claim number to the claim it was about (first send on or before the person's work). A claim sent after that is the bill sent again: To do (Started if the old item was Sent), with the notes, folded as ema_claim_sent_again. A Paid item hands nothing on | test_a_bill_sent_again_after_a_decision_on_its_ema_claim_is_a_new_matter (Let go and Paid) |
+| r2-2 (medium) claims sent in the 80 days before a payer's ERAs began are listed | fixed with r1-3 (same root); its mirror (ERAs stop 7 weeks before) by r1-2's rule | test_claims_sent_seven_weeks_before_the_payers_eras_began_are_not_listed, test_claims_sent_seven_weeks_after_the_payers_eras_stopped_are_counted_not_listed |
+| r2-3 (medium) G5 lists the first payer's claim when the A/R holds the balance for the second coverage | fixed: `_ar_held_open` takes an A/R row as evidence only when its payer group is the claim's and its coverage is the claim's place on its 837, where the 837 says it (counts 837_ar_open_other_payer, 837_ar_open_other_coverage) | test_a_line_the_ar_holds_for_another_coverage_does_not_make_the_claims_payer_never_answered (other payer; same payer as secondary) |
+| r2-4 (medium) the G6 guard holds only on the content bridge | fixed: a claim found by its claim id or its bill is a second payer's claim when its 837 sent it as a later payer's, or its payer is its EMA claim's second payer and not its first; only that payer's own postings answer it | test_the_first_payers_posting_never_answers_a_second_payers_claim_found_by_its_bill |
+| r2-5 (low) a print-batch hand-off with no EMA claim number is dropped when any never-sent item has no claim id | fixed: None never enters the set of listed claims, nor matches it | test_a_print_batch_claim_with_no_ema_claim_number_is_on_some_list |
+| r2-6 (low) one old open A/R line moves the first day EMA's reports cover | fixed: `_ema_reports_from` takes Production's current files first (their first service day, or first posting day for a file pulled by posting dates), then the ledger's lines, then the A/R's earliest pulled service year, then the exports | test_one_old_open_line_on_the_ar_does_not_move_the_first_day_emas_reports_cover |
+| r2-7 (low) before the first analysis of this release: $0.00 on every payer's line and an empty list for a count of 3 | fixed in part as asked: each payer's line gives its billed dollars and they add up to the total. Not as the reviewer's test asks for the list: the panel does not offer a list it cannot fill; it says the list comes with the next analysis (listed false, list_note; /api/ema/unseen says listed false). A list cannot be built without an analysis, and the count must stay on the page (blindness is loud), so the reviewer's check that the list returns the panel's count still fails on purpose | test_the_data_tab_before_the_first_analysis_of_this_release_shows_each_payers_dollars_and_lists_what_it_counts (both hosts) |
+| r2-8 (low) with no EMA report read yet, the Data tab never shows the claims counted unseen | fixed: /api/ema/data's not-ready answer carries 'unseen' when there is a count (otherwise it stays {"ready": false}); data.js draws the panel there | test_the_data_tab_shows_claims_counted_unseen_for_want_of_any_ema_report (both hosts) |
+| r2-9 (low) new except blocks without runlog.caught | fixed: each logs through runlog.caught or is gone (real_day and plain checks instead) | test_every_except_block_the_gap_fix_added_logs_through_runlog_caught (an AST check of every function the unit added or changed) |
+
+## Notes for the integrator (fix round)
+
+- No real-data run in this round: the disk had 5.4 GB free when the fixes were done (4.1 GB at the end), under the
+  6 GB the common brief asks for before a store copy. The reviewers' evidence says what the release run should show
+  moving: 4 second-payer claims whose share the patient paid leave the list ($393.57, counted
+  open_claim_second_patient_paid); 1 Tricare claim ($131.72, expired) goes back to the unseen count; 5 Champ VA claims
+  ($1,665.32 billed) move from "payers behind" to the unseen count (payer_remittances_stop), their bills held; one
+  $251.79 remainder is counted once (the Medicaid second-payer claim keeps what the first payer's denial does not take).
+  Hand-check those in the private real-data run.
+- replay-fix-2a and replay-fix-2b were built on this branch at 89acb3c, before this round. A trial merge (git
+  merge-tree) of wip/replay-fix-2b, wip/replay-fix-2a, wip/routes and wip/replay-fix onto this branch finds no
+  conflicting file. Run 2b's tests after its merge: its Detector.retired should pick up this round's `_retire` calls
+  and the CH-8 claims this round sends through `_count_unseen`.
+- r2-4 is older than this unit (the base fails the same way). After the fix, a claim to a second payer found by its claim
+  id or its bill, which the first payer's payment or write-off used to answer, comes back to the list. The real data's
+  count is not known (no run here).
+- r1-4: C5 can value the first payer's denial above what the first payer left; the second payer's claim then counts $0
+  and stays listed (its payer never answered). The denial carries the dollars.
+- r1-3: one visit's claims are judged at the visit's first send, so a claim sent after a payer's ERAs began, for a visit
+  first sent before, is counted unseen by name rather than listed. Nothing is dropped; its bill is kept.
+- r2-7: the panel shows "the list comes with the next analysis" until the server's next cycle (the rules changed, so it
+  analyses) or, on Vercel, until someone presses Run the analysis now.
