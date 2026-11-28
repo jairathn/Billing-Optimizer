@@ -607,6 +607,7 @@ def test_a_new_loss_in_a_cell_a_person_accepted_holds_the_run(tmp_path, kind):
         assert pm["status"] == "fail" and pm["cents"] == 8000, _show(pm)
         assert w.run("r2")["held"]
         sc.accept_findings(w.conn, "owner@example.test", ["posted_money"])
+        assert [o["accepted"] for o in sc.offenders(w.conn, "posted_money")] == [True, True]     # what run r2 found
         assert _posted(w.check())["status"] == "ok"
         assert not w.run("r3")["held"]
         # the accepted dollars stay on record with who accepted them
@@ -619,6 +620,8 @@ def test_a_new_loss_in_a_cell_a_person_accepted_holds_the_run(tmp_path, kind):
         assert pm["status"] == "fail" and pm["cents"] == 5000, _show(pm)
         out = w.run("r4")
         assert out["held"] and out["hold_checks"] == ["posted_money"] and out["new"]["posted_money"] == 2, out
+        # the Data tab's list does not call the new fall accepted: nobody accepted what run r4 found
+        assert [(o["cents"], o["accepted"]) for o in sc.offenders(w.conn, "posted_money")] == [(4000, False), (1000, False)]
     finally:
         w.close()
 

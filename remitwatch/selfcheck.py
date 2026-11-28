@@ -1847,6 +1847,13 @@ def offenders(conn: sqlite3.Connection, check_id: str, *, limit: int = 5000) -> 
     what accept_findings accepts): [{'key', 'cents', 'run_id', 'accepted'}]."""
     ensure_tables(conn)
     acc = _accepted(conn).get(check_id, set())
+    if check_id == "posted_money" and acc:
+        # accepting posted money moved the cell's mark (accept_findings): a cell a later run lists again fell again, and
+        # that fall is accepted only once a person accepts what that run found
+        shown = meta_get(conn, "selfcheck:offenders_run")
+        if not any(isinstance(h, dict) and h.get("run_id") == shown and "posted_money" in (h.get("checks") or {})
+                   for h in meta_get(conn, K_ACCEPTED, []) or []):
+            acc = set()
     return [{"key": k, "cents": c, "run_id": rid, "accepted": k in acc} for k, c, rid in conn.execute(
         "SELECT key, cents, run_id FROM selfcheck_offenders WHERE check_id = ? ORDER BY cents DESC, key LIMIT ?", (check_id, limit))]
 
