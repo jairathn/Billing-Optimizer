@@ -888,4 +888,4 @@ def test_a_held_trizetto_sign_in_is_dated_the_practices_day(store, monkeypatch):
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (trizetto.REFUSED_META, json.dumps({"who": "h", "at": NIGHT})))
     env = {"TRIZETTO_SFTP_USER": "SITE", "TRIZETTO_SFTP_PASSWORD": "x", "TRIZETTO_SFTP_PASSWORD_SET": "2026-10-01"}
     [h] = insights.trizetto_health(store.conn, "2026-11-25", env)
-    assert h["at"] == "2026-11-24" and h["title"].endswith("on 2026-11-24"), h
+    assert h["at"] == "2026-11-24" and h["title"].endswith("on Nov 24, 2026"), h

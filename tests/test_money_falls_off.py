@@ -263,7 +263,7 @@ def test_a_payer_whose_remittances_stopped_has_its_claims_counted_not_listed_as_
         check = _stopped(insights.data_health(conn, "2026-11-10", "2026-11-12"))
         print(where, check)
         assert check is not None and not check["ok"], f"nothing on the Data tab ({where}) says Humana's remittances stopped"
-        assert check["title"] == "No remittance from Humana since 2026-09-25"
+        assert check["title"] == "No remittance from Humana since Sep 25, 2026"  # one date format (ui-words)
         assert check["n"] == 1 and check["cents"] == 22365
         assert "1 claim sent to Humana and due since then ($223.65 billed) is not listed as never answered" in check["detail"]
     served.close()

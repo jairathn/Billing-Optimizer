@@ -51,7 +51,9 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
+from typing import Any
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
@@ -170,6 +172,15 @@ def _utc(iso: str | None) -> str:
     """A run's time as people read it: '2026-11-22T10:17:55+00:00' is '2026-11-22 10:17 UTC'."""
     return f"{iso[:10]} {iso[11:16]} UTC" if iso and len(iso) >= 16 else "an unknown time"
 
+
+def _when(value: Any) -> str:
+    """A day or a moment as a biller reads it (DESIGN 2.2, unit ui-words): Mar 3, 2026, on the practice's calendar; never
+    an ISO date or a UTC time. A value that is not a date is kept as it was written."""
+    from .runtime import practice_date
+    from .states import day
+    v = str(value or "")
+    d = practice_date(v) if "T" in v else v[:10]
+    return day(d) if d and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) else v
 
 def _and(parts: list[str]) -> str:
     return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
@@ -294,7 +305,7 @@ def _swing_files(files: dict, since: str) -> str:
     for k in sorted(files, key=lambda k: (k != "835", k)):
         one, many = SWING_FILE_KINDS[k]
         parts.append(f"{files[k]:,} {one if files[k] == 1 else many}")
-    return f"Read since the run before ({since}): {_and(parts)}."
+    return f"Read since the analysis before ({_when(since)}): {_and(parts)}."
 
 
 def _swing_levels() -> str:
@@ -508,7 +519,7 @@ class AlertEngine:
         since, at = _utc(before["started_at"]), _utc(after["started_at"])
         lead = _swing_lead(m)
         title = f"{lead} under new rules from a release" if changed else f"{lead}, far more than a run normally does"
-        lines = [f"Open items in all categories (To do, Started and Sent): {t['before_n']:,} at the run before ({since}), "
+        lines = [f"Open items in all categories (To do, Started and Sent): {t['before_n']:,} at the analysis before ({_when(since)}), "
                  f"{t['after_n']:,} after this run ({at}); {money(t['before_cents'])} before, {money(t['after_cents'])} after."]
         if t["people_n"] or t["people_cents"]:
             moved = (f"took {abs(t['people_n']):,} items ({money(abs(t['people_cents']))}) off the open list" if t["people_n"] < 0 else
@@ -532,7 +543,7 @@ class AlertEngine:
         lines.append(f"This alert stays at the top of every page for {SWING_DAYS} days after the run, unless someone acknowledges it "
                      "once the files are checked.")
         lines.append(_swing_levels())
-        action = (f"Before working new items, open the Data tab and check the files read since {since}. "
+        action = (f"Before working new items, open the Data tab and check the files read since {_when(since)}. "
                   f"If one is wrong, tell {SWING_CONTACT} and do not work the new items yet.")
         detail = {"run": after["run_id"], "run_before": before["run_id"], "at": after["started_at"], "since": before["started_at"],
                   "rules": [before.get("version"), after.get("version")], "rules_changed": changed,
@@ -588,7 +599,7 @@ class AlertEngine:
             span = f"{-hi:.0%} to {-lo:.0%}" if round(lo, 2) != round(hi, 2) else f"{-lo:.0%}"
             shown = "; ".join(f"{i['code']} ${i['old_cents']/100:.2f} to ${i['new_cents']/100:.2f}" for i in items[:4])
             self._raise("RATE_CUT", "info" if follows_medicare else ("high" if annual >= 500000 else "medium"),
-                        f"{payer} cut its usual allowed amount on {len(codes)} code{'s' if len(codes) != 1 else ''} by {span} from about {since} "
+                        f"{payer} cut its usual allowed amount on {len(codes)} code{'s' if len(codes) != 1 else ''} by {span} from about {_when(since)} "
                         f"({shown}), roughly {money(annual)} a year at current volume",
                         {"codes": items, "since": since, "annual_cents": annual,
                          "note": "January changes at Medicare-based payers usually follow the fee schedule update." if follows_medicare else
@@ -657,8 +668,8 @@ class AlertEngine:
         if behind > max(STALE_DAYS, 14) or (since_ingest is not None and since_ingest > STALE_DAYS):
             # weeks missing, then newer files (misuse check CH-6): what to look for is those weeks' files, not new ones
             title = gap_words(self.gap) if self.gap else (
-                f"No new remittances: the remittances on file reach {self.asof} for most payers ({behind} days ago) and the last new "
-                f"file arrived {last_ingest or 'never'}. Check the TriZetto download and the Dropbox upload.")
+                f"No new remittances: the remittances on file reach {_when(self.asof)} for most payers ({behind} days ago) and the last new "
+                f"file arrived {_when(last_ingest) if last_ingest else 'never'}. Check the TriZetto download and the Dropbox upload.")
             self._raise("STALE_FEED", "high", title,
                         {"newest_payment": self.asof, "days_behind": behind, "last_file_ingested": last_ingest, "days_since_ingest": since_ingest,
                          "gap": self.gap},

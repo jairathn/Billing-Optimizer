@@ -217,7 +217,7 @@ def test_the_data_tab_shows_the_unseen_claims_in_dollars_by_reason_and_payer_wit
     assert {r["reason"]: (r["n"], r["cents"]) for r in u["reasons"]} == {
         "before_ema_reports": (1, 15000), "ema_claim_not_found": (1, 15000), "second_payer_not_matched": (1, 2666)}, u["reasons"]
     assert [(g["payer"], g["n"], g["cents"]) for g in u["groups"]] == [(u["groups"][0]["payer"], 3, 32666)], u["groups"]
-    assert u["export"] == ("EMA's Production report for services from January 20, 2026 to March 1, 2026, and the A/R report "
+    assert u["export"] == ("EMA's Production report for services from Jan 20, 2026 to Mar 1, 2026, and the A/R report "
                            "for service year 2026"), u["export"]
     assert bool(u["host_note"]) == (host == "serverless"), u["host_note"]
     page = c.get("/api/ema/unseen").json()
@@ -240,7 +240,7 @@ def test_the_data_tab_shows_the_unseen_claims_in_dollars_by_reason_and_payer_wit
         finally:
             conn.close()
         assert h["title"] == "3 claims sent that no source can show an answer to ($326.66)", h["title"]
-        assert "the service is older than every EMA report in the store" in h["detail"] and "March 1, 2026" in h["who"], h
+        assert "the service is older than every EMA report in the store" in h["detail"] and "Mar 1, 2026" in h["who"], h
 
 
 def sqlite3_connect(db):

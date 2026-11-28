@@ -565,13 +565,13 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
     day = practice_date(str((held or {}).get("at") or ""))
     if held and held.get("at") and held.get("unclear"):
         out.append({"key": "trizetto_signin", "ok": False, "at": day,
-                    "title": f"TriZetto's sign-in did not finish twice in a row on {day}",
+                    "title": f"TriZetto's sign-in did not finish twice in a row on {_d(day)}",
                     "detail": "The feed waits 6 hours before it tries again, so the login is never locked. TriZetto may have "
                               "been down. If it keeps happening, the password may be refused without a clear answer.",
                     "who": f"{test_once} If it says TriZetto refused the sign-in, {reset}"})
     elif held and held.get("at") and held.get("kind") == "method":
         out.append({"key": "trizetto_signin", "ok": False, "at": day,
-                    "title": f"TriZetto would not take a password for the feed's login on {day}",
+                    "title": f"TriZetto would not take a password for the feed's login on {_d(day)}",
                     "detail": "TriZetto's server asked for another way to sign in, so no remittances come straight from TriZetto. "
                               "The feed tries again once a day.",
                     "who": "TriZetto administrator: ask TriZetto in writing (the portal's Contact Us) for the RemitWatch login to "
@@ -580,7 +580,7 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
         # "the password" only when TriZetto refused a password sent by the password method (trizetto.SignInRefused.kind)
         what = "password" if held.get("kind") == "password" else "sign-in"
         out.append({"key": "trizetto_signin", "ok": False, "at": day,
-                    "title": f"TriZetto refused the feed's {what} on {day}",
+                    "title": f"TriZetto refused the feed's {what} on {_d(day)}",
                     "detail": "No remittances come straight from TriZetto until it is fixed. The feed tries the same password only "
                               "once a day, so the login is never locked.",
                     "who": f"{test_once} If TriZetto still refuses it, {reset}"})
@@ -737,14 +737,15 @@ NO_ERA_LINES = 10          # the payers whose claims get no ERA named one by one
 
 
 def _d(day: str | None) -> str:
-    """A day as the pages write it (March 2, 2026); one no calendar has, as it was written."""
+    """A day as the pages write it (Mar 2, 2026: DESIGN 2.2's one format, as the item's story writes it); one no calendar
+    has, as it was written."""
     from .detect import real_day
     if not day:
         return ""
     if not real_day(day):
         return str(day)
     d = date.fromisoformat(str(day)[:10])
-    return f"{d:%B} {d.day}, {d.year}"
+    return f"{d:%b} {d.day}, {d.year}"
 
 
 def unseen_summary(conn: sqlite3.Connection, serverless: bool | None = None) -> dict | None:
@@ -843,7 +844,7 @@ def _feeds_837(conn: sqlite3.Connection) -> list[dict]:
         out.append({"key": "no_era_837", "ok": False, "payer": p["payer"], "payer_id": p.get("payer_id"), "n": n, "cents": cents,
                     "listed": listed, "answered_in_ema": ema_ans, "unchecked": blind,
                     "title": f"No ERA comes for claims sent to {p['payer']}",
-                    "detail": (f"{n} {'claim' if n == 1 else 'claims'} sent since {p.get('since')} (${cents / 100:,.2f} billed), and no 835 "
+                    "detail": (f"{n} {'claim' if n == 1 else 'claims'} sent since {_d(p.get('since'))} (${cents / 100:,.2f} billed), and no 835 "
                                f"for any of them: only EMA's postings can show whether {p['payer']} answered."
                                + (" " + "; ".join(parts) + "." if parts else "")),
                     "who": f"Billing lead: ask {p['payer']} (or TriZetto) about ERA enrollment, and keep posting its payments in EMA. "
@@ -941,12 +942,12 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
         n, cents = sum(int(p.get("claims") or 0) for p in behind), sum(int(p.get("billed_cents") or 0) for p in behind)
         one = behind[0]
         items.append({"key": "payer_stopped", "ok": False, "n": n, "cents": cents, "payers": behind[:20],
-                      "title": (f"No remittance from {one['payer']} since {one['since']}" if len(behind) == 1 else
+                      "title": (f"No remittance from {one['payer']} since {_d(one['since'])}" if len(behind) == 1 else
                                 f"No recent remittance from {len(behind)} payers: "
-                                + ", ".join(f"{p['payer']} (since {p['since']})" for p in behind[:3]) + (", and more" if len(behind) > 3 else "")),
+                                + ", ".join(f"{p['payer']} (since {_d(p['since'])})" for p in behind[:3]) + (", and more" if len(behind) > 3 else "")),
                       "detail": (f"{held(one)}: nothing on file says whether {one['payer']} answered {'it' if n == 1 else 'them'}."
                                  if len(behind) == 1 else
-                                 "; ".join(f"{p['payer']}, no remittance since {p['since']}: {held(p)}" for p in behind[:5])
+                                 "; ".join(f"{p['payer']}, no remittance since {_d(p['since'])}: {held(p)}" for p in behind[:5])
                                  + ("; and more" if len(behind) > 5 else "") + ". Nothing on file says whether those payers answered them."),
                       "who": "Billing lead, with TriZetto: ask why the payer's remittances stopped (its ERA enrollment, or files missing from the "
                              "downloads) and put any missing files in the Dropbox folder. Until they are in, check those claims on the payer's portal."})
@@ -958,7 +959,7 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
     found = [v for v in _meta(conn, DIFFER_META) or [] if isinstance(v, dict)]
 
     def listed(vs: list[dict]) -> str:
-        return "; ".join(f"{v.get('payer') or 'a payer'}, trace {v.get('trace')}, paid {v.get('payment_date')}: versions of "
+        return "; ".join(f"{v.get('payer') or 'a payer'}, trace {v.get('trace')}, paid {_d(v.get('payment_date'))}: versions of "
                          + " and ".join(f"${c / 100:,.2f}" for c in v.get("payments_cents") or []) for v in vs[:3]) + ("; and more." if len(vs) > 3 else ".")
     versions = [v for v in found if v.get("kind") != "lost"]
     if versions:
