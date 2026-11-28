@@ -16,7 +16,11 @@ What holds now:
      detect:no_longer_listed.
   2. The control: the same change, with one detection run between the person's status and the answer, has its row too.
   3. The guard: a status a person sets while the run runs, after its 'before' was taken, stays the person's and is not
-     written up as the run's.
+     written up as the run's, also when the same run sets the stale mark: the row carries the stale mark (kind 'stale',
+     rule detect:no_longer_listed), never the person's Let go or reopen as a hide rule or a payment that no longer stands.
+  4. Who changed what is decided by the history line's id against the snapshot's newest (Snapshot.max_event), never by a
+     time stored to the second: a person's line written before the run's 'before' is already in it, so the run's own
+     change on that item is logged (review r1 of replay-fix-2a).
 
 Every name, claim number, check number, amount and date is invented (tests/ema_fixtures.py and the builders of
 tests/test_ema_wiring.py, tests/test_features.py and tests/test_workable.py). The unit cases run on the server's store

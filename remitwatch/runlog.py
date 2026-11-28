@@ -1794,12 +1794,14 @@ KIND_ORDER = ("closed", "reopened", "hidden", "raised", "signal_changed", "folde
 
 
 class Snapshot:
-    """The tracked fields of every item at one moment (finding id -> tuple), with when it was taken and when the
-    previous detection run ended (a person's action after that is theirs, not an automatic change)."""
-    __slots__ = ("taken_at", "prev_run_at", "cols", "rows")
+    """The tracked fields of every item at one moment (finding id -> tuple), with when it was taken, when the previous
+    detection run ended, and the newest history line (finding_events id) written by then: a person's action written
+    after it is theirs, not an automatic change; one written before it is already in the snapshot."""
+    __slots__ = ("taken_at", "prev_run_at", "cols", "rows", "max_event")
 
-    def __init__(self, taken_at: str, prev_run_at: str | None, cols: tuple, rows: dict):
+    def __init__(self, taken_at: str, prev_run_at: str | None, cols: tuple, rows: dict, max_event: int | None = None):
         self.taken_at, self.prev_run_at, self.cols, self.rows = taken_at, prev_run_at, cols, rows
+        self.max_event = max_event
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -1826,8 +1828,15 @@ def snapshot_items(conn: sqlite3.Connection, *, now: datetime | None = None) -> 
         prev = r[0] if r else None
     except sqlite3.Error:
         pass
+    # the newest history line at this moment (finding_events ids only grow): no history yet is 0, so a person's line
+    # written after this snapshot is told from one already in it by its id, never by a time stored to the second
+    try:
+        r = cur.execute("SELECT MAX(id) FROM finding_events").fetchone()
+        max_event = int(r[0] or 0) if r else 0
+    except sqlite3.Error:
+        max_event = 0
     if "finding_id" not in have:
-        return Snapshot(taken, prev, (), {})
+        return Snapshot(taken, prev, (), {}, max_event)
     cols = tuple(c for c in TRACKED + CARRIED if c in have) + ("auto",)
     auto = "(auto_note IS NOT NULL AND auto_note <> '')" if "auto_note" in have else "0"
     sql = f"SELECT finding_id, {', '.join(c for c in cols if c != 'auto')}, {auto} FROM findings"
@@ -1835,7 +1844,7 @@ def snapshot_items(conn: sqlite3.Connection, *, now: datetime | None = None) -> 
     intern = sys.intern
     for r in cur.execute(sql):
         rows[r[0]] = tuple(intern(x) if isinstance(x, str) and len(x) <= 40 else x for x in r[1:])
-    return Snapshot(taken, prev, cols, rows)
+    return Snapshot(taken, prev, cols, rows, max_event)
 
 
 def _days(a: Any, b: Any) -> int | None:
@@ -1996,15 +2005,23 @@ def _closed_rule(ev: dict, row: dict) -> str:
     return "detect:auto_close"
 
 
-def _person_touched(conn: sqlite3.Connection, since: str | None) -> set[str]:
-    if not since:
-        return set()
+def _person_touched(conn: sqlite3.Connection, since: str | None, after_event: int | None = None) -> set[str]:
+    """The items a person changed after the run's 'before' was taken: a status or unhide line (finding_events) whose id is
+    above the snapshot's newest (after_event). A line written before the snapshot is already in it, so what differs
+    between before and after on that item is the run's own doing and is logged (review r1 of replay-fix-2a: a status set
+    before the run hid the run's own changes from the log). With no id to go by (a snapshot built by hand), the lines
+    written since `since` (the previous run's end) count, as before."""
     cur = conn.cursor()
     cur.row_factory = None
+    kinds = ",".join("?" * len(_PERSON_KINDS))
     try:
-        return {r[0] for r in cur.execute(
-            f"SELECT DISTINCT finding_id FROM finding_events WHERE at >= ? AND kind IN ({','.join('?' * len(_PERSON_KINDS))})",
-            (since, *_PERSON_KINDS))}
+        if after_event is not None:
+            return {r[0] for r in cur.execute(f"SELECT DISTINCT finding_id FROM finding_events WHERE id > ? AND kind IN ({kinds})",
+                                              (after_event, *_PERSON_KINDS))}
+        if not since:
+            return set()
+        return {r[0] for r in cur.execute(f"SELECT DISTINCT finding_id FROM finding_events WHERE at >= ? AND kind IN ({kinds})",
+                                          (since, *_PERSON_KINDS))}
     except sqlite3.Error:
         return set()
 
@@ -2039,7 +2056,7 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
     at = _iso(now)
     version = rule_version or _latest_version(conn)
     since = before.prev_run_at or before.taken_at
-    person = _person_touched(conn, since)
+    person = _person_touched(conn, since, getattr(before, "max_event", None))
     hidden = _hidden_now(conn, before.taken_at)
     bcols, acols = before.cols, after.cols
 
@@ -2127,12 +2144,17 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
         a = rowd(acols, after.rows[f])
         kind = kinds[f]
         automatic_status = kind == "closed" or (kind == "reopened" and f not in person) or (kind == "hidden" and f in hidden)
-        # a change that carries the stale mark is the run's whoever worked the item: Detector.save takes an item off the
-        # lists (or brings it back) by its rules alone, never a person (replay-fix-2a A3: a month-by-month replay left 393
-        # of 719 such changes out of the log, every one on an item a person had worked since the run before)
-        if f in person and not automatic_status and "stale" not in ch and kind in ("state", "follow_up", "status", "hidden", "reopened"):
-            counts["after_person"] += 1
-            continue
+        if f in person and not automatic_status and kind in ("state", "follow_up", "status", "hidden", "stale", "reopened"):
+            if "stale" not in ch:
+                counts["after_person"] += 1         # the person's own change, in their own history lines
+                continue
+            # a change that carries the stale mark is the run's whoever worked the item: Detector.save takes an item off
+            # the lists (or brings it back) by its rules alone, never a person (replay-fix-2a A3: a month-by-month replay
+            # left 393 of 719 such changes out of the log). The person's own status in the same change (a Let go, a reopen
+            # pressed while the run ran) stays theirs: the row carries the stale mark and the state it brings, never the
+            # status, and is never written up as a hide rule or a payment that no longer stands (review r1 of replay-fix-2a)
+            ch = {k: ch[k] for k in ("stale", "work_state", "follow_up_on") if k in ch}
+            kind = "stale"
         d = det.get(f, {})
         ev = _ev_json(d.get("evidence"))
         refs = _evidence_refs(a, d, ev, ch, kind)
