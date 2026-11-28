@@ -430,6 +430,7 @@ K_TRACK = "selfcheck:track"
 K_PATTERNS = "selfcheck:patterns"
 K_MONEY = "selfcheck:money"
 K_POSTED = "selfcheck:posted"
+K_POSTED_GROUPS = "selfcheck:posted_groups"   # {EMA payer name: the payer group its posted-money marks were made with}
 K_ACCEPTED = "selfcheck:acceptances"
 K_GIVEN_UP = "selfcheck:given_up"
 K_BLIND = "selfcheck:blind"
@@ -842,7 +843,10 @@ CHECKS: dict[str, tuple] = {
                      "posting ledger: a newer export of the same dates that lacks some of them is a gap with its dollars.",
                      "Compare the newest Production export of those dates with the one before (a filtered or partial export "
                      "replaced a complete one): send the complete export again, or accept the change on the Data tab if EMA "
-                     "itself removed those postings."),
+                     "itself removed those postings. A payer name that changed group (an alias learned or dropped from the "
+                     "weekly exports' payer ids, the owner's REMITWATCH_EMA_PAYER_ALIASES, a release's name rules) takes its "
+                     "money with it and none leaves: the check counts each name under the group its marks were made with and "
+                     "moves the marks once nothing is missing, so that alone never fails it."),
     "ledger_store": ("critical", "hold", 0, "The store's EMA money equals the posting ledger's",
                      "The money the store's EMA summaries hold equals what the posting ledger holds, month by month and file by file.",
                      "A run that saved one and not the other, or a refresh that stopped part-way: ema_ledger.refresh repairs it "
@@ -1742,6 +1746,17 @@ def _save_facts(conn: sqlite3.Connection) -> int:
     return len(fps)
 
 
+def _add_facts(conn: sqlite3.Connection, items: list[dict]) -> int:
+    """The fingerprints of the new items a held run still lists (safe mode never hides new work), made from the data they
+    were found on, beside the last good run's, whose input position stays. None when the stored ones are of another build
+    (the next good run saves them all)."""
+    if not items or meta_get(conn, K_FACTS_VERSION) != FACTS_VERSION:
+        return 0
+    fps = _facts_of(conn, items)
+    conn.executemany("INSERT OR REPLACE INTO selfcheck_facts (finding_id, fp) VALUES (?, ?)", list(fps.items()))
+    return len(fps)
+
+
 def _stored_results(conn: sqlite3.Connection) -> list[dict]:
     """The checks other steps ran and kept in meta: the money checks (check_ledger, while the store's EMA summaries are of
     the ledger revision they were measured on), posted money (check_posted: the ledger's own history, current whenever it
@@ -2074,7 +2089,8 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
                     run_id: str | None = None) -> dict:
     """After detection saved (inside Detector.run, after the hide rules, before the decision log): run the checks, keep
     what disappeared with no reason (every run, the first included), decide safe mode, update the track record, the
-    history, the offenders a person may accept and the facts the next run's vanished check compares against. Returns
+    history, the offenders a person may accept and the facts the next run's vanished check compares against (a held run
+    keeps the last good run's, adding only those of the new items it still lists). Returns
     {'held', 'first', 'failing', 'errors', 'new', 'kept', 'checks': [...summaries], 'safe_mode': {...}}."""
     ensure_tables(conn)
     ctx = ctx or {}
@@ -2137,11 +2153,20 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
             except Exception as exc:       # noqa: BLE001  (the track record waits for the next run; the checks stand)
                 _caught(exc, "track")
         conn.execute("DELETE FROM selfcheck_held")
+        # the facts go with the worklist: the next run's vanished check compares against the facts of this run's items
+        try:
+            _save_facts(conn)
+        except Exception as exc:       # noqa: BLE001  (without them the next run judges every departure as unexplained)
+            _caught(exc, "facts")
+    else:
+        # A held run put back the last good run's worklist, decided on that run's facts: those facts and the input position
+        # they were taken at stay as they are, or the next good run would read an answer that came before this run as old
+        # and keep every item it settled. Only the new items this run still lists (found on its own data) add theirs.
+        try:
+            _add_facts(conn, [r for f, r in _after_rows(conn).items() if f not in before and not r.get("stale")])
+        except Exception as exc:       # noqa: BLE001  (their departure is then judged as unexplained: kept, never dropped)
+            _caught(exc, "facts")
     _save_offenders(conn, results, rid)
-    try:
-        _save_facts(conn)
-    except Exception as exc:       # noqa: BLE001  (without them the next run judges every departure as unexplained)
-        _caught(exc, "facts")
     safe = _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_hold)
     summary = _store_results(conn, results, rid, t, mode, held, first, kept, at)
     conn.execute(f"DROP TABLE IF EXISTS temp.{SNAPSHOT}")
@@ -2934,7 +2959,10 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
     lacks some (a filtered or partial export replacing a complete one), or EMA deleting them. Each fall over $1 is an
     offender with its dollars until a person accepts it (accept_findings moves the mark) or the missing postings are read
     again. Service months the ledger's retention is about to drop are left out, and nothing is judged while the catalog
-    has a Production file waiting to be read again. Cheap (one grouped pass); called by check_ledger and, on a serverless
+    has a Production file waiting to be read again. A payer name that changes group (the name rules of now: an alias
+    learned or dropped, the owner's aliases, a release's rules) takes its money with it, which is no money leaving: each
+    name's money is compared under the group the marks were made with (meta selfcheck:posted_groups), and the marks move
+    to the groups of now once nothing is missing. Cheap (one grouped pass); called by check_ledger and, on a serverless
     host, right after each Production file is applied. Saved in meta selfcheck:posted, which after_detection counts."""
     ensure_tables(conn)
     lc = ledger.conn if hasattr(ledger, "conn") else ledger
@@ -2954,6 +2982,7 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
         return done(_skip("posted_money", "the posting ledger holds no posting yet"))
     open_month = str(newest)[:7]
     floor = _retain_floor(lc, str(newest)[:10])
+    floor_m = floor[:7]
     from . import ema_reports as er
     names = {i: n for i, n in lc.execute("SELECT id, name FROM names")}
     groups: dict[Any, str] = {}
@@ -2967,44 +2996,137 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
                 _caught(exc, "payer_group")
                 groups[pid] = str(nm or "No payer named")
         return groups[pid]
-    cur: dict[tuple, int] = defaultdict(int)
+    # The name rules change on their own (an alias learned or dropped from the weekly exports' payer ids, the owner's
+    # REMITWATCH_EMA_PAYER_ALIASES, a release's rules), and a payer name that changes group takes its money with it. So
+    # each name's money is compared with the marks under the group the marks were made with (meta selfcheck:posted_groups):
+    # the move itself is never read as money leaving the ledger, and a real loss shows with its own dollars.
+    kept = meta_get(conn, K_POSTED_GROUPS)
+    kept = kept if isinstance(kept, dict) else None
+
+    def group_then(pid: Any) -> str:
+        nm = names.get(pid)
+        return str(kept[nm]) if kept is not None and nm and nm in kept else group(pid)
+    now_cells: dict[tuple, int] = defaultdict(int)
+    then_cells: dict[tuple, int] = defaultdict(int)
+    payers: set = set()
+    moved: set = set()
     for svc_m, post_m, payer, ins, pat, adj, padj in lc.execute(
             """SELECT substr(svc, 1, 7), substr(posted, 1, 7), payer, SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)),
                       SUM(COALESCE(contractual, 0) + COALESCE(noncontractual, 0)), SUM(COALESCE(pat_adj, 0))
                FROM postings WHERE svc >= ? AND posted < ? GROUP BY 1, 2, 3""", (floor, open_month + "-01")):
-        g = group(payer)
+        g, g_then = group(payer), group_then(payer)
         for measure, v in (("ins_paid", ins), ("pat_paid", pat), ("adjustments", adj), ("pat_adj", padj)):
             if v:
-                cur[(svc_m, post_m, g, measure)] += int(v)
+                now_cells[(svc_m, post_m, g, measure)] += int(v)
+                then_cells[(svc_m, post_m, g_then, measure)] += int(v)
+                payers.add(payer)
+                if g != g_then:
+                    moved.add(payer)
     marks = {(s, p, g, m): h for s, p, g, m, h in conn.execute(
         "SELECT svc_month, posted_month, payer_group, measure, high_cents FROM selfcheck_posted")}
-    floor_m = floor[:7]
-    offs, rows = [], []
-    for k in sorted(set(cur) | set(marks)):
-        if k[0] < floor_m or k[1] >= open_month:
+
+    def inside(k: tuple) -> bool:
+        return k[0] >= floor_m and k[1] < open_month
+    offs: list[tuple] = []
+    rows = []
+    for k in sorted(set(then_cells) | set(marks)):
+        if not inside(k):
             continue
-        now_c = int(cur.get(k, 0))
+        now_c = int(then_cells.get(k, 0))
         high = marks.get(k)
         if high is None or now_c > high:
             high = now_c
         elif high - now_c > 100:
-            offs.append(("|".join(k), high - now_c, None))
+            offs.append((k, high - now_c))
         rows.append((*k, high, now_c, at))
+    regrouped: dict = {}
+    if kept is None and marks and offs:
+        # marks an earlier version made, with no record of each name's group: a name that changed group since shows as a
+        # fall in one group and a rise in another in the same months. Each month's money is summed across every group: a
+        # month whose total did not fall lost nothing, and its marks move to the groups of now; one whose total fell keeps
+        # its marks, and its fall is caught
+        offs, rows, slices = _posted_by_month(offs, rows, marks, now_cells, inside, at)
+        if slices:
+            regrouped = {"slices": slices}
+    elif moved and not offs:
+        # nothing is missing under the groups the marks were made with: the marks move to the groups of now. A cell the
+        # move changed starts again from what it holds now; every other cell keeps its mark
+        changed = {k for k in set(now_cells) | set(then_cells) if inside(k) and now_cells.get(k, 0) != then_cells.get(k, 0)}
+        rows = []
+        for k in sorted(set(now_cells) | set(marks)):
+            if inside(k):
+                now_c, high = int(now_cells.get(k, 0)), marks.get(k)
+                rows.append((*k, now_c if k in changed or high is None else max(high, now_c), now_c, at))
+        regrouped = {"names": len(moved), "cells": len(changed)}
+    elif moved:
+        regrouped = {"names": len(moved), "waiting": True}     # moved once nothing is missing (read again, or accepted)
     conn.execute("DELETE FROM selfcheck_posted WHERE svc_month < ? OR posted_month >= ?", (floor_m, open_month))
     conn.executemany("""INSERT OR REPLACE INTO selfcheck_posted (svc_month, posted_month, payer_group, measure, high_cents, last_cents, at)
                         VALUES (?,?,?,?,?,?,?)""", rows)
-    drop = sum(o[1] for o in offs)
+    # the groups the marks stand in now: those of now once nothing is missing; else the ones they were made with (a name
+    # met for the first time takes its group of now). An earlier version's marks with a month that fell record them once
+    # nothing is missing
+    if not offs:
+        meta_set(conn, K_POSTED_GROUPS, {names[p]: group(p) for p in payers if names.get(p)})
+    elif kept is not None:
+        meta_set(conn, K_POSTED_GROUPS, {**kept, **{names[p]: group_then(p) for p in payers if names.get(p) and names[p] not in kept}})
+    drop = sum(c for _k, c in offs)
     info = {"cells": len(rows), "closed_before": open_month, "service_from": floor_m, "first": not marks,
-            "by_measure": dict(Counter(o[0].rsplit("|", 1)[-1] for o in offs))}
-    text = (f"{_n(len(rows), 'closed month cell')} checked: the money EMA posted stayed in the posting ledger" if not offs else
-            f"Money EMA posted left the posting ledger: {usd0(drop)} across {_n(len(offs), 'month cell')} (a newer export of the "
-            "same dates lacks postings the one before had)")
+            "by_measure": dict(Counter(k[3] for k, _c in offs))}
+    if regrouped:
+        info["regrouped"] = regrouped
+    if offs:
+        text = (f"Money EMA posted left the posting ledger: {usd0(drop)} across {_n(len(offs), 'month cell')} (a newer export of "
+                "the same dates lacks postings the one before had)")
+        if regrouped.get("waiting"):
+            k = regrouped["names"]
+            text += (f". {_n(k, 'payer name')} also changed group: the check counts {'its' if k == 1 else 'their'} money "
+                     "under the group the marks were made with until nothing is missing, then moves the marks")
+        elif regrouped.get("slices"):
+            text += (f". In {_n(regrouped['slices'], 'other month cell')} money only moved between payer groups (a payer name "
+                     "changed group): none left there")
+    else:
+        text = f"{_n(len(rows), 'closed month cell')} checked: the money EMA posted stayed in the posting ledger"
+        if regrouped.get("names"):
+            k = regrouped["names"]
+            text += (f"; {_n(k, 'payer name')} changed group, and the check moved {'its' if k == 1 else 'their'} marks with "
+                     f"{'it' if k == 1 else 'them'}")
+        elif regrouped.get("slices"):
+            text += (f"; in {_n(regrouped['slices'], 'month cell')} money moved between payer groups (a payer name changed "
+                     "group) and none left")
     seq = None
     try:
         seq = int(ledger.seq()) if hasattr(ledger, "seq") else None
     except Exception:          # noqa: BLE001
         seq = None
-    return done(_result("posted_money", offs, info=info, examples=[], text=text), ledger_seq=seq)
+    return done(_result("posted_money", [("|".join(k), c, None) for k, c in offs], info=info, examples=[], text=text),
+                ledger_seq=seq)
+
+
+def _posted_by_month(offs: list[tuple], rows: list[tuple], marks: dict, now_cells: dict, inside: Callable[[tuple], bool],
+                     at: str) -> tuple[list[tuple], list[tuple], int]:
+    """check_posted on marks that kept no record of each payer name's group (an earlier version's): each (service month,
+    posted month, measure) with a falling cell is summed across every payer group, marks against now. One whose total did
+    not fall by more than $1 lost nothing (a name changed group: its money moved from one group to another), so its cells
+    start again from what they hold now under the groups of now; one whose total fell keeps its marks and offenders.
+    Returns (offenders, rows, how many months started again)."""
+    def month(k: tuple) -> tuple:
+        return (k[0], k[1], k[3])
+    had: dict[tuple, int] = defaultdict(int)
+    holds: dict[tuple, int] = defaultdict(int)
+    for k, h in marks.items():
+        if inside(k):
+            had[month(k)] += int(h or 0)
+    for k, v in now_cells.items():
+        if inside(k):
+            holds[month(k)] += int(v)
+    calm = {month(k) for k, _c in offs if had[month(k)] - holds[month(k)] <= 100}
+    if not calm:
+        return offs, rows, 0
+    rows = [r for r in rows if (r[0], r[1], r[3]) not in calm] + [
+        (*k, int(now_cells.get(k, 0)), int(now_cells.get(k, 0)), at) for k in sorted(set(now_cells) | set(marks))
+        if inside(k) and month(k) in calm]
+    return [(k, c) for k, c in offs if month(k) not in calm], rows, len(calm)
 
 
 def check_serving(conn: sqlite3.Connection, serving: sqlite3.Connection) -> dict:
