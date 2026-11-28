@@ -110,12 +110,17 @@ export replaced a complete one), or EMA itself removed them. A payer name that c
 rules change on their own (an alias learned or dropped from the weekly exports' payer ids, the owner's
 REMITWATCH_EMA_PAYER_ALIASES, a release's name rules), so the check keeps the group each name had when its marks were
 made (meta selfcheck:posted_groups), compares each name's money under that group, and moves the marks to the new groups
-once nothing is missing. The check's text then says how many names changed group, and a real loss read in the same run
-still shows with its own dollars, under the group the marks were made with. To do: compare the newest Production export
-of the dates the offending cells name with the one before; send the complete export again, or accept the change on the
-Data tab if EMA itself removed those postings (accepting moves the marks to what the ledger holds). Marks made before
-2026-11-28 have no record of each name's group: the first check that finds a fall sums each month across every payer
-group, and a month whose total did not fall starts again under the groups of now.
+once nothing is missing. A cell the move changes keeps the fall it already had, so a leak of less than $1 at a time is
+still caught while an alias comes and goes. The check's text then says how many names changed group, and a real loss
+read in the same run still shows with its own dollars, under the group the marks were made with. To do: compare the
+newest Production export of the dates the offending cells name with the one before; send the complete export again, or
+accept the change on the Data tab if EMA itself removed those postings. Accepting moves the marks to what the ledger
+holds, so a later fall in the same cell is new and holds the run again. Marks made before 2026-11-28 have no record of
+each name's group. The first check after the release sums each month across every payer group: a month whose total did
+not fall, and whose fall whole payer names now in another group can explain, starts again under the groups of now, and
+the check's text says how many dollars moved that way (if no name changed group, compare the exports as above). A month
+that also lost money at that check keeps its marks, so its gap includes the moved name's money there: check the export,
+then accept. That check records the groups, so this happens once.
 
 **Items kept after a held run.** A run safe mode held leaves the worklist, and the facts the vanished check compares
 against (selfcheck_facts and meta selfcheck:facts_input), as the last good run saved them; only the new items the held
