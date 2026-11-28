@@ -64,33 +64,33 @@ machine) at 1,119 and 1,116 MB; no step error.
 Each item's dates worked out again by hand from the raw dates and the rule's words, then compared with what the branch
 wrote. Verdicts: 32 right, 1 unclear, 0 wrong.
 - Anthem's own member, newly expired (the plan names Indiana by its code; CO-55 on the 835; 180 days from the remittance
-  shown, 185 the last day, both past): 217a402b517b0c46b4bc51e5, a39bb2ad095631d4fe132f39, c430baade7361c99e15ec456
+  shown, 185 the last day, both past): item 1, item 2, item 3
   DENIED_NONCOVERED $59.95 each: right.
 - The six items the reviewers cited (a plan that names no state; CO-55 or CO-50 on the 835; 180 days shown, past; the
   dispute's two years the last day, ahead; listed, as at the tip; the build round had expired four of them at 185 days):
-  aadabc6530a4f49c2ae32f29, 130279059fa13777125f3006, 86ca7816d5076f64febe0189, 0c0e3bba7d4a7a3e1394b468,
-  20a09dbf841aaceeea04bf7d DENIED_NONCOVERED $59.95 each, 48d261c0190012a39cf9ff64 DENIED_MEDICAL_NECESSITY $50.96: right.
+  item 4, item 5, item 6, item 7,
+  item 8 DENIED_NONCOVERED $59.95 each, item 9 DENIED_MEDICAL_NECESSITY $50.96: right.
 - A plan that names no state, whole claims denied CO-50 two years ago (expired before and after: the two years past):
-  1c4108bfde6a8e8e210e7e28, 7ef0618254f18f78bc447c53, 7f7adde4f07fa568e22a2131, acc3c7798b0c6062ab70c6be,
-  c8767c66ad6c8320199840c1 CLAIM_DENIED_UNPAID $741.85 each, af97a80255178c6ce2ec04c8 DENIED_MEDICAL_NECESSITY $433.69: right.
-- EMA's own clinical denials (no plan named): 8535d8d1be007ae9bd40e194 (CO-55), 9166d036e64794a06e8c2f36 (CO-50)
+  item 10, item 11, item 12, item 13,
+  item 14 CLAIM_DENIED_UNPAID $741.85 each, item 15 DENIED_MEDICAL_NECESSITY $433.69: right.
+- EMA's own clinical denials (no plan named): item 16 (CO-55), item 17 (CO-50)
   EMA_DENIED $59.95 each: 180 days from EMA's posting less the payer's 5-day delay shown, two years the last day: right.
-- More than one denial reason (r2-2): 78d7a49277e46d242adfe260 and 7950abbdced9e69a7300d2c9 CLAIM_DENIED_UNPAID $200.02
-  each (BlueCard; CO-97 beside two PR-55), f798c4dea952ac28fa768da7 CLAIM_DENIED_UNPAID $788.68 (a plan naming no state;
+- More than one denial reason (r2-2): item 18 and item 19 CLAIM_DENIED_UNPAID $200.02
+  each (BlueCard; CO-97 beside two PR-55), item 20 CLAIM_DENIED_UNPAID $788.68 (a plan naming no state;
   CO-197 beside three CO-50; both dates past): 180 days shown, the dispute's two years the last day: right.
-- BlueCard or another state's plan: 181bc05f050d37215eda4234 CLAIM_DENIED_UNPAID $50.96 (BlueCard's host words),
-  076f9da1a6a69d976377b893 DENIED_NONCOVERED $59.95 (another state's code; already done): 180 days shown, two years
+- BlueCard or another state's plan: item 21 CLAIM_DENIED_UNPAID $50.96 (BlueCard's host words),
+  item 22 DENIED_NONCOVERED $59.95 (another state's code; already done): 180 days shown, two years
   last: right.
-- VA Community Care EMA denials (r2-8): 0187c8f5fbdbc88682d6b442 (OA-B15), 07b06a33e00dce3ee68814f8 (OA-96),
-  07c8b223cdddf7c6b95800bb (OA-96), 0bcba7ca5e24c1ab642deafb (OA-B15, posted under another administrator's name)
+- VA Community Care EMA denials (r2-8): item 23 (OA-B15), item 24 (OA-96),
+  item 25 (OA-96), item 26 (OA-B15, posted under another administrator's name)
   EMA_DENIED $357.48 each: 90 days from EMA's posting less 9 days shown, 12 months the last day, both past: right.
-- VA never answered, basis words only (the first-filing limit plus 90 days, unchanged): 0d1830f6882079e75a5e574d
-  NO_ANSWER $37.21 (expired), 917bff5041201c0e73055374 NO_ANSWER $65.08: right as the 837 pass dates them; their last
+- VA never answered, basis words only (the first-filing limit plus 90 days, unchanged): item 27
+  NO_ANSWER $37.21 (expired), item 28 NO_ANSWER $65.08: right as the 837 pass dates them; their last
   day is Needs from others 5.
-- Carried from the build round, the dates traced then: f08d747771bd5fd7fc44b73d EMA_DENIED $63.89 (Indiana's program, 60
-  days), 58bb593548102cfc5b031450 NO_ANSWER $56.47 (Kentucky managed care, 365 + 120 days): right;
-  84c6128e241cf91fed4ca54f NO_ANSWER $0 (appears): unclear, as in the build round (Observations).
-- Humana Medicare Advantage, words only: 04c1932468d4d25c9650eaeb DENIED_CODING $49.06, 07b64d0a966a48bc1401c1da
+- Carried from the build round, the dates traced then: item 29 EMA_DENIED $63.89 (Indiana's program, 60
+  days), item 30 NO_ANSWER $56.47 (Kentucky managed care, 365 + 120 days): right;
+  item 31 NO_ANSWER $0 (appears): unclear, as in the build round (Observations).
+- Humana Medicare Advantage, words only: item 32 DENIED_CODING $49.06, item 33
   DENIED_MISSING_INFO $80.88: a year from the service shown, 18 months from the remittance the last day, unchanged: right.
 
 ## Inputs (read only, never in git)
@@ -186,40 +186,40 @@ Detection 381 s at a 1,104 MB peak (no step error).
 Each item's dates were worked out again by hand from the raw dates and the source's words, then compared with what the
 branch wrote. Verdicts: 29 right, 1 unclear, 0 wrong (30 items).
 - Anthem's own plans, CO-55 or CO-50 on the 835, newly expired (180 days from the remittance as the date shown, 185 the
-  last day, both past): 20a09dbf841aaceeea04bf7d DENIED_NONCOVERED $59.95, 86ca7816d5076f64febe0189 DENIED_NONCOVERED
+  last day, both past): item 8 DENIED_NONCOVERED $59.95, item 6 DENIED_NONCOVERED
   $59.95 (EMA also shows an earlier CO-210, another reason, so the CO-55 remittance starts the clock),
-  0c0e3bba7d4a7a3e1394b468 DENIED_NONCOVERED $59.95, 48d261c0190012a39cf9ff64 DENIED_MEDICAL_NECESSITY $50.96: right.
+  item 7 DENIED_NONCOVERED $59.95, item 9 DENIED_MEDICAL_NECESSITY $50.96: right.
 - Anthem's own plans, whole claims denied CO-50, expired before (the two years had passed) and after, dates earlier:
-  1cfd80257c9c0d537b5a2d93 CLAIM_DENIED_UNPAID $788.68, 40a8030f0ce026fa51faeb51 CLAIM_DENIED_UNPAID $741.85,
-  1877fd1e298de09c88e7a4d0 CLAIM_DENIED_UNPAID $741.85, af97a80255178c6ce2ec04c8 DENIED_MEDICAL_NECESSITY $433.69: right.
+  item 34 CLAIM_DENIED_UNPAID $788.68, item 35 CLAIM_DENIED_UNPAID $741.85,
+  item 36 CLAIM_DENIED_UNPAID $741.85, item 15 DENIED_MEDICAL_NECESSITY $433.69: right.
 - BlueCard members (the 835's plan: another state's two-letter code, BlueCard's words or ITS HOST): 180 days as the
-  date shown, the dispute's two years as the last day, still listed: f9f15a3956306ec0cdf97396 DENIED_NONCOVERED $59.95,
-  2c11e2b2f5b9575438908ece DENIED_NONCOVERED $59.95, 8b87b6b3fab4e0c8d45f1e80 DENIED_NONCOVERED $59.95,
-  7950abbdced9e69a7300d2c9 CLAIM_DENIED_UNPAID $200.02 (PR-55), 6696d7558c76d18215076306 CLAIM_DENIED_UNPAID $59.95,
-  305bae34e9a19e832c2a78e9 CLAIM_DENIED_UNPAID $88.67 (PR-50, already done): right. Whether a member of another Elevance
+  date shown, the dispute's two years as the last day, still listed: item 37 DENIED_NONCOVERED $59.95,
+  item 38 DENIED_NONCOVERED $59.95, item 39 DENIED_NONCOVERED $59.95,
+  item 19 CLAIM_DENIED_UNPAID $200.02 (PR-55), item 40 CLAIM_DENIED_UNPAID $59.95,
+  item 41 CLAIM_DENIED_UNPAID $88.67 (PR-50, already done): right. Whether a member of another Elevance
   state's plan counts as a BlueCard member for this practice is not on file; the item keeps both dates, so it is worked
   early and does not leave the list early either way.
-- EMA's own clinical denials (no plan named): 8535d8d1be007ae9bd40e194 EMA_DENIED $59.95 (CO-55) and
-  9166d036e64794a06e8c2f36 EMA_DENIED $59.95 (CO-50): 180 days from EMA's posting less the payer's usual 5-day delay,
+- EMA's own clinical denials (no plan named): item 16 EMA_DENIED $59.95 (CO-55) and
+  item 17 EMA_DENIED $59.95 (CO-50): 180 days from EMA's posting less the payer's usual 5-day delay,
   last day two years: right.
-- 84c6128e241cf91fed4ca54f NO_ANSWER Anthem / BCBS Medicaid, $0, appears: an 837 send to Anthem's Indiana Medicaid plan
+- item 31 NO_ANSWER Anthem / BCBS Medicaid, $0, appears: an 837 send to Anthem's Indiana Medicaid plan
   with no 835. The group is right (the name is Anthem's plan, not Indiana's program), and with it the payer's remittances
   reach past the claim's due day, so it is listed. A17 calls its one unit (G2211) not payable by the plan: whether a $0
   claim of a code the plan never pays should be listed as never answered is the 837 pass's rule. Unclear.
-- f08d747771bd5fd7fc44b73d EMA_DENIED 'Medicaid of Indiana' $63.89: now Indiana's program (IHCP's 60-day administrative
+- item 29 EMA_DENIED 'Medicaid of Indiana' $63.89: now Indiana's program (IHCP's 60-day administrative
   review); expired before and after; its dates move by the group's own posting delay (9 days, the catch-all's 50): right.
 - VA Community Care, first filing 180 days after the service in each (38 U.S.C. 1703D(b)), dates unchanged:
-  663853191add5c59f4e55a2c NO_ANSWER $65.08 (expired), 917bff5041201c0e73055374 NO_ANSWER $65.08,
-  c7417f54f780099f7015e62d NO_ANSWER $130.16, fd7c792ab50a72c335d2abff REJECTED_PRE_PAYER $0,
-  da8e05fad801864e563ddd54 REJECTED_PRE_PAYER $127.80: right.
+  item 42 NO_ANSWER $65.08 (expired), item 28 NO_ANSWER $65.08,
+  item 43 NO_ANSWER $130.16, item 44 REJECTED_PRE_PAYER $0,
+  item 45 REJECTED_PRE_PAYER $127.80: right.
 - Humana Medicare Advantage, a corrected claim within a year of the service and the dispute's 18 months as the last
-  day, dates unchanged, the label no longer says the tip sheet was confirmed: 0c0a9e1f96f0f0bb811366b4
-  DENIED_MISSING_MODIFIER $79.14, 79ea3ae195be1f17357ee425 DENIED_MISSING_INFO $71.62, 3dfa6855292807c5d55ef9c8
-  DENIED_CODING $44.70 (expired), 08c638937c6b30e8123deb22 EM_BUNDLED_MOD57_MINOR $159.14, 10abcf26dd765627032d7b98
+  day, dates unchanged, the label no longer says the tip sheet was confirmed: item 46
+  DENIED_MISSING_MODIFIER $79.14, item 47 DENIED_MISSING_INFO $71.62, item 48
+  DENIED_CODING $44.70 (expired), item 49 EM_BUNDLED_MOD57_MINOR $159.14, item 50
   EM_BUNDLED_NO_MODIFIER $40.86: right.
 - A Kentucky managed care plan named '<plan> Medicaid of Ky', never answered, sent on time (the final code's run): the
   date shown is the first-filing limit (365 days from the service) plus 120 days (KRS 205.534(1)(d)1), was plus 90:
-  58bb593548102cfc5b031450 NO_ANSWER $56.47 and d4dd79dd2ccb0737bcf378d6 NO_ANSWER $0: right.
+  item 30 NO_ANSWER $56.47 and item 51 NO_ANSWER $0: right.
 
 ## Needs from others (failing tests in plans/progress/fx-windows_needs_tests.py, not collected by the suite)
 1. F4, done on wip/fx-ema at d78502f (`ema_ledger.refresh` calls `ema_reports.learn_payer_aliases` first): EMA's
@@ -275,7 +275,7 @@ branch wrote. Verdicts: 29 right, 1 unclear, 0 wrong (30 items).
 - EMA names Humana's Kentucky Medicaid plan ('<Humana plan> Medicaid of Kentucky') 'Medicaid (other)' (the generic Medicaid rule comes before the
   Humana rules); its windows are Kentucky's managed care ones either way (120 days, last day 125; filing 365 days).
 
-- The appearing NO_ANSWER item (84c6128e241cf91fed4ca54f, $0): a claim whose one code (G2211) A17 calls not payable by
+- The appearing NO_ANSWER item (item 31, $0): a claim whose one code (G2211) A17 calls not payable by
   the plan is listed as never answered now that its group lets the check see it. Whether a $0 claim of a code the plan
   never pays belongs on the never-answered list is the 837 pass's rule (F3a's).
 

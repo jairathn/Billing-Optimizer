@@ -414,7 +414,7 @@ def test_two_members_claims_sent_the_same_day_are_answered_by_their_own_paid_ema
 
 # ------------------------------------------------------------------------------------------------------------------------
 # 6. _spare_ema_claims counts an EMA claim charged AFTER the claim went out as one that 'may be the claim's own', and so
-#    sets the claim's real send-day twin aside (on the real copy: 0ae7a771e27022193105b292, A17 undecided, listed though
+#    sets the claim's real send-day twin aside (on the real copy: one item, A17 undecided, listed though
 #    its lone twin and both 'spare' claims were answered).
 def _late_decoy_world(tmp_path, kind, *, decoy_day):
     """Annie's claim F.claim_id(61) (a 99214 at $200, visit March 2) went to Blue Cross March 20; only the 837s know it, and

@@ -74,7 +74,7 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   not net what a correct ranking takes back from the repair paid in full; the branch's net is the money the payer owes
   for the day (hand-traced, 12 of 12 right). A16 cannot judge OLD_FEE_SCHEDULE (no unit reference).
 - The bar. UHC MA January: all 18 January 2026 visit lines UHC MA paid on its 2025 schedule with a payment are in one
-  repricing item, 58e4941184a9954aa7ea58a1 ($109.97: 99203 x3, 99204 x1, 99213 x12, 99214 x2, physician and the
+  repricing item, item 1 ($109.97: 99203 x3, 99204 x1, 99213 x12, 99214 x2, physician and the
   85 percent tier both checked against the 2025 and 2026 amounts); the base listed 6 of them as one-offs (absorbed) and
   missed 12. The 6 other January lines at 2025 amounts paid $0 (deductible): the patient's share, rightly left out.
   Humana MA split days with a surgery-center claim, 2026: 14 of 27 halved 17311s and 11 of 12 halved 17313s carry an
@@ -85,14 +85,14 @@ Brief: `plans/briefs/2026-11-26_fix7c.md`. Branch `wip/fix7c`. Rules: `plans/bri
   (other units' real-data runs and two suites), peak 1,061 MB (run 4: 1,064; base: 1,054). 4,411 on Work now. Against
   run 4: 13 items added, all `every_cut` Humana MA days (7 of 2026 with 17311 or 17313 and 14041 or 14301 at the surgery
   center, 6 of 2025), $3,736.71; 4 more of 2024 and 2025 are past their window (expired, off the list). All 7 both-cut
-  days of 2026 found in run 4 now carry an item: 0d490784c7d27b66d5ff9294, 6f6d2f82df236794aa85b286,
-  d023e038ee00df6f6638a7f2, e67edfe84ccb626653fbf2a0, 37ea4e053416254344eb3828, bd232d007c25774f8f54f87d,
-  850871c5f0ef7f32eb1bd2ea ($2,029.58). Hand-traced 4 of the 13 (2 of 2026, 2 of 2025): right; one note cited a 2025
+  days of 2026 found in run 4 now carry an item: item 2, item 3,
+  item 4, item 5, item 6, item 7,
+  item 8 ($2,029.58). Hand-traced 4 of the 13 (2 of 2026, 2 of 2025): right; one note cited a 2025
   rate as this year's (fixed in c3bbb1f).
 - Base against run 5: 61 added (55 Humana MA split days: 42 where the Mohs was the higher-valued, 13 where every
   procedure was cut; 1 UHC MA split day; 1 UHC MA repricing item; 2 UHC Kentucky PA/NP one-offs; 2 routine-rate
   reviews), $11,793; 128 removed (Anthem 80, Wausau 15, UHC 14, UHC MA 11, UMR 5, Humana MA 3), $35,166.
-- The bar: UHC MA January, 58e4941184a9954aa7ea58a1 (all 18 lines). Humana MA Mohs and surgery-center repair days: on
+- The bar: UHC MA January, item 1 (all 18 lines). Humana MA Mohs and surgery-center repair days: on
   Work now for every 2026 day where Humana cut a higher-valued Mohs (42 items) or every procedure of the day (7), none
   for the days where the repair is rightly first. The 23 plan-rate cases stay off: no item comes back on the UMR and
   Wausau employer plan at its own schedule, Anthem's products and employer plan, the surgery center's facility rate or
@@ -215,11 +215,11 @@ lines and 13 small ones, r1-3), $138.07 inside their windows.
 
 ## Open questions
 - UHC Kentucky PA/NP: paid in full from January 2025 to late October 2026, then 85 percent on some lines. The branch
-  lists the 99213s after the switch as one routine-rate review framed as a rate change (1add3df444791b0e54dc8909,
-  check the contract first), but two one-offs dated after the switch (ee002bd949c21d04ccba43bb 17110 $18.88,
-  f1ceae8b8ba61059469ba9e3 99214 $16.56) are listed as appeals: likely the same change. If UHC confirms it, the Kentucky
+  lists the 99213s after the switch as one routine-rate review framed as a rate change (item 9,
+  check the contract first), but two one-offs dated after the switch (item 10 17110 $18.88,
+  item 11 99214 $16.56) are listed as appeals: likely the same change. If UHC confirms it, the Kentucky
   rule needs an end date.
-- UMR routine-rate review 22130d50949acee5d66aad47 (5 NP 99214 lines, $312.80): sized against the plan's full rate;
+- UMR routine-rate review item 12 (5 NP 99214 lines, $312.80): sized against the plan's full rate;
   if the plan pays nurse practitioners 85.7 percent as elsewhere, the gap is about $217.
 - Repricing items listed only lines short by the one-off threshold ($2 and 5 percent): since r1-3 the smaller ones join the
   request (UHC MA 2026: 13 more lines, $28.10). Two 17312 lines are still left out: UHC MA has no firm rate of its own

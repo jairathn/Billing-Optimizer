@@ -134,6 +134,7 @@ remitwatch/
   states.py       the one place an item's state is decided: work now, waiting, done, accepted, expired, can't check (a person's status always wins)
   story.py        each item's story (every event on its line, from the 835s and EMA, with a balance that reconciles to the cent or shows the gap), its verdict and its exact next step; never from EMA's claim status alone
   rarely_paid.py  codes a payer almost never pays: why this payer does not pay this code (the run's evidence from the store, and the payer's published rule researched by hand in data/payer_code_rules.json, public facts only) and what the note or the claim must show
+  routes.py       how each item's request reaches its payer, easiest accepted way first (payer_routes.json: the researched table of each payer's portal, fax, mail and phone routes per request type, with sources, checked 2026-11-28): the drawer's route card, its fields filled from the store and the PRACTICE_ settings, never invented
   insights.py     what Today and Bigger wins say: kinds of work, the plan, the data checks (the TriZetto feed's among them)
   results.py      the Results tab's figures, by fixed rules and each with the exact items behind it: money returned on items RemitWatch flagged or worked, lift against similar unworked items, ROI, work done, spot checks
   activity.py     what each clinician did: who rendered each visit, patients per clinic day, panels, levels, allowed per patient

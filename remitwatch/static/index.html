@@ -152,6 +152,10 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 .todo-box{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 12px;margin:8px 0 10px;background:var(--soft)}
 .todo-top{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-bottom:6px}.todo-what,.todo-next{margin:4px 0}
 .todo-actions{margin-top:8px}
+.rc-card{border-top:1px solid var(--line);margin:8px 0 4px;padding-top:8px}.rc-head{margin:2px 0 4px}.rc-actions{margin:6px 0 2px}
+table.rc-fields{margin:4px 0;border-collapse:collapse}table.rc-fields td{padding:2px 8px 2px 0;vertical-align:top;overflow-wrap:anywhere}
+.rc-attach{margin:2px 0 4px;padding-left:18px}.rc-source{margin-top:6px}.rc-sent{display:flex;flex-wrap:wrap;gap:6px;align-items:end;margin-top:6px}
+.rc-sent input{display:block;max-width:16rem}
 .calc-row{padding:6px 0;border-bottom:1px dashed var(--line)}
 .calc-row label{display:block;font-size:13px}
 .calc-ctl{display:flex;align-items:center;gap:8px}
@@ -648,8 +652,9 @@ document.addEventListener('keydown', e=>{ if(e.key!=='Escape') return;
   if($('#modal').classList.contains('open')){ $('#modal').classList.remove('open'); return; }
   if($('#drawer').classList.contains('open')) closeDetail(); });
 // Keyboard shortcuts for working a list (shown by ? and the ? button): j and k move through the list, or through the items
-// with an item open; Enter or o opens one; s marks it sent; l lets it go (it asks why); / goes to the search box.
-const KEYS = [['j','Next item'],['k','Previous item'],['Enter or o','Open the item'],['s','Mark it sent'],['l','Let it go (asks why)'],['/','Search the list'],['Esc','Close the item'],['?','These shortcuts']];
+// with an item open; Enter or o opens one; s marks it sent; l lets it go (it asks why); c copies the route card's filled
+// fields; / goes to the search box.
+const KEYS = [['j','Next item'],['k','Previous item'],['Enter or o','Open the item'],['s','Mark it sent'],['l','Let it go (asks why)'],['c','Copy every filled field of the route'],['/','Search the list'],['Esc','Close the item'],['?','These shortcuts']];
 function keysSheet(){
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Keyboard shortcuts</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="keys" style="margin-top:10px">${KEYS.map(([k, w])=>`<span>${k.split(' or ').map(x=>`<kbd>${esc(x)}</kbd>`).join(' or ')}</span><span>${esc(w)}</span>`).join('')}</div>`;
@@ -670,6 +675,7 @@ document.addEventListener('keydown', e=>{
     else if(e.key === 'k'){ e.preventDefault(); press('#prevItem'); }
     else if(e.key === 's'){ e.preventDefault(); press('[data-xp="mark_sent"]') || press('#sentNext') || press('[data-st="appealed"]') || hint('Nothing to mark sent here.'); }
     else if(e.key === 'l'){ e.preventDefault(); press('[data-xp="let_go"]') || press('#letGoNext') || press('[data-st="dismissed"]') || hint('This item cannot be let go from here.'); }
+    else if(e.key === 'c'){ e.preventDefault(); press('#rcCopyAll') || hint('No route to copy here.'); }
     return;
   }
   const rows = [...document.querySelectorAll('#view tr.row[data-id]')]; if(!rows.length) return;

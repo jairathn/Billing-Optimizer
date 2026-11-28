@@ -44,17 +44,20 @@ payer's accepted channel, easiest first, with the fields prefilled; and say whet
   report in the store reaches; the Data tab shows none of it in dollars, the stated reason is wrong, and the archive would
   drop them silently (G2, G3). The payer routes research is done (wf_c3711a72-b66; private `$S/tk/routes/research_raw.json`,
   public facts only). The replay ran all 11 months before a container restart; its analysis is being finished.
-- Running (2026-11-28, 09:45 UTC): wf_1b05bad9-f47 is in the fix rounds of `wip/gapfix`
-  (plans/briefs/2026-11-28_gapfix.md, G1 to G8 built and reviewed twice) and `wip/routes`
-  (plans/briefs/2026-11-28_routes.md, payer_routes.json, routes.py, the drawer's route card; reviewed twice).
-  wf_47797c0b-c26 reviews `wip/replay-fix` (selfcheck: posted_money marks re-baselined when a payer name changes group; a
-  held run no longer saves the self-check facts). wf_922f5636-97c builds `wip/ui-a` (plans/briefs/2026-11-28_ui.md).
-  wf_a3fa6266-96f builds `wip/replay-fix-2a` (states: rate patterns past every window expire; a hand-off's Started is not a
-  person's; stale rows in the decision log; a second payer a person billed closes as Paid with proof when it pays, stays
-  listed when it pays less) and `wip/replay-fix-2b` (vanished check routes for a payment EMA posted and a resend under the
-  same claim id; detection hands the checks the ids it retires on purpose; precision_guard counts only the item's own payer
-  and nets takebacks; a let-go line settles a never-listed whole-claim denial; a same-visit vote split keeps its link), each
-  built on gapfix and replay-fix, reviewed and fixed.
+- Merged on the integration branch (2026-11-28, 11:50 UTC): `wip/gapfix` (cdd3463, G1 to G8 and the fix round's 14
+  findings) and `wip/routes` (8fe6a7e, the payer routes card and the fix round's 21 findings); python3 suite on the merge:
+  4,528 passed, 0 failed. Item ids from the private copy in plans/progress and one test comment are now neutral labels.
+- Running: wf_47797c0b-c26 fixes `wip/replay-fix` after its review (selfcheck: posted_money marks re-baselined when a payer
+  name changes group; a held run no longer saves the self-check facts). wf_922f5636-97c builds `wip/ui-a`
+  (plans/briefs/2026-11-28_ui.md), then two reviews and a fix round. wf_a3fa6266-96f builds `wip/replay-fix-2a` (states:
+  rate patterns past every window expire; a hand-off's Started is not a person's; stale rows in the decision log; a second
+  payer a person billed closes as Paid with proof when it pays, stays listed when it pays less) and `wip/replay-fix-2b`
+  (vanished check routes for a payment EMA posted and a resend under the same claim id; detection hands the checks the ids
+  it retires on purpose; precision_guard counts only the item's own payer and nets takebacks; a let-go line settles a
+  never-listed whole-claim denial; a same-visit vote split keeps its link), each reviewed and fixed. Next to start: the UI
+  units ui-words and ui-signin (now), then ui-work, ui-panel and ui-pages once ui-a's fix round is in.
+- Disk: pytest's own temp folders (/tmp/pytest-of-root) filled the disk once (13 GB from many suites at once). A private
+  cleaner removes folders untouched for an hour; run suites with a private TMPDIR per shard and delete it after.
 - The replay audit is done. Its verdicts are private (`$S/tk/replay/replay_finish_result.json`, `verify2_result.json`): no
   automatic closure without proof in any month, no person's decision overwritten; ten code bugs, all routed to the units
   above; the rest expected or the harness's own. Delete the big replay stores once replay-fix-2 merges (keep the JSON).
