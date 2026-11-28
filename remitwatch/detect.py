@@ -7480,6 +7480,8 @@ class Detector:
                     self.ema_counts["open_claim_second_send_nothing_left"] += 1
                     return False
         second_note = None
+        if cd.get("ema_second") and cd.get("ema_link") is not None:
+            ev["visit_ema_claim"] = cd["ema_link"]      # the EMA claim naming this payer as the visit's second payer
         if cd.get("ema_second"):
             # found through its EMA claim's second payer and not answered by it (gapfix G6): worth what the payer before it
             # left, as any send to a later payer. The claim's own 837 says what that was when it went out as a later payer's
@@ -7597,7 +7599,10 @@ class Detector:
             # Federal holiday moves Medicare's to the next workday; Ambetter's 180 days for a participating provider)
             f["legal_deadline"] = file_legal if file_legal and deadline and file_legal > deadline else None
         f["source"] = cd.get("source") or "ema"
-        if cd.get("ema_link") is not None:
+        if cd.get("ema_link") is not None and not cd.get("ema_second"):
+            # (a claim to the visit's second payer names its EMA claim in its evidence only, 'visit_ema_claim': that EMA
+            # claim's postings and settlement are the first payer's, and every reader of an item's own EMA claim, the
+            # states first, would take them for this claim's answer: gapfix G6)
             f["ema_link"] = cd["ema_link"]
         self._export_claims.add(pcn)
         if gave_up and billed > pat_paid:   # given up in EMA though no payer answered: what the patient did not pay, written off

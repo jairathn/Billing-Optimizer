@@ -44,7 +44,7 @@ def _run(s, lg=None, today="2026-05-03"):
     if lg is not None:
         lg.close()
     listed = {r["patient_control_number"]: dict(r) for r in s.query(
-        "SELECT patient_control_number, signal, hint, ema_link, shortfall_cents, evidence FROM findings "
+        "SELECT patient_control_number, signal, hint, ema_link, shortfall_cents, evidence, work_state, state_rule FROM findings "
         "WHERE signal='NO_ANSWER' AND COALESCE(stale,0)=0")}
     return det, listed, _unseen(s)
 
@@ -379,14 +379,16 @@ def test_the_first_payers_payment_after_the_send_does_not_answer_the_second_paye
         "dropped as answered: the only posting after the send is the FIRST payer's, and Blue Cross never answered")
     if F.claim_id(73) in listed:
         # found through its EMA claim's second payer, and valued at what EMA leaves open after the first payer ($26.66)
-        assert listed[F.claim_id(73)]["ema_link"] == F.link_no(73), listed[F.claim_id(73)]
+        assert json.loads(listed[F.claim_id(73)]["evidence"]).get("visit_ema_claim") == F.link_no(73), listed[F.claim_id(73)]
+        assert listed[F.claim_id(73)]["ema_link"] is None, "the first payer's EMA claim is not the second payer's claim's own"
         assert 0 < (listed[F.claim_id(73)]["shortfall_cents"] or 0) <= 2666, listed[F.claim_id(73)]["shortfall_cents"]
     s.close()
 
 
-def _second_payer_world(tmp_path, kind, monkeypatch, *, eaf, contractual, written_off):
+def _second_payer_world(tmp_path, kind, monkeypatch, *, eaf, contractual, written_off, paid_on=D(2026, 3, 6)):
     """Claim 75: a visit March 5 (11102 at $86.66). EMA files it under Medicare Test Region, its first payer, which paid $60
-    and wrote `contractual` dollars off as contractual on March 6, and names Blue Cross as its second payer. The 837s show
+    (posted `paid_on`, March 6 unless said) and wrote `contractual` dollars off as contractual, and names Blue Cross as its
+    second payer. The 837s show
     claim 75 sent March 9 to Blue Cross as the second payer, saying Medicare left the patient `eaf` dollars (AMT*EAF; None:
     the 837 does not say). Blue Cross never posted anything; on April 12 the practice wrote `written_off` dollars off in EMA
     (CO-206, not contractual, under Medicare's name). Returns the listed items and the unseen count."""
@@ -396,9 +398,9 @@ def _second_payer_world(tmp_path, kind, monkeypatch, *, eaf, contractual, writte
     both = {"primary": MED, "secondary": BCP}
     v = {"cpt": "11102", "patient": 1, "svc": D(2026, 3, 5)}
     rows = [charge(F.link_no(75), amount=86.66, posted=D(2026, 3, 5), **v, **both),
-            pay(F.link_no(75), "PAPER-75A", 60, posted=D(2026, 3, 6), payer=MED, **v, **both)]
+            pay(F.link_no(75), "PAPER-75A", 60, posted=paid_on, payer=MED, **v, **both)]
     if contractual:
-        rows.append(adj(F.link_no(75), "CO-45", contractual, posted=D(2026, 3, 6), contractual=True, payer=MED, **v, **both))
+        rows.append(adj(F.link_no(75), "CO-45", contractual, posted=paid_on, contractual=True, payer=MED, **v, **both))
     if written_off:
         rows.append(adj(F.link_no(75), "CO-206", written_off, posted=D(2026, 4, 12), payer=MED, **v, **both))
     s, lg = _world(tmp_path, kind, monkeypatch, rows)
@@ -421,12 +423,16 @@ def test_a_second_payers_claim_whose_remainder_ema_wrote_off_is_listed_at_what_t
     list and in no count but the maintainers' (on the real data two claims to Medicaid as second payer, $285.21 by their
     837s, were dropped)."""
     from tests import ema_fixtures as F
-    det, listed, unseen = _second_payer_world(tmp_path, kind, monkeypatch, eaf=eaf, contractual=6.66, written_off=20)
+    det, listed, unseen = _second_payer_world(tmp_path, kind, monkeypatch, eaf=eaf, contractual=6.66, written_off=20,
+                                              paid_on=D(2026, 3, 9))
     assert F.claim_id(75) in listed, (
         f"not listed (counts {dict((k, v) for k, v in det.ema_counts.items() if 'second' in k)}): Blue Cross never answered, "
         "and the practice's write-off in EMA is no answer")
     item = listed[F.claim_id(75)]
-    assert item["ema_link"] == F.link_no(75), item
+    assert item["ema_link"] is None and json.loads(item["evidence"]).get("visit_ema_claim") == F.link_no(75), item
+    # the first payer's payment, posted the day the claim went to Blue Cross, and the write-off settle EMA's claim: that is
+    # the first payer's settlement, never this claim's answer, so the claim is work, not done
+    assert item["work_state"] == "work_now", (item["work_state"], item["state_rule"])
     assert item["shortfall_cents"] == 2000, item["shortfall_cents"]
     ev = json.loads(item["evidence"])
     assert ev.get("second_payer_left_cents") == 2000 and ev.get("ema_open_cents") == 0, ev
@@ -476,7 +482,8 @@ def test_a_claim_to_the_second_payer_never_stands_for_its_ema_claims_own_never_s
         return
     assert mine == [("NO_ANSWER", F.claim_id(76))], f"the claim to the second payer is not listed as never answered: {sorted(got)}"
     item = got[mine[0]]
-    assert item["ema_link"] == F.link_no(76) and "Invalid" not in (item["hint"] or ""), item
+    assert item["ema_link"] is None and json.loads(item["evidence"]).get("visit_ema_claim") == F.link_no(76), item
+    assert "Invalid" not in (item["hint"] or ""), item
     assert json.loads(item["evidence"]).get("ema_bridge", "").endswith("_secondary"), item["evidence"]
 
 
