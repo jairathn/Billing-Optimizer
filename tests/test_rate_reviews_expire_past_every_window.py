@@ -12,6 +12,9 @@ before it looked at a window, so once the last window closed an unworked review 
 scoreboard never counted it lost to deadlines, the at-risk figure dropped it the day after its last date, and the
 self-check past_window looked only at the rule 'open'. Here: it expires (a person's Started or Sent still decides), the
 scoreboard counts each claim's dollars lost once, the self-check guards it, and the story says when every window closed.
+A review listed again after its loss, for claims the payer paid the same way since, counts those claims lost when it
+expires again, in the week their windows closed (the first loss keeps its week), and while it is listed again only its
+claims still inside their windows are at risk, never the ones already counted lost (review r1 of replay-fix-2a).
 
 Each case runs the way the live server does (an analysis inside the windows, then the day after the last one closes) on
 the server's store file, the compact in-memory store and that store's serialized image (the serverless host's next
@@ -366,13 +369,13 @@ def _listed_again(tmp_path, kind):
     again = w.one("SECOND_RATE")
     assert again["finding_id"] == fid and again["work_state"] == "work_now", (again["finding_id"] == fid, again["work_state"])
     assert again["ev"]["lines"] == 9 and again["appeal_deadline"] > last
-    return w, fid, again
+    return w, fid, again, last
 
 
 def test_a_review_listed_again_with_new_claims_counts_their_dollars_lost_when_it_expires_again(tmp_path, kind):
     """Nobody works the review listed again, and the new claims' windows close too. Rule 5: their 3 x $17.60 are lost to
     the deadline as well, each dollar once (the 6 counted the first time are not counted again)."""
-    w, fid, again = _listed_again(tmp_path, kind)
+    w, fid, again, last = _listed_again(tmp_path, kind)
     w.run(_day_after(again["appeal_deadline"]))
     assert w.one("SECOND_RATE")["work_state"] == "expired"
     reg = results.load_registry(w.store.conn)[fid]
@@ -381,8 +384,14 @@ def test_a_review_listed_again_with_new_claims_counts_their_dollars_lost_when_it
         "expired unworked and are lost to no deadline on the scoreboard")
     assert len(reg["flag_info"]["lost_lines"]) == 9 and len(set(reg["flag_info"]["lost_lines"])) == 9
     assert reg["lost_on"] == again["appeal_deadline"], (reg["lost_on"], again["appeal_deadline"])
-    lost, _lists = results._lost(results.load_registry(w.store.conn))
+    lost, lists = results._lost(results.load_registry(w.store.conn))
     assert lost["cents"] == 9 * 1760 + 2175, lost        # the review once (9 claims) and the control's one-off
+    # each loss in the week its claims' windows closed: the first keeps its week (a week, once frozen, is never counted
+    # again), the claims listed since are lost in theirs
+    first_wk, again_wk = results.week_of(last), results.week_of(again["appeal_deadline"])
+    weeks = {x["week"]: x["cents"] for x in lost["weeks"]}
+    assert first_wk != again_wk and weeks[again_wk] == 3 * 1760 and [fid, 6 * 1760] in lists[f"lost:week:{first_wk}"], (weeks, lists)
+    assert [fid, 3 * 1760] in lists[f"lost:week:{again_wk}"] and [fid, 9 * 1760] in lists["lost"]
     # the run after changes nothing: nothing is counted twice
     w.run(_day_after(again["appeal_deadline"], 2))
     assert results.load_registry(w.store.conn)[fid]["lost_cents"] == 9 * 1760
@@ -392,7 +401,7 @@ def test_a_review_listed_again_with_new_claims_counts_their_dollars_lost_when_it
 def test_while_listed_again_the_claims_already_counted_lost_are_not_at_risk_again(tmp_path, kind):
     """The week before the new claims' windows close, the scoreboard's 'at risk in the next 14 days' and 'lost to
     deadlines' never both hold the 6 claims already counted lost (each dollar once); the list the figure opens agrees."""
-    w, fid, again = _listed_again(tmp_path, kind)
+    w, fid, again, _last = _listed_again(tmp_path, kind)
     wk = _day_after(again["appeal_deadline"], -7)
     w.run(wk)
     figs = results.live_figures(w.store.conn, today=wk)
@@ -404,4 +413,8 @@ def test_while_listed_again_the_claims_already_counted_lost_are_not_at_risk_agai
         "dead claims are on the scoreboard twice")
     listed = results.list_entries(w.store.conn, "at_risk", wk)
     assert sum(e[1] for e in listed) == risk and fid in {e[0] for e in listed}, listed
+    # what it is likely worth at risk is its at-risk part's share, never its dead claims' worth
+    item = w.one("SECOND_RATE")
+    if figs["at_risk"].get("expected_n"):
+        assert figs["at_risk"]["expected_cents"] == item["expected_value_cents"] * (3 * 1760) // item["shortfall_cents"], figs["at_risk"]
     w.store.close()
