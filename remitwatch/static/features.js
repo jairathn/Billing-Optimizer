@@ -674,6 +674,7 @@ function xpRouteHtml(f, x, r){
     <div class="rc-head"><span class="chip">${esc(RC_CH[b.channel] || b.channel)}</span> <b>${esc(b.line)}</b>${due}
       ${b.required ? ' <span class="chip">required</span>' : ''}${b.verified ? '' : ` <span class="chip hint" title="${esc(b.unverified_why || '')}">not confirmed</span>`}</div>
     <div class="small muted">${esc(c.payer)}: ${esc(c.request_label)}${c.variant_why ? ' · ' + esc(c.variant_why) : ''}</div>
+    ${c.deadline_note ? `<div class="small sev-medium">${esc(c.deadline_note)}</div>` : ''}
     ${b.where && !(b.action || {}).url ? `<div class="small">Send to: <b>${esc(b.where)}</b>${b.form ? ' · form: ' + esc(b.form) : ''}</div>` : (b.form ? `<div class="small">Form: ${esc(b.form)}</div>` : '')}
     ${b.fax ? `<div class="small ${b.fax.confirmed ? '' : 'sev-medium'}">${esc(b.fax.words)}</div>` : ''}
     <div class="actions rc-actions">${rcAction(f, b, r, nx)}<button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button></div>

@@ -272,6 +272,31 @@ def test_the_payers_unpaid_answer_to_an_appeal_takes_it_to_the_next_level(store)
     assert c["request"] == "second_level_appeal"
 
 
+def test_a_second_level_runs_on_its_own_clock_from_the_first_answer_never_on_the_first_levels_date(store):
+    # the item's date is the first level's window; the second level has its own limit from the payer's answer to the first
+    # (UnitedHealthcare's post-service appeal, Anthem's 90 days): the card names that limit and the answer's date, and
+    # shows no date of its own that could read as months more time
+    world(store, payer="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial", status="in_progress")
+    event(store, "F1", "manual", at="2026-04-01T10:00:00", frm="open", to="appealed")
+    event(store, "F1", "manual", at="2026-04-20T10:00:00", frm="appealed", to="in_progress", note="The payer said no: upheld")
+    c, _ = card(store)
+    assert c["request"] == "second_level_appeal"
+    assert c["deadline"] is None
+    assert c["deadline_note"].startswith("This level has its own limit: " + c["time_limit"])
+    assert "The payer answered the first level on Apr 20, 2026." in c["deadline_note"]
+    # the payer's unpaid answer on a remittance (states rule work_answered) dates it the same way
+    tk = world(store, payer="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial", status="appealed",
+               appealed_at="2026-04-10")
+    store.conn.execute("DELETE FROM finding_events")
+    event(store, "F1", "manual", at="2026-04-10T15:00:00", frm="open", to="appealed")
+    remit(store, trace="T3", paid_on="2026-04-25", payer="UNITEDHEALTHCARE",
+          claims=[{"pcn": F.claim_id(1), "pccn": "ICN-TEST-1", "received": "2026-03-05", "lines": [ln("99213", 150, 0, [("CO", "50", 150)], lcn="1")]}])
+    assert tk
+    c2, ex2 = card(store, today="2026-04-28")
+    assert ex2["state"]["rule"] == "work_answered" and c2["request"] == "second_level_appeal"
+    assert c2["deadline"] is None and "The payer answered the first level on Apr 25, 2026." in c2["deadline_note"]
+
+
 def test_a_corrected_claim_sent_again_and_denied_is_not_a_second_level(store):
     world(store, payer="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial", status="in_progress",
           signal="EM_BUNDLED_NO_MODIFIER", category="bundling", reason=("CO", "97"), actionable="correct_and_resubmit")

@@ -166,6 +166,37 @@ def _first_level_denied(conn: sqlite3.Connection | None, f: dict, st: dict) -> b
     return False
 
 
+def _first_answer(conn: sqlite3.Connection | None, f: dict, st: dict) -> str | None:
+    """The day the payer turned down the first-level request (what a second level's own limit counts from): its unpaid
+    answer on a remittance (states rule work_answered), or the day a person logged 'The payer said no' after Sent."""
+    a = st.get("answered") or {}
+    if st.get("rule") == "work_answered" and a.get("date"):
+        return str(a["date"])[:10]
+    if conn is None:
+        return None
+    try:
+        rows = conn.execute("SELECT at, to_status, note FROM finding_events WHERE finding_id=? ORDER BY at, id", (f["finding_id"],)).fetchall()
+    except sqlite3.Error as exc:
+        runlog.caught(exc, "routes.first_answer", level="warning")
+        return None
+    sent, day = False, None
+    for at, to, note in rows:
+        if to == "appealed":
+            sent = True
+        elif sent and to == "in_progress" and str(note or "").startswith("The payer said no"):
+            day = str(at)[:10]
+    return day
+
+
+def _long(d: str | None) -> str:
+    try:
+        x = date.fromisoformat(str(d)[:10])
+    except (TypeError, ValueError) as exc:
+        runlog.caught(exc, "routes.long_date", level="warning")
+        return ""
+    return f"{x:%b} {x.day}, {x.year}"
+
+
 def _first_filing(f: dict, st: dict) -> dict | None:
     """The first-filing limit of a claim no payer has answered (the window of that name states.windows lists), or None:
     the date a status request is due by, which the item's own date can run past (a dispute window after the limit)."""
@@ -879,6 +910,15 @@ def card(conn: sqlite3.Connection, finding_id: str, *, explain: dict | None = No
         base["fallback"] = (not_covered + " " + FALLBACK) if not_covered else FALLBACK
         return base
     base.update(block)
+    if request == "second_level_appeal":
+        # the item's date is the first level's window; the second level runs on its own clock from the payer's answer to
+        # the first, so the card names that limit and the answer's day, and shows no date that could read as more time
+        day = _first_answer(conn, f, st)
+        limit = str(base.get("time_limit") or "").strip()
+        base["deadline"], base["deadline_basis"] = None, None
+        base["deadline_note"] = (f"This level has its own limit: {limit}{'' if limit.endswith('.') else '.'}"
+                                 + (f" The payer answered the first level on {_long(day)}." if day else
+                                    " It counts from the date of the payer's answer to the first level."))
     if also:
         extra = _request_block(conn, f, claim, line, nx, st, also, base["route"] or "", group, show_names, today, carcs)
         if extra:
