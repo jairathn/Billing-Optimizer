@@ -1007,7 +1007,16 @@ const ids = (v, sel) => v.querySelectorAll(sel + ' [data-id]').map(e => e.datase
   for (const key of out.today_tiles) { went.length = 0; ctx.state.dataAnchor = null; await click(v.querySelector(`[data-td="${key}"]`)); clicks[key] = went.slice(); }
   out.today_clicks = clicks;
   out.today_links = v.querySelectorAll('.go-data').map(e => e.dataset.anchor || null);
-  went.length = 0; await click(v.querySelector('[data-score="lost"]')); out.score_click = went.slice(); out.results_open = ctx.state.resultsOpen;
+  // Results' top: the money scoreboard and the items by state (Today's tiles until the premium pass: static/today.js tdBoard)
+  const bd = new El('div'); await ctx.tdBoard(bd);
+  out.board_html = bd.innerHTML;
+  out.board_tiles = bd.querySelectorAll('[data-td]').map(e => e.dataset.td);
+  out.board_score = bd.querySelectorAll('[data-score]').map(e => e.dataset.score);
+  out.board_titles = Object.fromEntries(bd.querySelectorAll('[data-td]').map(e => [e.dataset.td, e.attrs.title || '']));
+  const bclicks = {};
+  for (const key of out.board_tiles) { went.length = 0; ctx.state.dataAnchor = null; await click(bd.querySelector(`[data-td="${key}"]`)); bclicks[key] = went.slice(); }
+  out.board_clicks = bclicks;
+  went.length = 0; await click(bd.querySelector('[data-score="lost"]')); out.score_click = went.slice(); out.results_open = ctx.state.resultsOpen;
   ctx.state.dataAnchor = null;
   v = new El('main'); calls.length = 0; dialogs.length = 0;
   const d0 = Date.now(), dRun = ctx.dataTab(v);
@@ -1015,6 +1024,7 @@ const ids = (v, sel) => v.querySelectorAll(sel + ' [data-id]').map(e => e.datase
   await dRun;
   out.data_html = v.innerHTML;
   out.data_calls = calls.map(c => c.path);
+  out.data_links = v.querySelectorAll('#dtEmaLine .go-data').map(e => e.dataset.anchor || null);
   out.buckets = v.querySelectorAll('.dtBucket').map(e => e.dataset.bucket);
   went.length = 0; calls.length = 0;
   await click(v.querySelector('.dtBucket'));
@@ -1131,33 +1141,39 @@ def page_run(worlds, tmp_path, monkeypatch):
 
 
 def test_today_draws_the_counts_the_routes_give_and_each_opens_its_list(page_run):
+    """The counts by state and the scoreboard are Results' board now (the premium pass moved Today's nine tiles there
+    without losing a figure): each tile shows its route's number and opens the list it was counted with. Today keeps
+    what is not on today's list, the payments to post and the credits to refund."""
     out, ans = page_run()
     t = ans["/api/ema/today"]
-    assert out["today_tiles"][:5] == ["todo", "followup_due", "waiting", "auto_written_off", "unworked"]
-    h = out["today_html"]
+    assert out["board_tiles"][:5] == ["todo", "followup_due", "waiting", "auto_written_off", "unworked"]
+    b, h = out["board_html"], out["today_html"]
     # each tile shows its route's number, and opens the Worklist with the very filter that number was counted with
     for key in ("todo", "followup_due", "waiting"):
-        assert out["today_clicks"][key][-1]["tab"] == "worklist"
+        assert out["board_clicks"][key][-1]["tab"] == "worklist"
         # no order forced: the Worklist's own (worth most first), so Item 1 is the same item whichever door opened it
         want = dict({"status": "open,in_progress", "deadline": "valid"}, **t["states"][key]["go"])
-        assert out["today_clicks"][key][-1]["filt"] == want, key
+        assert out["board_clicks"][key][-1]["filt"] == want, key
+        assert out["today_clicks"].get(key, [{}])[-1].get("filt") in (None, want), key   # Today's strip opens the same lists
     aw = t["auto_written_off"]
-    assert out["today_clicks"]["auto_written_off"][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **aw["go"])
-    assert 'data-td="todo"' in h and ">2<small>$210 est.</small>" in h.replace("\n", "")
-    assert "Auto write-offs still appealable" in h and "Nobody has worked these" in h
+    assert out["board_clicks"]["auto_written_off"][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **aw["go"])
+    assert 'data-td="todo"' in b and ">2<small>$210 est.</small>" in b.replace("\n", "")
+    assert "Auto write-offs still appealable" in b and "Nobody has worked these" in b
+    assert 'class="tile' not in h and 'data-score' not in h                     # none of the nine is left on Today
     assert "Not on today's list" in h and ">1 done</a>" in h
     assert "1 payment</a>" not in h and "1 payment to post in EMA" in h and "1 credit to refund" in h
     assert [(out["today_clicks"][k][-1]["tab"], out["today_clicks"][k][-1]["anchor"]) for k in ("post", "refund")] == \
         [("data", "dtPostList"), ("data", "dtRefundList")]
     # the scoreboard: a figure the route gives, and a dash (never a zero) for one it does not
-    assert out["today_score"] == ["recovered", "lost", "at_risk", "given_up"]
-    assert "$1,234" in h and h.count(">–</span>") >= 2
+    assert out["board_score"] == ["recovered", "lost", "at_risk", "given_up"]
+    assert "$1,234" in b and b.count(">–</span>") >= 2
     assert out["score_click"][-1]["tab"] == "results" and out["results_open"] == "lost"
     assert "Blind spot" not in h                       # the feeds are current
-    # every work type has its colour, the two unit B added included (index.html holds the classes)
-    index = open(os.path.join(os.path.dirname(cloud.__file__), "static", "index.html"), encoding="utf-8").read()
+    # every work type has its style, the two unit B added included (the stylesheet, static/rw.css, holds the classes
+    # since the pages' inline <style> blocks moved there: the same guarantee, read where the styles live now)
+    rw_css = open(os.path.join(os.path.dirname(cloud.__file__), "static", "rw.css"), encoding="utf-8").read()
     assert {k: out["kind_styles"].get(k) for k in ("bill", "post")} == {"bill": "k-bill", "post": "k-post"}
-    assert all(f".{c}{{" in index for c in out["kind_styles"].values())
+    assert all(re.search(rf"\.{re.escape(c)}\s*\{{", rw_css) for c in out["kind_styles"].values())
     assert "—" not in h and "false positive" not in h.lower()
 
 
@@ -1272,7 +1288,7 @@ def test_an_unpriced_write_off_is_said_apart_on_each_page(page_run):
     answers = {"/api/ema/policy": pol, "/api/ema/policy/items?": items, "/api/ema/today": today, "/api/ema/data": data}
     out, _ = page_run(answers)
     assert "+ up to $150 not priced" in out["policy_html"] and "up to $150.00" in out["items_html"]
-    assert "Not in this total: up to $150 EMA wrote off on 1 item no rate prices" in out["today_html"]
+    assert "Not in this total: up to $150 EMA wrote off on 1 item no rate prices" in out["board_html"]
     assert "1 open item has no price" in out["data_html"] and "EMA wrote off up to $150 on them" in out["data_html"]
     narrow, _ = page_run(dict(answers, __narrow=True))
     assert "(+ up to $150 not priced)" in narrow["policy_html"] and "up to $150.00" in narrow["items_html"]
@@ -1318,7 +1334,7 @@ def test_today_says_which_report_waits_and_what_to_do(page_run):
                  remits_missing={"key": "remits_missing", "ok": False, "month": "2026-10", "cents": 1234500,
                                  "title": "Payments without a remittance in 2026-10: $12,345"})
     out, _ = page_run({"/api/ema/today": today})
-    h = out["today_html"]
+    h = out["data_html"]                        # EMA's exports line is on the Data tab (it was Today's)
     assert "A Production report waits: " + reason.replace("'", "&#39;") in h
     # the run's judgment of last month, with the month by name
     assert "1 EMA report waits for a decision</a>" in h and "EMA posted $12,345 of insurance payments in October 2026 with no remittance</a>" in h
@@ -1616,9 +1632,124 @@ def test_today_and_the_data_tab_draw_at_once_and_fill_each_place_when_its_answer
     out, _ = page_run({"__delay": slow})
     early, late = out["today_early"], out["today_html"]
     assert 'id="tdPlan"' in early and 'class="title"' in early and 'id="tdStates"' not in early and 'id="tdScore"' not in early
-    assert 'id="tdStates"' in late and 'id="tdScore"' in late and late.index('id="tdStates"') < late.index('id="tdPlan"')
+    assert 'id="tdStates"' in late and late.index('id="tdStates"') < late.index('id="tdPlan"')
+    assert 'id="tdScore"' not in late and 'id="tdScore"' in out["board_html"]     # the scoreboard is Results' board now
     assert "Can the numbers be trusted?" in out["data_early"] and 'id="dtReports"' not in out["data_early"]
     assert out["checks_ms"] is not None and out["checks_ms"] < 500 and 'id="dtReports"' in out["data_html"]
+
+
+def _dollars(c: int) -> str:
+    return "$" + f"{int(abs(c) / 100 + 0.5):,}"           # static/index.html money(): whole dollars, half up
+
+
+def test_today_s_strip_adds_up_and_each_part_opens_its_list(page_run):
+    """CRITIQUE_premium change 5: one figure that adds up. Work now is the whole; what is new and the follow-ups due are
+    its parts and add up to it; what closes within 7 days and is not sent yet is inside it, counted by the route with
+    the Worklist's own filter (state todo, the to-do statuses, deadline week: the list step 1 opens), so each figure
+    opens the very list it counts. Beside it, the week's progress and what deadlines took in the last 30 days."""
+    out, ans = page_run()
+    t, b = ans["/api/ema/today"], ans["/api/brief"]
+    whole, fu = t["states"]["todo"], t["states"]["followup_due"]
+    due = whole["due7"]
+    assert due["go"] == {"state": "todo", "status": "open,in_progress", "deadline": "week", "sort": "deadline"}
+    assert 0 <= due["n"] <= whole["n"] and 0 <= due["cents"] <= whole["cents"] and fu["n"] <= whole["n"]
+    h = out["today_html"]
+    strip = h.split('id="tdStates"')[1].split('id="tdMoreSlot"')[0]
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", strip))
+    # the parts as shown add up to the whole as shown: the new part is the whole's dollars less the follow-ups' dollars
+    whole_d, fu_d = int(_dollars(whole["cents"])[1:].replace(",", "")), int(_dollars(fu["cents"])[1:].replace(",", ""))
+    assert f"Work now {_dollars(whole['cents'])} {whole['n']} item" in text
+    assert f"New {_dollars((whole_d - fu_d) * 100)} ({whole['n'] - fu['n']})" in text and f"Follow-ups due {_dollars(fu['cents'])} ({fu['n']})" in text
+    if due["n"]:
+        assert f"Of which closes in 7 days: {_dollars(due['cents'])} ({due['n']})" in text and 'class="td-due"' in strip
+    done, missed = b.get("done") or {}, b.get("missed") or {}
+    assert f"Sent or paid this week {_dollars(done.get('week_cents') or 0)}" in text
+    assert f"Lost to deadlines, last {missed.get('days') or 30} days {_dollars(missed.get('cents') or 0)}" in text
+    for key, go in (("todo", whole["go"]), ("followup_due", fu["go"])):
+        assert out["today_clicks"][key][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **go), key
+    if due["n"]:
+        assert out["today_clicks"]["todo_week"][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **due["go"])
+    # with follow-ups due, the new part is the whole less them (the two parts add up to the whole)
+    t2 = json.loads(json.dumps(t))
+    t2["states"]["followup_due"].update(n=1, cents=min(5000, whole["cents"]))
+    out2, _ = page_run({"/api/ema/today": t2})
+    text2 = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", out2["today_html"].split('id="tdStates"')[1].split('id="tdMoreSlot"')[0]))
+    fu2 = t2["states"]["followup_due"]["cents"]
+    fu2_d = int(_dollars(fu2)[1:].replace(",", ""))
+    assert f"New {_dollars((whole_d - fu2_d) * 100)} ({whole['n'] - 1})" in text2 and f"Follow-ups due {_dollars(fu2)} (1)" in text2
+    assert "Nothing in it closes within 7 days." in text2 and 'class="td-due"' not in out2["today_html"]
+    # something closes within 7 days: the red part says it inside the whole and opens its own list, soonest first
+    t3 = json.loads(json.dumps(t))
+    cents3 = min(4000, whole["cents"])
+    t3["states"]["todo"]["due7"].update(n=1, cents=cents3)
+    out3, _ = page_run({"/api/ema/today": t3})
+    strip3 = out3["today_html"].split('id="tdStates"')[1].split('id="tdMoreSlot"')[0]
+    text3 = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", strip3))
+    assert f"Of which closes in 7 days: {_dollars(cents3)} (1)" in text3 and 'class="td-due"' in strip3
+    assert out3["today_clicks"]["todo_week"][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **due["go"])
+    # the strip's whole and its 7-day part are drawn when the counts come; until then a dash, never a zero
+    out, _ = page_run({"__fail": ["/api/ema/today"]})
+    assert 'id="tdStates"' not in out["today_html"] and "Work now" in out["today_html"] and ">–<" in out["today_html"]
+
+
+def test_today_shows_a_banner_only_for_a_late_feed_and_leaves_the_self_checks_to_data(page_run):
+    """DESIGN P4: Today shows one banner only when a feed is late (safe mode has its own bar above every page); the
+    other self-checks are on the Data tab, with a dot on Data in the sidebar (static/shell.js)."""
+    out, ans = page_run()
+    brief = json.loads(json.dumps(ans["/api/brief"]))
+    brief["health"] = [{"key": "ema_wiring", "ok": False, "title": "A check that is not a feed failed", "detail": "", "who": ""}] + brief["health"]
+    out, _ = page_run({"/api/brief": brief})
+    assert "Before you start" not in out["today_html"] and "A check that is not a feed failed" not in out["today_html"]
+    brief["health"] = [{"key": "feed", "ok": False, "title": "The remittances reach 2026-09-01 for most payers", "detail": "", "who": ""}] + brief["health"]
+    out, _ = page_run({"/api/brief": brief})
+    assert "<b>Before you start:</b> The remittances reach 2026-09-01 for most payers." in out["today_html"]
+    assert "dtMissing" in out["today_links"]                      # How to fix lands on the payments with no remittance
+
+
+def test_the_route_counts_what_closes_in_7_days_inside_work_now(worlds, tmp_path, monkeypatch):
+    """/api/ema/today's Work now carries what in it closes within 7 days and is not sent yet: one definition with Today's
+    step 1, the red numbers on the tabs and the count in each page's title (/api/brief work.total due7), counted with
+    the Worklist's own filter, so the strip shows it as a part of the whole and a click opens exactly that list. A
+    follow-up due on an item already sent is in Work now, but its filing window no longer closes on it. The window is
+    today and the next 6 days, as the Worklist counts it. The same answer on both hosts (the dashboard's copy holds
+    every column the count reads)."""
+    db = copied(worlds, tmp_path)
+    conn = sqlite3.connect(db)
+    # one denial was sent and its follow-up is due (in Work now), its window's last day today; the other is not sent
+    # yet and its window's last day is the 6th day from today, the last day inside the 7
+    conn.execute("UPDATE findings SET status='appealed', work_state='waiting', follow_up_on=?, appeal_deadline=? "
+                 "WHERE signal='DENIED_MISSING_INFO'", (iso(1), TODAY))
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-6),))
+    conn.commit()
+    conn.close()
+    want = (1, 9000)
+    todo = "(work_state='work_now' OR (work_state='waiting' AND follow_up_on <= ?)) AND status IN ('open','in_progress')"
+    assert sql_count(db, f"{todo} AND appeal_deadline >= ? AND appeal_deadline < ?", TODAY, TODAY, iso(-7)) == want
+    srv = _site(monkeypatch, db)
+    st = srv.get("/api/ema/today").json()["states"]
+    whole, due = st["todo"], st["todo"]["due7"]
+    assert (whole["n"], whole["cents"]) == (2, 21000) and (st["followup_due"]["n"], st["followup_due"]["cents"]) == (1, 12000)
+    assert (due["n"], due["cents"]) == want                                   # a part of the whole
+    assert due["go"] == {"state": "todo", "status": "open,in_progress", "deadline": "week", "sort": "deadline"}
+    assert _list_total(srv, due["go"]) == want                               # the list a click opens, its count line
+    total = srv.get("/api/brief").json()["work"]["total"]
+    assert (total["due7_n"], total["due7_cents"]) == want                    # step 1, the tabs' red numbers, the title
+    # the 7th day from today is outside the window, here as on the list
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-7),))
+    conn.commit()
+    edge = srv.get("/api/ema/today").json()["states"]["todo"]["due7"]
+    assert (edge["n"], edge["cents"]) == (0, 0) == _list_total(srv, edge["go"])
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE signal='DENIED_AUTH'", (iso(-6),))
+    conn.commit()
+    conn.close()
+    (tmp_path / "vercel").mkdir()
+    cloud_c = _site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel")
+    got = cloud_c.get("/api/ema/today").json()["states"]["todo"]
+    assert got["due7"] == due and (got["n"], got["cents"]) == (whole["n"], whole["cents"])
+    assert _list_total(cloud_c, due["go"]) == want
+    cloud_total = cloud_c.get("/api/brief").json()["work"]["total"]
+    assert (cloud_total["due7_n"], cloud_total["due7_cents"]) == want
 
 
 def test_today_stays_blind_and_ticks_nothing_when_its_counts_do_not_come_back(page_run):
@@ -1716,17 +1847,18 @@ def test_today_words_dollars_and_phone(page_run):
     basis on hover and estimates are labelled; decision 9: no nudge to leave small items; review 2: at phone width
     the figures are two compact lines, so the plan's first step is on the first screen."""
     out, ans = page_run()
-    h = out["today_html"]
+    h = out["board_html"]
     assert "this week, follow-ups too" not in h and "to work, follow-ups due included" in h
-    assert "of Work now, nothing done in 21 days" in h and "worth less than" not in h
-    assert "Estimate" in out["today_titles"]["todo"] and "est.</small>" in h
-    assert "safe date" in out["today_titles"]["auto_written_off"]
+    assert "of Work now, nothing done in 21 days" in h and "worth less than" not in h and "worth less than" not in out["today_html"]
+    assert "Estimate" in out["board_titles"]["todo"] and "est.</small>" in h
+    assert "Estimate" in out["today_titles"]["todo"]                            # Today's Work now says its basis too
+    assert "safe date" in out["board_titles"]["auto_written_off"]
     assert "Estimate" in out["policy_html"] and "Dollars (est.)" in out["policy_html"]
     assert "postings: insurance payments posted on checks" in out["data_html"] and "The remittances (835)" in out["data_html"]
     narrow, _ = page_run({"__narrow": True})
     nh = narrow["today_html"]
-    assert nh.count("td-compact") == 2 and 'class="tile' not in nh.split('id="tdPlan"')[0]
-    assert set(narrow["today_tiles"][:5]) == {"todo", "followup_due", "waiting", "auto_written_off", "unworked"}
+    assert narrow["board_html"].count("td-compact") == 2 and 'class="tile' not in nh.split('id="tdPlan"')[0]
+    assert set(narrow["board_tiles"][:5]) == {"todo", "followup_due", "waiting", "auto_written_off", "unworked"}
 
 
 def test_the_blind_spot_gives_each_part_its_dollars_and_basis(page_run):
@@ -1776,7 +1908,7 @@ def test_the_data_tab_lands_on_what_a_link_names_says_remittance_and_shows_an_ar
     out, ans = page_run()
     today = dict(ans["/api/ema/today"], reports_held=1, reports_pending=1)
     out, _ = page_run({"/api/ema/today": today})
-    assert {"dtReports"} <= set(out["today_links"]) and "1 EMA report waits for the next run" in out["today_html"]
+    assert {"dtReports"} <= set(out["data_links"]) and "1 EMA report waits for the next run" in out["data_html"]
     heads = re.findall(r"<h2>([^<]*)</h2>", out["data_html"])
     assert heads and not [x for x in heads if "835" in x] and "no 835 on file" not in out["data_html"]
     narrow, ans = page_run(lambda c: {"/api/ema/ar?": c.get("/api/ema/ar", params={"bucket": "denied_todo"}).json(), "__narrow": True})
@@ -1794,7 +1926,7 @@ def test_an_export_held_or_not_read_yet_is_not_said_never_to_have_arrived(page_r
              {"key": "prod", "title": "Production report", "overdue": True, "age_days": None, "held": False, "unread": "waiting", "arrived": iso(3)},
              {"key": "w1", "title": "Weekly export", "overdue": True, "age_days": None, "held": False, "unread": None, "arrived": None}]
     out, _ = page_run({"/api/ema/exports": {"exports": rows_}})
-    h = out["today_html"]
+    h = out["data_html"]                        # EMA's exports line is on the Data tab (it was Today's)
     assert "A/R report: the newest file is held" in h and "Production report: none read yet" in h and "Weekly export: never arrived" in h
 
 
