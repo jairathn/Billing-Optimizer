@@ -833,7 +833,7 @@ def test_the_weekly_reports_closed_this_week_starts_on_the_practices_day_a_week_
         _item(store.conn, fid, status="resolved", recovered_cents=2500, auto_note="EMA shows this line paid",
               status_changed_at=when.isoformat(timespec="seconds"))
     lines = report.ema_section(store)
-    assert "- Closed this week because EMA shows them paid: 1 items, $25" in lines, lines
+    assert "- Closed this week because EMA shows them paid: 1 item, $25" in lines, lines
 
 
 def test_a_second_upload_of_the_same_name_is_named_for_the_practices_day(store, monkeypatch):

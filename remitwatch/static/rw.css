@@ -430,6 +430,8 @@ nav#nav, .sidebar { position: sticky; top: 0; z-index: var(--z-nav); height: 100
 .person-err { font-size: var(--fs-xs); color: var(--danger); }
 .person-err:empty { display: none; }
 .nav-close { display: none; }
+/* the Data tab's list of claims no source answers (data.js): its heading sits close to the list */
+.unseen-h { margin: 10px 0 4px; }
 /* the narrow sidebar: the icons alone (the person's choice on a desk; always between 641 and 1023 px) */
 :root[data-sidebar="rail"] nav#nav { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
 :root[data-sidebar="rail"] nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg, .person-name) { display: none; }

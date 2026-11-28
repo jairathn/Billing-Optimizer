@@ -653,8 +653,8 @@ function rcPrintSheet(c, b){
     return i > 0 ? `<tr><th>${esc(l.slice(0, i))}</th><td>${esc(l.slice(i + 2))}</td></tr>` : `<tr><td colspan="2">${esc(l)}</td></tr>`; }).join('');
   const att = ((b || {}).attachments || []).map(a => `<li>${esc(a.label)}</li>`).join('');
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(head)}</title><style>body{font:14px/1.5 system-ui,sans-serif;margin:32px;color:#111;background:#fff}
-    th{text-align:left;padding:4px 16px 4px 0;vertical-align:top}td{padding:4px 0}button{margin-bottom:16px}@media print{button{display:none}}</style></head>
-    <body><button onclick="print()">Print</button><h1 style="font-size:18px">${esc(head)}</h1><table>${rows}</table>
+    th{text-align:left;padding:4px 16px 4px 0;vertical-align:top}td{padding:4px 0}button{margin-bottom:16px}h1{font-size:18px}@media print{button{display:none}}</style></head>
+    <body><button onclick="print()">Print</button><h1>${esc(head)}</h1><table>${rows}</table>
     ${att ? `<p><b>Enclose</b></p><ul>${att}</ul>` : ''}</body></html>`;
   const url = URL.createObjectURL(new Blob([html], {type: 'text/html'}));
   window.open(url, '_blank', 'noopener,noreferrer');

@@ -84,7 +84,7 @@ def test_the_weekly_report_says_fewer_findings_are_due_than_it_capped(tmp_path):
                            AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')""")[0][0]
     assert n_due == 45 and findings(store, "signal='SECOND_RATE'")
     text = build_report(store)
-    line = [x for x in text.splitlines() if "findings are due" in x]
+    line = [x for x in text.splitlines() if "items are due" in x]           # (ui-words) "findings" read "items"
     print(line)
     assert line and line[0].startswith(("46 ", "40+")), f"{n_due} one-offs and a pattern are due; the report says: {line[0]}"
     store.close()
