@@ -18,7 +18,7 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
 |-----|------|------|-------|
 | B1 | vanished check: routes for a payment EMA posted and a claim sent again under the same claim id | tests/test_vanished_posted_or_sent_again.py (21: 7 cases x 3 store kinds) | done: failed 9/9 on the base; passes; each of the 4 parts broken fails its cases; restored (sha1) |
 | B2 | detection hands the checks the ids it retires on purpose (left_record) | tests/test_left_record_retired_on_purpose.py (21) | done: failed 9/15 on the base; passes; 5 breaks each fail; restored (sha1) |
-| B3 | precision_guard: own payer only, PLB takebacks netted, own answer repeated skipped | | not started |
+| B3 | precision_guard: own payer only, PLB takebacks netted, own answer repeated skipped | tests/test_precision_guard_counts_only_standing_money.py (42) | done: failed 12/21 of the proposed cases on the base; passes; 7 breaks each fail; restored (sha1) |
 | B4 | a let-go line settles a never-listed whole-claim denial | | not started |
 | B5 | a same-visit vote split keeps its EMA link | | not started |
 
@@ -46,9 +46,19 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
   Work now, so Results does not count it as lost; its dollars are only in meta ema:wiring snb_past_limit_cents (see
   Open questions).
 
+- B3 (selfcheck.py): `later_payments` (used by check_precision_guard and the weekly self-audit's `_precision`):
+  downcoding and underpayment items count only their own payer group's later money (835 rows by
+  `ema_checks._same_payer` on `_group_kind(payer, cfi)`, EMA postings by `_same_payer_named`); a later payment is
+  counted net of `_plb_taken` (PLB WO, FB, J1, L6 with a positive amount whose reference is the claim id, holds exactly
+  one claim id of these bills, or holds the payer's claim number of exactly one claim; same payer group; dated on or
+  after the payment; newest payment first, each at most to nothing); a later answer repeating the item's own (same claim
+  id, code and paid amount, not a reversal) is skipped, and so is one reversal of each such repeat. Detection's
+  ledger_taken was not reused: the guard's tests build rows by hand (no detection run), so one direct netting serves
+  both.
+
 ## Next command
 
-B3: port `$S/tk/replay/proposed_tests/test_precision_guard_false_offenders.py`, see it fail, fix later_payments.
+B4: port `$S/tk/replay/proposed_tests/test_let_go_line_back_as_claim_denial.py`, see it fail, fix detect settled().
 
 ## Measurements (replay data, read only)
 

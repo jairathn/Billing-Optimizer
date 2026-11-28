@@ -127,6 +127,13 @@ TRACK_ALERT_SHARE = 0.05            # a closure rule whose reopen rate passes 5%
 RATE_MIN_CASES = 10                 # a recovery-rate pattern needs this many cases, else the next level is used
 RATE_MATURE_DAYS = 90               # a denial younger than this (from the newest remittance) has not had time to be paid
 LATER_PAID_SHARE = 0.95             # a later payment of at least this share of the shortfall covers it (precision guard)
+# a payer's provider-level adjustments that take money back from a claim they name (an overpayment recovered, a balance
+# carried forward and recovered, Medicare's withholding, interest given back): later_payments nets them, as detection's
+# ledger and states.py read them
+TAKEBACK_PLB = ("WO", "FB", "J1", "L6")
+# items about a payer's own rate or level (a downcode, an underpayment): only that payer's later money pays them; another
+# payer's payment after them is its share of what the first left (a second payer's copay), never the first payer's money
+OWN_PAYER_CATEGORIES = ("downcoding", "underpayment")
 SETTLED_SHARE = 0.50                # the self-audit's "paid" test (half the target, as the answer keys have it)
 STALE_835_DAYS = 10                 # alerts.STALE_DAYS
 STALE_PRODUCTION_DAYS = 14          # ema_checks.PRODUCTION_FRESH_DAYS
@@ -1069,10 +1076,19 @@ def check_facility_twin(conn: sqlite3.Connection, today: str) -> dict:
 
 def later_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     """For each item (finding dicts with finding_id, patient_control_number, service_date, codes, payment_date, ema_link,
-    transaction_key), the money paid on the same bill, date of service and code AFTER the item's own remittance: from the
-    835 archive (net of reversals; never a surgery-center claim) and from EMA's payments no 835 carries (never the item's
-    own check). {finding_id: {'r835', 'ema', 'total', 'first', 'same_payer'}}. Reads the 835 tables by the claim id
-    index both kinds of store keep (claims by claim id, lines by claim), one bill at a time."""
+    transaction_key, category, payer_group, paid_cents), the money paid on the same bill, date of service and code AFTER
+    the item's own remittance: from the 835 archive (net of reversals; never a surgery-center claim) and from EMA's
+    payments no 835 carries (never the item's own check). {finding_id: {'r835', 'ema', 'total', 'first', 'same_payer'}}.
+    Reads the 835 tables by the claim id index both kinds of store keep (claims by claim id, lines by claim), one bill at
+    a time. What counts as the item's money:
+      - for a downcode or an underpayment, only its own payer's (by payer group: ema_checks._same_payer): another payer's
+        payment after it is that payer's share of what the first payer left (a second payer paying the copay), never the
+        first payer's level change or rate paid;
+      - a payment a later provider-level adjustment took back (PLB WO, FB, J1 or L6 whose reference names the paying claim,
+        by its claim id or the payer's claim number, dated on or after the payment: _plb_taken) counts only for what is
+        left of it;
+      - a later answer that repeats the item's own (the same claim id, code and paid amount: the plan's network answering
+        the claim again under another payer name) is no new money, nor is the reversal of such a repeat."""
     out: dict[str, dict] = {}
     by_bill: dict[str, list[dict]] = defaultdict(list)
     for it in items:
@@ -1088,49 +1104,132 @@ def later_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dic
             for tk, tr in conn.execute(f"SELECT transaction_key, trace_number FROM transactions WHERE transaction_key IN "
                                        f"({','.join('?' * len(part))})", part):
                 traces[tk] = _digits(tr)
+    rows_of: dict[str, list] = {}
+    if has_835:
+        for bill in by_bill:
+            # (claim id, date of service, code, billed code, paid on, cents, claim status, payer, line, claim, payer's claim
+            # number, filing indicator), in the order the money came
+            rows_of[bill] = sorted(conn.execute(
+                """SELECT c.patient_control_number, l.service_date, l.procedure_code, l.original_procedure_code, l.payment_date,
+                          COALESCE(l.paid_cents, 0), c.claim_status_code, c.payer_name, l.line_key, c.claim_key,
+                          c.payer_claim_control_number, c.claim_filing_indicator
+                   FROM claims c JOIN lines l ON l.claim_key = c.claim_key
+                   JOIN transactions t ON t.transaction_key = c.transaction_key
+                   WHERE c.patient_control_number >= ? AND c.patient_control_number < ?
+                     AND COALESCE(t.superseded, 0) = 0""", (bill, bill + "~")).fetchall(),
+                key=lambda r: (str(r[4] or ""), str(r[8] or "")))
+    taken = _plb_taken(conn, rows_of)
+    from .ema_checks import _same_payer, _same_payer_named
     for bill, its in by_bill.items():
-        rows = []
-        if has_835:
-            hi = bill + "~"
-            rows = conn.execute("""SELECT c.patient_control_number, l.service_date, l.procedure_code, l.original_procedure_code,
-                                          l.payment_date, COALESCE(l.paid_cents, 0), c.claim_status_code, c.payer_name, l.line_key
-                                   FROM claims c JOIN lines l ON l.claim_key = c.claim_key
-                                   JOIN transactions t ON t.transaction_key = c.transaction_key
-                                   WHERE c.patient_control_number >= ? AND c.patient_control_number < ?
-                                     AND COALESCE(t.superseded, 0) = 0""", (bill, hi)).fetchall()
+        rows = rows_of.get(bill, [])
         for it in its:
             codes = set(_codes_of(it))
             after = str(it.get("payment_date") or "")[:10]
             svc = str(it.get("service_date") or "")[:10]
             own_group = it.get("payer_group")
+            own_only = it.get("category") in OWN_PAYER_CATEGORIES
+            own_pcn = str(it.get("patient_control_number") or "")
+            own_paid = int(it.get("paid_cents") or 0)
             r835 = same = 0
             first = None
-            for pcn, sd, pc, opc, pd, paid, st, payer, lk in rows:
+            repeats = 0
+            for pcn, sd, pc, opc, pd, paid, st, payer, lk, _ck, _cn, cfi in rows:
                 if bill_of(pcn) != bill or is_facility(pcn) or str(sd or "")[:10] != svc or lk == it.get("line_key"):
                     continue
                 if not ({pc, opc} & codes) or not pd or str(pd)[:10] <= after:
                     continue
                 if st not in ("1", "2", "3", "19", "20", "21", "22"):
                     continue
+                mine = bool(own_group) and _same_payer(_group_kind(payer, cfi)[0], own_group)
+                if own_only and not mine:
+                    continue                    # another payer's share, not this payer's rate or level
+                if own_paid > 0 and str(pcn) == own_pcn and paid == own_paid and st != "22":
+                    repeats += 1                # the item's own answer delivered again: no new money
+                    continue
+                if repeats and st == "22" and str(pcn) == own_pcn and paid == -own_paid:
+                    repeats -= 1                # ... and the reversal of that repeat
+                    continue
+                if paid > 0:
+                    paid = max(0, paid - taken.get(lk, 0))      # what a later takeback left of it
                 r835 += paid
                 if paid > 0:
                     first = min(first or str(pd)[:10], str(pd)[:10])
-                    if own_group and _group_kind(payer)[0] == own_group:
+                    if mine:
                         same += paid
             ema = 0
             link = it.get("ema_link")
             if link and _has_table(conn, "ema_line_payments"):
                 own = traces.get(it.get("transaction_key") or "", "")
-                for check, posted, cents, in835 in conn.execute(
-                        f"""SELECT check_no, posted, COALESCE(ins_paid, 0), COALESCE(in_835, 0) FROM ema_line_payments
+                pcols = set(_cols(conn, "ema_line_payments"))
+                who = ", payer, payer_group" if {"payer", "payer_group"} <= pcols else ", NULL, NULL"
+                for check, posted, cents, in835, pname, pgroup in conn.execute(
+                        f"""SELECT check_no, posted, COALESCE(ins_paid, 0), COALESCE(in_835, 0){who} FROM ema_line_payments
                             WHERE link = ? AND svc = ? AND cpt IN ({','.join('?' * len(codes))})""",
                         (int(link), svc, *sorted(codes))):
                     if in835 or not posted or str(posted)[:10] <= after or (own and _digits(check) == own):
                         continue
+                    if own_only and not (own_group and _same_payer_named(pgroup, pname, own_group)):
+                        continue                # another payer's posting: its share, not this payer's money
                     ema += cents
                     if cents > 0:
                         first = min(first or str(posted)[:10], str(posted)[:10])
             out[it["finding_id"]] = {"r835": r835, "ema": ema, "total": r835 + ema, "first": first, "same_payer": same}
+    return out
+
+
+def _plb_taken(conn: sqlite3.Connection, rows_of: dict[str, list]) -> dict[str, int]:
+    """What the payers' provider-level takebacks (TAKEBACK_PLB, a positive amount) took from the payments in `rows_of`
+    (later_payments' rows by bill): {line key: cents}. An entry names a claim as detection's ledger and states.py read a
+    reference: its whole text is the claim id; else exactly one claim id of these bills inside it (detect.CLAIM_ID_IN_TEXT);
+    else a word of it (6 characters or more) is the payer's claim number of exactly one of these claims. It takes from
+    that claim's payments by the same payer (ema_checks._same_payer, by payer group) dated on or before it, the newest
+    first, each at most to nothing."""
+    out: dict[str, int] = {}
+    if not rows_of or not _has_table(conn, "plb") or not {"reference", "amount_cents", "reason_code"} <= set(_cols(conn, "plb")):
+        return out
+    from .detect import CLAIM_ID_IN_TEXT
+    from .ema_checks import _same_payer
+    pays: dict[str, list] = defaultdict(list)       # claim id -> [paid on, line, cents, payer group]
+    numbers: dict[str, set] = defaultdict(set)      # the payer's claim number -> claim ids
+    for rows in rows_of.values():
+        for pcn, _sd, _pc, _opc, pd, paid, st, payer, lk, _ck, cn, cfi in rows:
+            if not pcn:
+                continue
+            if cn and str(cn).strip():
+                numbers[str(cn).strip().upper()].add(str(pcn))
+            if paid > 0 and st in ("1", "2", "3", "19", "20", "21") and lk and pd:
+                pays[str(pcn).upper()].append([str(pd)[:10], lk, int(paid), _group_kind(payer, cfi)[0], str(pcn)])
+    if not pays:
+        return out
+    codes = ",".join("'" + c + "'" for c in TAKEBACK_PLB)
+    entries = conn.execute(f"""SELECT p.reference, p.amount_cents, COALESCE(p.payment_date, t.payment_date), COALESCE(p.payer_name, t.payer_name)
+                               FROM plb p JOIN transactions t ON t.transaction_key = p.transaction_key
+                               WHERE COALESCE(t.superseded, 0) = 0 AND upper(COALESCE(p.reason_code, '')) IN ({codes})
+                                 AND COALESCE(p.amount_cents, 0) > 0 AND COALESCE(p.reference, '') <> ''""").fetchall()
+    left = {lk: cents for ps in pays.values() for _d, lk, cents, _g, _p in ps}
+    for ref, cents, day, payer in sorted(entries, key=lambda e: (str(e[2] or ""), str(e[0]), int(e[1] or 0))):
+        text = str(ref or "").strip().upper()
+        name = text if text in pays else None
+        if name is None:
+            ids = {x for x in CLAIM_ID_IN_TEXT.findall(text) if x in pays}
+            name = next(iter(ids)) if len(ids) == 1 else None
+        if name is None:
+            found = {p.upper() for w in [text] + [w for w in re.split(r"[^0-9A-Z]+", text) if len(w) >= 6]
+                     for p in (numbers.get(w) or ()) if len(numbers[w]) == 1}
+            name = next(iter(found)) if len(found) == 1 else None
+        if name is None or name not in pays:
+            continue
+        grp = _group_kind(payer)[0] if payer else None
+        rest = int(cents or 0)
+        for d, lk, _paid, g, _pcn in sorted(pays[name], key=lambda x: (x[0], x[1]), reverse=True):
+            if rest <= 0:
+                break
+            if d > str(day or "")[:10] or (grp and g and not _same_payer(grp, g)) or left.get(lk, 0) <= 0:
+                continue
+            take = min(rest, left[lk])
+            left[lk] -= take
+            out[lk] = out.get(lk, 0) + take
+            rest -= take
     return out
 
 
