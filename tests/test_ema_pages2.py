@@ -1154,10 +1154,11 @@ def test_today_draws_the_counts_the_routes_give_and_each_opens_its_list(page_run
     assert "$1,234" in h and h.count(">–</span>") >= 2
     assert out["score_click"][-1]["tab"] == "results" and out["results_open"] == "lost"
     assert "Blind spot" not in h                       # the feeds are current
-    # every work type has its colour, the two unit B added included (index.html holds the classes)
-    index = open(os.path.join(os.path.dirname(cloud.__file__), "static", "index.html"), encoding="utf-8").read()
+    # every work type has its style, the two unit B added included (the stylesheet, static/rw.css, holds the classes
+    # since the pages' inline <style> blocks moved there: the same guarantee, read where the styles live now)
+    rw_css = open(os.path.join(os.path.dirname(cloud.__file__), "static", "rw.css"), encoding="utf-8").read()
     assert {k: out["kind_styles"].get(k) for k in ("bill", "post")} == {"bill": "k-bill", "post": "k-post"}
-    assert all(f".{c}{{" in index for c in out["kind_styles"].values())
+    assert all(re.search(rf"\.{re.escape(c)}\s*\{{", rw_css) for c in out["kind_styles"].values())
     assert "—" not in h and "false positive" not in h.lower()
 
 
