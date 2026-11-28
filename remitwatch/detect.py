@@ -12997,9 +12997,8 @@ class Detector:
             # a person's own lines (their Started or Sent, their notes) and the item's faxes go with the line's money to its
             # new id BEFORE the states are decided, so the heir is judged on them in this very run, as the old id was: never
             # as To do for one run with a hand-off's words (review r1 of replay-fix-2a). carry_to_heirs moves the rest below
-            have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table in ("finding_events", "faxes"):
-                if table in have:
+                if table in have_tables:
                     c.executemany(f"UPDATE {table} SET finding_id=? WHERE finding_id=?", [(n, o) for o, n in moved])
         self._set_states(out_rows)
         rows = [tuple(r.get(k) for k in cols) for r in out_rows]
