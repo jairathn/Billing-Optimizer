@@ -720,6 +720,9 @@ def _plan_tables(conn: sqlite3.Connection) -> None:
 # would hold nearly every bill for three years, since every claim waits on the A/R for a while.
 EMA_NAMES = (("ema_lines", "bill", "claim_id"), ("ema_link_map", "bill", "claim_id"), ("ema_ar", "bill", "claim_id"))
 HELD_EMA = "EMA still lists it"
+# a never-answered claim counted unseen (detect.UNSEEN_KEY 'claims'): no item holds its bill, and the count is its only record
+HELD_UNSEEN = "counted unseen"
+UNSEEN_META = "ema:unanswered_unseen"
 # one patient's service day (_day_groups): detection weighs the patient's claims of a day together (the payer's second
 # procedure that day on another claim, a CO-45 line another claim of the day answered), so their bills leave together,
 # stay together (HELD_DAY) and come back together (WHY_DAY_BACK; WHY_DAY_HOT: a new claim in the store names the day)
@@ -752,7 +755,8 @@ def _ema_named(conn: sqlite3.Connection) -> int:
 
 def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
     """Bills that stay hot whatever their age, with the reason: an open item, a worked or open pattern listing one of
-    their lines, a recent reopening, a reopening asked for, EMA's reports still listing the bill."""
+    their lines, a never-answered claim counted unseen, a recent reopening, a reopening asked for, EMA's reports still
+    listing the bill."""
     held: dict[str, str] = {}
     if _have(conn, "findings"):
         fcols = set(_cols(conn, "findings"))
@@ -801,6 +805,15 @@ def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
                                         JOIN temp.arc_cb k ON k.claim_key = l.claim_key"""):
                 held.setdefault(b, "pattern")
             conn.execute("DROP TABLE IF EXISTS temp.arc_pl")
+    # the never-answered claims counted unseen: no item holds their bills, and the count (meta UNSEEN_META, the Data tab's
+    # dollars no source can check) is their only record. While they are counted their bills stay, whatever the horizon,
+    # the tightened one included: retired, they would leave the count in silence (owner's rule 1; gapfix G3)
+    unseen = _meta_json(conn, UNSEEN_META, {})
+    for row in (unseen.get("claims") or []) if isinstance(unseen, dict) else []:
+        if isinstance(row, (list, tuple)) and row and row[0]:
+            b = _bill_of(row[0])
+            if b:
+                held.setdefault(b, HELD_UNSEEN)
     for (b,) in conn.execute("SELECT bill FROM archive_pins WHERE until > ?", (today,)):
         held.setdefault(b, "reopened")
     for (b,) in conn.execute("SELECT DISTINCT bill FROM archive_requests"):
