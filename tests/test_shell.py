@@ -119,6 +119,23 @@ def test_the_nine_figures_head_results_and_the_exports_line_heads_data():
     assert '<div id="dtBlind"></div><div id="dtEmaLine"></div>' in data and "tdEmaInto(v.querySelector('#dtEmaLine'))" in data
 
 
+def test_the_guide_and_the_analysis_page_name_the_places_as_the_sidebar_does():
+    """The first-visit guide (today.js guideHtml) and the Analysis page (today.js moreTab) name the places as the sidebar
+    names them, and the guide says the Worklist's own first order in the words of its order menu (desk.js DESK_DEFAULTS
+    and its orders): a newcomer reads one name for each place, in the guide, the sidebar and the page."""
+    today, desk = read("today.js"), read("desk.js")
+    groups, names = shell([["groups"], ["names"]])
+    labels = {it["label"] for g in groups for it in g["items"]} | {s["label"] for g in groups for it in g["items"] for s in it.get("sub", [])}
+    guide = today.split('<div class="guide-more">', 1)[1].split("</div>", 1)[0]
+    named = re.findall(r"<b>([^<]+)</b>", guide)
+    assert len(named) >= 7 and not [n for n in named if n not in labels], [n for n in named if n not in labels]
+    first = re.search(r"sort:'(\w+)'", desk.split("const DESK_DEFAULTS", 1)[1]).group(1)
+    orders = dict(re.findall(r"\['(\w+)','([^']+)'\]", desk.split("const orders = ", 1)[1].split(";", 1)[0]))
+    assert orders[first].lower() in guide.lower(), (first, orders[first])
+    more = today.split("async function moreTab(v){", 1)[1]
+    assert re.search(r'<h1 class="page-title">([^<]+)</h1>', more).group(1) == names["more"] == "Analysis"
+
+
 def _browser_ready() -> bool:
     return bool(NODE) and subprocess.run([NODE, "-e", "require('playwright')"], capture_output=True).returncode == 0
 

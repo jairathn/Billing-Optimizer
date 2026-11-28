@@ -69,7 +69,7 @@ function guideHtml(b){
       <li><b>Open an item.</b> The box at the top says what happened and what to do. Do it in EMA or the payer's portal, then press <b>Mark sent</b>. The next item opens.</li>
       <li><b>When the payer pays,</b> RemitWatch sees it in the next remittance and marks the item Paid by itself. If the payer says no, press <b>Lost</b>.</li>
     </ol>
-    <div class="guide-more">The tabs after Today (<b>Denials</b>, <b>Bundling & modifiers</b>, <b>Downcoding</b>, <b>Contracts & underpayment</b>, <b>Fees & takebacks</b>) hold the same work by category; the red number on a tab is what closes there within 7 days. <b>Worklist</b> has every claim item in one list, soonest first. <b>Bigger wins</b> is money you fix once and collect on every future claim: contracts, your fees, payment fees and denial causes. <b>Data</b> tells you when the numbers cannot be trusted yet.</div>
+    <div class="guide-more"><b>Work</b> in the sidebar has every claim item in one list, worth most first. Its views (<b>Denials</b>, <b>Bundling</b>, <b>Downcoding</b>, <b>Contracts</b>, <b>Fees and takebacks</b>) hold the same work by category; the red number beside a view is what in it closes within 7 days. <b>Bigger wins</b> is money you fix once and collect on every future claim: contracts, your fees, payment fees and denial causes. <b>Data</b> tells you when the numbers cannot be trusted yet.</div>
     <div class="actions"><button class="primary" id="guideGo">Show me the first item</button><button id="guideOk">Got it</button></div>
   </div>`;
 }
@@ -558,7 +558,7 @@ const MORE_PAGES = [
   ['providers','Providers','What each clinician is doing, behind the owner\'s password where one is set.', 'mid-only'],
 ];
 async function moreTab(v){
-  v.innerHTML = `<div class="page-head"><h1 class="page-title">More</h1><span class="muted small">Pages for questions and for the owner. The daily work is on Today, the category pages and the Worklist.</span></div>
+  v.innerHTML = `<div class="page-head"><h1 class="page-title">Analysis</h1><span class="muted small">Pages for questions and for the owner. The daily work is on Today and in Work.</span></div>
     <div class="more-grid">${MORE_PAGES.map(([k,t,d,cls])=>`<a class="more-card ${cls||''}" href="#${k}" data-go="${k}"><b>${esc(t)}</b><span class="small muted">${esc(d)}</span></a>`).join('')}</div>`;
   v.querySelectorAll('[data-go]').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab=a.dataset.go; location.hash=a.dataset.go; render(); });
 }

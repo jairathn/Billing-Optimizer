@@ -80,6 +80,11 @@ Branch `wip/ui-a`, worktree `$S/tk/wt/ui-a` (base: integration tip dc92143). Dem
    moving when the panel opens with --panel): Work fails them today, which is ui-work's job.
 6. Final checks: DONE (see Numbers measured). Also: Work is marked in the sidebar's rail while one of its views is open
    (commit "ui-a: Work is marked ..."). The demo site is deleted; the screenshots stay in `$S/tk/units/ui-a/shots/final`.
+7. After the checks: the 7-day count inside Work now is tested on both hosts with something closing (commit "ui-a: the
+   7-day count ..."); Today's red part has one definition with step 1, the views' red numbers and the title (commit
+   "ui-a: Today's red part ..."); the first-visit guide and the Analysis page name the places as the sidebar does (the
+   guide said "the tabs after Today", "Worklist" and "soonest first"; the page said "More"), tested in
+   tests/test_shell.py.
 
 ## Numbers measured
 
