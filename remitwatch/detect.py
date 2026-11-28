@@ -364,6 +364,26 @@ def _fid(*parts) -> str:
     return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()[:24]
 
 
+def _item_links(r: dict) -> set[int]:
+    """The EMA claim numbers an item about a whole claim is about: its ema_link, and those its evidence names (the report
+    checks' 'ema_links' and Production's 'ema_link'). Never a send-day twin's: that is another claim's EMA claim."""
+    out: set[int] = set()
+    ev = r.get("evidence")
+    if isinstance(ev, str):
+        try:
+            ev = json.loads(ev or "{}")
+        except ValueError:
+            ev = {}
+    ev = ev if isinstance(ev, dict) else {}
+    for x in [r.get("ema_link"), ev.get("ema_link")] + list(ev.get("ema_links") or []):
+        try:
+            if x is not None and str(x).strip():
+                out.add(int(x))
+        except (TypeError, ValueError):
+            continue                        # a damaged number names no claim
+    return out
+
+
 def _days_between(a: str | None, b: str | None) -> int | None:
     try:
         return (date.fromisoformat(b[:10]) - date.fromisoformat(a[:10])).days
@@ -7164,8 +7184,14 @@ class Detector:
             elif not rejected and not cob.get(b) and (not due or due > (through or newest)):
                 # not due yet, or the answers on file do not reach the day it was due (a payer that answered as secondary
                 # after a coordination denial applied the primary's): on the waiting view with its due day, as the 837
-                # pass's own claims are (_note_waiting; blindness is loud)
+                # pass's own claims are (_note_waiting; blindness is loud). The claim is this pass's all the same: its EMA claim
+                # is looked up (run_ema_report_claims) so that the report checks leave it to this pass (one claim, one item)
                 self._note_waiting(pcn, grp, sent, due, sum(x[2] or 0 for x in items))
+                self._waiting_claim({"pcn": pcn, "k": k, "b": b, "items": items, "sent": sent, "grp": grp, "kind": kind,
+                                     "ema_payer": ema_payer, "s837": r8, "token_lines": [(x[0], x[1], x[2]) for x in tokens],
+                                     "first_sent": ((r8 or [None, None])[1] or str(k.get("sent") or "")[:10]
+                                                    or str(k.get("created") or "")[:10] or None),
+                                     "ema_patients": set(k.get("patients") or ())})
                 continue
             # Its own payer's answers must reach that day too (misuse check CH-8): its remittances, or EMA's postings for it when
             # they reach past the feed (through). When they stop before it while the feed goes on, nothing on file says whether
@@ -7923,8 +7949,12 @@ class Detector:
             through = self._answers_through(grp, newest) if self.ema_on else newest
             if not cb and (not due or due > (through or newest)):
                 # not due yet, or the answers on file do not reach the day it was due (a payer that answered as secondary
-                # after a coordination denial applied the primary's): on no list until then, so shown waiting with its due day
+                # after a coordination denial applied the primary's): on no list until then, so shown waiting with its due day.
+                # Its EMA claim is looked up all the same (run_ema_report_claims): the report checks leave it to this pass
                 self._note_waiting(pcn, grp, sent, due, sum(x[2] or 0 for x in items))
+                self._waiting_claim({"pcn": pcn, "k": {"payer_ids": Counter({r[4]: 1}) if r[4] else Counter(), "member": r[8]},
+                                     "b": b, "items": items, "sent": sent, "grp": grp, "kind": kind, "ema_payer": r[5] or grp,
+                                     "s837": r, "match_group": self._ema_group(r[5]), "first_sent": r[1] or sent})
                 continue
             billed = sum(x[2] or 0 for x in items)
             pid = (r[4] or "").strip()
@@ -8031,6 +8061,49 @@ class Detector:
         note one."""
         w = self.__dict__.setdefault("_waiting", {})
         w[pcn] = [pcn, grp or "Unknown", sent, due, int(billed or 0)]
+
+    def _waiting_claim(self, cd: dict) -> None:
+        """The claim of a waiting entry as the pass holds it (claim id, lines, send, payer), so that its EMA claim can be
+        found and the report checks leave it to that pass (_waiting_ema_claims, run_ema_report_claims)."""
+        self.__dict__.setdefault("_waiting_cds", {})[cd["pcn"]] = cd
+
+    def _waiting_ema_claims(self) -> dict[int, str]:
+        """The EMA claims of the claims on the waiting view ({EMA claim number: claim id}), found as the never-answered
+        passes find a listed claim's (_ema_claims_found: its claim id, its bill, its content, its send-day twins). The
+        report checks leave these to the pass that holds the claim: one claim, one item (gapfix G8). A waiting claim is
+        never listed here; its EMA claim is only found."""
+        cds = list((self.__dict__.get("_waiting_cds") or {}).values())
+        if not cds:
+            return {}
+        answers = self._ema_claims_found("claim_answers_waiting", cds)
+        out: dict[int, str] = {}
+        for cd in cds:
+            a = answers.get(cd["pcn"]) or {}
+            if a.get("link") is not None:
+                out[int(a["link"])] = cd["pcn"]
+            for lk in a.get("twins") or ():
+                out.setdefault(int(lk), cd["pcn"])
+        return out
+
+    def _note_waiting_report(self, pcn: str, check: str, p: dict) -> None:
+        """A claim on the waiting view whose EMA claim a report check would have listed (run_ema_report_claims): its
+        waiting entry says so (the check, EMA's claim number, the status the report gives and its date), and the waiting
+        view counts them with their dollars. The claim waits for its own due day under its own pass."""
+        row = (self.__dict__.get("_waiting") or {}).get(pcn)
+        if row is None:
+            return
+        ev = p.get("evidence") or {}
+        what = {"not_sent": "not_sent", "rejected_claims": "rejected", "unanswered_claims": "no_answer"}.get(check, check)
+        note = {"check": what, "ema_link": p.get("ema_link"), "status": ev.get("ema_status") or None,
+                "as_of": str(ev.get("status_as_of") or ev.get("production_as_of") or "")[:10] or None}
+        if len(row) > 5:
+            return                          # one note per claim: the first check that would list it
+        row.append(note)
+        w = getattr(self, "waiting_837", None)
+        if isinstance(w, dict):
+            got = w.setdefault("ema_reports", {}).setdefault(what, {"n": 0, "billed_cents": 0})
+            got["n"] += 1
+            got["billed_cents"] += int(row[4] or 0)
 
     def _finish_waiting(self, since: str) -> None:
         """WAITING_837_META from the claims noted waiting, with every claim the 837s show sent since `since` by week (the
@@ -10415,12 +10488,21 @@ class Detector:
             return
         from . import ema_checks as ec
         skip = set(self._export_claims)
+        # the claims the exports' and the 837 passes hold on the waiting view, by claim id and by their EMA claims: a report
+        # check that would list one of them leaves it to that pass and says so on its waiting entry (one claim, one item:
+        # before, Production listed a waiting claim's EMA claim with its own clock, new work beside the claim's own)
+        waiting_ids = set(self.__dict__.get("_waiting_cds") or {})
+        waiting_links = (self._ema_step("waiting_ema_claims", self._waiting_ema_claims) or {}) if waiting_ids else {}
         for name, fn in (("not_sent", ec.not_sent), ("rejected_claims", ec.rejected_claims), ("unanswered_claims", ec.unanswered_claims)):
             if name == "unanswered_claims":
                 skip |= self._837_claims    # a claim the 837s show sent is judged from its send there, not from its charge
             # the parts of a service the claims' lines bill: a payment for another part is not theirs (T-C1)
             more = {"parts": self._line_parts} if name in ("not_sent", "unanswered_claims") else {}
+            if name == "unanswered_claims":
+                more["keep_skipped"] = True     # the claims another pass lists come back marked held: they carry a service
             protos = self._ema_step(name, fn, self.conn, today=self.today, rate=self._rate, skip_claim_ids=skip, **more) or []
+            held_protos = [p for p in protos if p.get("held")]
+            protos = [p for p in protos if not p.get("held")]
             if name != "not_sent" and protos:
                 # the one answered rule every never-answered claim meets; should it fail, every claim stays listed
                 kept = self._ema_step(name + "_answered", self._protos_answered, name, protos)
@@ -10428,14 +10510,23 @@ class Detector:
                     protos = kept
             if name == "unanswered_claims" and protos:
                 # one item per service, each line priced as the other never-answered passes price theirs; should it fail,
-                # every claim stays listed as Production's check made it
-                one = self._ema_step(name + "_one_service", self._g8_one_service, protos)
+                # every claim stays listed as Production's check made it. A claim another pass lists (held) takes part:
+                # its newer charge carries an older claim's service as Production's own would, and it is never emitted
+                one = self._ema_step(name + "_one_service", self._g8_one_service, protos + held_protos)
                 if one is not None:
-                    protos = one
+                    protos = [p for p in one if not p.get("held")]
             for p in protos:
                 links = {p.get("ema_link")} | set((p.get("evidence") or {}).get("ema_links") or [])
                 if links & self._export_links:
                     continue                # the same EMA claim, listed by the weekly exports' path under its claim id
+                held = (p.get("claim") or {}).get("patient_control_number")
+                held = held if held in waiting_ids else next((waiting_links[lk] for lk in sorted(links - {None}) if lk in waiting_links),
+                                                             None)
+                if held:
+                    # a claim the exports' or the 837 pass holds on the waiting view: it waits for its own due day there
+                    self.ema_counts[f"{name}_on_waiting_view"] += 1
+                    self._note_waiting_report(held, name, p)
+                    continue
                 if self._emit_proto(p):
                     cid = (p.get("claim") or {}).get("patient_control_number")
                     if cid:
@@ -11830,9 +11921,22 @@ class Detector:
         # ... and a claim chased under one id that is now chased under the other (the 837s' 837_OPEN_CLAIM and EMA's
         # EMA_OPEN_CLAIM: EMA's exports started, or stopped, listing it) is the same chase: its item passes on whole
         same_claim: dict[str, dict] = {}
+        # ... and one claim chased under its claim id in one run and under its EMA claim number in another (the report
+        # checks key a claim by its EMA claim number, 'link:<n>', while the A/R pairs it with no claim id; the weekly
+        # exports' and the 837 passes key it by its claim id): one claim, so its item passes on whole as same_claim's does,
+        # the person's status, notes, history and faxes with it, never as a new matter (gapfix G8: the replay found 28 worked
+        # items back as new work this way). Only between an item keyed by the EMA claim number and one keyed by a claim id
+        # (or two of the same claim id): two claim ids that met on one EMA claim are two bills, and a bill made again is
+        # its own matter (the one-visit rule's heir keys hand on its notes)
+        same_link: dict[int, dict] = {}
         for fid, prev in existing.items():
             if fid in self.findings or not worked(prev):
                 continue
+            if prev.get("signal") in EMA_CLAIM_SIGNALS and not prev.get("line_key"):
+                for lk in _item_links(prev):
+                    w = same_link.get(lk)
+                    if w is None or (w.get("stale") and not prev.get("stale")):
+                        same_link[lk] = prev
             if prev.get("line_key"):
                 if not prev.get("stale"):
                     orphans.setdefault((prev["line_key"], prev["category"]), prev)
@@ -11909,6 +12013,19 @@ class Detector:
                 w = same_claim.get(f.get("patient_control_number") or "")
                 if w is not None and w["finding_id"] not in inherited:
                     heir = w                # the same claim's chase under the other id: status, notes and records follow
+                else:
+                    for lk in _item_links(f):
+                        w = same_link.get(lk)
+                        if (w is not None and w["finding_id"] not in inherited
+                                and (not w.get("patient_control_number") or not f.get("patient_control_number")
+                                     or w["patient_control_number"] == f["patient_control_number"])):
+                            heir = w        # the same EMA claim, keyed by its number in one run and its claim id in the other
+                            # named on the heir as folded into it: the self-check that keeps an item no rule explains,
+                            # the decision log and Results read where the old id went (it has no bill to match by)
+                            self._fold_into(fid, w["finding_id"], "same_ema_claim",
+                                            f"The same claim was listed before under {'EMA claim ' + str(lk) if not w.get('patient_control_number') else 'its claim id'}: "
+                                            "its work carries on here", signal=w.get("signal") or "NO_ANSWER", gone_item=w)
+                            break
             if prev is None and heir is None and f.get("patient_control_number"):
                 pcn_f = f["patient_control_number"]
                 paid_on = f.get("payment_date") or f.get("txn_payment_date") or ""

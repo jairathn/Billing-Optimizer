@@ -1958,7 +1958,7 @@ def _routine_sql() -> str:
 
 
 def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, skip_claim_ids: Iterable[str] = (),
-                      rate: Callable | None = None, parts: Callable | None = None) -> list[dict]:
+                      rate: Callable | None = None, parts: Callable | None = None, keep_skipped: bool = False) -> list[dict]:
     """G8: claims no payer answered, found in Production (the A/R lists only 30 days of activity). One NO_ANSWER item per
     EMA claim when all hold: it has insurance charge rows (no product or patient-only rows); no insurance payment, $0
     answer or reason code was ever posted on it (line_answered_sql: a bare $0 row under a check, with no reason, allowed
@@ -1969,7 +1969,9 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
     insurance posting in the 30 days before that as_of. Keyed EMA_OPEN_CLAIM by the claim id when the A/R knows it, else
     'link:<n>'; a claim id the weekly exports already listed is skipped (that path wins). The ASC's facility claims are
     listed and titled as such. An answer counts only for its own part of the service (part_fits; parts(keys) gives the
-    parts EMA claim lines bill, default line_parts): the TC paid never answers a claim for the reading (26)."""
+    parts EMA claim lines bill, default line_parts): the TC paid never answers a claim for the reading (26).
+    keep_skipped: a claim id in skip_claim_ids comes back all the same, marked 'held' (another pass lists it), so that
+    the caller's one-service rule (detect._g8_one_service) sees its charges carry an older claim of the same service."""
     _prepare(conn)
     fr = freshness(conn, today)
     t = fr["today"]
@@ -2035,7 +2037,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
         if ls and all((paid_other.get((lk, ln[0], ln[1])) or {}).get("same") for ln in ls):
             continue                    # its payer paid every line, its part of the service, on another of EMA's claims
         cid = cid_of.get(lk)
-        if cid and cid in skip:
+        held = bool(cid and cid in skip)
+        if held and not keep_skipped:
             continue
         codes = sorted({ln[1] for ln in ls if ln[1]})
         label = ", ".join(codes[:5]) + ("…" if len(codes) > 5 else "")
@@ -2082,6 +2085,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
                   or "No payment, $0 answer or reason code is posted in EMA for this claim: look it up on the payer's portal "
                   "before sending it again"),
             link=lk, heir_keys=[("EMA_OPEN_CLAIM", f"link:{lk}")] if cid else []))
+        if held:
+            out[-1]["held"] = True      # another pass lists this claim: never emitted, it only carries an older charge
     return out
 
 

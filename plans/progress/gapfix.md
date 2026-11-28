@@ -1,0 +1,47 @@
+# Progress: unit gapfix (the never-answered gap), branch wip/gapfix
+
+Brief: plans/briefs/2026-11-28_gapfix.md (with plans/briefs/2026-11-26_common.md, CLAUDE.md, plans/HANDOFF.md).
+Base: origin/claude/ecstatic-fermi-orfcgo at b170aed. Worktree (this session): $S/tk/wt/gapfix. Private folder: $S/tk/units/gapfix.
+S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad
+
+## Order and state
+
+| item | state | where |
+|---|---|---|
+| G8 one claim, one item | done, tests green, break and restore done | detect.py: `_item_links`, `save()` (same_link heir), `_note_waiting(cd=)`, `_waiting_ema_claims`, `_note_waiting_report`, `run_ema_report_claims` (waiting skip); tests/test_gap_one_claim.py |
+| G3 archive holds unseen bills | next | archive.py `_held_bills` and the plan |
+| G2 unseen count by reason, dollars, Data tab | to do | detect.py `_837_ema_answers`, `_ema_check_open_claims`, `_save_ema_wiring`; insights `_feeds_837`; api_ema; data.js |
+| G1 print-batch hand-off (fixed_b + never early) | to do | detect.py `_ema_check_open_claims`, `run_ema_report_claims` |
+| G4 ERA start/stop window | to do | detect.py `_run_837` no_era_ids |
+| G5 A/R held-open line | to do | detect.py `_837_ema_answers` (or ema_checks) |
+| G7 waiting view names all or the remainder in dollars | to do | detect.py `_finish_waiting`, insights `_waiting_837` |
+| G6 second-payer bridge | only if safe | ema_checks.claim_answers |
+
+## G8: what was built
+
+- Within a run: a claim the exports' or the 837 pass puts on the waiting view now carries its claim (`_note_waiting(..., cd=)`);
+  `run_ema_report_claims` finds the waiting claims' EMA claims once (`_waiting_ema_claims`, the passes' own
+  `_ema_claims_found`), and a report check's proto whose claim id or EMA claim number belongs to a waiting claim is not
+  emitted: counted `<check>_on_waiting_view` (meta ema:wiring) and noted on the claim's waiting row (a sixth element
+  `{"check": "not_sent"|"rejected"|"no_answer", "ema_link", "status", "as_of"}`), and the waiting meta gets
+  `ema_reports: {check: {n, billed_cents}}`. api.py `_waiting_row` reads the first five elements, so old readers are unaffected.
+- Across runs: save() hands a worked item whole (status, notes, first_seen, history, faxes through finding_heirs) to the new
+  item of the same EMA claim when one side is keyed by the EMA claim number ('link:<n>', no claim id) and the other by a
+  claim id (or both by the same claim id). The heir records the old id in its evidence 'folded' list (rule same_ema_claim),
+  which is the self-check's route for it (else the vanished check put the old row back beside its heir). Two different claim
+  ids that meet on one EMA claim keep the old behaviour (a bill made again is a new matter, notes handed on).
+- Tests (both store kinds): tests/test_gap_one_claim.py, 5 tests x 2. Break and restore: heir disabled -> the 3 identity
+  tests fail (6); waiting skip disabled -> the 2 waiting tests fail (4); restored, md5 identical.
+
+## Next command
+
+    cd $S/tk/wt/gapfix && python3 -m pytest -q -p no:cacheprovider tests/test_gap_one_claim.py
+
+## Measurements so far
+
+None yet (the final_world3 cycle is run once at the end, tip vs branch).
+
+## Open questions / notes for the integrator
+
+- The vanished self-check has no route for an item whose work moved to an heir with no bill to match; G8 records the fold
+  in the heir's evidence instead of touching selfcheck.py (not this unit's file).
