@@ -445,11 +445,17 @@ K_RATES = "selfcheck:rates"
 K_HOUSE = "selfcheck:housekeeping"
 K_ANSWER = "selfcheck:answer_days"
 K_FACTS_VERSION = "selfcheck:facts_version"
+K_FACTS_PAYMENT = "selfcheck:facts_payment_version"
 K_FACTS_INPUT = "selfcheck:facts_input"
-# the fingerprint's own version (_facts_of): a build that reads another part of an item's claim changes every fingerprint,
-# so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else). 4: an item
-# about an 835 payment itself (a transaction and no line or claim: REMIT_NOT_POSTED, TAKEBACK) adds EMA's checks of it
-FACTS_VERSION = "4"
+# the fingerprint's own version (_facts_of): a build that reads another part of every item's claim changes every
+# fingerprint, so fingerprints another build stored are never compared (raise it whenever _facts_of reads anything else
+# for every item)
+FACTS_VERSION = "3"
+# the version of the part only an item about an 835 payment itself has (a transaction and no line or claim:
+# REMIT_NOT_POSTED, TAKEBACK): EMA's checks of that payment. Raised on its own, so a build that changes only that part
+# leaves out only those items' stored fingerprints, and its first run still compares every other item's (byte for byte
+# the same). 1: EMA's checks of the payment (2026-11-28)
+FACTS_PAYMENT_VERSION = "1"
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
@@ -1710,11 +1716,12 @@ _SUB_NO = re.compile(r"C(\d{1,3})$")
 
 def _sent_again(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
     """Items about a whole claim whose bill went out again: under a later submission number (EMA's rows with a submission
-    date, an 837 or an 835 claim of the same bill), or under the same claim id after the item was raised (an 837 of it
-    created, or EMA's submission date of it, on or after the day the item was first seen and after the send the item is
-    about, its evidence's `sent`). Detection chases only a bill's newest submission and waits for a send's due day: the
-    earlier item waits, stale, and the claim shows on the Waiting view until the new send comes due (detect.save hands
+    date, an 837 or an 835 claim of the same bill), or under the same claim id (an 837 of it created, or EMA's submission
+    date of it, after the send the item is about, its evidence's `sent`; for an item that names no send, on or after the
+    practice's day it was first seen). Detection chases only a bill's newest submission and waits for a send's due day:
+    the earlier item waits, stale, and the claim shows on the Waiting view until the new send comes due (detect.save hands
     its notes on, and lists it again with them if that send goes unanswered)."""
+    from .runtime import practice_date
     out: set[str] = set()
     sources = [(t, col, extra) for t, col, extra in (("ema_rows", "claim_id", " AND COALESCE(claim_submission_date,'') != ''"),
                                                      ("claims_837", "patient_control_number", ""),
@@ -1738,15 +1745,18 @@ def _sent_again(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
                         break
                 if found:
                     break
-        since = str(r.get("first_seen") or "")[:10]
-        if not found and pcn and since and resent:
+        own = str(_ev(r.get("evidence")).get("sent") or "")[:10]
+        since = practice_date(str(r.get("first_seen") or ""))
+        if not found and pcn and (own or since) and resent:
             # the same claim id sent again (a rejected claim fixed and sent, or an unanswered one sent again, with no new
-            # submission number): a send dated on or after the day the item was raised and after the send it is about
-            own = str(_ev(r.get("evidence")).get("sent") or "")[:10]
+            # submission number): a send dated after the send the item is about (its evidence's `sent`: the newest send
+            # either source showed when it was raised), whenever its 837 was read (837 files come in batches, often after
+            # the run that raised the item); for an item that names no send, one dated on or after the practice's day it
+            # was raised
             for t, col, day in resent:
                 (newest,) = conn.execute(f"SELECT MAX({day}) FROM {t} WHERE {col} = ? AND COALESCE({day}, '') != ''", (pcn,)).fetchone()
                 d = str(newest or "")[:10]
-                if d and d >= since and (not own or d > own):
+                if d and (d > own if own else d >= since):
                     found = True
                     break
         if found:
@@ -1939,18 +1949,25 @@ def _input_position(conn: sqlite3.Connection) -> list:
     return pos
 
 
-def _stored_facts(conn: sqlite3.Connection) -> dict[str, str]:
+def _stored_facts(conn: sqlite3.Connection, before: dict[str, dict] | None = None) -> dict[str, str]:
     """The fingerprints the run before stored, when this build makes them the same way and a source file was read since
-    (else none: never compared, so no departure is excused as new facts)."""
+    (else none: never compared, so no departure is excused as new facts). When only the part of an item about a payment
+    was made another way (FACTS_PAYMENT_VERSION), only those items' fingerprints are left out (`before`: the items as the
+    run found them, which tells which are about a payment)."""
     if meta_get(conn, K_FACTS_VERSION) != FACTS_VERSION:
         return {}
     if meta_get(conn, K_FACTS_INPUT) == _input_position(conn):
         return {}                       # nothing read since the run before: no claim has new facts
     try:
-        return {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
+        facts = {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
     except sqlite3.Error as exc:
         _caught(exc, "facts")
         return {}
+    if facts and meta_get(conn, K_FACTS_PAYMENT) != FACTS_PAYMENT_VERSION:
+        # made before this build's payment part: an item about a payment is not compared (kept once if it left on new
+        # facts alone), every other item's fingerprint is made the same way and still is
+        facts = {f: fp for f, fp in facts.items() if f in (before or {}) and not _about_payment(before[f])}
+    return facts
 
 
 def _save_facts(conn: sqlite3.Connection) -> int:
@@ -1961,6 +1978,7 @@ def _save_facts(conn: sqlite3.Connection) -> int:
     conn.execute("DELETE FROM selfcheck_facts")
     conn.executemany("INSERT OR REPLACE INTO selfcheck_facts (finding_id, fp) VALUES (?, ?)", list(fps.items()))
     meta_set(conn, K_FACTS_VERSION, FACTS_VERSION)
+    meta_set(conn, K_FACTS_PAYMENT, FACTS_PAYMENT_VERSION)
     meta_set(conn, K_FACTS_INPUT, _input_position(conn))
     return len(fps)
 
@@ -2330,7 +2348,7 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
     try:
-        van = check_vanished(conn, before, after, facts=_stored_facts(conn), delivered_again=ctx.get("delivered_again"),
+        van = check_vanished(conn, before, after, facts=_stored_facts(conn, before), delivered_again=ctx.get("delivered_again"),
                              retired=ctx.get("retired"))
         left_record = van.pop("left_record", None)
         results.append(van)

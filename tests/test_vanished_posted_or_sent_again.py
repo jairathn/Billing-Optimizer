@@ -342,3 +342,113 @@ def test_control_the_send_an_item_is_about_is_not_a_send_again(kind):
     van = vanished(c)
     assert "F-same-day" in listed(c) and out["kept"] == 1, van
     assert "F-ema-resent" not in listed(c) and van["info"]["routes"].get("sent_again") == 1, van
+
+
+# ================================================================ the review's cases: a resend read late, or sent that evening
+def _two_claims_raised(kind, signal: str, first_seen: str, evidence: dict | None) -> None:
+    """Two claims, each sent on August 1 and listed by run 1 (raised on `first_seen`, about the send its evidence names)."""
+    c = kind.conn
+    sent_837(c, "ZZ00R10021C017", "2026-08-01")
+    sent_837(c, "ZZ00R10022C017", "2026-08-01")
+    for fid, pcn in (("F-resent", "ZZ00R10021C017"), ("F-lone", "ZZ00R10022C017")):
+        add_item(c, fid, signal=signal, category="denial", patient_control_number=pcn, procedure_code="99213",
+                 shortfall_cents=None, charge_cents=15000, appeal_deadline="2027-03-01", deadline_basis="invented window",
+                 state_rule="open", state_basis="No answer from the payer on file", transaction_key=None, first_seen=first_seen,
+                 evidence=evidence if evidence is not None else "{}")
+    run(c, None, "r1")
+    assert {"F-resent", "F-lone"} <= listed(c)
+
+
+def _drop_two(cn) -> None:
+    cn.execute("DELETE FROM findings WHERE finding_id IN ('F-resent', 'F-lone')")
+
+
+@pytest.mark.parametrize("signal", ["NO_ANSWER", "REJECTED_PRE_PAYER"])
+def test_a_resend_read_after_the_item_was_raised_is_a_send_again(kind, signal):
+    """The biller sends the claim again under its claim id on November 8. That 837 reaches the store only after the run
+    of November 10 raised the item from the August send it knew (837 files come in batches). Once it is read the claim
+    waits for its new due day and the item leaves: the send is after the one the item is about (its evidence's sent,
+    August 1), so it explains the departure, though it is dated before the day the item was first seen."""
+    _two_claims_raised(kind, signal, "2026-11-10T14:00:00+00:00", {"sent": "2026-08-01", "sent_basis": "837"})
+    kind.reopen()
+    c = kind.conn
+    sent_837(c, "ZZ00R10021C017", "2026-11-08")
+    out = run(c, _drop_two, "r2")
+    van = vanished(c)
+    assert "F-lone" in listed(c), van
+    assert "F-resent" not in listed(c) and out["kept"] == 1, (van.get("examples"), van.get("info"))
+    assert van["info"]["routes"].get("sent_again") == 1, van["info"]
+
+
+def test_a_resend_the_evening_the_item_was_raised_is_a_send_again(kind):
+    """The run of 9:30 PM Eastern on November 10 (02:30 UTC on November 11) raises the item; the biller sends the claim
+    again that evening, an 837 dated November 10 (the practice's day)."""
+    _two_claims_raised(kind, "NO_ANSWER", "2026-11-11T02:30:00+00:00", {"sent": "2026-08-01", "sent_basis": "837"})
+    kind.reopen()
+    c = kind.conn
+    sent_837(c, "ZZ00R10021C017", "2026-11-10")
+    out = run(c, _drop_two, "r2")
+    van = vanished(c)
+    assert "F-resent" not in listed(c) and out["kept"] == 1, (van.get("examples"), van.get("info"))
+
+
+def test_an_item_with_no_send_named_counts_a_resend_from_the_practices_day_it_was_raised(kind, monkeypatch):
+    """An item an older build raised names no send in its evidence: a send of its claim id on or after the day it was
+    raised explains its departure. That day is the practice's (America/New_York here): raised at 02:30 UTC on November 11,
+    9:30 PM on November 10 where the practice is, so an 837 dated November 10 counts. One dated November 9 does not."""
+    monkeypatch.setenv("REMITWATCH_TZ", "America/New_York")
+    _two_claims_raised(kind, "NO_ANSWER", "2026-11-11T02:30:00+00:00", None)
+    kind.reopen()
+    c = kind.conn
+    sent_837(c, "ZZ00R10021C017", "2026-11-10")
+    sent_837(c, "ZZ00R10022C017", "2026-11-09")        # before the day it was raised: the send it was raised from, read late
+    out = run(c, _drop_two, "r2")
+    van = vanished(c)
+    assert "F-lone" in listed(c), van
+    assert "F-resent" not in listed(c) and out["kept"] == 1, (van.get("examples"), van.get("info"))
+
+
+# =========================================================== the review's case: the first run after the payment part came
+def _ema_line(conn, link: int, bill: str, **kw) -> None:
+    """One EMA line summary (ema_lines), as the ledger keeps it for an EMA claim number."""
+    row = dict(link=link, svc="2026-03-02", cpt="99213", bill=bill, payer_group="Testcare Health", payer_kind="commercial",
+               charges=15000, ins_charges=15000, ins_paid=0, contractual=0, noncontractual=0, nonroutine=0, balance=15000,
+               facility=0, ins_answer_rows=0, status_class="pending", first_charge_posted="2026-03-03")
+    row.update(kw)
+    cols = list(row)
+    conn.execute(f"INSERT OR REPLACE INTO ema_lines ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [row[c] for c in cols])
+    conn.commit()
+
+
+def test_the_first_run_after_the_payment_part_came_still_compares_every_other_items_facts(kind):
+    """The build that added EMA's checks of a payment to the fingerprint of an item about a payment (REMIT_NOT_POSTED,
+    TAKEBACK) changed no other item's fingerprint. Its first run on a store the build before saved (facts version 3, no
+    payment part) must still compare the others: a never-answered claim whose EMA lines moved (the payer's answer posted
+    in EMA, read in a new report) leaves by its new facts, instead of being kept on Work now ('nothing explains why')
+    until the owner accepts. Only the payment item's stored fingerprint, made without its checks, is not compared: the
+    payment EMA posted short is kept once, as before."""
+    c = kind.conn
+    tk = remit(c, "2026-09-20", "ZZ00T0051C001", 21204, trace="770000051")
+    add_item(c, "F-payment", **unposted(tk, "ZZ00T0051C001", 21204))
+    _ema_line(c, 7051, bill="ZZ00T0052")
+    add_item(c, "F-claim", signal="NO_ANSWER", category="denial", patient_control_number="ZZ00T0052C017", procedure_code="99213",
+             shortfall_cents=None, charge_cents=15000, appeal_deadline="2027-03-01", deadline_basis="invented window",
+             state_rule="open", state_basis="No answer from the payer on file", transaction_key=None, ema_link=7051)
+    report_read(c, "prod-1")
+    run(c, None, "r1")
+    assert {"F-payment", "F-claim"} <= listed(c)
+    # the store as the build released before left it: fingerprints of facts version 3, none with a payment part
+    sc.meta_set(c, sc.K_FACTS_VERSION, "3")
+    c.execute("DELETE FROM meta WHERE key = 'selfcheck:facts_payment_version'")
+    c.commit()
+    kind.reopen()
+    c = kind.conn
+    report_read(c, "prod-22")
+    _ema_line(c, 7051, bill="ZZ00T0052", ins_paid=9000, contractual=6000, balance=0, ins_answer_rows=1, status_class="paid",
+              last_posted="2026-11-03")
+    _ema_check(c, "770000051", tk, 7000, 21204)         # EMA posted $70.00 of the $212.04: not in full
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id IN ('F-payment', 'F-claim')"), "r2")
+    van = vanished(c)
+    assert "F-claim" not in listed(c) and van["info"]["routes"].get("facts_changed") == 1, van
+    assert "F-payment" in listed(c) and out["kept"] == 1, van
+    assert sc.meta_get(c, "selfcheck:facts_payment_version") is not None      # this run's own, compared next time

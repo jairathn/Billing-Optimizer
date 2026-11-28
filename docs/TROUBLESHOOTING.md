@@ -133,9 +133,9 @@ shown as work, `left_record` for the others). An item the run no longer makes ne
 records, or it is kept on the list ("nothing explains why"). The routes: a person's decision; an item this run made for
 the same line, claim or service; its remittance superseded; a payment EMA has since posted in full (`posted_in_ema`:
 EMA's checks of the item's 835 trace hold its paid amount within $1 or 0.5%); its claim answered by an 835; its claim
-sent again, under a later submission number or under the same claim id after the item was raised (`sent_again`: an 837
-of it, or EMA's submission date, on or after the day the item was first seen and after the send the item is about); the
-owner's accepted pattern; new facts on its own claim (an item about a payment, such as REMIT_NOT_POSTED or TAKEBACK,
+sent again, under a later submission number or under the same claim id (`sent_again`: an 837 of it, or EMA's submission
+date, after the send the item is about, whenever that 837 was read; for an item that names no send, on or after the
+practice's day it was first seen); the owner's accepted pattern; new facts on its own claim (an item about a payment, such as REMIT_NOT_POSTED or TAKEBACK,
 also counts EMA's postings of that payment); a copy of an answer the payer delivered twice; or a rule that stops raising
 it on purpose and counts its dollars elsewhere (`retired:<counter>`: `snb_past_limit`, a second payer's share a month
 past its last day; `unseen`, a claim no source can show the answer to; `unseen_second_send_nothing_left`;
@@ -144,9 +144,11 @@ left for it, or a share the patient paid; the unseen claims are counted in meta 
 tab, the others in meta ema:wiring). Detection hands the check the ids it retired, and the decision log names the same
 counter as the rule of the item's "gone" row (`detect:snb_past_limit`, where it used to say `detect:no_longer_raised`).
 The retired route is only for an item nobody worked: one a person worked stays on the list. The fingerprints the facts
-route compares are made one way per release (meta selfcheck:facts_version, 4 since 2026-11-28): the first run after a
-release that changes them compares none, so an item that leaves in that run on new facts alone is kept once and waits
-for a person on the Data tab. To do: the bundle's examples for the check; an item with no route is a rule change or a
+route compares are made one way per release (meta selfcheck:facts_version, 3; the part only an item about a payment has,
+EMA's checks of it, has its own version in meta selfcheck:facts_payment_version, 1 since 2026-11-28): the first run after
+a release that changes a part compares none of the fingerprints that part is in, so such an item that leaves in that run
+on new facts alone is kept once and waits for a person on the Data tab. Every other item's fingerprint is compared as
+usual. To do: the bundle's examples for the check; an item with no route is a rule change or a
 bug.
 
 **An item to work was already paid** (the self-check `precision_guard`, critical: it holds the run past 5 new items). It
@@ -154,9 +156,11 @@ looks for money paid on the item's bill, date and code after the item's own answ
 from EMA's postings on checks no 835 carries, covering what the item says is missing. For a downcoding or an underpayment
 only its own payer group's money counts (a second payer paying the copay is not the first payer's level or rate). A
 payment counts net of what the payer later took back by a provider-level adjustment (PLB WO, FB, J1 or L6 naming the
-paying claim by its claim id or the payer's claim number, dated on or after the payment), and a later answer that
-repeats the item's own (the same claim id, code and paid amount, often the plan's network answering under another
-name) is no new money. To do: hand-check the examples; a real offender is an item a rule should have closed.
+paying claim by its claim id or the payer's claim number, dated on or after the payment, from the same company: a
+Medicare Advantage or Medicaid plan's PLB carries only the company's name), and only for what a reversal of that payment
+did not already take back (one takeback counts once). A later answer that repeats the item's own (the same claim id, code
+and paid amount: a reprocessing at the same amount, or the plan's network answering under another name) is no new
+money, nor is a reversal of the item's own amount beside it, whatever order the lines of one remittance come in. To do: hand-check the examples; a real offender is an item a rule should have closed.
 
 **A claim the link map leaves out** (`ema_link_map.conflict` = 1: EMA's claim is joined to no bill, and its items get no
 EMA facts). A link takes the bill that holds at least 2/3 of its payment votes. A split under that is no conflict when it
