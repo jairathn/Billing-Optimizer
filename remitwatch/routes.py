@@ -43,6 +43,9 @@ FALLBACK = "No checked route for this payer yet. Use its provider portal, then n
 NO_CARD = frozenset({"post", "bill_patient", "bill_secondary", "contract", "policy", "fees", "decide", "wait", "nothing", "status"})
 # claims that never reached the payer (rejected before it, or never sent): no payer route, a new claim from EMA
 NEVER_REACHED = frozenset({"REJECTED_PRE_PAYER", "NOT_SENT"})
+# work that goes to another payer than the item's (the second plan never billed): no request to the item's payer, which
+# answered as billed, whatever route a person's start leaves the item on
+OTHER_PAYER = frozenset({"SECONDARY_NOT_BILLED"})
 # a first-filing limit this close (or past) puts the timely filing proof beside a claim status request
 NEAR_FILING_DAYS = 30
 SETTINGS = ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI", "PRACTICE_PTAN", "PRACTICE_PHONE",
@@ -178,6 +181,8 @@ def request_for(conn: sqlite3.Connection | None, f: dict, st: dict, nx: dict, to
     if f.get("signal") in NEVER_REACHED:
         # the claim never reached the payer: it is fixed and sent again from EMA as a new claim, and the payer's own
         # corrected-claim route (a replacement of a claim it has, frequency 7 with its claim number) does not apply
+        return None, "", None
+    if f.get("signal") in OTHER_PAYER:
         return None, "", None
     medicare = f.get("payer_kind") == "medicare"
     carcs = _carcs(conn, f)

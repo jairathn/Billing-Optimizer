@@ -323,6 +323,26 @@ def test_a_claim_that_never_reached_the_payer_gets_no_payer_route(store, signal)
     assert routes.card(store.conn, "F1", explain=ex, today=TODAY) is None
 
 
+def test_a_second_payer_never_billed_gets_no_card_even_once_a_person_started_it(store):
+    # Blue Cross paid as billed and left coinsurance; the second plan on file was never billed. The work is a claim to the
+    # second payer (the research has no row for that), never a request to the first payer, which owes nothing. A person's
+    # start leaves the item's route to the last line of states.route_of, which reads it as an appeal: the card must not
+    # follow it to an appeal, a corrected claim or a status call at the first payer.
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+               "lines": [ln("99213", 150, 80, [("CO", "45", 50), ("PR", "2", 20)], lcn="1")]}])
+    item(store, signal="SECONDARY_NOT_BILLED", category="denial", actionable="review", carc=None, paid_cents=8000,
+         expected_cents=2000, shortfall_cents=2000, status="in_progress", appeal_deadline="2026-09-24",
+         deadline_basis="Testcare Health's filing limit", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         evidence={"first_payer": "Anthem / BCBS", "second_payer": "Testcare Health", "share": "coinsurance"})
+    event(store, "F1", "status", at="2026-05-01T10:00:00", frm="open", to="in_progress")
+    ex = story.explain(store.conn, "F1", today=TODAY)
+    assert ex["state"]["work_state"] == "work_now"
+    assert routes.card(store.conn, "F1", explain=ex, today=TODAY) is None, ex["next_step"]["route"]
+    for route in ("appeal", "corrected", "call", "rate"):
+        ex["next_step"] = dict(ex["next_step"], route=route)
+        assert routes.card(store.conn, "F1", explain=ex, today=TODAY) is None, route
+
+
 def test_a_refund_is_the_overpayment_route(store):
     world(store, payer="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial")
     ex = story.explain(store.conn, "F1", today=TODAY)
