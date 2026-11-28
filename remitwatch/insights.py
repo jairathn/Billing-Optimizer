@@ -726,6 +726,7 @@ def _unanswered_weeks_item(conn: sqlite3.Connection) -> list[dict]:
 # why a never-answered claim is counted, not listed (detect.UNSEEN_REASONS), in the words the pages use
 UNSEEN_WORDS = {
     "no_ema_reports": "no EMA report is in the store yet, so nothing can show the payer's answer",
+    "payer_remittances_stop": "the payer's remittances stop before the claim was due, so no 835 can show its answer",
     "ambiguous": "EMA holds several claims with the same date, code and charge, and nothing says which is this one",
     "before_ema_reports": "the service is older than every EMA report in the store",
     "second_payer_not_matched": "the claim went to the visit's second payer, and EMA files the visit under its first payer",
@@ -926,7 +927,8 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
         def held(p: dict) -> str:
             k, c = int(p.get("claims") or 0), int(p.get("billed_cents") or 0)
             return (f"{k} {'claim' if k == 1 else 'claims'} sent to {p['payer']} and due since then (${c / 100:,.2f} billed) "
-                    f"{'is' if k == 1 else 'are'} not listed as never answered")
+                    f"{'is' if k == 1 else 'are'} not listed as never answered (the Data tab lists "
+                    f"{'it' if k == 1 else 'them'} with the claims no source can show an answer to)")
         n, cents = sum(int(p.get("claims") or 0) for p in behind), sum(int(p.get("billed_cents") or 0) for p in behind)
         one = behind[0]
         items.append({"key": "payer_stopped", "ok": False, "n": n, "cents": cents, "payers": behind[:20],

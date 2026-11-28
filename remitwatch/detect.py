@@ -305,8 +305,8 @@ EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's 
 # and codes] (most dollars first: what the Data tab lists and the archive holds), "at", "newest_835"}
 UNSEEN_KEY = "ema:unanswered_unseen"
 # why a claim is counted unseen, in the order they are decided (_finish_unseen)
-UNSEEN_REASONS = ("no_ema_reports", "ambiguous", "before_ema_reports", "second_payer_not_matched", "voided_in_ema",
-                  "ema_claim_not_found")
+UNSEEN_REASONS = ("no_ema_reports", "payer_remittances_stop", "ambiguous", "before_ema_reports", "second_payer_not_matched",
+                  "voided_in_ema", "ema_claim_not_found")
 PAYER_POLICY_KEY = "ema:payer_policy"       # meta: codes a payer never pays, folded out of the work (835 and EMA-only items)
 POLICY_SUMMARY_KEY = "ema:policy_summary"   # meta: the write-off pattern table for the owner's policy (O11), from the run
 PAYMENT_OUTCOMES = ("paid_after", "paid_after_other")   # the line outcomes an EMA closure (C6, rebilled) rests on
@@ -7231,6 +7231,9 @@ class Detector:
                 held = behind.setdefault(grp, {"payer": grp, "since": last, "claims": 0, "billed_cents": 0})
                 held["claims"] += 1
                 held["billed_cents"] += sum(x[2] or 0 for x in items)
+                # counted unseen by name with that reason too, as the 837 pass's are (gapfix review r1-2)
+                self._count_unseen({"pcn": pcn, "s837": r8, "grp": grp, "sent": sent, "due": due}, items, None,
+                                   reason="payer_remittances_stop")
                 continue
             cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
                           "again_after": again_after, "rejected": rejected, "unsent": unsent, "gave_up": gave_up, "status": status,
@@ -7849,9 +7852,22 @@ class Detector:
             era_got[pid].append((era_got[pid][-1] if era_got[pid] else 0) + (1 if got else 0))     # answered, running total
         no_era_cache: dict[tuple, bool] = {}
 
+        def none_answered(got: list[int], i: int, j: int) -> bool:
+            """Whether the claims days[i:j] show no ERA: at least NO_ERA_MIN_CLAIMS of them, at most NO_ERA_MAX_SHARE answered."""
+            n = j - i
+            answered = (got[j - 1] - (got[i - 1] if i else 0)) if n > 0 else 0
+            return n >= NO_ERA_MIN_CLAIMS and answered <= NO_ERA_MAX_SHARE * n
+
         def no_era_at(pid: str | None, day: str | None) -> bool:
-            """Whether the claims sent under this payer id around `day` show it sends no ERA: at least NO_ERA_MIN_CLAIMS of
-            them due, and at most NO_ERA_MAX_SHARE answered by any 835."""
+            """Whether the claims sent under this payer id show it sent no ERA for a claim sent on `day`: the claims sent in the
+            NO_ERA_WINDOW_DAYS either side of it say so (at least NO_ERA_MIN_CLAIMS of them due, at most NO_ERA_MAX_SHARE
+            answered by any 835), or the claims sent in the NO_ERA_WINDOW_DAYS up to it do (its own send day's included).
+            The second is the start of a payer's ERAs (gapfix review r1-3, r2-2): a claim sent weeks before the first ERA
+            has the answered claims sent after the start in its window, and was listed as never answered though no ERA could
+            come for it. The stop needs no rule of its own here: a payer whose ERAs stop stops sending remittances, and its
+            claims due after its last one are counted unseen by the check on payers whose remittances stop (CH-8, below); the
+            claims sent after this one are never a reason to call it blind, since a batch that never reached the payer looks
+            exactly like that and must be listed."""
             if not pid or not day or pid not in era_days:
                 return False
             key = (pid, day)
@@ -7872,9 +7888,16 @@ class Detector:
                             i -= 1
                         else:
                             j += 1
-                n = j - i
-                answered = (got[j - 1] - (got[i - 1] if i else 0)) if n else 0
-                no_era_cache[key] = n >= NO_ERA_MIN_CLAIMS and answered <= NO_ERA_MAX_SHARE * n
+                blind = none_answered(got, i, j)
+                if not blind:
+                    # the claims sent up to this one, on their own: few in the window, the NO_ERA_MIN_CLAIMS sent last up to
+                    # its day (none when the payer was sent fewer by then)
+                    j = bisect_right(days, day)
+                    i = bisect_left(days, _add_days(day, -NO_ERA_WINDOW_DAYS) or day)
+                    if j - i < NO_ERA_MIN_CLAIMS:
+                        i = max(0, j - NO_ERA_MIN_CLAIMS)
+                    blind = none_answered(got, i, j)
+                no_era_cache[key] = blind
             return no_era_cache[key]
         # the same member's other claims to the same payer, answered as primary, name the payer group (its product)
         members = sorted({(r[4], r[8]) for r in cand.values() if r[4] and r[8]})
@@ -8016,6 +8039,18 @@ class Detector:
         # the answers of the newer bills that may not carry a visit: another payer answered them only as a later payer
         sec_lines = self._837_answer_lines({x: answered_rows[x] for ref in refused.values() for xs in ref.values() for x in xs
                                             if x in answered_rows})
+        # one visit's claims to one payer id (the same member and first service day) are judged together on its ERAs, at the
+        # visit's first send to that payer id: two claims of a patient's day with the same evidence, sent days apart, never
+        # get opposite verdicts from two windows a few days apart (gapfix review r1-3: one Tricare visit, one claim listed
+        # as never answered and the other counted unseen)
+        def visit_of(r: list, items: list) -> tuple | None:
+            days = [x[1] for x in items if x[1]]
+            return (r[4], r[8], min(days)) if r[4] and r[8] and days else None
+        visit_first: dict[tuple, str] = {}
+        for pcn, items in own_items.items():
+            vk, day = visit_of(cand[pcn], items), cand[pcn][0]
+            if vk is not None and day and (vk not in visit_first or day < visit_first[vk]):
+                visit_first[vk] = day
         # 3. each claim's item
         for pcn, items in sorted(own_items.items()):
             r = cand[pcn]
@@ -8064,7 +8099,7 @@ class Detector:
             billed = sum(x[2] or 0 for x in items)
             pid = (r[4] or "").strip()
             last = None
-            ne_claim = no_era_at(r[4], r[0])
+            ne_claim = no_era_at(r[4], visit_first.get(visit_of(r, own_items[pcn])) or r[0])
             if ne_claim:
                 # its 837 claims never get an ERA: EMA's postings are the only source of its answers. Counted for the Data
                 # tab; without EMA's reports nothing can show the answer, so it is not listed (never as paid either)
@@ -8089,7 +8124,12 @@ class Detector:
                     held = behind.setdefault(grp, {"payer": grp, "since": last, "claims": 0, "billed_cents": 0})
                     held["claims"] += 1
                     held["billed_cents"] += billed
-                    continue                # its payer's remittances stop before its due day (CH-8): counted, not listed
+                    # its payer's remittances stop before its due day (CH-8): not listed, and counted unseen by name with that
+                    # reason, so that the Data tab lists it and the archive keeps its bill (gapfix review r1-2: a payer whose
+                    # ERAs stopped, its claims named nowhere and their bills retired in silence)
+                    self._count_unseen({"pcn": pcn, "s837": r, "grp": grp, "sent": sent, "due": due, "source": "837"}, items, None,
+                                       reason="payer_remittances_stop")
+                    continue
             # only another payer answered it (T-C2). Its own payer's answers to an older submission of the bill are neither
             # this send's answer nor another payer's (fx-837-r2-3): they are named in the hint. (A resend of a bill answered
             # as primary: its new services have no answer at all, and the bill's answers were the primary's own, so no other
@@ -9714,7 +9754,8 @@ class Detector:
     def _finish_unseen(self) -> dict:
         """The unseen count (UNSEEN_KEY) from the claims _count_unseen kept: each valued as _emit_open_claim values a listed
         claim (sent to a second or later payer: at most what the payer before it left, and not counted when it left
-        nothing), and given its reason, the first that holds: no EMA report in the store (no_ema_reports); several EMA
+        nothing), and given its reason: the one the pass that counted it gave (no_ema_reports: no EMA report in the store;
+        payer_remittances_stop: its payer's remittances stop before its due day, CH-8), else the first that holds: several EMA
         claims of its content and nothing to choose between them (ambiguous); a service before the first one any EMA source
         covers (before_ema_reports: exporting EMA's Production and A/R for those services would let the bridges run); sent
         to the visit's second or later payer (its 837's SBR01), or EMA holds the patient's day and code with this payer as
