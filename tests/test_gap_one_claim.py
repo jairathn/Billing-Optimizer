@@ -276,3 +276,49 @@ def test_a_claim_the_exports_hold_on_the_waiting_view_is_not_listed_again_by_the
     assert isinstance(note, dict) and note.get("ema_link") == F.link_no(N) and note.get("status") == "Rejected", row
     lg.close()
     s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_item_listed_before_its_claim_began_waiting_stays_listed_until_the_claims_own_item_takes_it_over(tmp_path, kind,
+                                                                                                         monkeypatch):
+    """Month 1: no 837 knows claim 74, and Production shows EMA's claim 74 charged March 5 with no answer: the report checks
+    list it under its EMA claim number (nobody has worked it yet). Month 2: the 837s show claim 74 sent May 1, so the 837
+    pass holds it on the waiting view until May 31. The item already listed stays listed as it was: holding a claim on the
+    waiting view keeps new work from being made early, and never takes work off the list in silence. Month 3 (June 15):
+    the send is due and unanswered; the 837 pass lists the claim under its claim id, and that item takes the old one over
+    (the day it was first listed, and the fold the self-check reads), so the claim is one item.
+    Before: in month 2 the listed item vanished (on the real data the self-check put back 12 such items, every run)."""
+    from tests import ema_fixtures as F
+    from tests.test_ema_wiring import charge, load, pay
+    s, lg = _world(tmp_path, kind, monkeypatch, _visit())
+    _run(s, "m1")
+    first = _listed(s)
+    assert [(r["signal"], r["patient_control_number"], r["ema_link"]) for r in first] == [("NO_ANSWER", None, F.link_no(N))], first
+    old = first[0]
+    _send(s, tmp_path, "20260501")
+    det = _run(s, "m2")
+    now = _listed(s)
+    assert [(r["finding_id"], r["status"]) for r in now] == [(old["finding_id"], "open")], (
+        "the item listed before its claim began waiting left the list: "
+        + repr([(r["signal"], r["patient_control_number"], r["ema_link"], r["stale"]) for r in _claim_items(s)]))
+    assert det.ema_counts.get("unanswered_claims_kept_while_waiting") == 1, dict(det.ema_counts)
+    kept = s.conn.execute("SELECT COUNT(*) FROM finding_events WHERE finding_id=? AND kind='kept_by_selfcheck'",
+                          (old["finding_id"],)).fetchone()[0]
+    assert kept == 0, "the analysis dropped the listed item, and only the self-check put it back"
+    row, _w = _waiting_row(s, F.claim_id(N))
+    assert row is not None and row[3] == "2026-05-31" and len(row) == 5, row
+    # month 3: the send is due and unanswered
+    load(s, lg, tmp_path, [charge(F.link_no(59), cpt="99212", amount=120, patient=2, svc=D(2026, 5, 20), posted=D(2026, 5, 21)),
+                           pay(F.link_no(59), "PAPER-59", 60, cpt="99212", patient=2, svc=D(2026, 5, 20), posted=D(2026, 6, 5)),
+                           charge(F.link_no(98), cpt="99212", patient=3, svc=D(2026, 6, 1), posted=D(2026, 6, 10),
+                                  status="Payment Pending")])
+    _run(s, "m3", today="2026-06-15")
+    now = _listed(s)
+    assert [r["finding_id"] for r in now] == [_fid(OPEN_837_ID, F.claim_id(N))], (
+        [(r["signal"], r["patient_control_number"], r["ema_link"], r["stale"]) for r in now])
+    it = now[0]
+    assert it["first_seen"] == old["first_seen"], (it["first_seen"], old["first_seen"])
+    folded = json.loads(it["evidence"] or "{}").get("folded") or []
+    assert old["finding_id"] in {x.get("finding_id") if isinstance(x, dict) else x for x in folded}, folded
+    lg.close()
+    s.close()

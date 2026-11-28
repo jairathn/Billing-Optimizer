@@ -10821,7 +10821,12 @@ class Detector:
                 held = (p.get("claim") or {}).get("patient_control_number")
                 held = held if held in waiting_ids else next((waiting_links[lk] for lk in sorted(links - {None}) if lk in waiting_links),
                                                              None)
-                if held:
+                if held and self._listed_before(p):
+                    # listed before its claim began waiting: it stays listed as it was (holding a claim on the waiting view
+                    # keeps new work from being made early, and never takes work off the list in silence); the claim's own
+                    # item takes it over when it is listed (save: the same EMA claim's heir)
+                    self.ema_counts[f"{name}_kept_while_waiting"] += 1
+                elif held:
                     # a claim the exports' or the 837 pass holds on the waiting view: it waits for its own due day there
                     self.ema_counts[f"{name}_on_waiting_view"] += 1
                     self._note_waiting_report(held, name, p)
@@ -10838,6 +10843,13 @@ class Detector:
                 self._ema_step("left_unsent", self._left_unsent, listed, skip)
         # the waiting view again, with what the report checks and the hand-off added to it
         self._finish_waiting(self.__dict__.get("_wait_since") or "")
+
+    def _listed_before(self, p: dict) -> bool:
+        """Whether the item a report check's proto makes is on record from an earlier run, open and not stale (the store
+        holds the earlier run's items until this run saves)."""
+        fid = _fid(p.get("id_signal") or p["signal"], *p["key_parts"])
+        row = self.conn.execute("SELECT status, COALESCE(stale, 0) FROM findings WHERE finding_id = ?", (fid,)).fetchone()
+        return bool(row) and row[0] in ("open", "in_progress", "appealed") and not row[1]
 
     def _left_unsent(self, listed: set, skip: set) -> None:
         """The claims the exports' or the 837 pass left to ema_checks.not_sent (a report newer than the pass's own data
@@ -12307,6 +12319,15 @@ class Detector:
                     # another matter)
                     own_answer[pcn_w] = prev
                     sent_again.setdefault(bill_of(pcn_w), []).append(prev)
+        # an item a report check listed for an EMA claim, that nobody worked and this run does not list again (its claim now
+        # held or listed by the exports' or the 837 pass): the claim's own item listed for the same EMA claim takes it over,
+        # as a worked one's heir does (the day it was first listed, and the fold the self-check reads: gapfix G8)
+        for fid, prev in existing.items():
+            if (fid in self.findings or worked(prev) or prev.get("stale") or prev.get("line_key")
+                    or prev.get("signal") not in EMA_CLAIM_SIGNALS or prev.get("status") != "open"):
+                continue
+            for lk in _item_links(prev):
+                same_link.setdefault(lk, prev)
         first_cache: dict[str, str] = {}
 
         def first_paid(pcn: str) -> str:
