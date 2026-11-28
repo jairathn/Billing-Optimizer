@@ -1170,7 +1170,7 @@
   },
   "m75": {
    "url": "https://palmettogba.com/palmetto/mforms.nsf/files/FN-RRB-B-2010.pdf/$File/FN-RRB-B-2010.pdf",
-   "title": "Voluntary Refund Overpayment — Check Enclosed (FN-RRB-B-2010)",
+   "title": "Voluntary Refund Overpayment - Check Enclosed (FN-RRB-B-2010)",
    "publisher": "Palmetto GBA Railroad Medicare",
    "date": "Revised 3/2018 (older)"
   },
@@ -6325,7 +6325,7 @@
      "rank": 1,
      "channel": "mail",
      "name": "Refund check, Central Region CCOA Lockbox",
-     "where": "Anthem Central Region — CCOA Lockbox P.O. Box 73651 Cleveland, OH 44193-1177",
+     "where": "Anthem Central Region - CCOA Lockbox P.O. Box 73651 Cleveland, OH 44193-1177",
      "form": "",
      "fields": [],
      "attachments": [
@@ -9378,7 +9378,7 @@
       "Other carrier's EOB if the refund is for COB"
      ],
      "minutes": 15,
-     "notes": "For overpayments you find yourself (unsolicited). Overnight: UnitedHealthcare Insurance Company — Overnight Delivery, Lockbox 101760, 3585 Atlanta Avenue, Hapeville, GA 30354-1705. Questions: 800-727-6735.",
+     "notes": "For overpayments you find yourself (unsolicited). Overnight: UnitedHealthcare Insurance Company - Overnight Delivery, Lockbox 101760, 3585 Atlanta Avenue, Hapeville, GA 30354-1705. Questions: 800-727-6735.",
      "required": false,
      "sources": [
       "u19",
@@ -14884,7 +14884,7 @@
      "rank": 1,
      "channel": "mail",
      "name": "Refund with remittance copy",
-     "where": "Ambetter Attn: Claims Dept — Refunds and Overpayments P.O. Box 5010 Farmington, MO 63640-5010",
+     "where": "Ambetter Attn: Claims Dept - Refunds and Overpayments P.O. Box 5010 Farmington, MO 63640-5010",
      "form": "",
      "fields": [],
      "attachments": [

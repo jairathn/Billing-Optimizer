@@ -738,10 +738,21 @@ def build(raw_path: str) -> dict:
     return out
 
 
+def plain(x):
+    """Every string as the pages print it (house style: no em dashes; the research's own titles use ' - ')."""
+    if isinstance(x, str):
+        return x.replace("\u2014", "-")
+    if isinstance(x, list):
+        return [plain(v) for v in x]
+    if isinstance(x, dict):
+        return {k: plain(v) for k, v in x.items()}
+    return x
+
+
 def main() -> None:
     if len(sys.argv) != 3:
         sys.exit(__doc__)
-    out = build(sys.argv[1])
+    out = plain(build(sys.argv[1]))
     with open(sys.argv[2], "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1, ensure_ascii=False)
         fh.write("\n")
