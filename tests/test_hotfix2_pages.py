@@ -142,27 +142,27 @@ def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path
     n = out["note"]
     assert n["disabled_before"] is True and n["disabled_after"] is False and n["packet_link"] == 1 and "I opened this note" in n["label"]
     assert [(x.get("note_checked"), x.get("packet_id")) for x in n["sends"]] == [(None, None), (True, "pkt.1")], n["sends"]
-    # H4: the prompt starts empty with the disputed amount as a hint; amounts are read as typed; anything else is asked again
+    # H4 (moved with the same guarantee from the browser's prompt to the panel's Paid form, unit ui-panel): the amount starts
+    # empty with the disputed amount as a hint; amounts are read as typed; anything else is refused with its reason; no box
     p = out["paid"]
-    assert all(a["value"] == "" for x in p for a in x["asked"]) and "The amount in dispute is" in p[0]["asked"][0]["message"]
+    assert all(x["start"] == "" for x in p) and "The amount in dispute is" in p[0]["help"] and out["paid_dialogs"] == 0, p
     assert p[0]["sent"]["recovered_cents"] == 125000 and p[0]["sent"]["seen_status"] == "open"
-    whys = [a["message"].split("\n\n")[0] for a in p[1]["asked"][1:]]
     zero = "Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead."         # CH-10: '0' is no payment
-    assert whys == ["Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is.",
-                    "The amount paid cannot be below zero.", "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.",
-                    "Use at most two decimals (dollars and cents).", "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.",
-                    zero, zero], whys
+    assert p[1]["errors"] == ["Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is.",
+                              "The amount paid cannot be below zero.", "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.",
+                              "Use at most two decimals (dollars and cents).", "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.",
+                              zero, zero], p[1]["errors"]
     assert p[1]["sent"]["recovered_cents"] == 125000 and p[2]["sent"]["recovered_cents"] == 125050 and p[3]["sent"]["recovered_cents"] == 9500
-    assert p[4]["sent"] is None and "ten times the charge" in p[4]["asked"][1]["message"]
+    assert p[4]["sent"] is None and "ten times the charge" in p[4]["errors"][0]
     # push 2's panel (review people-1): Log what happened is the main button of an item a person marked Sent; the Paid prompt
     # starts empty with the disputed amount as a hint; 1,250.00 and $1,250.00 are $1,250.00; OK on the empty prompt and 0
     # are asked again, and backing out sends nothing; a double click on Save is one change and one line in the history
     pa = out["panel"]
     assert {pa[k]["main"] for k in "ABCD"} == {"log_outcome"}, pa
-    assert pa["A"]["asked"][0]["value"] == "" and "The amount in dispute is" in pa["A"]["asked"][0]["message"], pa["A"]
+    assert pa["A"]["start"] == "" and "The amount in dispute is" in pa["A"]["help"] and pa["dialogs"] == 0, pa["A"]
     assert [b.get("recovered_cents") for b in pa["A"]["sent"]] == [125000] and pa["A"]["sent"][0]["seen_status"] == "appealed", pa["A"]
     assert [b.get("recovered_cents") for b in pa["D"]["sent"]] == [125000], pa["D"]
-    assert pa["B"]["sent"] == [] and [a["message"].split("\n\n")[0] for a in pa["B"]["asked"][1:]] == [PAID_EMPTY, PAID_ZERO], pa["B"]
+    assert pa["B"]["sent"] == [] and pa["B"]["errors"] == [PAID_EMPTY, PAID_ZERO], pa["B"]
     assert pa["C"]["posts"] == 1 and pa["C"]["lines"] == 1, pa["C"]
     assert pa["overflow"] <= 0, pa["overflow"]                      # nothing wider than the screen, at either width
     # H3: a bulk change carries the status each row showed

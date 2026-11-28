@@ -461,14 +461,6 @@ function paidZeroOk(f, x){
   const proof = (((x || {}).explain || {}).state || {}).proof;
   return !!(proof && proof.rule && proof.rule !== 'moved_to_patient_open' && !(PAID_RECOVERED.has(proof.rule) && (proof.cents || 0) > 0));
 }
-// What the payer paid, asked until it is an amount (or the person backs out: null). The prompt starts empty (H4): the
-// disputed amount is only a hint, never an answer a person can accept by pressing OK.
-function askPaid(shortfall, charge, zeroOk){
-  const ask = `Amount the payer paid, in dollars (from the remittance or EMA).${shortfall!=null ? ` The amount in dispute is ${money2(shortfall)}.` : ''}`
-    + (zeroOk ? ' Type 0 if the money came before this item was listed: nothing was recovered.' : '');
-  let msg = ask;
-  for(;;){ const x = prompt(msg, ''); if(x===null) return null; const got = paidCents(x, charge, zeroOk); if(got.cents != null) return got.cents; msg = got.why + '\n\n' + ask; }
-}
 // A packet built in the panel (attached, pasted or from EMA) can be read and faxed at once: it joins the item's packets
 // (the fax buttons read them when pressed) and the next step's box is drawn again, so its main button moves on to the fax
 function xpPacketBuilt(id, d, p){
@@ -478,25 +470,6 @@ function xpPacketBuilt(id, d, p){
     .concat((r.packets || []).filter(q => q.packet_id !== p.packet_id));
   if(typeof xpRedrawBox === 'function') xpRedrawBox(id, d);
 }
-// A status set from an item's own panel, with the questions it takes. False when the person backed out: nothing is sent.
-// seen: the status the panel showed; the site leaves an item that changed since as it is (and says so).
-async function setFindingStatus(id, status, shortfall, signal, seen, charge){
-  const body = {status};
-  if(seen) body.seen_status = seen;
-  if(status==='resolved'){
-    // the open panel's own item: its work says whether $0 is an answer (paidZeroOk); any other is asked an amount above $0
-    const zeroOk = state.detailId === id && paidZeroOk(state.detailF, state.detailX);
-    const cents = askPaid(shortfall, charge, zeroOk);
-    if(cents === null) return false;
-    body.recovered_cents = cents;
-  }
-  // Let go and Lost take a reason, on every item (letGoNote in desk.js; the server holds to it): asking is the confirmation
-  const why = letGoNote(signal, status);
-  if(why === null) return false;
-  if(why !== undefined) body.notes = why;
-  await post('/api/findings/'+id+'/status', body); return true;
-}
-
 // ---------------------------------------------------------------- an item's verdict, next step and story (remitwatch.story)
 // Asked for beside the item itself (/api/findings/{id}/explain), so the panel opens at once. What happened and how sure the
 // site is, then what to do next with its one main button (the rest under More), then the evidence row by row with the
@@ -564,8 +537,10 @@ function xpEmaUrl(f, x, nx){
 }
 // the verdict's own "(row 2)" and "(rows 1 and 3)" go when the Rows link beside it says the same
 const xpUncited = s => String(s || '').replace(/\s*\(rows? \d+(?:(?:, | and |-)\d+)*\)/gi, '');
-// what to do and how sure: the verdict sentence, the next step with who and by when, what it is worth and its buttons. The
-// rest (the deadline's basis, the recovery rate's basis, the rule) is on hover; the steps are folded
+// what to do and how sure: the next step (who does it and by when), its one main button, the rest under More; then Why, the
+// verdict in one line with its proof and its basis on request (what it is worth and how sure the site is). The state, the
+// item's place and Previous and Next are in the panel's head (panelHeadHtml). Where the route the payer takes leads (the
+// item is ready to go), the route's own button is the one filled button and the next step's turns secondary.
 function xpBoxHtml(f, x, r){
   x = xpEffective(f, x);
   const ex = x.explain || {}, vd = ex.verdict || {}, nx = ex.next_step || {}, st = ex.state || {};
@@ -574,31 +549,37 @@ function xpBoxHtml(f, x, r){
   const rowsCited = (vd.rows || []).filter(n => n != null);
   const strength = vd.strength ? `<span${vd.strength === 'inferred' && vd.rule ? ` title="${esc('Rule: ' + vd.rule)}"` : ''}>${esc(XP_STRENGTH[vd.strength] || vd.strength)}</span>` : '';
   const legal = st.legal_deadline || f.legal_deadline;
-  const due = nx.deadline ? `By <b${nx.basis ? ` title="${esc(nx.basis)}"` : ''}>${esc(longDate(nx.deadline))}</b> <span class="${closesText(nx.deadline).cls}">(${esc(closesText(nx.deadline).text)})</span>${legal && legal !== nx.deadline ? ` · Payer's limit: <b>${esc(longDate(legal))}</b>` : ''}` : '';
+  const fu = follow ? panelDue(f, x) : null;
+  const due = fu ? `Follow up <b>${esc(longDate(follow))}</b> <span class="${fu.now ? 'due-now' : ''}">(${esc(fu.words)})</span>`
+    : nx.deadline ? `By <b${nx.basis ? ` title="${esc(nx.basis)}"` : ''}>${esc(longDate(nx.deadline))}</b> <span class="${closesText(nx.deadline).cls}">(${esc(closesText(nx.deadline).text)})</span>${legal && legal !== nx.deadline ? ` · Payer's limit: <b>${esc(longDate(legal))}</b>` : ''}` : '';
   const rec = nx.recovery || {};
-  const worth = nx.expected_cents ? `At stake <b>${money2(nx.expected_cents)}</b>${nx.ranked_cents != null ? ` · about <b>${money2(nx.ranked_cents)}</b> expected back` : ''}` : '';
-  const primary = xpPrimary(nx, (r.packets || []).length > 0);
+  const worth = nx.expected_cents ? `At stake <b>${money2(nx.expected_cents)}</b>${nx.ranked_cents != null ? ` · ranked by about <b>${money2(nx.ranked_cents)}</b> expected back` : ''}` : '';
+  const hasPacket = (r.packets || []).length > 0;
+  const primary = xpPrimary(nx, hasPacket);
   const url = xpEmaUrl(f, x, nx);
   const more = xpButtons(nx).concat(url && !(nx.buttons || []).includes('open_in_ema') ? ['open_in_ema'] : []).filter(k => k !== primary && XP_BUTTON[k]);
-  const ids = state.worklist || [], i = ids.indexOf(f.finding_id), more2 = i >= 0 && (i < ids.length - 1 || (!!state.wlNext && (state.wlTotal || 0) > ids.length));
   const steps = (nx.steps || []).filter(Boolean);
   const sib = (nx.siblings || []).length;
-  return `<div class="todo-box xp-box" id="xpBox">
-    <div class="todo-top">${xpChips(f, ws)}${follow ? `<span class="muted small">follow up ${esc(longDate(follow))}</span>` : ''}${i >= 0 ? `<span class="muted small">Item ${i+1} of ${Number(Math.max(state.wlTotal||0, ids.length)).toLocaleString()}</span>` : ''}</div>
-    ${vd.sentence ? `<div class="xp-verdict">${esc(rowsCited.length ? xpUncited(vd.sentence) : vd.sentence)}${rowsCited.length ? ` <a href="#" class="xp-rows small" data-rows="${rowsCited.join(',')}">${rowsCited.length > 1 ? 'Rows' : 'Row'} ${rowsCited.join(', ')}</a>` : ''}</div>` : ''}
-    ${strength ? `<div class="small muted">${strength}</div>` : ''}
-    ${nx.action ? `<div class="todo-next"><b>Next:</b> ${esc(nx.action)}</div>` : ''}
-    ${nx.who || due ? `<div class="small">${nx.who ? `Who: ${esc(nx.who)}` : ''}${nx.who && due ? ' · ' : ''}${due}</div>` : ''}
-    ${xpRouteHtml(f, x, r)}
-    ${worth ? `<div class="small" ${rec.basis ? `title="${esc(rec.basis)}"` : ''}>${worth}</div>` : ''}
+  const card = xpRouteShown(f, x);
+  // the route leads once nothing is left to prepare: its button (call, open the portal, start the fax) is the one filled
+  // button; while a packet or a note is still to be made, or a decision taken, the next step's own button leads
+  const leads = !!card && !card.fallback && (hasPacket || !['build_packet', 'attach_note', 'find_note', 'upload_note', 'decide'].includes(primary));
+  const key = k => ({mark_sent: 's', let_go: 'l', mark_billed: 'b', billed_patient: 'b', log_outcome: 'n', open_in_ema: 'e'})[k];
+  return `<div class="todo-box xp-box next" id="xpBox">
+    <div class="next-label">Next step${nx.who ? ` <span>· ${esc(nx.who)}</span>` : ''}</div>
+    ${nx.action ? `<p class="next-text todo-next">${esc(nx.action)}</p>` : ''}
+    ${due ? `<div class="small next-due">${due}</div>` : ''}
     ${steps.length ? `<details class="xp-steps"><summary class="small">${steps.length === 1 ? 'The step' : `The ${steps.length} steps`}</summary><ol class="small">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
+    ${xpRouteHtml(f, x, r, !leads)}
     ${(nx.needs || []).length ? `<div class="small muted">It needs: ${esc(nx.needs.join('; '))}</div>` : ''}
     ${sib ? `<div class="small muted">${pl(sib, 'other open item')} on this visit: work them together.</div>` : ''}
     <div class="todo-err sev-high small" id="xpErr" role="alert"></div>
-    <div class="actions todo-actions">${primary ? `<button class="primary" data-xp="${primary}" id="xpMain">${esc(XP_BUTTON[primary])}</button>` : ''}
-      ${more.length ? `<details class="xp-more"><summary class="small">More</summary><div class="actions">${more.map(k => `<button class="ghost" data-xp="${k}">${esc(XP_BUTTON[k])}</button>`).join('')}</div></details>` : ''}
-      ${i > 0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more2 ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div>
-    <div id="xpMsg" class="small"></div></div>`;
+    <div class="actions todo-actions next-actions">${primary ? `<button${leads ? '' : ' class="primary"'} data-xp="${primary}" title="${esc(XP_BUTTON[primary])} (Enter)" id="xpMain">${esc(XP_BUTTON[primary])}</button>` : ''}
+      ${more.length ? `<details class="xp-more"><summary class="small">More</summary><div class="actions">${more.map(k => `<button class="ghost" data-xp="${k}"${key(k) ? ` title="Key ${key(k)}"` : ''}>${esc(XP_BUTTON[k])}</button>`).join('')}</div></details>` : ''}</div>
+    <div id="xpMsg" class="small"></div></div>
+    ${vd.sentence || strength || worth ? `<details class="why" id="xpWhyLine"><summary><span class="why-label">Why</span> <span class="xp-verdict">${esc(rowsCited.length ? xpUncited(vd.sentence) : (vd.sentence || 'How sure the site is'))}</span></summary>
+      <div>${rowsCited.length ? `<a href="#" class="xp-rows small" data-rows="${rowsCited.join(',')}">${rowsCited.length > 1 ? 'Rows' : 'Row'} ${rowsCited.join(', ')}</a> in the story below. ` : ''}${strength}
+      ${worth ? `<div class="small"${rec.basis ? ` title="${esc(rec.basis)}"` : ''}>${worth}</div>` : ''}</div></details>` : ''}`;
 }
 // ---------------------------------------------------------------- how it reaches the payer (remitwatch.routes)
 // The route card at the top of the next step: the easiest way the payer accepts as one line with its main action (open the
@@ -613,12 +594,13 @@ function xpRouteShown(f, x){
   const nx = ((xpEffective(f, x) || {}).explain || {}).next_step || {};
   return nx.route === 'status' && f.work_state !== 'work_now' ? null : c;
 }
-// a field filled in part (the name and address, no email on file) shows what it still needs beside its value (review r2-8)
-function rcFieldRows(list, at){
-  return (list || []).map(v => { const i = at.push(v) - 1;
+// a field filled in part (the name and address, no email on file) shows what it still needs beside its value (review r2-8).
+// keyed: the route's own fields, where the first nine filled ones take the keys 1 to 9 (shown on the row) to copy them
+function rcFieldRows(list, at, keyed){
+  return (list || []).map(v => { const i = at.push(v) - 1, k = keyed && v.value ? at.filter(o => o.value).length : 0, key = k && k <= 9 ? k : 0;
     const need = v.value && v.fill ? `<div class="muted small">also needed: ${esc(v.fill)}</div>` : '';
-    return `<tr><td class="small">${esc(v.label)}</td><td>${v.value ? `<b>${esc(v.value)}</b>${need}` : `<span class="muted small">${esc(v.set ? 'as the label says' : (v.fill ? 'fill: ' + v.fill : ''))}</span>`}</td>
-      <td>${v.value ? `<button class="ghost small" data-rc-copy="${i}" aria-label="Copy ${esc(v.label)}">Copy</button>` : ''}</td></tr>`; }).join('');
+    return `<tr class="copyrow${v.value ? '' : ' rc-empty'}"><td class="rc-key">${key ? `<kbd>${key}</kbd>` : ''}</td><td class="small">${esc(v.label)}</td><td>${v.value ? `<b>${esc(v.value)}</b>${need}` : `<span class="muted small">${esc(v.set ? 'as the label says' : (v.fill ? 'fill: ' + v.fill : ''))}</span>`}</td>
+      <td>${v.value ? `<button class="ghost small copy-btn" data-rc-copy="${i}"${key ? ` data-rc-key="${key}"` : ''} aria-label="Copy ${esc(v.label)}">Copy</button>` : ''}</td></tr>`; }).join('');
 }
 // the requests whose mail way is the app's own letter or packet (the panel's Appeal letter); any other mail way prints a cover
 // sheet of the card's filled fields to send with it (a refund check, a corrected claim on paper: review routes-r2-11)
@@ -679,11 +661,12 @@ function rcOther(o, at){
 }
 // the sent words: what "I sent it" records, so a later "no" is read for what was sent (routes.sent_request); a status
 // request records "I asked the payer" as a line in the item's history and changes no status (review routes-r1-2)
-const rcSentHtml = (c, how) => `<div class="rc-sent">${how ? '<label class="small">How you sent it <input id="rcHow" maxlength="80" autocomplete="off" placeholder="the payer\'s portal, fax or mail"></label>' : ''}
+const rcSentHtml = (c, how) => `<div class="rc-sent after-send">${how ? '<label class="small">How you sent it <input id="rcHow" maxlength="80" autocomplete="off" placeholder="the payer\'s portal, fax or mail"></label>' : ''}
       <label class="small">Reference number (optional) <input id="rcRef" maxlength="60" autocomplete="off" placeholder="the portal's submission ID"></label>
-      <button class="ghost" id="rcSent">${c.request === 'claim_status_or_reprocess' ? 'I asked the payer' : 'I sent it'}</button></div>`;
+      <button id="rcSent">${c.request === 'claim_status_or_reprocess' ? 'I asked the payer' : 'I sent it'}</button></div>`;
 const rcNamesOff = c => c.names_shown ? '' : '<div class="small muted">Names are switched off on this site: the patient\'s name and member ID are left for you to fill from EMA.</div>';
-function xpRouteHtml(f, x, r){
+// quiet: the next step's own button leads (a packet still to build, a call to log), so the route's button is not filled
+function xpRouteHtml(f, x, r, quiet){
   const err = x && x.route_card_error;
   const c = xpRouteShown(f, x);
   if(!c) return err ? `<div class="small muted">${esc(err)}</div>` : '';
@@ -692,9 +675,9 @@ function xpRouteHtml(f, x, r){
   if(c.fallback){
     // a payer the table does not cover: the claim's own facts to copy, Copy all, and I sent it with how it went (r2-12)
     const at = []; xpRouteHtml.vals = at;
-    const facts = rcFieldRows(c.facts, at);
+    const facts = rcFieldRows(c.facts, at, true);
     return `<section class="rc-card" id="rcCard" aria-label="How to send it"><div class="small"><b>How to send it:</b> ${esc(c.fallback)}</div>
-    <div class="actions rc-actions"><button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button></div>
+    <div class="actions rc-actions"><button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button><span class="small muted rc-count" id="rcCount" aria-live="polite"></span></div>
     ${facts ? `<table class="small rc-fields"><tbody>${facts}</tbody></table>` : ''}
     ${rcNamesOff(c)}
     ${rcSentHtml(c, true)}</section>`;
@@ -702,7 +685,7 @@ function xpRouteHtml(f, x, r){
   const nx = ((x || {}).explain || {}).next_step || {}, b = c.best, at = [];
   xpRouteHtml.vals = at;
   const due = c.deadline ? ` · by <b${c.deadline_basis ? ` title="${esc(c.deadline_basis)}"` : ''}>${esc(longDate(c.deadline))}</b> <span class="${closesText(c.deadline).cls}">(${esc(closesText(c.deadline).text)})</span>` : '';
-  const facts = rcFieldRows(b.fields, at) + rcFieldRows(b.facts, at);
+  const facts = rcFieldRows(b.fields, at, true) + rcFieldRows(b.facts, at, true);
   const others = (c.others || []).map(o => rcOther(o, at)).join('');
   // the Also fold says what the card's own line says: whether the way was confirmed, the fax words, the limit (r1-5)
   const ab = (c.also || {}).best || {};
@@ -711,15 +694,16 @@ function xpRouteHtml(f, x, r){
       ${ab.fax ? `<div class="small ${ab.fax.sendable ? '' : 'sev-medium'}">${esc(ab.fax.words)}</div>` : ''}
       ${(ab.attachments || []).length ? `<div class="small muted">With: ${esc(ab.attachments.map(a => a.label).join('; '))}</div>` : ''}
       ${c.also.time_limit ? `<div class="small muted">Limit: ${esc(c.also.time_limit)}${c.also.time_limit_verified ? '' : ' (not confirmed)'}</div>` : ''}</details>` : '';
-  return `<section class="rc-card" id="rcCard" aria-label="How to send it">
-    <div class="rc-head"><span class="chip">${esc(RC_CH[b.channel] || b.channel)}</span> <b>${esc(b.line)}</b>${due}
+  return `<section class="rc-card send-step" id="rcCard" aria-label="How to send it">
+    <div class="rc-head"><span class="chip">${esc(RC_CH[b.channel] || b.channel)}</span> <b>${esc(b.line)}</b> <span class="easy">Easiest</span>${due}
       ${b.required ? ' <span class="chip">required</span>' : ''}${rcChip(b.verified, b.unverified_why)}</div>
     <div class="small muted">${esc(c.payer)}: ${esc(c.request_label)}${c.variant_why ? ' · ' + esc(c.variant_why) : ''}</div>
     ${c.deadline_note ? `<div class="small sev-medium">${esc(c.deadline_note)}</div>` : ''}
     ${b.where && !(b.action || {}).url ? `<div class="small">Send to: <b>${esc(b.where)}</b>${b.form ? ' · form: ' + esc(b.form) : ''}</div>` : (b.form ? `<div class="small">Form: ${esc(b.form)}</div>` : '')}
     ${b.fax ? `<div class="small ${b.fax.sendable ? '' : 'sev-medium'}">${esc(b.fax.words)}</div>` : ''}
-    <div class="actions rc-actions">${rcAction(f, b, r, nx, c)}<button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button></div>
+    <div class="actions rc-actions">${quiet ? rcAction(f, b, r, nx, c).replace(/class="primary" /g, '') : rcAction(f, b, r, nx, c)}<button class="ghost" id="rcCopyAll" title="Copy every filled field (c)">Copy all</button><span class="small muted rc-count" id="rcCount" aria-live="polite"></span></div>
     ${facts ? `<table class="small rc-fields"><tbody>${facts}</tbody></table>` : ''}
+    ${facts ? '<div class="privacy-note">Copied details stay on this computer\'s clipboard until you copy something else. RemitWatch keeps no record of what you copied.</div>' : ''}
     ${rcNamesOff(c)}
     ${(b.steps || []).length ? `<details class="xp-steps"><summary class="small">Where to click (${b.steps.length})</summary><ol class="small">${b.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
     ${rcAttach(b.attachments, r, f)}
@@ -740,7 +724,15 @@ function xpRouteBind(f, x, r, d, h){
   if(!c || !box || c.single_level) return;
   const vals = xpRouteHtml.vals || [], b = c.best || {};
   const nx = ((xpEffective(f, x) || {}).explain || {}).next_step || {};
-  box.querySelectorAll('[data-rc-copy]').forEach(bt => bt.onclick = () => { const v = vals[Number(bt.dataset.rcCopy)]; if(v) h.copy(v.value, v.label); });
+  // a copied field gets a check, the next field to paste is marked, and the count says how many are copied
+  const own = [...box.querySelectorAll(':scope > table.rc-fields [data-rc-copy]')], done = new Set(), count = box.querySelector('#rcCount');
+  const mark = bt => { if(!own.includes(bt)) return; done.add(bt); const tr = bt.closest('tr'); if(tr) tr.classList.add('copied'); bt.textContent = 'Copied';
+    own.forEach(o => { const t = o.closest('tr'); if(t) t.classList.remove('is-next'); });
+    const nx2 = own.find(o => !done.has(o)), t2 = nx2 && nx2.closest('tr'); if(t2) t2.classList.add('is-next');
+    if(count) count.textContent = `${done.size} of ${own.length} copied`; };
+  if(own[0] && own[0].closest('tr')) own[0].closest('tr').classList.add('is-next');
+  if(count && own.length) count.textContent = `${own.length} ${own.length === 1 ? 'field' : 'fields'} to copy`;
+  box.querySelectorAll('[data-rc-copy]').forEach(bt => bt.onclick = async () => { const v = vals[Number(bt.dataset.rcCopy)]; if(v && await h.copy(v.value, v.label)) mark(bt); });
   const all = box.querySelector('#rcCopyAll'); if(all) all.onclick = () => h.copy(c.copy_all || '', 'Every filled field');
   box.querySelectorAll('[data-rc]').forEach(bt => bt.onclick = async () => {
     const k = bt.dataset.rc;
@@ -867,7 +859,10 @@ function xpBind(f, x, r, d, done){
   const say = msg => { const m = d.querySelector('#xpMsg'); if(m){ m.className = 'small ok'; m.textContent = msg; } };
   const copy = async (text, what) => { try { await navigator.clipboard.writeText(text); say(`${what} copied.`); return true; } catch(e){ err('Could not copy here: select the text and copy it by hand.'); return false; } };
   // every change carries the status this panel showed (hotfix 2, H3): one made elsewhere since is not undone (409 changed)
-  const status = async (st, notes, extra) => { await post('/api/findings/' + f.finding_id + '/status', Object.assign({status: st, seen_status: f.status}, notes ? {notes} : {}, extra || {})); state.brief = null; state.dirty = true; done(st); };
+  const status = async (st, notes, extra, o) => { await post('/api/findings/' + f.finding_id + '/status', Object.assign({status: st, seen_status: f.status}, notes ? {notes} : {}, extra || {})); state.brief = null; state.dirty = true; done(st, o); };
+  // a status a form took, checked as the menu's are (a reason for Let go and Lost, an amount for Paid): why it was not sent, or nothing
+  const saveBy = async (st, given) => { const a = stAnswers(f, st, given, x); if(a.why) return a.why; await status(st, a.notes, a.extra); return null; };
+  const form = spec => stForm(d, spec);
   const event = async (ev, note) => post('/api/findings/' + f.finding_id + '/event', {event: ev, note: note || ''});
   // a copy's line in the item's history: when the site refuses it (a panel drawn before a run gave the item a new number),
   // the panel says so; the copy itself stands (review people-6)
@@ -882,24 +877,26 @@ function xpBind(f, x, r, d, done){
     fax_payer: () => xpFaxPreview(f, r.packets, d),
     copy_instructions: async () => { if(await copy(nx.instructions || nx.action || '', 'The steps')) await logged('instructions', 'The steps'); },
     request_era: async () => { if(!eraText){ err('No ERA request for this item.'); return; } if(await copy(eraText, 'The ERA request')) await logged('era_requested', 'The ERA request'); },
-    mark_sent: async () => { const n = prompt('Mark it sent? Say what went out and how (kept in its history; optional):', ''); if(n === null) return; await status('appealed', n.trim() || 'Sent from the next step'); },
+    mark_sent: () => form(stSpec(f, 'appealed', (st, g) => saveBy(st, {note: g.note || 'Sent from the next step'}), x)),
     log_outcome: () => xpOutcome(f, d, status, err, x),
     decide: () => xpDecide(f, d, status, err, act),
-    mark_posted: async () => {
-      if(nx.route === 'post'){ if(!confirm('Mark it posted in EMA? It leaves the list.')) return; await status('resolved', 'Posted in EMA', {recovered_cents: 0}); return; }
-      const n = prompt('What did you post in EMA (the remittance or the takeback)? Kept in its history; the item stays on the list:', ''); if(n === null) return;
-      await event('posted', n.trim()); say('Noted in its history.'); },
-    mark_billed: async () => { const n = prompt(`Who was billed, and when? (${nx.route === 'bill_patient' ? 'the patient' : 'the other payer'}; kept in its history)`, ''); if(n === null) return;
-      if(!n.trim()){ err('Not changed: say who was billed.'); return; } await event('billed', n.trim()); await status('appealed', 'Billed: ' + n.trim()); },
+    mark_posted: () => nx.route === 'post'
+      ? form({title: 'Mark it posted in EMA?', help: 'It leaves the list, closed as Paid with $0.00 recovered: the money already came.', button: 'Mark posted',
+          save: async () => { await status('resolved', 'Posted in EMA', {recovered_cents: 0}); return null; }})
+      : form({title: 'What did you post in EMA?', help: 'The remittance or the takeback. It is kept in its history; the item stays on the list.', button: 'Save',
+          fields: [{id: 'stNote', key: 'note', label: 'What you posted'}], save: async v => { await event('posted', v.note.trim()); stFormClose(d); say('Noted in its history.'); return null; }}),
+    mark_billed: () => form({title: 'Mark it billed', help: `Who was billed (${nx.route === 'bill_patient' ? 'the patient' : 'the other payer'}), and when? It is kept in its history.`, button: 'Mark billed',
+      fields: [{id: 'stNote', key: 'note', label: 'Who was billed, and when'}],
+      save: async v => { const n = v.note.trim(); if(!n) return 'Not changed: say who was billed.'; await event('billed', n); await status('appealed', 'Billed: ' + n); return null; }}),
     // a service the payer put on the patient (the owner's decision 2): one change each, the server's own words in its history
-    billed_patient: async () => { const n = prompt('Billed the patient? It waits for the patient\'s payment in EMA and closes when EMA shows it.\n\nHow, and anything to remember (kept in its history; optional):', ''); if(n === null) return;
-      await status('appealed', 'Billed the patient' + (n.trim() ? ': ' + n.trim() : '')); },
-    mark_done: async () => { const n = prompt('Mark it done? It leaves the list and counts as done by you, with nothing recovered.\n\nWhy (kept in its history; optional):', ''); if(n === null) return;
-      await status('resolved', n.trim(), {recovered_cents: 0, done: true}); },
-    accept_pattern: () => xpAccept(f, nx, err, say),
-    let_go: async () => { const n = prompt('Let it go? It leaves the list and counts as let go.\n\nWhy (kept in its history; required):', ''); if(n === null) return;
-      if(!n.trim()){ err('Not changed: letting an item go needs a reason.'); return; } await status('dismissed', n.trim()); },
-    reopen: async () => { if(!confirm('Reopen it? It goes back on the list as To do.')) return; await status('open', 'Reopened'); },
+    billed_patient: () => form({title: 'Billed the patient', help: "It waits for the patient's payment in EMA and closes when EMA shows it.", button: 'Billed the patient',
+      fields: [{id: 'stNote', key: 'note', label: 'How, and anything to remember (optional)'}],
+      save: async v => { await status('appealed', 'Billed the patient' + (v.note.trim() ? ': ' + v.note.trim() : '')); return null; }}),
+    mark_done: () => form({title: 'Mark it done', help: 'It leaves the list and counts as done by you, with nothing recovered.', button: 'Mark done',
+      fields: [{id: 'stNote', key: 'note', label: 'Why (optional)'}], save: async v => { await status('resolved', v.note.trim(), {recovered_cents: 0, done: true}); return null; }}),
+    accept_pattern: () => xpAccept(f, nx, err, say, d),
+    let_go: () => form(stSpec(f, 'dismissed', saveBy, x)),
+    reopen: () => form({title: 'Reopen it?', help: 'It goes back on the list as To do.', button: 'Reopen', save: async () => { await status('open', 'Reopened'); return null; }}),
     open_in_ema: () => { if(url) window.open(url, '_blank', 'noopener,noreferrer'); else err('No EMA address is set for this site.'); },
   };
   // one press at a time, and none on a panel the walk opened a moment ago (H1: the status bar's walk guard)
@@ -918,7 +915,7 @@ function xpDecide(f, d, status, err, act){
     <label><input type="radio" name="xpd" value="fixed" checked> It needed a fix: I corrected it and sent it again</label>
     <label><input type="radio" name="xpd" value="appeal"> The payer is wrong: appeal it</label>
     <label><input type="radio" name="xpd" value="let_go"> The payer is right: let it go</label>
-    <input id="xpdNote" maxlength="300" placeholder="What you sent, or why (kept in its history)" style="width:100%;margin:4px 0">
+    <input id="xpdNote" class="xp-input" maxlength="300" placeholder="What you sent, or why (kept in its history)">
     <div class="actions"><button class="primary" id="xpdSave">Go</button><button class="ghost" id="xpdCancel">Cancel</button></div></div>`;
   box.querySelector('#xpdCancel').onclick = () => { box.innerHTML = ''; };
   const save = box.querySelector('#xpdSave');
@@ -937,46 +934,74 @@ function xpDecide(f, d, status, err, act){
 // the status bar's walk guard (index.html walkGuarded): a panel "open the next" opened a moment ago takes no press, since
 // the second click of a double click lands on the next item's button in the same place
 function xpWalkGuarded(){ return typeof walkGuarded === 'function' && walkGuarded(); }
-// Log what happened: the payer is working on it (it waits on the payer, with the note), the payer paid (Paid), or the payer
-// said no (it stays to do, with the answer in its history)
+// Log what happened (a call or a portal check, key n): what the payer said as a chip (keys 1 to 6), the reference number and
+// what they said. Paid asks the amount (read as the remittance prints it, empty at first: H4) and Denied the code. Each answer
+// is a status the rules know: in process waits on the payer (Sent); Paid is Paid; denied, no claim on file, records asked and a
+// wrong payer stay to do (Started) with the answer in the item's history, where its next step is read. Saving opens the next item.
+const CALL_ANSWERS = [['in_process', 'In process'], ['paid', 'Paid'], ['denied', 'Denied'], ['no_claim', 'No claim on file'], ['records', 'Needs records'], ['wrong_payer', 'Wrong payer']];
+const CALL_WORDS = {denied: 'denied', no_claim: 'no claim on file: fix it and send it again', records: 'the payer needs records: appeal with the visit note', wrong_payer: 'wrong payer: bill the right payer'};
 function xpOutcome(f, d, status, err, x){
   const box = d.querySelector('#xpMsg'); if(!box) return;
+  const zero = paidZeroOk(f, x), xb = d.querySelector('#xpBox');
   box.className = 'small';
-  box.innerHTML = `<div class="xp-log"><b>What happened?</b>
-    <label><input type="radio" name="xpo" value="working" checked> The payer is working on it (or I sent what it asked for)</label>
-    <label><input type="radio" name="xpo" value="paid"> The payer paid</label>
-    <label><input type="radio" name="xpo" value="no"> The payer said no</label>
-    <input id="xpoNote" maxlength="300" placeholder="What they said, a reference number" style="width:100%;margin:4px 0">
-    <div class="actions"><button class="primary" id="xpoSave">Save</button><button class="ghost" id="xpoCancel">Cancel</button></div></div>`;
-  box.querySelector('#xpoCancel').onclick = () => { box.innerHTML = ''; };
-  const save = box.querySelector('#xpoSave');
-  save.onclick = async () => {
+  box.innerHTML = `<div class="st-form call-form" id="callForm" role="group" aria-label="What the payer said">
+    <div class="st-form-head"><b>What did the payer say?</b><span>Keys 1 to 6 pick the answer; Enter saves.</span></div>
+    <div class="chip-opts" role="radiogroup" aria-label="The payer's answer">${CALL_ANSWERS.map(([k, w], i) => `<button type="button" class="chip-opt" role="radio" aria-checked="${i === 0}" aria-pressed="${i === 0}" data-ans="${k}" data-ans-key="${i + 1}"><kbd>${i + 1}</kbd> ${esc(w)}</button>`).join('')}</div>
+    <div class="field" data-when="paid" hidden><label for="callAmt">Amount the payer paid, in dollars</label><input id="callAmt" inputmode="decimal" maxlength="20" autocomplete="off">
+      <span class="hint">${f.shortfall_cents != null ? `The amount in dispute is ${money2(f.shortfall_cents)}.` : ''}${zero ? ' Type 0 if the money came before this item was listed.' : ''}</span></div>
+    <div class="field" data-when="denied" hidden><label for="callCode">The denial code</label><input id="callCode" maxlength="20" autocomplete="off"></div>
+    <div class="field"><label for="callRef">Reference number (optional)</label><input id="callRef" maxlength="60" autocomplete="off"></div>
+    <div class="field"><label for="callNote">What they said</label><input id="callNote" maxlength="300" autocomplete="off"></div>
+    <div class="hint">The next run dates the follow-up from the payer's answer window.</div>
+    <div class="actions"><button type="button" class="primary" id="callSave">Save and open the next</button><button type="button" class="ghost" id="callCancel">Cancel</button></div></div>`;
+  if(xb && xb.classList) xb.classList.add('has-form');
+  let what = 'in_process';
+  const q = sel => box.querySelector(sel);
+  box.querySelectorAll('[data-ans]').forEach(b => b.onclick = () => { what = b.dataset.ans;
+    box.querySelectorAll('[data-ans]').forEach(o => { const on = o === b; o.setAttribute('aria-checked', on ? 'true' : 'false'); o.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    box.querySelectorAll('[data-when]').forEach(el => { el.hidden = el.dataset.when !== what; });
+    const first = q(`[data-when="${what}"] input`) || q('#callNote'); if(first && first.focus) first.focus(); });
+  q('#callCancel').onclick = () => { box.innerHTML = ''; if(xb && xb.classList) xb.classList.remove('has-form'); if(d.focus) d.focus({preventScroll: true}); };
+  const save = q('#callSave');
+  const go = async () => {
     if(save.disabled || xpWalkGuarded()) return;      // H1: one change per press, none on a panel the walk just opened
     save.disabled = true;
-    const what = (box.querySelector('input[name=xpo]:checked') || {}).value, note = box.querySelector('#xpoNote').value.trim();
+    const val = sel => String((q(sel) || {}).value || '').trim(), ref = val('#callRef'), note = val('#callNote'), code = val('#callCode');
+    const said = [ref ? 'Reference ' + ref : '', note].filter(Boolean).join('. ');
     try {
-      // the payer paid: the amount it paid, read as the remittance prints it, the prompt empty (H4, CH-10: review people-1)
-      if(what === 'paid'){ const cents = askPaid(f.shortfall_cents, f.charge_cents, paidZeroOk(f, x)); if(cents === null) return;
-        await status('resolved', note || 'The payer paid', {recovered_cents: cents}); }
-      else if(what === 'no'){ if(!note){ err('Say what the payer said.'); return; } await status('in_progress', 'The payer said no: ' + note); }
-      else { if(!note){ err('Say what the payer said, or what you sent.'); return; } await status('appealed', 'Call or portal check: ' + note); }
+      if(what === 'paid'){
+        const got = paidCents(val('#callAmt'), f.charge_cents, zero);
+        if(got.cents == null){ err(got.why); return; }
+        await status('resolved', 'The payer paid' + (said ? ': ' + said : ''), {recovered_cents: got.cents}, {walk: true});
+      } else if(what === 'in_process'){
+        if(!said){ err('Say what the payer said, or give its reference number.'); return; }
+        await status('appealed', 'Call or portal check: in process. ' + said, null, {walk: true});
+      } else {
+        if(what === 'denied' && !code && !note){ err('Give the denial code, or say what the payer said.'); return; }
+        await status('in_progress', 'Call or portal check: ' + CALL_WORDS[what] + (code ? ' (' + code + ')' : '') + (said ? '. ' + said : ''), null, {walk: true});
+      }
     } catch(e){ err('Not saved: ' + (e.message || 'no answer from the site')); }
     finally { save.disabled = false; }
   };
+  save.onclick = go;
+  q('#callForm').onkeydown = e => { if(e.key === 'Enter' && e.target && e.target.tagName === 'INPUT'){ e.preventDefault(); go(); } };
+  const first = q('#callNote'); if(first && first.focus) first.focus();
 }
 // Accept a write-off pattern: the write-off policy table (one decision for every item of the pattern), never one item
 // quietly. It carries the owner's password where the page holds one, and asks for it when the site wants it (as a payer's
 // fax number does: faxes.js faxOwnerPost), so the owner's gate holds wherever the site sets one
-async function xpAccept(f, nx, err, say){
+async function xpAccept(f, nx, err, say, d){
   const pattern = nx.pattern;
   if(!pattern){ state.tab = 'policy'; location.hash = 'policy'; if(typeof closeDetail === 'function') closeDetail(); render(); return; }
   const pp = pattern.endsWith('|payer_policy') ? pattern.split('|') : null;
-  if(!confirm(pp ? `Accept that ${pp[0]} does not pay ${pp[1]}${pp[2] ? ' (services ' + pp[2] + ')' : ''}? Every such denial leaves Work now at the next run and stays counted on the Write-off policy page, with who decided, where Pursue brings them back.`
-                 : `Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
-  const where = document.querySelector('#xpMsg');
-  if(typeof faxOwnerPost === 'function') await faxOwnerPost('/api/ema/policy', {pattern, decision: 'accept'}, where);
-  else await post('/api/ema/policy', {pattern, decision: 'accept'});
-  say('Accepted as policy: the next run takes these items off the work list.');
+  const words = pp ? `Accept that ${pp[0]} does not pay ${pp[1]}${pp[2] ? ' (services ' + pp[2] + ')' : ''}? Every such denial leaves Work now at the next run and stays counted on the Write-off policy page, with who decided, where Pursue brings them back.`
+                 : `Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`;
+  return stForm(d, {title: 'Accept as policy?', help: words, button: 'Accept as policy', save: async () => {
+    const where = document.querySelector('#xpMsg');
+    if(typeof faxOwnerPost === 'function') await faxOwnerPost('/api/ema/policy', {pattern, decision: 'accept'}, where);
+    else await post('/api/ema/policy', {pattern, decision: 'accept'});
+    stFormClose(d);
+    say('Accepted as policy: the next run takes these items off the work list.'); return null; }});
 }
 // Fax it to the payer: what goes is read first (the packet's letter and PDF; for a rate request, the letter), then sent as it
 // is to the payer's confirmed number. A hold comes back in words, with the one answer a person may give where there is one
@@ -986,7 +1011,7 @@ async function xpFaxPreview(f, packets, d){
   if(!pk && kind !== 'rate'){
     const b = d && d.querySelector('#builderFold'); if(b){ b.open = true; b.scrollIntoView({block:'start'}); }
     const m = d && d.querySelector('#fxOneMsg'); const text = 'Build the packet first (below), so you can read it before it goes.';
-    if(m){ m.className = 'small sev-medium'; m.textContent = text; } else alert(text);
+    if(m){ m.className = 'small sev-medium'; m.textContent = text; } else { const e = d && d.querySelector('#xpErr'); if(e) e.textContent = text; }
     return;
   }
   // the packet's "Before you send it" checklist (the payer's published rule for the code, the owner's decision 4): shown
@@ -1044,4 +1069,353 @@ async function xpFaxPreview(f, packets, d){
       msg.appendChild(document.createTextNode(' ')); msg.appendChild(again);
     } };
   $('#xpFaxGo').onclick = go;
+}
+
+// ================================================================================ the item panel (DESIGN P3, unit ui-panel)
+// The panel's head (where you are, the title, the patient behind the names switch, the payer, the date of service and the
+// code, the claim ID to copy, the state beside the person's status as one button, the money at stake and the due date), the
+// small forms that take a status's answers in the panel (no browser box: Enter saves, Esc cancels, a reason as a chip), the
+// toast with Undo, the keys, and the answers kept for the next items so Next opens at once. Nothing here decides a state, an
+// outcome or a closure: the rules do, and the server holds to every rule a form shows (a reason for Let go and Lost, an
+// amount for Paid, the status the panel showed).
+const PANEL_ICON = n => `<svg class="i" aria-hidden="true"><use href="/static/icons.svg#i-${n}"/></svg>`;
+// the answers for an item (the item and its next step), asked once and kept two minutes for this analysis; any change a
+// person makes drops them all, so a kept answer never shows an item as it was before a change
+const PANEL_CACHE = new Map(), PANEL_TTL_MS = 120000;
+const panelStamp = () => String(((state.meta || {}).remits || {}).last_payment || '');
+function panelCacheDrop(){ PANEL_CACHE.clear(); }
+function panelAnswers(id){
+  const had = PANEL_CACHE.get(id);
+  if(had && Date.now() - had.at < PANEL_TTL_MS && had.stamp === panelStamp()) return had;
+  const enc = encodeURIComponent(id);
+  const c = {at: Date.now(), stamp: panelStamp(), ready: false};
+  c.item = api('/api/findings/' + enc);
+  c.told = api('/api/findings/' + enc + '/explain').catch(e => ({explain_error: 'What to do could not be worked out just now (' + (e.message || 'no answer') + ').'}));
+  // a refused or failed answer is never kept: the next open asks again (and says why)
+  c.item.then(() => { c.ready = true; }, () => { if(PANEL_CACHE.get(id) === c) PANEL_CACHE.delete(id); });
+  PANEL_CACHE.set(id, c);
+  return c;
+}
+// the next two items of the list (and the one before) are asked for while this one is read
+function panelPrefetch(id){
+  const ids = state.worklist || [], i = ids.indexOf(id);
+  if(i < 0) return;
+  [i + 1, i + 2, i - 1].forEach(k => { if(k >= 0 && ids[k] && !PANEL_CACHE.has(ids[k])) panelAnswers(ids[k]); });
+}
+function panelPlace(id){
+  const ids = state.worklist || [], i = ids.indexOf(id);
+  return {i, n: Math.max(state.wlTotal || 0, ids.length), prev: i > 0,
+    next: i >= 0 && (i < ids.length - 1 || (!!state.wlNext && (state.wlTotal || 0) > ids.length))};
+}
+// where you are: the list (or the plan's step, state.queueLabel) and the item's place in it; the state is said once, beside
+// the status, never here as well
+function panelCrumb(id){
+  const p = panelPlace(id), desk = typeof DESKS !== 'undefined' && DESKS[state.tab] ? DESKS[state.tab].title : '';
+  const where = state.queueLabel || desk || '';
+  if(p.i < 0) return `<b>${esc(where || 'Item')}</b>`;
+  return `${where ? `<b>${esc(where)}</b> · ` : ''}Item ${p.i + 1} of ${Number(p.n).toLocaleString()}`;
+}
+function panelNavHtml(p){
+  return `<button type="button" id="prevItem" aria-label="Previous item (k)" title="Previous item (k)"${p.prev ? '' : ' disabled'}>${PANEL_ICON('chev-l')}</button>`
+    + `<button type="button" id="nextItem" aria-label="Next item (j)" title="Next item (j)"${p.next ? '' : ' disabled'}>${PANEL_ICON('chev-r')}</button>`
+    + `<button type="button" id="closeD" aria-label="Close (Esc)" title="Close (Esc)">${PANEL_ICON('x')}</button>`;
+}
+// until the item's answer comes: the head's frame and quiet placeholders that show only after a moment (never a blank word)
+function panelSkeletonHtml(id){
+  return `<div class="dr-head" aria-busy="true"><div class="dr-top"><span class="crumb">${panelCrumb(id)}</span>${panelNavHtml(panelPlace(id))}</div>
+    <div class="dr-skel"><span class="skel skel-title"></span><span class="skel skel-line"></span><span class="skel skel-facts"></span></div></div>
+    <div class="dr-body dr-skel"><span class="skel skel-box"></span><span class="skel skel-line"></span><span class="skel skel-line"></span></div>`;
+}
+// the due date as the item's state words it: a follow-up is a day to follow up ("today", "in 3 days"), never a window that
+// closes; a window that closed says so; an item that is over has nothing due
+function panelDue(f, x){
+  const ex = (x && x.explain) || {}, vd = ex.verdict || {}, nx = ex.next_step || {}, st = ex.state || {};
+  const ws = vd.state || st.work_state || f.work_state;
+  const follow = ws === 'waiting' && (vd.follow_up_on || st.follow_up_on || f.follow_up_on);
+  if(follow){
+    const n = typeof daysUntil === 'function' ? daysUntil(follow) : null;
+    const words = n == null ? '' : n < -1 ? `${-n} days ago` : n === -1 ? 'yesterday' : n === 0 ? 'today' : n === 1 ? 'tomorrow' : `in ${n} days`;
+    return {label: 'Follow up', day: follow, words, now: n != null && n <= 0};
+  }
+  if(['done', 'accepted'].includes(ws)) return {label: 'Due', day: null, words: 'Nothing due', now: false};
+  const day = nx.deadline || f.appeal_deadline;
+  if(!day) return {label: 'Due', day: null, words: 'No date', now: false};
+  if(ws === 'expired') return {label: 'Window closed', day, words: '', now: false};
+  const c = closesText(day);
+  return {label: 'Due', day, words: c.text, now: c.cls === 'due-now'};
+}
+function panelFactsHtml(f, x){
+  const nx = ((x && x.explain) || {}).next_step || {}, due = panelDue(f, x);
+  const stake = nx.expected_cents != null ? nx.expected_cents : f.shortfall_cents;
+  return `<div><dt>At stake</dt><dd class="money">${stake != null ? money2(stake) : 'Not known'}</dd></div>
+    <div><dt>${esc(due.label)}</dt><dd${due.now ? ' class="now"' : ''}>${due.day ? esc(longDate(due.day)) + ' ' : ''}<span>${esc(due.words)}</span></dd></div>`;
+}
+// the head: where you are with Previous, Next and Close; the title; the patient (names on only), the payer, the date of service,
+// the code and the claim ID (one click, or y, copies it); the state beside the person's status; At stake and Due
+function panelHeadHtml(f, r, x){
+  r = r || {}; x = xpEffective(f, x || {}) || {};
+  const ex = x.explain || {}, ws = (ex.verdict || {}).state || (ex.state || {}).work_state || f.work_state, cl = r.claim || {};
+  const plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : (f.title || 'Item');
+  const phi = typeof showPhi === 'function' && showPhi();
+  const claimNo = f.patient_control_number || cl.payer_claim_control_number || '';
+  const meta = [phi && cl.patient ? `<span class="who">${esc(cl.patient)}</span>` : '',
+    f.payer_group ? `<span>${esc(f.payer_group)}</span>` : '',
+    f.service_date ? `<span title="Date of service">${esc(longDate(String(f.service_date).slice(0, 10)))}</span>` : '',
+    f.procedure_code ? `<span title="Code">${esc(f.procedure_code)}</span>` : '',
+    claimNo ? `<button type="button" class="copy-inline" id="copyClaim" data-copy="${esc(claimNo)}" title="Copy the claim ID (y)">${esc(claimNo)}</button>` : ''].filter(Boolean);
+  return `<div class="dr-head">
+    <div class="dr-top"><span class="crumb">${panelCrumb(f.finding_id)}</span>${panelNavHtml(panelPlace(f.finding_id))}</div>
+    <h2 class="dr-title" id="drTitle" tabindex="-1">${esc(plain)}</h2>
+    ${meta.length ? `<div class="dr-meta">${meta.join('<span class="sep" aria-hidden="true"></span>')}</div>` : ''}
+    <div class="dr-state"><span id="xpChips">${xpChips(f, ws)}</span>${stMenuHtml(f)}</div>
+    <dl class="facts facts-2" id="drFacts">${panelFactsHtml(f, x)}</dl></div>`;
+}
+// the head's due date and money follow the next step once it comes (its deadline, its amount)
+function panelFacts(f, x, d){ const el = d && d.querySelector && d.querySelector('#drFacts'); if(el) el.innerHTML = panelFactsHtml(f, xpEffective(f, x)); }
+
+// ---------------------------------------------------------------- the person's status: one button, its menu, its forms
+// Started and back to To do are saved at once (with Undo); Sent, Paid, Lost and Let go open a small form. Lost and Let go sit
+// below a line, apart from the rest, and always ask why.
+const ST_ITEMS = [['in_progress', 'Started', ''], ['appealed', 'Sent', 'S'], ['resolved', 'Paid', 'P'], '-', ['lost', 'Lost', ''], ['dismissed', 'Let go', 'L'], '-', ['open', 'Back to To do', '']];
+const ST_SAID = {open: 'Back to To do', in_progress: 'Marked started', appealed: 'Marked sent', resolved: 'Marked paid', lost: 'Marked lost', dismissed: 'Let go'};
+// the reasons a person gives most for money given up (the owner's weekly count by payer and reason), a chip each
+const ST_REASONS = ['The payer is right: not covered', "Patient's share: billed the patient", "Small balance under the owner's limit", 'Duplicate claim',
+  "Past the payer's limit", 'Already paid in EMA'];
+function stMenuHtml(f){
+  const rows = ST_ITEMS.filter(it => it === '-' || it[0] !== f.status)
+    .map(it => it === '-' ? '<hr>' : `<button type="button" role="menuitem" data-st="${it[0]}"${['lost', 'dismissed'].includes(it[0]) ? ' class="danger-item"' : ''}>${esc(it[1])}${it[2] ? `<kbd class="kbd-right">${it[2]}</kbd>` : ''}</button>`)
+    .join('').replace(/^(<hr>)+|(<hr>)+$/g, '').replace(/(<hr>){2,}/g, '<hr>');
+  return `<span class="menu-wrap st-wrap"><button type="button" class="st-btn" id="stBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="stMenu" title="Change the status">${esc(STATUS_WORDS[f.status] || f.status || 'To do')}${PANEL_ICON('chev-d')}</button>
+    <div class="menu st-menu" id="stMenu" role="menu" aria-label="Change the status" hidden>${rows}</div></span>`;
+}
+// Let go and Lost take a reason on every item (the server holds to it); a claim no payer answered says it may not have been
+// asked for yet. The words are the ones the list's Let go uses (desk.js letGoNote).
+function stReasonWhy(signal, status, note){
+  if(!['dismissed', 'lost'].includes(status) || String(note || '').trim()) return null;
+  const claim = typeof CLAIM_CHASES !== 'undefined' && CLAIM_CHASES.has(signal), one = typeof ONE_AT_A_TIME !== 'undefined' && ONE_AT_A_TIME.has(signal);
+  return claim ? 'Not changed. A claim with no answer from a payer needs a note that says why.' : one ? 'Not changed. This item needs a note that says why.'
+    : 'Not changed. Letting an item go, or marking it lost, needs a reason.';
+}
+function stReasonHelp(signal, status){
+  const claim = typeof CLAIM_CHASES !== 'undefined' && CLAIM_CHASES.has(signal), lost = status === 'lost';
+  return (claim ? 'No answer from a payer is on file for it, so this money may not have been asked for yet. ' : '')
+    + `It leaves the list${lost ? '' : ' and counts as let go'}. Pick a reason or write one: it is kept in its history.`;
+}
+// what a status change sends, from what its form took: {why} when it is not enough (nothing is sent), else the note and the
+// amount. Paid's amount is read as the remittance prints it and starts empty (H4); $0 only where nothing new was owed.
+function stAnswers(f, st, given, x){
+  given = given || {};
+  const note = String(given.note || '').trim(), out = {notes: note || null, extra: {}};
+  if(st === 'resolved'){
+    const got = paidCents(given.amount, f.charge_cents, paidZeroOk(f, x));
+    if(got.cents == null) return {why: got.why};
+    out.extra.recovered_cents = got.cents;
+  }
+  const why = stReasonWhy(f.signal, st, note);
+  return why ? {why} : out;
+}
+// A status set from an item's panel with what its form took (no browser box): {saved: true}, or {why} when the answers are
+// not enough (nothing is sent then). given: {note, amount}. seen: the status the panel showed; the site leaves an item that
+// changed since as it is (and says so).
+async function setFindingStatus(id, status, shortfall, signal, seen, charge, given){
+  const f = state.detailId === id && state.detailF ? state.detailF : {finding_id: id, signal, charge_cents: charge};
+  const a = stAnswers(Object.assign({}, f, {signal, charge_cents: charge}), status, given, state.detailId === id ? state.detailX : null);
+  if(a.why) return {why: a.why};
+  await post('/api/findings/' + id + '/status', Object.assign({status}, seen ? {seen_status: seen} : {}, a.notes ? {notes: a.notes} : {}, a.extra));
+  return {saved: true};
+}
+function stFormClose(d){
+  const fm = d && d.querySelector && d.querySelector('#stForm');
+  if(fm){ fm.hidden = true; fm.innerHTML = ''; }
+  if(d && d.classList) d.classList.remove('dr-form-open');
+  if(d && d.focus) d.focus({preventScroll: true});
+}
+// One small form under the head: a title, a line of help, the reason chips, the fields, Save and Cancel. Focus starts in the
+// first field; Enter in a field saves; Esc cancels (index.html's Escape). spec.save(values) returns why it was not saved, or
+// nothing. While it saves, Save says so and takes no second press.
+function stForm(d, spec){
+  const fm = d && d.querySelector && d.querySelector('#stForm'); if(!fm) return;
+  const chips = (spec.chips || []).map((c, i) => `<button type="button" class="chip-opt" aria-pressed="false" data-chip="${i}">${esc(c)}</button>`).join('');
+  const fields = (spec.fields || []).map(x => `<div class="field"><label for="${x.id}">${esc(x.label)}</label><input id="${x.id}" type="text" maxlength="${x.max || 300}" autocomplete="off"${x.mode ? ` inputmode="${x.mode}"` : ''}>${x.hint ? `<span class="hint">${esc(x.hint)}</span>` : ''}</div>`).join('');
+  fm.innerHTML = `<div class="st-form-head"><b>${esc(spec.title)}</b>${spec.help ? `<span>${esc(spec.help)}</span>` : ''}</div>
+    ${chips ? `<div class="chip-opts" role="group" aria-label="Reason">${chips}</div>` : ''}${fields}
+    <div class="st-form-err" id="stFormErr" role="alert"></div>
+    <div class="actions"><button type="button" class="primary" id="stSave">${esc(spec.button)}</button><button type="button" class="ghost" id="stCancel">Cancel</button></div>`;
+  fm.hidden = false; d.classList.add('dr-form-open');
+  let chip = null;
+  fm.querySelectorAll('[data-chip]').forEach(b => b.onclick = () => {
+    const on = b.getAttribute('aria-pressed') !== 'true';
+    fm.querySelectorAll('[data-chip]').forEach(o => o.setAttribute('aria-pressed', 'false'));
+    b.setAttribute('aria-pressed', on ? 'true' : 'false'); chip = on ? spec.chips[Number(b.dataset.chip)] : null; });
+  const err = fm.querySelector('#stFormErr'), save = fm.querySelector('#stSave');
+  const go = async () => {
+    if(save.disabled || xpWalkGuarded()) return;      // one change per press, none on a panel the walk opened a moment ago
+    const vals = {chip};
+    (spec.fields || []).forEach(o => { vals[o.key] = fm.querySelector('#' + o.id).value || ''; });
+    err.textContent = ''; save.disabled = true; const label = save.textContent; save.textContent = 'Saving…';
+    let why = null;
+    try { why = await spec.save(vals); }
+    catch(e){ if(e.code === 'changed' || e.code === 'in_flight') state.dirty = true;
+      why = 'Not saved: ' + (e.message || 'the site did not answer') + (e.code ? '' : '. Try again.'); }
+    if(!fm.isConnected) return;
+    save.disabled = false; save.textContent = label;
+    if(why){ err.textContent = why; const first = fm.querySelector('input'); if(first) first.focus(); }
+  };
+  save.onclick = go;
+  fm.querySelector('#stCancel').onclick = () => stFormClose(d);
+  fm.onkeydown = e => { if(e.key === 'Enter' && e.target && e.target.tagName === 'INPUT'){ e.preventDefault(); go(); } };
+  const first = fm.querySelector('input') || fm.querySelector('[data-chip]') || save;
+  if(first) first.focus();
+}
+// the forms each status takes, saved through `saveWith(status, given)` (the menu's own, or the next step's)
+function stSpec(f, st, saveWith, x){
+  const zero = paidZeroOk(f, x);
+  if(st === 'appealed') return {title: 'Mark it sent', help: 'It waits on the payer; the next run dates the follow-up.', button: 'Mark sent',
+    fields: [{id: 'stHow', key: 'how', label: 'What went out and how (optional)'}, {id: 'stRef', key: 'ref', label: 'Reference number (optional)', max: 60}],
+    save: v => saveWith('appealed', {note: [v.how.trim(), v.ref.trim() ? 'Reference ' + v.ref.trim() : ''].filter(Boolean).join('. ')})};
+  if(st === 'resolved') return {title: 'Mark it paid', button: 'Mark paid',
+    help: (f.shortfall_cents != null ? `The amount in dispute is ${money2(f.shortfall_cents)}. ` : '') + (zero ? 'Type 0 if the money came before this item was listed: nothing was recovered.' : 'Type what the payer paid.'),
+    fields: [{id: 'stAmt', key: 'amount', label: 'Amount the payer paid, in dollars (from the remittance or EMA)', mode: 'decimal', max: 20}, {id: 'stNote', key: 'note', label: 'Note (optional)'}],
+    save: v => saveWith('resolved', {amount: v.amount, note: v.note})};
+  if(st === 'lost' || st === 'dismissed') return {title: st === 'lost' ? 'Mark it lost' : 'Let it go', help: stReasonHelp(f.signal, st), chips: ST_REASONS,
+    button: st === 'lost' ? 'Mark lost' : 'Let it go', fields: [{id: 'stNote', key: 'note', label: 'Why, in your words'}],
+    save: v => saveWith(st, {note: [v.chip, v.note.trim()].filter(Boolean).join(': ')})};
+  return null;
+}
+// the menu's status change: the answers checked, the change sent with the status the panel showed, then the toast with Undo
+// and the next item (or this one again, for Started and To do)
+async function stChange(f, seq, st, given){
+  const got = await setFindingStatus(f.finding_id, st, f.shortfall_cents, f.signal, f.status, f.charge_cents, given);
+  if(got.why) return got.why;
+  panelChanged(f, st, seq);
+  return null;
+}
+function stOpen(f, d, seq, st){
+  if(st === 'in_progress' || st === 'open'){
+    if(state.stBusy) return;
+    state.stBusy = true;
+    stChange(f, seq, st, {note: st === 'open' ? 'Back to To do' : ''})
+      .then(why => { if(why) stSay(d, why); }, e => stSay(d, 'Not saved: ' + (e.message || 'the site did not answer') + (e.code ? '' : '. Try again.')))
+      .finally(() => { state.stBusy = false; });
+    return;
+  }
+  const spec = stSpec(f, st, (s, given) => stChange(f, seq, s, given), state.detailId === f.finding_id ? state.detailX : null);
+  if(spec) stForm(d, spec);
+}
+function stSay(d, text){ const el = d && d.querySelector && d.querySelector('.st-err'); if(el) el.textContent = text; }
+// after a change: the lists are drawn again when the panel closes, kept answers are dropped, the toast says what changed
+// with Undo, and the walk goes on (a status that ends the work here opens the next item; Started and To do stay)
+function panelChanged(f, st, seq, o){
+  o = o || {};
+  state.brief = null; state.dirty = true; panelCacheDrop();
+  state.panelUndo = st === f.status ? null : {id: f.finding_id, from: f.status, to: st, cents: f.recovered_cents, at: Date.now()};
+  const what = (state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : (f.title || 'the item')) + (f.payer_group ? ' · ' + f.payer_group : '');
+  panelToast(o.said || `${ST_SAID[st] || STATUS_WORDS[st] || st}: ${what}.`, {undo: !!state.panelUndo});
+  const here = seq == null ? state.detailId === f.finding_id : (typeof panelShows !== 'function' || panelShows(seq, f.finding_id));
+  if(!here || typeof openDetail !== 'function') return;
+  if(o.walk || ['appealed', 'dismissed', 'resolved', 'lost'].includes(st)) return panelWalk(f.finding_id, seq);
+  return openDetail(f.finding_id);
+}
+// the next item of the list (the next page of it when the list has one), or this item again at the end
+async function panelWalk(id, seq){
+  const here = () => seq == null ? state.detailId === id : (typeof panelShows !== 'function' || panelShows(seq, id));
+  if(!here()) return;
+  const ids = state.worklist || [], i = ids.indexOf(id);
+  let nx = i >= 0 ? ids[i + 1] : null;
+  if(!nx && i >= 0 && state.wlNext){ try { await state.wlNext(); } catch(e){} nx = (state.worklist || [])[i + 1]; }
+  if(!here()) return;
+  return nx ? openDetail(nx, {walk: true}) : openDetail(id);
+}
+// Undo: the status back to what it was, with the status this change set as the one seen (one made elsewhere since is kept)
+async function panelUndo(){
+  const u = state.panelUndo;
+  if(!u || Date.now() - u.at > 10000){ panelToast('Nothing to undo.'); return false; }
+  state.panelUndo = null;
+  const body = {status: u.from, seen_status: u.to, notes: 'Undone: back to ' + (STATUS_WORDS[u.from] || u.from)};
+  if(u.from === 'resolved' && u.cents != null) body.recovered_cents = u.cents;
+  try { await post('/api/findings/' + u.id + '/status', body); }
+  catch(e){ panelToast('Not undone: ' + (e.message || 'the site did not answer') + '.', {error: true, stay: true}); return true; }
+  state.brief = null; state.dirty = true; panelCacheDrop();
+  panelToast(`Undone: back to ${STATUS_WORDS[u.from] || u.from}.`);
+  if(state.detailId === u.id && typeof openDetail === 'function') openDetail(u.id);
+  return true;
+}
+// a toast at the bottom left (the panel is on the right): what just happened, Undo for 8 seconds; a failure stays until closed
+function panelToast(text, o){
+  o = o || {};
+  if(typeof document === 'undefined' || !document.body) return;
+  let box = document.getElementById('rwToasts');
+  if(!box){ box = document.createElement('div'); box.id = 'rwToasts'; box.className = 'toasts'; box.setAttribute('role', 'status'); box.setAttribute('aria-live', 'polite'); document.body.appendChild(box); }
+  const t = document.createElement('div');
+  t.className = 'toast' + (o.error ? ' error' : '');
+  t.innerHTML = `<span class="t-icon" aria-hidden="true"></span><span class="t-text">${esc(text)}</span>${o.undo ? '<button type="button" class="t-undo">Undo</button>' : ''}<button type="button" class="t-close" aria-label="Close">${PANEL_ICON('x')}</button>`;
+  while(box.children.length > 2) box.firstElementChild.remove();
+  box.appendChild(t);
+  const gone = () => t.remove();
+  t.querySelector('.t-close').onclick = gone;
+  const u = t.querySelector('.t-undo'); if(u) u.onclick = () => { gone(); panelUndo(); };
+  if(!o.stay) setTimeout(gone, o.ms || 8000);
+}
+// the head's buttons: the status menu (arrow keys move in it, Esc closes it), Previous and Next, the claim ID's copy
+function panelBindHead(f, d, seq){
+  const btn = d.querySelector('#stBtn'), menu = d.querySelector('#stMenu');
+  const shut = () => { if(menu) menu.hidden = true; if(btn) btn.setAttribute('aria-expanded', 'false'); };
+  if(btn && menu){
+    btn.onclick = () => { const open = menu.hidden; menu.hidden = !open; btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if(open){ const b = menu.querySelector('button'); if(b) b.focus(); } };
+    menu.onkeydown = e => { const all = [...menu.querySelectorAll('button')], i = all.indexOf(document.activeElement);
+      if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){ e.preventDefault(); const n = all[(i + (e.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length]; if(n) n.focus(); } };
+  }
+  d.querySelectorAll('[data-st]').forEach(b => b.onclick = () => { shut(); if(b.disabled || xpWalkGuarded()) return; stOpen(f, d, seq, b.dataset.st); });
+  if(!d.dataset.stOutside){ d.dataset.stOutside = '1';
+    d.addEventListener('click', e => { const m = d.querySelector('#stMenu'); if(m && !m.hidden && !(e.target.closest && e.target.closest('.st-wrap'))){ m.hidden = true; const b = d.querySelector('#stBtn'); if(b) b.setAttribute('aria-expanded', 'false'); } }); }
+  const cc = d.querySelector('#copyClaim');
+  if(cc) cc.onclick = async () => { try { await navigator.clipboard.writeText(cc.dataset.copy || ''); cc.classList.add('copied'); panelToast('Claim ID copied.'); }
+    catch(e){ const s = getSelection(), rg = document.createRange(); rg.selectNodeContents(cc); s.removeAllRanges(); s.addRange(rg); stSay(d, 'Press Ctrl+C to copy the claim ID.'); } };
+  panelBindNav(f, d);
+}
+// Previous and Next: the list's items in its order (Next asks for the list's next page at its end)
+function panelBindNav(f, d){
+  const id = f.finding_id, pv = d.querySelector('#prevItem'), nx = d.querySelector('#nextItem');
+  if(pv) pv.onclick = () => { const ids = state.worklist || [], i = ids.indexOf(id); if(i > 0) openDetail(ids[i - 1]); };
+  if(nx) nx.onclick = async () => { const ids = state.worklist || [], i = ids.indexOf(id); if(i < 0) return;
+    let n = ids[i + 1]; if(!n && state.wlNext){ try { await state.wlNext(); } catch(e){} n = (state.worklist || [])[i + 1]; }
+    if(n && state.detailId === id) openDetail(n); };
+}
+// Esc in the panel closes what is open inside it first: the status menu, then a form, then (index.html) the panel
+function panelEscape(d){
+  const m = d && d.querySelector && d.querySelector('#stMenu');
+  if(m && !m.hidden){ m.hidden = true; const b = d.querySelector('#stBtn'); if(b){ b.setAttribute('aria-expanded', 'false'); b.focus(); } return true; }
+  const fm = d && d.querySelector && d.querySelector('#stForm');
+  if(fm && !fm.hidden && fm.innerHTML){ stFormClose(d); return true; }
+  const call = d && d.querySelector && d.querySelector('#callForm');
+  if(call){ const box = call.parentNode; if(box) box.innerHTML = ''; const x = d.querySelector('#xpBox'); if(x) x.classList.remove('has-form'); if(d.focus) d.focus({preventScroll: true}); return true; }
+  return false;
+}
+// The keys in an open panel (the keyboard sheet lists them; none fires while the person types in a field): j and k move,
+// Enter presses the main button, s Sent, p Paid, l Let go, b Billed (each opens its form), n logs a call or portal check, e
+// opens EMA, y copies the claim ID, 1 to 9 copy the route's fields (in the call form, 1 to 6 pick what the payer said), c
+// copies them all, u undoes the last change.
+function panelKey(e, d){
+  const k = e.key, t = e.target;
+  const press = sel => { const b = d.querySelector(sel); if(b && !b.disabled){ b.click(); return true; } return false; };
+  const hint = text => { const el = d.querySelector('#xpErr') || d.querySelector('.st-err'); if(el) el.textContent = text; };
+  if(d.querySelector('#callForm') && /^[1-6]$/.test(k)){ e.preventDefault(); press(`#callForm [data-ans-key="${k}"]`); return; }
+  if(k === 'j'){ e.preventDefault(); press('#nextItem'); }
+  else if(k === 'k'){ e.preventDefault(); press('#prevItem'); }
+  else if(k === 'Enter'){
+    const own = !t || t === d || (typeof document !== 'undefined' && t === document.body) || (t.classList && t.classList.contains('dr-title'));
+    if(!own) return;
+    e.preventDefault(); press('#xpBox .primary') || press('#xpMain') || press('#sentNext') || hint('Nothing to press here.');
+  }
+  else if(k === 's'){ e.preventDefault(); press('[data-xp="mark_sent"]') || press('#sentNext') || press('[data-st="appealed"]') || hint('Nothing to mark sent here.'); }
+  else if(k === 'p'){ e.preventDefault(); press('[data-st="resolved"]') || hint('This item cannot be marked paid from here.'); }
+  else if(k === 'l'){ e.preventDefault(); press('[data-xp="let_go"]') || press('#letGoNext') || press('[data-st="dismissed"]') || hint('This item cannot be let go from here.'); }
+  else if(k === 'b'){ e.preventDefault(); press('[data-xp="mark_billed"]') || press('[data-xp="billed_patient"]') || hint('Nothing to mark billed here.'); }
+  else if(k === 'n'){ e.preventDefault(); press('[data-xp="log_outcome"]') || hint('No call or portal check to log here.'); }
+  else if(k === 'e'){ e.preventDefault(); press('[data-xp="open_in_ema"]') || press('[data-rc="ema"]') || hint('No EMA address for this item.'); }
+  else if(k === 'y'){ e.preventDefault(); press('#copyClaim') || hint('No claim ID to copy here.'); }
+  else if(k === 'u'){ e.preventDefault(); panelUndo(); }
+  else if(k === 'c'){ e.preventDefault(); press('#rcCopyAll') || hint('No route to copy here.'); }
+  else if(/^[1-9]$/.test(k)){ e.preventDefault(); press(`[data-rc-key="${k}"]`); }
 }

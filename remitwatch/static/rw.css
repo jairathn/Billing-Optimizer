@@ -1022,6 +1022,87 @@ details summary { cursor: pointer; }
 #drawer:focus { outline: none; }
 body:has(#drawer.open) :is(.page-actions, .ph-go) .primary { background: var(--surface); border-color: var(--border-strong); color: var(--text); box-shadow: none; }
 
+/* == 13b. Item panel: head, status, forms, route rows (unit ui-panel) ============================================ */
+/* The panel's head under the design's .dr-head: the state beside the person's status (one button with its menu), the two
+   facts, the placeholders shown only when an answer is slow, the small forms that take a status's answers in the panel
+   (no browser box), the reason chips, the call or portal check, and the route's copy rows with their number keys. */
+#drawer:focus, .dr-title:focus { outline: none; }
+.dr-top button:disabled { opacity: .4; cursor: default; }
+.dr-top button .i { width: 18px; height: 18px; }
+.dr-meta .who { color: var(--text); font-weight: var(--fw-semibold); }
+.dr-state { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); min-height: 28px; }
+.st-wrap > .menu { top: calc(100% + 6px); left: 0; right: auto; }
+.st-btn { height: 28px; padding: 0 6px 0 10px; gap: 4px; border-radius: var(--r-sm); font-size: var(--fs-sm); }
+.st-btn .i { width: 14px; height: 14px; color: var(--text-3); }
+.st-menu kbd { font-size: var(--fs-xs); }
+.facts-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* placeholders: shown only after 250 ms, so a quick answer never flashes them */
+.dr-skel { display: flex; flex-direction: column; gap: var(--sp-3); }
+.dr-skel .skel { opacity: 0; animation: rw-skel-show 0s linear .25s forwards; }
+@keyframes rw-skel-show { to { opacity: 1; } }
+.skel-title { height: 24px; width: 72%; }
+.skel-line { height: 14px; width: 48%; }
+.skel-facts { height: 58px; width: 100%; }
+.skel-box { height: 132px; width: 100%; border-radius: var(--r-lg); }
+.dr-body > :empty { display: none; }
+.dr-folds { display: flex; flex-direction: column; }
+.dr-line, .dr-more { margin: 0; }
+#drawer tr.is-item > td { background: var(--surface-3); }
+.next-due { color: var(--text-2); }
+.why-label { font-weight: var(--fw-semibold); }
+details.why > summary .xp-verdict { color: var(--text-2); font-weight: var(--fw-regular); }
+details.why > div > .small { margin-top: var(--sp-1); }
+/* the small forms: a title, a line of help, the reason chips, the fields, Save and Cancel */
+.st-form { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--surface); }
+.st-form-head { display: flex; flex-direction: column; gap: 2px; }
+.st-form-head b { font-size: var(--fs-md); font-weight: var(--fw-semibold); color: var(--text); }
+.st-form-head span { font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
+.st-form .field { display: flex; flex-direction: column; gap: 4px; }
+.st-form .field[hidden] { display: none; }
+.st-form label { font-size: var(--fs-xs); font-weight: var(--fw-medium); color: var(--text-2); }
+.st-form input { width: 100%; }
+.st-form .hint { font-size: var(--fs-xs); color: var(--text-3); }
+.st-form-err { font-size: var(--fs-sm); color: var(--danger); }
+.st-form-err:empty { display: none; }
+.chip-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-opt { height: 30px; padding: 0 12px; gap: 6px; border-radius: var(--r-full); font-size: var(--fs-sm); font-weight: var(--fw-regular); }
+.chip-opt[aria-pressed="true"] { background: var(--surface-3); border-color: var(--border-control); font-weight: var(--fw-medium); }
+.chip-opt[aria-pressed="true"]::before { content: ""; width: 14px; height: 14px; background: currentColor;
+  -webkit-mask: var(--i-check) center / contain no-repeat; mask: var(--i-check) center / contain no-repeat; }
+.chip-opt kbd { font-size: var(--fs-xs); }
+.xp-input { width: 100%; margin: var(--sp-1) 0; }
+/* one filled button at a time: while a form is open, its Save is the one */
+#drawer.dr-form-open .next .primary, .xp-box.has-form #xpMain.primary {
+  background: var(--surface); border-color: var(--border-strong); color: var(--text); box-shadow: none; }
+/* the route: its line, its main button, the copy rows (number key, label, value, Copy), the count and I sent it */
+.rc-card { display: flex; flex-direction: column; gap: var(--sp-2); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.rc-head { font-size: var(--fs-sm); line-height: 24px; }
+.rc-head .chip { margin-right: 2px; }
+.rc-head .easy { padding: 0 6px; height: 18px; display: inline-flex; align-items: center; border-radius: var(--r-full);
+  background: var(--neutral-soft); color: var(--neutral-fg); font-size: var(--fs-xs); font-weight: var(--fw-semibold); }
+.rc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: 0; }
+.rc-count { margin-left: var(--sp-1); }
+table.rc-fields { display: block; margin: 0; border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; background: var(--surface); }
+table.rc-fields > tbody { display: block; }
+table.rc-fields tr.copyrow { grid-template-columns: 24px minmax(96px, 132px) minmax(0, 1fr) auto; cursor: default; }
+table.rc-fields tr.copyrow > td { padding: 0; border: 0; background: none; overflow-wrap: anywhere; }
+table.rc-fields tr.copyrow > td:nth-child(2) { color: var(--text-3); }
+table.rc-fields tr.rc-empty { background: var(--surface-2); }
+.rc-key kbd { font-size: var(--fs-xs); }
+.rc-attach { margin: 2px 0 4px; padding-left: 18px; }
+.rc-sent { display: flex; flex-wrap: wrap; align-items: end; gap: var(--sp-2) var(--sp-3); padding: var(--sp-3) var(--sp-4); border-radius: var(--r-lg); background: var(--surface-2); }
+.rc-sent label { display: flex; flex-direction: column; gap: 4px; color: var(--text-2); }
+.rc-sent input { width: 16rem; max-width: 100%; }
+@media (max-width: 640px) {
+  .chip-opt { height: 40px; }
+  .st-form .actions button { height: 44px; flex: 1 1 auto; }
+  table.rc-fields tr.copyrow { grid-template-columns: 20px minmax(0, 1fr) auto; }
+  table.rc-fields tr.copyrow > td:nth-child(2) { grid-column: 2; }
+  table.rc-fields tr.copyrow > td:nth-child(3) { grid-column: 2; grid-row: 2; }
+  table.rc-fields tr.copyrow > td:nth-child(4) { grid-column: 3; grid-row: 1 / span 2; }
+  .rc-sent input { width: 100%; }
+}
+
 /* == 14. Forms ===================================================================================================== */
 input[type="text"], input[type="search"], input[type="password"], input[type="number"], input[type="email"], input[type="tel"],
 input[type="date"], input[type="url"], input:not([type]), select, textarea {

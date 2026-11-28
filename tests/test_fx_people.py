@@ -521,9 +521,12 @@ def xp():
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
+# moved with the same guarantees from the browser's prompt box to the call or portal check's own amount field (unit ui-panel,
+# CRITIQUE_biller change 4: no browser boxes): the field starts empty with the disputed amount as a hint; amounts are read as
+# typed; anything else is refused in the panel with the reason and nothing is sent; Save acts once
 def test_people1_the_paid_prompt_starts_empty_with_the_disputed_amount_as_a_hint(xp):
-    asked = xp["paid_typed_as_ema_prints_it"]["asked"]
-    assert asked[0]["def"] == "" and "The amount in dispute is $34.60" in asked[0]["msg"], asked
+    r = xp["paid_typed_as_ema_prints_it"]
+    assert r["start_empty"] and "The amount in dispute is $34.60" in r["hint"], r
 
 
 def test_people1_an_amount_is_read_as_the_remittance_prints_it(xp):
@@ -535,16 +538,14 @@ def test_people1_an_amount_is_read_as_the_remittance_prints_it(xp):
 def test_people1_ok_on_the_empty_prompt_never_records_the_disputed_amount(xp):
     r = xp["paid_ok_on_what_the_prompt_holds"]
     assert r["sent"] == [], r
-    assert [a["msg"].split("\n\n")[0] for a in r["asked"][1:]] == [
-        "Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is."], r["asked"]
+    assert r["errors"] == ["Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is."], r
 
 
 def test_people1_zero_and_bad_input_are_asked_again(xp):
     r = xp["paid_typed_bad_then_cancel"]
     assert r["sent"] == [], r
-    whys = [a["msg"].split("\n\n")[0] for a in r["asked"][1:]]
-    assert whys == ["Use at most two decimals (dollars and cents).", PAID_ZERO,
-                    "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00."], whys
+    assert r["errors"] == ["Use at most two decimals (dollars and cents).", PAID_ZERO,
+                           "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00."], r["errors"]
 
 
 def test_people1_zero_is_taken_where_the_item_brings_no_new_money(xp):
@@ -552,12 +553,12 @@ def test_people1_zero_is_taken_where_the_item_brings_no_new_money(xp):
     again with "mark it Lost or Let go"."""
     r = xp["paid_zero_on_a_paid_line"]
     assert [c.get("recovered_cents") for c in r["sent"]] == [0], r
-    assert "Type 0" in r["asked"][0]["msg"], r["asked"]
+    assert "Type 0" in r["hint"], r
 
 
 def test_people1_a_double_click_on_save_acts_once(xp):
     assert len(xp["working_double_click"]["sent"]) == 1, xp["working_double_click"]
-    assert len(xp["paid_double_click"]["sent"]) == 1 and len(xp["paid_double_click"]["asked"]) == 1, xp["paid_double_click"]
+    assert len(xp["paid_double_click"]["sent"]) == 1 and xp["paid_double_click"]["errors"] == [], xp["paid_double_click"]
 
 
 def test_people1_a_double_click_on_go_in_the_decide_box_acts_once(xp):

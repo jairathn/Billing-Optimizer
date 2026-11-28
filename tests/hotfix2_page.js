@@ -74,9 +74,11 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
   out.race = { panel: await page.$eval('#drawer', d => d.dataset.fid), last, slow };
   await page.unroute('**/api/findings/' + slow);
 
-  // ---------------------------------------------------------------- H1 (0a-10): two clicks 20 ms apart on the status bar's Sent: one change
+  // ---------------------------------------------------------------- H1 (0a-10): two clicks 20 ms apart on Sent's Save: one change
+  // (the status bar became the head's status menu and its Sent form, unit ui-panel: the same guarantee on the press that saves)
   const n0 = posts.length;
-  const sent = await page.$('#drawer [data-st="appealed"]'); const sb = await sent.boundingBox();
+  await page.click('#drawer #stBtn'); await page.click('#drawer [data-st="appealed"]'); await page.waitForSelector('#drawer #stSave');
+  const sent = await page.$('#drawer #stSave'); const sb = await sent.boundingBox();
   await page.mouse.click(sb.x + 5, sb.y + 5); await sleep(20); await page.mouse.click(sb.x + 5, sb.y + 5);
   await sleep(1500);
   out.double_sent = { posts: posts.slice(n0).filter(p => /\/status$/.test(p.url)).length, events: (await (await page.request.get(base + 'api/findings/' + last)).json()).events.filter(e => e.kind === 'manual').length };
@@ -155,16 +157,24 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
   // ---------------------------------------------------------------- H4: the Paid amount
   await open(); ids = await rows();
   const paid = [];
+  // the Paid form in the panel (unit ui-panel: no browser box): its amount field starts empty with the amount in dispute in its
+  // help; each amount typed is saved or refused there with the reason
+  dialogs.length = 0;
   for (const [k, typed] of [[5, ['1,250.00']], [6, ['', '-50', '1e9', '12.345', 'abc', '0', '$0.00', '$1,250.00']], [7, ['1250.5']], [8, ['$95']], [9, ['99999']]]) {
     await clickRow(ids[k]); await settle(ids[k]); await sleep(300);
-    dialogs.length = 0; answers.length = 0; answers.push(...typed, null);
-    const before = posts.length;
-    await page.click('#drawer [data-st="resolved"]'); await sleep(900);
+    const before = posts.length, errors = [];
+    await page.click('#drawer #stBtn'); await page.click('#drawer [data-st="resolved"]'); await page.waitForSelector('#drawer #stAmt');
+    const start = await page.$eval('#drawer #stAmt', i => i.value), help = await page.$eval('#drawer #stForm', f => f.innerText);
+    for (const t of typed) {
+      await page.fill('#drawer #stAmt', t); await page.click('#drawer #stSave'); await sleep(700);
+      const e = await page.$('#drawer #stFormErr'); const said = e ? (await e.innerText()).trim() : ''; if (said) errors.push(said);
+      if (posts.slice(before).some(x => /\/status$/.test(x.url))) break;
+    }
     const p = posts.slice(before).find(x => /\/status$/.test(x.url));
-    paid.push({ typed, asked: dialogs.map(d => ({ value: d.value, message: d.message })), sent: p ? p.body : null });
-    answers.length = 0;
+    paid.push({ typed, start, help, errors, sent: p ? p.body : null });
   }
   out.paid = paid;
+  out.paid_dialogs = dialogs.length;
 
   // ---------------------------------------------------------------- H3: a bulk change carries what each row showed
   await open(); ids = await rows();
@@ -194,33 +204,38 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
     await sleep(300);
     return page.$eval('#drawer #xpMain', b => b.dataset.xp);
   };
+  // Log what happened is the call or portal check (unit ui-panel): the payer's answer as a chip, the amount in its own field
   const logOutcome = async (what, note) => {
     await page.click('#drawer #xpMain');
-    await page.waitForSelector('#drawer #xpoSave');
-    await page.check(`#drawer input[name=xpo][value=${what}]`);
-    if (note) await page.fill('#drawer #xpoNote', note);
+    await page.waitForSelector('#drawer #callSave');
+    await page.click(`#drawer [data-ans="${what === 'working' ? 'in_process' : what}"]`);
+    if (note) await page.fill('#drawer #callNote', note);
   };
   const manualLines = async id => (await (await page.request.get(base + 'api/findings/' + id)).json()).events.filter(e => e.kind === 'manual').length;
   out.panel = {};
-  for (const [k, id, typed] of [['A', pA, ['1,250.00']], ['B', pB, [true, '0', null]], ['D', pD, ['$1,250.00']]]) {
+  dialogs.length = 0;
+  for (const [k, id, typed] of [['A', pA, ['1,250.00']], ['B', pB, ['', '0']], ['D', pD, ['$1,250.00']]]) {
     const main = await openPanel(id);
     await logOutcome('paid');
-    dialogs.length = 0; answers.length = 0; answers.push(...typed);
-    const n0 = posts.length;
-    await page.click('#drawer #xpoSave'); await sleep(1500);
-    out.panel[k] = { main, asked: dialogs.map(d => ({ value: d.value, message: d.message })),
-                     sent: posts.slice(n0).filter(p => p.url === '/api/findings/' + id + '/status').map(p => p.body) };
-    answers.length = 0;
+    const start = await page.$eval('#drawer #callAmt', i => i.value), help = await page.$eval('#drawer #callForm', f => f.innerText);
+    const n0 = posts.length, errors = [];
+    for (const t of typed) {
+      await page.fill('#drawer #callAmt', t); await page.click('#drawer #callSave'); await sleep(1200);
+      const e = await page.$('#drawer #xpErr'); const said = e ? (await e.innerText()).trim() : ''; if (said) errors.push(said);
+      if (posts.slice(n0).some(p => p.url === '/api/findings/' + id + '/status')) break;
+    }
+    out.panel[k] = { main, start, help, errors, sent: posts.slice(n0).filter(p => p.url === '/api/findings/' + id + '/status').map(p => p.body) };
   }
   {
     const main = await openPanel(pC);
     const before = await manualLines(pC);
     await logOutcome('working', 'Called the payer: in review, reference INV-0001 (invented)');
     const n0 = posts.length;
-    await page.dblclick('#drawer #xpoSave'); await sleep(2000);
+    await page.dblclick('#drawer #callSave'); await sleep(2000);
     out.panel.C = { main, posts: posts.slice(n0).filter(p => p.url === '/api/findings/' + pC + '/status').length, lines: (await manualLines(pC)) - before };
   }
   out.panel.overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  out.panel.dialogs = dialogs.length;
   await page.route('**/api/findings/*/explain', route => route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"held back by the test"}' }));
 
   // ---------------------------------------------------------------- H7: hiding shows its size first, asks for the reason, the count and the owner
