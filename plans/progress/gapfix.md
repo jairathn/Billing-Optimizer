@@ -102,13 +102,57 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
 
 ## Next command
 
-    cd $S/tk/wt/gapfix && python3 -m pytest -q -p no:cacheprovider tests/test_gap_one_claim.py
+    cd $S/tk/wt/gapfix && python3 -m pytest -q -p no:cacheprovider tests/test_gap_one_claim.py tests/test_gap_unseen.py tests/test_gap_print_batch.py
 
-## Measurements so far
+## Measurements (private copy of final_world3, one cycle each, day 2026-11-24; tip b170aed vs branch 3e55efb)
 
-None yet (the final_world3 cycle is run once at the end, tip vs branch).
+Aggregates only; the snapshots stayed in the unit's private folder and were deleted.
+
+- Listed (open, not stale): tip 10,572 items, $3,455,086.22; branch 10,552, $3,450,996.35.
+- Appear 12 ($1,173.00), all NO_ANSWER from the 837 pass: 9 ($879.28) found through the visit's second payer (G6) and not
+  answered by it: Selman & Co. 6 ($559.30: 5 work now, 1 expired), UnitedHealthcare Medicare Advantage 2 ($289.98), AmFirst
+  secondary claims 1 ($30.00), each at what the first payer left by its 837; 2 listed because EMA's A/R holds the line
+  open for insurance (G5: Tricare $64.00 work now, APWU $98.00 expired); 1 Tricare claim sent while Tricare's ERAs flowed
+  (G4: $131.72, expired).
+- Vanish 32 ($5,606.37), all expired NO_ANSWER items of the 837 pass, now counted unseen (G4): Self-funded plan TPAs 23
+  ($4,382.99), Freedom Life 9 ($1,223.38). Their payer ids sent no ERA around those sends (at most 4 of 14 nearby claims
+  answered by an 835; one payer id 0 of 11; each payer's first answered send came later).
+- Change 4: four second-payer claims to Medicaid (other) listed in both runs now carry a value (what the first payer left
+  by the 837: $251.79, $40.83, $40.67, $10.21; none before).
+- Kept by the self-check: tip 0, branch 2 (first cut 17): two claims to a visit's second payer that EMA shows answered
+  by that payer's own postings ($108.19, $12.91). The vanished check has no route for "answered in EMA" on an item the old
+  code listed without an EMA claim (see the integrator notes).
+- Unseen (meta ema:unanswered_unseen): tip 1,557 claims, $629,759.19 billed, one fixed reason; branch 1,570 claims,
+  $632,970.83 valued ($635,064.92 billed): before_ema_reports 1,568 ($632,739.15; services from 2023-07 while EMA's reports
+  begin 2025-01), ema_claim_not_found 1 ($125.00), voided_in_ema 1 ($106.68). By payer group (branch, valued): VA Community
+  Care 1,237 ($546,231.78), Tricare 178 ($35,239.74), Self-funded plan TPAs 57 ($21,779.74), Asuris 15 ($3,837.55),
+  Medi-Share 14 ($3,506.72), Champ VA 11 ($2,794.07), Freedom Life 9 ($2,721.51), others 49; 19 groups.
+- Archive plan for the unseen claims: at the default horizon (36 months) the tip's plan retires the bills of 8 of them
+  ($2,040.23), the branch's none (held 'counted unseen': 8); at the 24-month floor the tip's retires 1,376 ($567,136.57),
+  the branch's none (held 1,376).
+- Waiting view: tip 2,289 claims ($764,737.81), 2,000 named, 289 counted nowhere else; branch 2,291 ($764,998.13), 2,000
+  named and the rest counted (291, $98,565.10, due over the next nine months); notes: 2 claims in EMA's print batch ($260.32).
+  13 report-check items listed before their claim began waiting stay listed (not_sent 2, rejected 6, no answer 5).
+- No-ERA payers: tip 23 (3,988 claims, 1,557 unchecked, 67 listed); branch 30 (4,054 claims, 1,570 unchecked, 88 listed).
+- The brief's four claims: the two print-batch claims (0da1ade542a70bf0b15bfd66, 8bd74fff5e62cad10064f9b6) are on the
+  waiting view, due in one and two days, with their print-batch notes; the two A/R claims (8689f0c68f33904741b4fd57,
+  b9b25665e23f548ce1d8a3a1) are listed (NO_ANSWER, the A/R row their evidence).
+- Hand-trace (every moved item, from the raw rows): the 12 that appear, the 4 that change and the 32 that vanish match their
+  rule (837 sends, AMT*EAF, EMA lines and postings by role, A/R rows, the payer's 835 flow around the send). The first branch
+  run's three over-reaches were fixed and re-measured: second-payer claims valued at EMA's open balance and dropped at $0;
+  a second payer's claim taking its EMA claim's status and report checks (a never-sent item vanished); the item carrying
+  the first payer's EMA claim, so the states marked two claims done by the first payer's payment.
+- Replay back-as-new pairs ($S/tk/replay/analysis.json, 28): 26 are one claim under its claim id in one month and its EMA
+  claim number (or the same claim id) in the other, which save() now hands on whole (same_ema_claim); 2 are two claim ids
+  on one EMA claim (a bill made again), kept a new matter by design (notes handed on).
 
 ## Open questions / notes for the integrator
 
 - The vanished self-check has no route for an item whose work moved to an heir with no bill to match; G8 records the fold
   in the heir's evidence instead of touching selfcheck.py (not this unit's file).
+- Nor for an item the old code listed without an EMA claim that the new code finds answered in EMA (2 on the real data,
+  claims to a visit's second payer answered by its own postings): the self-check keeps them every run until a person or
+  the owner's acceptance lets them go. A route "answered in EMA after the send, by the claim's payer" in selfcheck.py
+  (it would read ema_line_payments by the evidence's 'visit_ema_claim' and role 'secondary') would end that.
+- A claim held on the waiting view whose EMA claim a newer report calls Rejected waits for its own due day (the brief's
+  rule; its waiting entry says so). Consider making such a claim due at once.
