@@ -400,10 +400,40 @@ nav#nav, .sidebar { position: sticky; top: 0; z-index: var(--z-nav); height: 100
 .theme-seg button { width: 30px; height: 26px; padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-3); }
 .theme-seg button:hover { background: var(--surface-3); color: var(--text); }
 .theme-seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border-strong); }
+/* who is working here: the person's own name at the sidebar's foot (shell.js), and the small card that sets it */
+.nav-foot { flex-wrap: wrap; }
+.person-slot { flex: 1 0 100%; min-width: 0; }
+.person-me { display: flex; align-items: center; justify-content: flex-start; gap: var(--sp-2); width: 100%; height: 36px; padding: 0 6px;
+  border: 0; border-radius: var(--r-md); background: transparent; box-shadow: none; color: var(--text); font-size: var(--fs-sm);
+  font-weight: var(--fw-medium); text-align: left; }
+.person-me:hover { background: var(--nav-hover); }
+.person-me.ask { color: var(--text-2); }
+.person-me .avatar { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--r-full);
+  background: var(--surface-3); color: var(--text-2); font-size: var(--fs-xs); font-weight: var(--fw-semibold); }
+.person-me .avatar .i { width: 14px; height: 14px; vertical-align: 0; }
+.person-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person-card { position: fixed; left: var(--sp-3); bottom: var(--sp-16); z-index: var(--z-modal); width: 300px; max-width: calc(100vw - 2 * var(--sp-4));
+  display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-4); background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-lg); font-size: var(--fs-sm); }
+.person-card[hidden] { display: none; }
+.person-card p { margin: 0; color: var(--text-2); }
+.person-card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); font-size: var(--fs-md); }
+.person-card-head .icon-btn { width: 28px; height: 28px; }
+.person-names { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.person-names:empty { display: none; }
+.person-names > span { flex-basis: 100%; font-size: var(--fs-xs); color: var(--text-3); }
+.person-names .chip-btn { height: 28px; padding: 0 10px; font-size: var(--fs-sm); }
+.person-form { display: flex; flex-direction: column; gap: 6px; }
+.person-form label { font-size: var(--fs-xs); font-weight: var(--fw-medium); color: var(--text-2); }
+.person-row { display: flex; gap: var(--sp-2); }
+.person-row input { flex: 1; min-width: 0; }
+.person-err { font-size: var(--fs-xs); color: var(--danger); }
+.person-err:empty { display: none; }
 .nav-close { display: none; }
 /* the narrow sidebar: the icons alone (the person's choice on a desk; always between 641 and 1023 px) */
 :root[data-sidebar="rail"] nav#nav { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
-:root[data-sidebar="rail"] nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg) { display: none; }
+:root[data-sidebar="rail"] nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg, .person-name) { display: none; }
+:root[data-sidebar="rail"] nav#nav .person-me { justify-content: center; width: 44px; padding: 0; }
 :root[data-sidebar="rail"] nav#nav .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
 :root[data-sidebar="rail"] nav#nav .brand { padding: 0; justify-content: center; }
 :root[data-sidebar="rail"] nav#nav .nav-foot { flex-direction: column; }
@@ -1408,7 +1438,8 @@ td.mark { width: 28px; font-weight: var(--fw-semibold); }
 @media (min-width: 641px) and (max-width: 1023px) {
   .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
   nav#nav { padding-left: var(--sp-2); padding-right: var(--sp-2); align-items: center; }
-  nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg, #railBtn) { display: none; }
+  nav#nav :is(.brand > span:not(.brand-mark), .nav-label, .nav-sub, .nav-count, .nav-dot, .nav-item > span, .theme-seg, #railBtn, .person-name) { display: none; }
+  nav#nav .person-me { justify-content: center; width: 44px; padding: 0; }
   nav#nav .nav-item { justify-content: center; width: 44px; height: 40px; padding: 0; }
   nav#nav .brand { padding: 0; justify-content: center; }
   nav#nav .nav-item.within { background: var(--surface); box-shadow: 0 0 0 1px var(--border); }

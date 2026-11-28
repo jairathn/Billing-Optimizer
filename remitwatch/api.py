@@ -325,6 +325,68 @@ def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredent
     return credentials.username
 
 
+# Who is working (CRITIQUE_biller change 5). Everyone signs in with the one shared password; each person chooses their own
+# name once per computer (static/shell.js keeps it in the browser) and the page sends it, URI-encoded, with every change.
+# What a person does is kept under that name in the item's history (actions.person_name says what a name may be); a change
+# sent without one (a script, a page from before) is kept under the sign-in, as before. The name stays in the store: it
+# is never logged, and runlog.Scrubber masks it should it ever reach a log line.
+PERSON_HEADER = "x-remitwatch-person"
+
+
+def person_of(request: Optional[Request]) -> str:
+    """The name the person chose on this computer, as the page sent it, or '' (none sent, or not a name)."""
+    from urllib.parse import unquote
+    from .actions import person_name
+    raw = request.headers.get(PERSON_HEADER) if request is not None else None
+    if not raw or len(raw) > 400:
+        return ""
+    try:
+        return person_name(unquote(raw, errors="strict"))
+    except (UnicodeDecodeError, ValueError):
+        return ""
+
+
+def acting(request: Optional[Request], user: str) -> str:
+    """Who did it, as the item's history keeps it: the person's own name when the page sent one, else the sign-in."""
+    return person_of(request) or user
+
+
+_NOTE_IN_BRACKETS = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def person_in(actor: Any) -> str:
+    """The person's own name an item's history line holds, or '' when the line is the app's own (a hide rule, a fax sent
+    again by the hourly run, the run), the shared sign-in's (a change from before names, or from a script) or empty."""
+    from .actions import APP_ACTORS
+    s = _NOTE_IN_BRACKETS.sub("", str(actor or "")).strip()
+    if not s or s.lower() in APP_ACTORS or s == USERNAME:
+        return ""
+    return s
+
+
+def _with_worked_by(items: list[dict]) -> list[dict]:
+    """Who set each item's status, where a person did and that status still stands (nothing the run or a hide rule did
+    came after it): worked_by (their name), worked_at, worked_to (the status). Work's rows and the panel say "Sent by
+    <name>"; a status kept under the shared sign-in names nobody. One query per 500 items, by the history's index."""
+    from .actions import DECIDING_KINDS
+    want = {r["finding_id"]: r for r in items if r.get("finding_id") and r.get("status") not in (None, "", "open")}
+    if not want or not has_table("finding_events"):
+        return items
+    ids = list(want)
+    newest: dict[str, dict] = {}
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        for e in rows(f"""SELECT finding_id, kind, to_status, actor, at FROM finding_events
+                          WHERE finding_id IN ({','.join('?' * len(part))}) AND kind IN {DECIDING_KINDS}
+                          ORDER BY finding_id, at DESC, id DESC""", tuple(part)):
+            newest.setdefault(e["finding_id"], e)
+    for fid, e in newest.items():
+        name = person_in(e["actor"]) if e["kind"] == "manual" and e["to_status"] == want[fid].get("status") else ""
+        if name:
+            want[fid].update(worked_by=name, worked_at=e["at"], worked_to=e["to_status"])
+    return items
+
+
 def owner_state(request: Optional[Request]) -> str:
     """How this request stands with the owner's password: 'open' (none is set, or the right one came with the request),
     'missing' (none was sent), 'wrong', 'blocked' (too many wrong tries from this address) or 'unusable' (the one
@@ -1135,6 +1197,7 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
                               tuple(params) + tuple(order_params) + (limit, offset)))
+    _with_worked_by(data)               # "Sent by <name>": who set each status, where a person did (ui-words)
     for r in data:
         if r.get("finding_id") in each and deadline in DEADLINE_RANGES:
             r["window_cents"], r["next_deadline"], r["window_lines"] = each[r["finding_id"]]
@@ -1339,8 +1402,12 @@ def finding_detail(finding_id: str, _: str = "ok"):
         out["bill"] = bill                  # the whole claim opens from the drawer: "See the whole claim"
     if f.get("transaction_key"):        # the remittance it came from (a takeback or a payment fee has one and no claim)
         out["remit"] = one("SELECT transaction_key, source_name, payer_name, payer_id, payer_contact_phone, payer_contact_url, payment_method, payment_amount_cents, payment_date, trace_number, production_date, payee_npi FROM transactions WHERE transaction_key=?", (f["transaction_key"],))
-    # the record of what people did, for every finding (a payer's routine rate belongs to no one claim)
+    # the record of what people did, for every finding (a payer's routine rate belongs to no one claim); `by`: the person's
+    # own name where a person did it (the panel says "by <name>"), '' for the app's own lines and the shared sign-in's
     out["events"] = rows("SELECT at, kind, from_status, to_status, amount_cents, actor, note FROM finding_events WHERE finding_id=? ORDER BY at DESC, id DESC LIMIT 30", (finding_id,)) if has_table("finding_events") else []
+    for e in out["events"]:
+        e["by"] = person_in(e.get("actor"))
+    _with_worked_by([f])
     out["packets"] = _packets_for(finding_id)
     # the faxes sent for it and the payer's faxes tied to it (remitwatch.fax)
     out["faxes"] = []
@@ -1837,7 +1904,8 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
             raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
                                      "only with a note. Say why.")
         raise HTTPException(400, LET_GO_REASON)
-    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True, done is True)
+    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, acting(request, user), {finding_id: seen} if seen else {}, True,
+                            done is True)
     return {"ok": True}
 
 
@@ -1865,8 +1933,72 @@ async def bulk_status(request: Request, user: str = Depends(require_auth)):
     if status in LET_GO and not (notes or "").strip():
         raise HTTPException(400, "Letting items go, or marking them lost, needs a reason: say why, once for all of them (it is kept "
                                  "in each item's history).")
-    out = await asyncio.to_thread(_person_status, ids, status, notes, None, user, {k: v for k, v in (seen or {}).items() if v}, False)
+    out = await asyncio.to_thread(_person_status, ids, status, notes, None, acting(request, user), {k: v for k, v in (seen or {}).items() if v},
+                                  False)
     return {"ok": True, "updated": out["n"], "changed": out["changed"], "in_flight": out["in_flight"]}
+
+
+# --------------------------------------------------------------------------- who is working
+PEOPLE_NAMES_DAYS = 90          # the names the picker offers: everyone who changed an item in this many days
+
+
+def _people_tally() -> dict:
+    return {"items": 0, "changes": 0, "statuses": {}, "paid_cents": 0, "lines": 0}
+
+
+@app.get("/api/people")
+def people(days: int = Query(7, ge=1, le=31), _: str = Depends(require_auth)):
+    """Who is working (CRITIQUE_biller change 5): the names people chose on their computers, newest first (the picker
+    offers them, so one person keeps one spelling), and what each did today and in the last `days` days, the practice's
+    days, counted from the items' histories: items whose status they changed and each status they set (Started, Sent,
+    Paid with what was paid, Lost, Let go, To do), and lines they wrote down without changing a status (a call, a
+    posting, a bill). What was kept under the shared sign-in (a script, a page from before names) is counted apart as
+    `unnamed`; the app's own lines are never counted. The manager's Summary reads it. Names and counts only: no patient,
+    claim or item."""
+    today = runtime.practice_today()
+    first = runtime.practice_today(-(days - 1))
+    out: dict[str, Any] = {"today": today, "days": days, "names": [], "people": [], "unnamed": {"today": _people_tally(), "days": _people_tally()}}
+    if not has_table("finding_events"):
+        return out
+    # a generous UTC cut, then the practice's own day for each line (a change at 9 PM Eastern is that day's)
+    since = (datetime.now(timezone.utc) - timedelta(days=max(days, PEOPLE_NAMES_DAYS) + 1)).isoformat(timespec="seconds")
+    seen: dict[str, str] = {}
+    by: dict[str, dict] = {}
+    items: dict[tuple, set] = defaultdict(set)
+    from .actions import NOT_APPLIED
+    # a status is always a person's (one kept with no name is counted unnamed); any other line is a person's when it names
+    # one (a call, a posting, a bill, a fax tied), the app's own (a hide rule, the run, a fax sent again) is never counted,
+    # and nor is a change that was not applied
+    for e in rows(f"""SELECT finding_id, at, kind, to_status, amount_cents, actor FROM finding_events
+                      WHERE at >= ? AND kind NOT IN ('hidden', 'unhidden', 'paid_on_later_remit', 'reopened', '{NOT_APPLIED}')
+                      ORDER BY at""", (since,)):
+        name = person_in(e["actor"])
+        if not name and e["kind"] != "manual" and _NOTE_IN_BRACKETS.sub("", str(e["actor"] or "")).strip() != USERNAME:
+            continue
+        if name:
+            seen[name] = max(seen.get(name) or "", str(e["at"] or ""))
+        day = runtime.practice_date(e["at"])
+        if not day or day < first:
+            continue
+        who = by.setdefault(name, {"name": name, "today": _people_tally(), "days": _people_tally(), "last_at": None}) if name \
+            else out["unnamed"]
+        if name:
+            who["last_at"] = max(who["last_at"] or "", str(e["at"] or ""))
+        for span in (("today",) if day == today else ()) + ("days",):
+            t = who[span]
+            t["changes"] += 1
+            if e["kind"] == "manual":
+                t["statuses"][e["to_status"]] = t["statuses"].get(e["to_status"], 0) + 1
+                if e["to_status"] == "resolved":
+                    t["paid_cents"] += int(e["amount_cents"] or 0)
+                items[(name, span)].add(e["finding_id"])
+            else:
+                t["lines"] += 1
+    for (name, span), ids in items.items():
+        (by[name] if name else out["unnamed"])[span]["items"] = len(ids)
+    out["names"] = [n for n, _at in sorted(seen.items(), key=lambda kv: kv[1], reverse=True)]
+    out["people"] = sorted(by.values(), key=lambda p: (-p["days"]["items"], p["name"].lower()))
+    return out
 
 
 # --------------------------------------------------------------------------- rates and references
@@ -4844,7 +4976,7 @@ def _vouch(f: dict) -> dict | None:
 
 
 @app.post("/api/appeals/send", dependencies=[Depends(require_xhr)])
-def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth)):
+def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth), request: Request = None):
     """One item all the way to the payer: the visit note from EMA where the appeal rests on it (Claude reviews it and
     writes the paragraphs that justify the claim), the letter, the fax to the payer's confirmed appeal number, and the
     item marked Sent. What cannot go comes back held, with why and what to do. A packet built earlier is reused (one
@@ -4853,6 +4985,7 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     behind; confirmed: a person checked in EMA that the higher code went out on the claim. An item whose appeal never got
     through (every try failed) can be sent again, to the number saved now."""
     from . import fax
+    user = acting(request, user)            # the fax, the note check and the Sent are kept under the person's own name
     fid = str(body.get("finding_id") or "")
     if not re.fullmatch(FAX_KEY, fid):
         raise HTTPException(400, "finding_id is required")
@@ -5288,7 +5421,7 @@ def _owner_actor(user: str) -> str:
 
 
 @app.post("/api/faxes/payer", dependencies=[Depends(require_xhr)])
-def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_owner)):
+def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_owner), request: Request = None):
     """Save a payer's fax number for appeals ('appeal') or for its second level ('level_2'), as a person confirmed it
     from the payer's own papers; an empty number removes it. A number decides where patient records are faxed, so adding
     or changing one takes the owner's password where one is set. Who and when are kept. A number that replaces another is
@@ -5308,13 +5441,14 @@ def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_ow
     before = _payer_number(pg, purpose)
     if not one("SELECT 1 FROM findings WHERE payer_group=? LIMIT 1", (pg,)) and not before:
         raise HTTPException(404, "No payer by that name.")
-    _record_action({"kind": "payer_fax", "payer_group": pg, "purpose": purpose, "number": fax.digits(number), "actor": _owner_actor(user), "at": _fax_now()})
+    _record_action({"kind": "payer_fax", "payer_group": pg, "purpose": purpose, "number": fax.digits(number),
+                    "actor": _owner_actor(acting(request, user)), "at": _fax_now()})
     changed = bool(before) and bool(number) and fax.digits(number) != before
     return {"ok": True, "number": fax.pretty(number), "previous": fax.pretty(before) if changed else "", "needs_confirm": changed}
 
 
 @app.post("/api/faxes/payer/confirm", dependencies=[Depends(require_xhr)])
-def fax_payer_confirm(body: dict = Body(default={}), user: str = Depends(require_owner)):
+def fax_payer_confirm(body: dict = Body(default={}), user: str = Depends(require_owner), request: Request = None):
     """A person confirms a payer's changed fax number, as the page showed it: retries and follow-ups may use it from now on."""
     from . import fax
     pg, purpose = str(body.get("payer_group") or "").strip(), str(body.get("purpose") or "appeal")
@@ -5325,7 +5459,8 @@ def fax_payer_confirm(body: dict = Body(default={}), user: str = Depends(require
     cur = _payer_number(pg, purpose)
     if not cur or fax.digits(str(body.get("number") or "")) != cur:
         raise HTTPException(409, "That is no longer the number saved. Open the Faxes page again.")
-    _record_action({"kind": "payer_fax_check", "payer_group": pg, "purpose": purpose, "number": cur, "actor": _owner_actor(user), "at": _fax_now()})
+    _record_action({"kind": "payer_fax_check", "payer_group": pg, "purpose": purpose, "number": cur,
+                    "actor": _owner_actor(acting(request, user)), "at": _fax_now()})
     return {"ok": True, "number": fax.pretty(cur)}
 
 
@@ -5717,7 +5852,7 @@ def faxes_refresh(user: str = Depends(require_auth)):
 
 
 @app.post("/api/faxes/follow_up", dependencies=[Depends(require_xhr)])
-def faxes_follow_up(body: dict = Body(default={}), user: str = Depends(require_auth)):
+def faxes_follow_up(body: dict = Body(default={}), user: str = Depends(require_auth), request: Request = None):
     """Send the follow-ups that are due (all of them, or the items named). number, with one item named: a person sends that
     one to the number the page showed them, also where a send nobody pressed a button for would wait (a number changed
     since its last fax; a line that never took it, tried again). stale_ok (JSON true only, with that one item and its
@@ -5730,7 +5865,7 @@ def faxes_follow_up(body: dict = Body(default={}), user: str = Depends(require_a
     stale_ok = person is not None and body.get("stale_ok") is True
     try:
         with fax_run(user) as lock:
-            return _send_followups(prov, user, ids, person_number=person, lock=lock, stale_ok=stale_ok)
+            return _send_followups(prov, acting(request, user), ids, person_number=person, lock=lock, stale_ok=stale_ok)
     except FaxBusy as exc:
         raise HTTPException(409, str(exc))
 
@@ -5741,11 +5876,12 @@ SAYS = {"upheld": ("appeal_decision", "upheld"), "overturned": ("appeal_decision
 
 
 @app.post("/api/faxes/match", dependencies=[Depends(require_xhr)])
-def faxes_match(body: dict = Body(default={}), user: str = Depends(require_auth)):
+def faxes_match(body: dict = Body(default={}), user: str = Depends(require_auth), request: Request = None):
     """Tie a fax that came in to the item it answers, where reading it did not (or tied it to the wrong one). says: what the
     fax decides, as the person read it ('upheld', 'overturned', 'partially_overturned', 'records_request', 'other'); without
     it, a fax not read yet is read now where Claude can. From then on it answers that item."""
     from . import fax
+    user = acting(request, user)            # who tied it and read it, in the item's history
     key, fid = str(body.get("fax_key") or ""), str(body.get("finding_id") or "")
     if not re.fullmatch(FAX_KEY, key) or not re.fullmatch(FAX_KEY, fid):
         raise HTTPException(400, "fax_key and finding_id are required")
@@ -5781,9 +5917,10 @@ def faxes_match(body: dict = Body(default={}), user: str = Depends(require_auth)
 
 
 @app.post("/api/faxes/settle", dependencies=[Depends(require_xhr)])
-def faxes_settle(body: dict = Body(default={}), user: str = Depends(require_auth)):
+def faxes_settle(body: dict = Body(default={}), user: str = Depends(require_auth), request: Request = None):
     """A person says whether a fax whose send never settled went out, from SRFax's own list of sent faxes: it did (it counts
     as sent) or it did not (it counts as a failed try, and the line tries it again)."""
+    user = acting(request, user)            # who checked it, in the item's history
     key = str(body.get("fax_key") or "")
     if not re.fullmatch(FAX_KEY, key) or not isinstance(body.get("went"), bool):
         raise HTTPException(400, "fax_key and went (true or false) are required")
@@ -5880,6 +6017,7 @@ def ema_report_decision(file_id: str, request: Request, body: dict = Body(defaul
     decision = str(body.get("decision") or "")
     if decision not in ("apply", "discard"):
         raise HTTPException(400, "The decision is apply or discard.")
+    user = acting(request, user)            # who decided, kept with the report's decision
     if not _FILE_ID.fullmatch(file_id or ""):
         raise HTTPException(400, "That is not a report's id.")
     if not has_table("ema_report_files"):
@@ -5927,7 +6065,7 @@ EVENT_KINDS = {"posted": "Posted in EMA", "era_requested": "ERA asked for", "bil
 
 
 @app.post("/api/findings/{finding_id}/event", dependencies=[Depends(require_xhr)])
-def finding_event(finding_id: str, body: dict = Body(default={}), user: str = Depends(require_auth)):
+def finding_event(finding_id: str, request: Request, body: dict = Body(default={}), user: str = Depends(require_auth)):
     """Write down work done outside RemitWatch that changes no status (a remittance posted in EMA while the denial is still
     worked, the ERA asked for, a bill sent): one line in the item's history, kept like any other (the journal on Vercel)."""
     kind = str(body.get("event") or "")
@@ -5937,7 +6075,7 @@ def finding_event(finding_id: str, body: dict = Body(default={}), user: str = De
         _not_found(finding_id)          # its money has a new number since the panel was drawn: 409 changed with it, else 404
     note = " ".join(str(body.get("note") or "").split())[:300]
     _record_action({"kind": "event", "finding_id": finding_id, "event": kind, "note": f"{EVENT_KINDS[kind]}: {note}" if note else EVENT_KINDS[kind],
-                    "actor": user})
+                    "actor": acting(request, user)})
     return {"ok": True}
 
 
@@ -6051,6 +6189,7 @@ def hide_add(request: Request, body: dict = Body(default={}), user: str = Depend
     is never hidden."""
     from .actions import HIDE_GRAIN, NEVER_HIDDEN, hide_rule_of
     from .archive_rules import hide_sql
+    user = acting(request, user)            # who hid it or showed it again, kept with the rule
     pg = str(body.get("payer_group") or "").strip()
     sig = str(body.get("signal") or "").strip() or "*"
     raw = {k: str(body.get(k) or "").strip() or "*" for k in ("code", "modifier", "reason")}

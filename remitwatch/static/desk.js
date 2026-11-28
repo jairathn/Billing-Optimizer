@@ -424,7 +424,9 @@ function rowHtml(b, r, o){
     : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
   // a person's status, or for an item that needs no work its state (done, accepted, expired, can't be checked)
   const quietState = ws && !['work_now','waiting'].includes(ws) ? STATE_LABEL[ws] || ws : '';
-  const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`
+  // who set the status, where a person did and it still stands (api._with_worked_by: ui-words, "Started by <name>")
+  const byWho = r.worked_by ? ` <span class="small muted by">by ${esc(r.worked_by)}</span>` : '';
+  const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span>${byWho}</div>`
     : quietState ? `<div><span class="st st-${esc(ws)}" title="${esc(r.state_basis||'')}">${esc(quietState)}</span></div>` : '';
   // EMA closed the line with no person working it (amendment 8): said on the row
   const auto = AUTO_WO[r.ema_outcome] ? `<span class="chip hint" title="${esc(r.ema_outcome === 'auto_written_off' ? "EMA's posting rule wrote off the denial the day the remittance posted; nobody worked this line" : r.ema_outcome === 'lost_to_timely_filing' ? 'Written off for late filing after an earlier denial nobody fixed' : 'Written off the day it posted while the payer still asked for something')}">${esc(AUTO_WO[r.ema_outcome])}</span>` : '';

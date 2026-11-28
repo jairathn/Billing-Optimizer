@@ -283,7 +283,7 @@ function drawerExtras(f, r){
   const datedOpen = !!f.appeal_deadline && f.appeal_deadline >= site;
   const wroteOff = f.written_off_cents ? `<div class="note sev-medium"><b>Written off in EMA.</b> ${money2(f.written_off_cents)} of the money in dispute on this ${f.line_key ? 'line' : 'claim'} is written off (or moved to the patient) in EMA${f.written_off_on ? ', as of ' + esc(f.written_off_on) : ''}${!['open','in_progress'].includes(f.status) ? '.' : datedOpen ? '. The payer can still be asked for it: work it, and reverse the write-off in EMA when the payer pays.' : f.appeal_deadline ? '. Its filing window has closed.' : '. No filing date is on file for it: check the payer\'s rules before working it.'}</div>` : '';
   const notes = `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${wroteOff}${why}${windows}${later}`;
-  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${esc(atTime(e.at))}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
+  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${esc(atTime(e.at))}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${e.by ? 'by ' + esc(e.by) : esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
   const factsHtml = `${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
       <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
@@ -552,7 +552,7 @@ function xpEffective(f, x){
   const when = f.status_changed_at ? ` on ${longDate(practiceDate(f.status_changed_at))}` : '';
   const [action, buttons] = XP_BY_STATUS[f.work_state];
   return Object.assign({}, x, {explain: Object.assign({}, ex, {
-    verdict: {state: f.work_state, sentence: `${(typeof STATUS_WORDS !== 'undefined' && STATUS_WORDS[f.status]) || f.status} by a person${when}.`, rows: []},
+    verdict: {state: f.work_state, sentence: `${(typeof STATUS_WORDS !== 'undefined' && STATUS_WORDS[f.status]) || f.status} by ${f.worked_by && f.worked_to === f.status ? f.worked_by : 'a person'}${when}.`, rows: []},
     next_step: {route: 'status', action, buttons}, state: {work_state: f.work_state}})});
 }
 // EMA's address for the item's claim (Open in EMA): the next step's own, or the template EMA's block gives with the item's

@@ -278,12 +278,13 @@ def ops_accept(request: Request, body: dict = Body(...), user: str = Depends(_ow
             latest = selfcheck.meta_get(c, "selfcheck:offenders_run")
         if checks_overtook(latest, run_id):
             return {"accepted": {}, "stale": True, "run_id": latest, "text": STALE_TEXT}
-        record_action(_state(), {"kind": "selfcheck_request", "what": "accept", "checks": checks, "run_id": run_id, "user": user})
+        record_action(_state(), {"kind": "selfcheck_request", "what": "accept", "checks": checks, "run_id": run_id,
+                                 "user": _api().acting(request, user)})
         return {"asked": True, "text": "Accepted: the next run takes it (press Run the analysis now)."}
     from . import selfcheck
     conn = _api().db()
     try:
-        got = selfcheck.accept_findings(conn, user, checks, run_id=run_id)
+        got = selfcheck.accept_findings(conn, _api().acting(request, user), checks, run_id=run_id)
         conn.commit()
         return got
     finally:
@@ -363,11 +364,11 @@ def archive_reopen(request: Request, body: dict = Body(...), user: str = Depends
         raise HTTPException(404, "That claim is not in the archive.")
     if runtime.serverless():
         from .cloud import record_action
-        record_action(_state(), archive.journal_entry(bill, actor=user, reason=reason, finding_id=fid or None))
+        record_action(_state(), archive.journal_entry(bill, actor=_api().acting(request, user), reason=reason, finding_id=fid or None))
     else:
         conn = _api().db()
         try:
-            archive.request_restore(conn, bill, actor=user, reason=reason, finding_id=fid or None, status="open")
+            archive.request_restore(conn, bill, actor=_api().acting(request, user), reason=reason, finding_id=fid or None, status="open")
         finally:
             conn.close()
     return {"queued": True, "text": ("It comes back with the next analysis: press Run the analysis now on the Data tab."

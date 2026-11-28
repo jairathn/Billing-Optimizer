@@ -515,7 +515,7 @@ async function openDetail(id, opts){
     ${letter ? `<div class="actions" id="letterRow">${letter}</div>` : ''}
     ${typeof faxDrawerHtml === 'function' ? faxDrawerHtml(f, r) : ''}
     ${typeof hideDrawerHtml === 'function' ? hideDrawerHtml(f) : ''}
-    <div class="statusbar"><span class="small muted">Status: <b>${esc(STATUS_WORDS[f.status]||f.status)}</b> · change to</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].filter(([s])=>s!==f.status).map(([s,l])=>`<button class="ghost small" data-st="${s}">${l}</button>`).join('')}</div>
+    <div class="statusbar"><span class="small muted">Status: <b>${esc(STATUS_WORDS[f.status]||f.status)}</b>${f.worked_by && f.worked_to === f.status ? ' by '+esc(f.worked_by) : ''} · change to</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].filter(([s])=>s!==f.status).map(([s,l])=>`<button class="ghost small" data-st="${s}">${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
     ${!f.claim_key && !f.line_key && f.patient_control_number ? `<div class="small" style="margin:6px 0">EMA claim ID <b>${esc(f.patient_control_number)}</b>${f.service_date ? ' · date of service ' + esc(f.service_date) : ''}${(f.evidence||{}).sent ? ' · sent ' + esc(f.evidence.sent) : ''} · no remittance from the payer for it</div>` : ''}

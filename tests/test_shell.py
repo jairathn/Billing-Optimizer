@@ -99,7 +99,8 @@ def test_the_title_names_the_place_and_counts_what_closes_within_7_days_never_a_
 def test_browser_storage_holds_only_the_theme_and_the_sidebar_width_and_never_breaks_the_page():
     src = read("shell.js") + read("index.html") + read("upload.html") + read("setup.html")
     keys = set(re.findall(r"""(?:store\.(?:get|set)|localStorage\.getItem)\(['"]([\w:.-]+)['"]""", src))
-    assert keys <= {"rw:theme", "rw:sidebar", "rw:guide:v1"}, keys
+    # the person's own name (ui-words, CRITIQUE_biller change 5) is the one key added: a per-viewer convenience, wrapped too
+    assert keys <= {"rw:theme", "rw:sidebar", "rw:guide:v1", "rw:person"}, keys
     body = read("shell.js").split("const store = {", 1)[1].split("};", 1)[0]
     assert body.count("try {") == 2 and body.count("catch(e)") == 2           # each read and write is wrapped
     for page in ("index.html", "upload.html", "setup.html"):
