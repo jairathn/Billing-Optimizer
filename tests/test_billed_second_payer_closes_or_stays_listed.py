@@ -17,7 +17,11 @@ Each case runs one daily cycle with the item listed, records Mark billed as the 
 (EMA's posting; with '835_too' its remittance as second payer as well), and runs the next daily cycle. What must hold:
   1. the item is either still on the list people work from with its "mark it Paid" step, or closed as Paid by the run
      with its payment named; never a stale row whose stored state is Work now or Waiting;
-  2. every item the Results open book counts as still open is on a list people see (counts equal lists).
+  2. every item the Results open book counts as still open is on a list people see (counts equal lists);
+  3. only the second payer's own answer closes it (review r1 of replay-fix-2a): never another patient's payment on
+     another EMA claim (a namesake: the same name, another date of birth; the patient's other claims are found by name
+     and date of birth together), never the first payer's own payment under another payer name of its group; and the
+     run's 'work its answer' change is in the decision log after a person's own status line.
 The control ('unworked'): nobody billed it; the run drops it when the second payer pays, as it always has.
 
 Every name, claim number, check number, amount and date here is invented (tests/ema_fixtures.py). Each case runs on the

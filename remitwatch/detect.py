@@ -11387,15 +11387,18 @@ class Detector:
         the patient's EMA claims for the same date and code (a second claim EMA keeps apart): (posted, payer, payer group,
         check tail, cents, EMA claim), oldest first; a takeback is a negative amount. Whatever its posting date, as the
         rule reads another payer's money on the line (other_paid): the line was listed with none, so it came since, even
-        where the first payer paid the line again after it (a later payment date)."""
+        where the first payer paid the line again after it (a later payment date). The patient's other claims are found by
+        the patient's keyed name AND date of birth (ema_lines.person), never by the name alone: another patient of the same
+        name seen the same day for the same code is another patient, and his payer's money is never this item's answer
+        (review r1 of replay-fix-2a). No date of birth, no other claim: a name alone proves nothing."""
         from . import ema_checks as ec
         svc, cpt, link = key[1], key[2], e.get("link")
         links = {link}
-        nk = self.conn.execute("SELECT name_key FROM ema_lines WHERE link=? AND svc=? AND cpt=?", (link, svc, cpt)).fetchone()
-        if nk and nk[0] is not None:
-            links.update(r[0] for r in self.conn.execute("SELECT link FROM ema_lines WHERE name_key=? AND svc=? AND cpt=? "
+        pk = self.conn.execute("SELECT person FROM ema_lines WHERE link=? AND svc=? AND cpt=?", (link, svc, cpt)).fetchone()
+        if pk and pk[0] is not None:
+            links.update(r[0] for r in self.conn.execute("SELECT link FROM ema_lines WHERE person=? AND svc=? AND cpt=? "
                                                          "AND COALESCE(facility,0) = 0 AND (COALESCE(flags,0) & 17) = 0",
-                                                         (nk[0], svc, cpt)))
+                                                         (pk[0], svc, cpt)))
         out = []
         for lk in sorted(x for x in links if x is not None):
             for posted, payer, grp, check, cents in self.conn.execute(
@@ -11630,8 +11633,12 @@ class Detector:
             c = cands.get(key)
             own = own_lines.get(billed_keys[key]) if key in billed_keys else None
             if own is not None and l["line_key"] != own["line_key"] \
-                    and (l.get("payer_id") or l.get("payer_name")) != (own.get("payer_id") or own.get("payer_name")):
-                seconds[key].append(l)          # another payer's line of a line a person billed: its answer, read below
+                    and (l.get("payer_id") or l.get("payer_name")) != (own.get("payer_id") or own.get("payer_name")) \
+                    and not ec._same_payer(l.get("payer_group") or "", own.get("payer_group") or ""):
+                # another payer's line of a line a person billed: its answer, read below. The first payer's own group under
+                # another payer id or name (a reprocessing, a plan's other name) is never the second payer's answer, as on
+                # EMA's side (_snb_second_postings; review r1 of replay-fix-2a)
+                seconds[key].append(l)
             if c is None or l["line_key"] == c["line_key"] or key in other_paid \
                     or (l.get("payer_id") or l.get("payer_name")) == (c.get("payer_id") or c.get("payer_name")):
                 continue
