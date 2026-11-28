@@ -35,16 +35,22 @@ G8's, not this unit's).
       items -> 3 fail; earlier marks not summed by month -> 2 fail; restored exactly (`git diff` equal to the saved diff)
 - [x] real-data reproduction, read only (below)
 - [x] docs/TROUBLESHOOTING.md: posted_money and items kept after a held run (section 3)
-- [ ] selfcheck tests in the four environments
-- [ ] full suite in python3 and in $S/fix/venv_sqlite340/bin/python
-- [ ] push wip/replay-fix (pushed at each milestone)
+- [x] selfcheck tests in the four environments (13 files, 748 tests): python3 748 passed; newest libraries 748 passed;
+      3.12/SQLite 3.45 748 passed; 3.11.1/SQLite 3.40 641 passed, 27 skipped, 80 failed or errors, every one
+      `AttributeError: ... no attribute 'serialize'` (that build cannot serialize a store image; Vercel can), none in
+      test_replay_selfcheck.py (31 passed, 15 skipped there) or test_selfcheck.py
+- [x] full suite, python3 (shard.sh, 3 shards): 4,359 passed, 29 skipped, 1 xfailed, 0 failed
+- [x] full suite, 3.11.1/SQLite 3.40 (shard.sh): 4,142 passed, 29 skipped, 1 xfailed, 217 failed or errors, all 217 the
+      serialize limitation (the many-requests self-test among them), as on the integration tip
+- [x] docs test with the private word list: 40 passed
+- [x] pushed wip/replay-fix at each milestone
 
 ## Next command
 
-Selfcheck-related suites in each environment, one at a time:
-`cd $S/tk/wt/replay-fix && <python> -m pytest -q -p no:cacheprovider -o addopts="" tests/test_replay_selfcheck.py tests/test_selfcheck.py tests/test_fx_ema.py tests/test_ema_ledger.py tests/test_hooks.py tests/test_hook_review.py tests/test_merge_vanished_policy.py tests/test_fx_hosts.py tests/test_fx_recover.py tests/test_diagnose.py tests/test_runlog.py tests/test_closure_proof_shared_payment.py tests/test_m1_exports.py`
-then `RW_RUNS=$S/tk/units/replay-fix/runs plans/tools/shard.sh $S/tk/wt/replay-fix python3 rf-py3 3` and the same with
-`$S/fix/venv_sqlite340/bin/python`.
+None: the unit is done. The integrator merges wip/replay-fix (it touches remitwatch/selfcheck.py, docs/TROUBLESHOOTING.md,
+tests/test_replay_selfcheck.py and this file; no other unit changed them as of 09:20 UTC). To redo the real-data
+reproduction: `RW_TREE=<tree> python3 -I -B $S/tk/units/replay-fix/repro_posted_fix.py` and
+`RW_TREE=<tree> python3 -I -B $S/tk/units/replay-fix/repro_heldfacts_fix.py` (read only, in memory).
 
 ## Measured (real data, read only, in memory; scripts in the private folder)
 
