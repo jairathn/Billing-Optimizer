@@ -117,7 +117,8 @@ State of the fix round (all done):
       diff; A1: no second loss, one week per item, whole shortfall at risk), each restored exactly (git diff clean)
 - [x] measurements, read only (below) and the release effect
 - [x] touched files' tests (27 files: the unit's four, test_hotfix2d and the rules they touch), four environments, at
-      293c93d: python3 1668 passed, 1 skipped; newest libraries 1668 passed, 1 skipped; 3.12/SQLite 3.45 1668 passed, 1
+      293c93d (python3's run began at 1873731, a moment before 293c93d's one-line refactor; the full python3 suite below
+      ran at 293c93d): python3 1668 passed, 1 skipped; newest libraries 1668 passed, 1 skipped; 3.12/SQLite 3.45 1668 passed, 1
       skipped; 3.11.1/SQLite 3.40 1504 passed, 74 skipped, 72 failed or errors, every one the missing
       Connection.serialize. The skip: test_docs' private words (with REMITWATCH_PRIVATE_WORDS: 40 passed).
 - [x] full suite, python3 (3 shards): 4,806 passed, 29 skipped, 1 xfailed, 0 failed
