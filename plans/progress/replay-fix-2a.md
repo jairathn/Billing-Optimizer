@@ -74,7 +74,60 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
 
 ## Next command
 
-None: the unit is done. A later unit takes the two items under "Left for a later unit".
+The fix round (review r1) is being finished: see "Review round 1" below. When its State list is all ticked, nothing is
+left for this unit; a later unit takes the items under "Left for a later unit".
+
+
+## Review round 1 (fix round, 2026-11-28)
+
+The review (reviewed tip 89e2802) found six things; its failing tests (invented data) are ported, one per bug file, each
+seen failing on the base first (commit 86be34c: the merge of the integration tip fa0aafa, i.e. gapfix cdd3463, routes and
+replay-fix eef678f, then the ported tests). Each finding was verified by its test failing on file, compact and image.
+
+- r1-a2-heir-started-judged-by-rules (high), VERIFIED, FIXED (8b7fd4a). Detector.save decided the states before
+  carry_to_heirs moved the old id's history and faxes to the heir, so a person's own Started carried to a line's new id
+  was judged as To do for one run (expired, with a chase hand-off basis). Now Detector.save moves finding_events and
+  faxes of the run's heir pairs to the heir just before self._set_states (eight lines; outside the unit's listed
+  functions, in a region replay-fix-2b's diff does not touch). Tests in tests/test_handoff_started_is_judged_by_the_rules.py:
+  the downcode heir (the review's), the same claim under its EMA claim number then its claim id, and a faxed appeal's
+  heir judged on its newest fax. tests/test_hotfix2d.py's in-flight heir test: the heir is now judged on its in-flight
+  fax (Waiting), as the item it was pressed on is after a run, so the second Appeal is held ('blocked') before the 409;
+  the guarantee holds (nothing sent, the status change refused 409). Break and restore: events only fails the fax case;
+  neither fails all three.
+- r1-a4-namesake-closes-billed-item (high), VERIFIED, FIXED (8ed9355). _snb_second_postings finds the patient's other
+  EMA claims by ema_lines.person (name and birth date), never name_key. Test with its same-patient control. Break: name_key
+  fails the namesake cases, the controls pass.
+- r1-a4-first-payer-repayment-read-as-second (high), VERIFIED, FIXED (8ed9355). run_secondary_not_billed's 'seconds' leave
+  out the first payer's own group (ema_checks._same_payer). Break: without it the three cases fail.
+- r1-a3-person-status-written-up-as-rule (medium) and r1-a4-work-its-answer-not-logged (low), VERIFIED, FIXED (88c72da).
+  runlog.Snapshot keeps max_event (the newest finding_events id when it was taken); a person's change is a manual or
+  unhidden line with a higher id (_person_touched; a hand-made snapshot falls back to the time rule). For such an item a
+  change carrying the stale mark is logged as kind 'stale' with stale, work_state and follow_up_on only. Breaks: the time
+  rule fails the work-its-answer cases; logging the whole diff fails the let_go and reopened cases.
+- r1-a1-review-listed-again (medium), VERIFIED, FIXED (e339680). (a) update_registry counts a review's or rate gap's new
+  claims lost when it expires again (each line once), each loss in its own week (flag_info lost_parts; _lost buckets
+  each part), so a frozen week is never counted again later. (b) results.live_cents: at risk, a review or rate gap adds
+  only its claims still inside their windows (evidence 'deadlines', JSON1); live_figures and list_entries use the same
+  expression; the at-risk worth is that part's share. Breaks: each of the three parts fails its case.
+- Docs: TROUBLESHOOTING (the four rules) and the at-risk basis on the scoreboard (621e43b).
+
+Routed, not changed (outside this unit): detect._ema_lines_for's 'elsewhere' (other_paid) still finds the patient's other
+EMA claims by name_key, so an unworked second-payer line can be dropped on a namesake's payment (14 namesake services on
+the replay). For the owner (from the review): the ema_heirs hand-off (an EMA_DENIED item a person worked, handed to the
+835 item of the same line) is judged as To do though it is the same denial.
+
+Measured, read only (aggregates):
+- r1-a3: record_decisions for the replay's run 10 (state_9 before, final after): before this round after_person 250,
+  state 282, follow_up 56, stale 58; after: after_person 0 (no person's line was written during the run: all 351 came
+  before its snapshot), state 520, follow_up 68, stale 58; the 101 items run 10 set stale ($6,016.30) all logged.
+- r1-a4: of the replay's 474 billed second-payer items, 0 have a namesake's paid sibling claim and 0 a first-payer group
+  payment under another name (the reviewer's script); the population holds 14 namesake services (name, date, code held
+  by two people) and every EMA line has a person key (0 of 202,793 without one).
+- r1-a1 at risk: replay final store at 11-24: 97 items, $9,005.32 before, $8,971.32 after (1 review, $34.00 of claims
+  past their window out); release copy (final_world3) at 11-28: 120 items, $11,919.76 before, $11,715.86 after (1
+  review, $203.90 out). Re-expiry: no review had expired before, so nothing at release.
+- r1-a2: the replay made no heir of a worked item (every signal_changed is a via_bill hand-off); the release copy has no
+  Started or Sent item and no hand-off history: no effect at release.
 
 ## Left for a later unit (found on the replay, not fixed here)
 
@@ -86,6 +139,15 @@ None: the unit is done. A later unit takes the two items under "Left for a later
 - Billed, no answer, past the second payer's limit: 3 on the replay ($75.19) are dropped by the rule's past-limit branch
   (replay-fix-2b's retired line names them to the vanished check). Whether a line a person billed in time should stay
   listed for its follow-up past that limit is a decision for the owner.
+- (review r1, routed) detect._ema_lines_for's 'elsewhere' (other_paid) finds the patient's other EMA claims by name_key:
+  an unworked second-payer line can be dropped on a namesake's payment. Its owner: whoever owns the rule's listing path
+  (run_secondary_not_billed's unworked lines). The fix is the one made here for billed items: ema_lines.person.
+- (review r1, for the owner) the ema_heirs hand-off (an EMA_DENIED item a person worked, handed to the 835 item of the
+  same line) is judged as To do (A2), though it is the same denial. Carrying the person's lines with it, as a whole
+  hand-off does, would make it theirs; the owner decides.
+- (review r1, optional, not done) a sibling EMA claim's posting counts for a billed item from any payer other than the
+  first payer's group; it could be held to the second payer billed (evidence second_payer). With the person key there is
+  no namesake left; a third payer paying the same patient's same service is rare and settles the share anyway.
 
 ## Measured (read only; aggregates)
 
