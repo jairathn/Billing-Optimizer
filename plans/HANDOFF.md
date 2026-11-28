@@ -47,17 +47,26 @@ payer's accepted channel, easiest first, with the fields prefilled; and say whet
 - Merged on the integration branch (2026-11-28, 11:50 UTC): `wip/gapfix` (cdd3463, G1 to G8 and the fix round's 14
   findings) and `wip/routes` (8fe6a7e, the payer routes card and the fix round's 21 findings); python3 suite on the merge:
   4,528 passed, 0 failed. Item ids from the private copy in plans/progress and one test comment are now neutral labels.
-- Running: wf_47797c0b-c26 fixes `wip/replay-fix` after its review (selfcheck: posted_money marks re-baselined when a payer
-  name changes group; a held run no longer saves the self-check facts). wf_922f5636-97c builds `wip/ui-a`
-  (plans/briefs/2026-11-28_ui.md), then two reviews and a fix round. wf_a3fa6266-96f builds `wip/replay-fix-2a` (states:
-  rate patterns past every window expire; a hand-off's Started is not a person's; stale rows in the decision log; a second
-  payer a person billed closes as Paid with proof when it pays, stays listed when it pays less) and `wip/replay-fix-2b`
-  (vanished check routes for a payment EMA posted and a resend under the same claim id; detection hands the checks the ids
-  it retires on purpose; precision_guard counts only the item's own payer and nets takebacks; a let-go line settles a
-  never-listed whole-claim denial; a same-visit vote split keeps its link), each reviewed and fixed. Next to start: the UI
-  units ui-words and ui-signin (now), then ui-work, ui-panel and ui-pages once ui-a's fix round is in.
+- Merged on the integration branch (2026-11-28, 15:00 UTC): `wip/replay-fix` (eef678f), `wip/replay-fix-2a` (3ad88c7)
+  and `wip/replay-fix-2b` (e625f69), each built, reviewed and fixed, then the Results fix the 2b review routed (1d0c069:
+  an item a rule closes as done after its deadline is not counted lost). The merged units' test files: 764 passed.
+- Release 1 (logic only) runs on 1d0c069: the suites in four environments and the private run on a copy of the live
+  store (final_world3), compared item by item with the store before. Then main, and /api/health on both sites.
+- Release 2 (the premium UI) follows: `wip/ui-a` (8c1ed1a), `wip/ui-work` (9178bef), `wip/ui-panel` (bef1bee),
+  `wip/ui-pages` (d9ebb9c) and `wip/ui-words` (1a554e6) are built; to save usage they had no review of their own. A trial
+  merge in the order ui-panel, ui-pages, ui-work, ui-words resolves its six conflicts keeping both sides (DESIGN.md both
+  bullets; rw.css both new sections, ui-work's renumbered 24; desk.js and index.html take the later rewrite, with the
+  person's name beside the panel's status; shell.js exports both units' functions; STYLE_ATTRS_MAX at the merged count).
+  Then one review of the whole app (a designer and a biller walking it; engineering, privacy and both hosts), one fix
+  round, the suites and main. Each unit's progress file lists what it left. The branded sign-in page is paused
+  (`wip/ui-signin` a904f25 needs finishing and two security reviews before it merges).
+- Visit notes: the owner will not pay for ModMed's practice API for now. Notes come in by hand (the Upload page or the
+  item's appeal step); the Release 2 review walks that path on both hosts. A later task checks, in ModMed's sandbox,
+  whether EMA's own visit notes come through for test patients. The sandbox values live only in the hosts' settings and
+  nothing in the code reads them yet; never put them, the firm's prefix or the sandbox's address in the repository.
 - Disk: pytest's own temp folders (/tmp/pytest-of-root) filled the disk once (13 GB from many suites at once). A private
-  cleaner removes folders untouched for an hour; run suites with a private TMPDIR per shard and delete it after.
+  cleaner removes folders untouched for an hour (a background job stops after two hours; run one pass by hand before
+  a long suite); run suites with a private TMPDIR per shard and delete it after.
 - The replay audit is done. Its verdicts are private (`$S/tk/replay/replay_finish_result.json`, `verify2_result.json`): no
   automatic closure without proof in any month, no person's decision overwritten; ten code bugs, all routed to the units
   above; the rest expected or the harness's own. Delete the big replay stores once replay-fix-2 merges (keep the JSON).
