@@ -436,6 +436,50 @@ def test_the_fields_come_from_the_store_and_the_settings_never_invented(store, m
     assert m["Contact"]["value"] == "" and m["Contact"]["fill"] == "your name"
 
 
+def _reasons(c):
+    """Every field, on every way the card shows, that holds the request's reason (the argument put to the payer)."""
+    return [x for v in [c["best"]] + c["others"] for x in v["fields"] if set(x.get("keys") or []) & {"reason", "refund_reason"}]
+
+
+def test_a_reason_field_holds_the_argument_to_the_payer_and_never_the_billers_own_instruction(store):
+    # an appeal: the argument the next step puts to the payer (its first sentence: the rest of "the argument, in full" can
+    # be advice to the biller), without "Appeal to <payer>:", the deadline words or Medicare's how-to-file sentence
+    world(store, payer="KY MEDICARE PART B", payer_group="Medicare KY (CGS J15)", payer_kind="medicare", cfi="MB")
+    c, ex = card(store)
+    assert ex["next_step"]["action"].startswith("Appeal to Medicare KY (CGS J15): ")
+    argument = ex["next_step"]["action"].split(": ", 1)[1].replace(
+        " Medicare contractors take no faxed redeterminations: file it on the contractor's portal or by mail.", "")
+    got = {x["value"] for x in _reasons(c)}
+    assert got == {argument}, (got, argument)
+    for x in _reasons(c):
+        assert not x["value"].startswith(("Appeal to", "Only ", "Today is")) and "faxed" not in x["value"]
+    # a clerical fix Original Medicare reopens: the next step tells the biller how ("... Fix it by asking the Medicare
+    # contractor for a reopening ..."); that is no reason to give CGS, so the reason is left empty with what to fill
+    world(store, payer="KY MEDICARE PART B", payer_group="Medicare KY (CGS J15)", payer_kind="medicare", cfi="MB", reason=("CO", "4"),
+          signal="DENIED_MISSING_MODIFIER", actionable="correct_and_resubmit",
+          deadline_basis="a reopening of the clerical error within 1 year of the remittance")
+    c, ex = card(store)
+    assert c["request"] == "medicare_reopening" and not ex["next_step"]["action"].startswith("Appeal to")
+    assert _reasons(c) and {(x["value"], x["fill"]) for x in _reasons(c)} == {("", "what to change, and why")}, _reasons(c)
+    # a claim status request: "Look the claim up ..." is the biller's step, not a reason
+    world(store, payer="UNITEDHEALTHCARE", payer_group="UnitedHealthcare", payer_kind="commercial", signal="NO_ANSWER",
+          category="no_answer", carc=None, actionable="follow_up", appeal_deadline="2026-12-20")
+    c, ex = card(store)
+    assert c["request"] == "claim_status_or_reprocess"
+    for x in _reasons(c):
+        assert x["value"] == "", x
+    assert {x["fill"] for x in _reasons(c)} <= {"what you ask the payer"}
+    # a refund: "decide whether to refund it or let the payer recoup it" is the biller's choice, never the refund's reason
+    # (Anthem's refund form asks for the reason: it is left empty, asking why the money is owed back)
+    world(store)
+    ex = story.explain(store.conn, "F1", today=TODAY)
+    ex["next_step"] = dict(ex["next_step"], route="refund", steps=[],
+                           action="Overpaid by $42.00: decide whether to refund it or let Anthem / BCBS recoup it.")
+    c = routes.card(store.conn, "F1", explain=ex, today=TODAY)
+    assert c["request"] == "overpayment_refund" and _reasons(c)
+    assert {(x["value"], x["fill"]) for x in _reasons(c)} == {("", "why the money is owed back")}, _reasons(c)
+
+
 def _ema_row(store, **kw):
     r = {"row_fingerprint": "RF-1", "family": "charge_lines", "row_index": 1, "claim_id": F.claim_id(1), "cpt": "99213",
          "patient_id": "EMA-PAT-TEST-9", "policy_number": "POLICY-TEST-7", "icd10": "L57.0, L82.1", "auth_number": "AUTH-TEST-3",

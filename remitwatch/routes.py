@@ -491,14 +491,19 @@ def _one(conn: sqlite3.Connection, sql: str, args: tuple) -> dict:
     return dict(zip([d[0] for d in cur.description], r)) if r else {}
 
 
-def _strip_lead(action: str) -> str:
-    """The next step's argument, the reason itself: without the deadline words put in front of it (story._next), its
-    'Appeal to <payer>:' head, and the how-to-file sentence the card says in its own words."""
-    s = re.sub(r"^(?:Only \d+ days? left \(by [^)]*\): do it today\. |Today is the last day \([^)]*\): do it today\. |"
-               r"The safe date passed on [^:]*: (?:send it|act) now\. )", "", str(action or "")).strip()
-    s = re.sub(r"^(?:Appeal to|Dispute it with) [^:]{1,80}: ", "", s)
-    s = s.replace(" Medicare contractors take no faxed redeterminations: file it on the contractor's portal or by mail.", "")
-    return s[:1000]
+# the head story.next_step puts before the argument it gives the payer, after any deadline or late-window words
+_ARGUMENT = re.compile(r"(?:^|[.)] )(?:Appeal to|Dispute it with) [^:]{1,80}: (.+)$", re.S)
+_MEDICARE_HOW = " Medicare contractors take no faxed redeterminations: file it on the contractor's portal or by mail."
+
+
+def _argument(action: str) -> str:
+    """The reason itself: the argument the next step puts to the payer, what follows its 'Appeal to <payer>:' or 'Dispute
+    it with <payer>:' head, without the deadline words before it and the how-to-file sentence the card says in its own
+    words. '' for every other next step: those are the biller's own instructions ("Fix it by asking the Medicare
+    contractor for a reopening ...", "decide whether to refund it ...", "Look the claim up ..."), never a reason to give
+    the payer, so the field is left to fill."""
+    m = _ARGUMENT.search(str(action or ""))
+    return m.group(1).replace(_MEDICARE_HOW, "").strip()[:1000] if m else ""
 
 
 def _ema_person(conn: sqlite3.Connection, claim_id: str | None) -> dict:
@@ -594,7 +599,7 @@ def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict,
         "shortfall": _money(f.get("shortfall_cents")) if f.get("shortfall_cents") else "",
         "frequency_code": "7", "rendering_npi": str(f.get("rendering_provider_npi") or ""),
         "rendering_name": str(f.get("rendering_provider_name") or ""),
-        "reason": _strip_lead(nx.get("action") or ""),
+        "reason": _argument(nx.get("action") or ""),
     })
     v["group_number"] = str(claim.get("group_number") or "")
     ema = _ema_facts(conn, f.get("patient_control_number"), f.get("procedure_code"))
@@ -602,7 +607,7 @@ def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict,
     v["authorization"] = v["authorization"] or ema.get("authorization", "")
     v["group_number"] = v["group_number"] or ema.get("group_number", "")
     if (nx.get("route") or "") == "refund":
-        v["refund_reason"] = v["reason"]
+        v["reason"] = ""        # why the money is owed back is the biller's to write: the next step only says what to decide
         credit = int((st or {}).get("credit_cents") or 0)
         v["refund_amount"] = _money(credit) if credit > 0 else ""
     pr = practice()
@@ -611,8 +616,17 @@ def values(conn: sqlite3.Connection, f: dict, claim: dict, line: dict, nx: dict,
     return v
 
 
-def fill(fields: list[str], vals: dict[str, str]) -> tuple[list[dict], list[str]]:
-    """(the fields to type, each with its value or what to fill; the steps where to click)."""
+# what an empty reason field asks for, by request (a refund's reason is why the money is owed back, not why a decision
+# is wrong)
+REQUEST_HINTS = {"overpayment_refund": {"reason": "why the money is owed back"},
+                 "medicare_reopening": {"reason": "what to change, and why"},
+                 "corrected_claim": {"reason": "what was corrected"},
+                 "claim_status_or_reprocess": {"reason": "what you ask the payer"}}
+
+
+def fill(fields: list[str], vals: dict[str, str], hints: dict | None = None) -> tuple[list[dict], list[str]]:
+    """(the fields to type, each with its value or what to fill; the steps where to click). hints: what an empty field
+    asks for when the request words it differently (REQUEST_HINTS)."""
     out, steps = [], []
     for label in fields or []:
         kind, keys = classify(label)
@@ -624,7 +638,7 @@ def fill(fields: list[str], vals: dict[str, str]) -> tuple[list[dict], list[str]
             continue
         got = [vals.get(k, "") for k in keys]
         value = " · ".join(x for x in got if x)
-        missing = [HINTS.get(k, "fill it in") for k, x in zip(keys, got) if not x] if keys else ["by hand"]
+        missing = [(hints or {}).get(k) or HINTS.get(k, "fill it in") for k, x in zip(keys, got) if not x] if keys else ["by hand"]
         out.append({"label": label, "value": value, "keys": list(keys), "fill": "; ".join(missing) if missing else "",
                     "names": bool(set(keys) & NAME_KEYS)})
     return out, steps
@@ -690,7 +704,7 @@ def claim_facts(vals: dict, fields: list[dict]) -> list[dict]:
 
 def channel_view(c: dict, vals: dict, checked: str, request: str = "") -> dict:
     """One channel as the card shows it: its main action, its fields filled, its attachments, its source line."""
-    fields, steps = fill(c.get("fields") or [], vals)
+    fields, steps = fill(c.get("fields") or [], vals, REQUEST_HINTS.get(request))
     kind = c["channel"]
     act: dict[str, str] = {"kind": kind, "label": ACTION_WORDS.get(kind, "")}
     if kind == "payer_portal":
