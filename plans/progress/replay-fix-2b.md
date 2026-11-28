@@ -25,6 +25,33 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
 | B4 | a let-go line settles a never-listed whole-claim denial | tests/test_let_go_line_not_back_as_claim_denial.py (10) | done: failed 2/4 of the proposed cases on the base; passes; 3 breaks each fail; restored (sha1) |
 | B5 | a same-visit vote split keeps its EMA link | tests/test_link_map_same_visit_bills.py (14: 7 cases x 2 store kinds), test_ema_ledger.py map_world cases 3 and 9 | done: failed on the base; passes; 6 breaks each fail their cases; restored (sha1) |
 
+## Fix round 1 (the review of 8a1cdfc, 2026-11-28)
+
+The review's nine findings, each checked with its failing test (copies of the review's tests in
+`$S/tk/units/replay-fix-2b-r1/tests`, invented data), on the tip 8a1cdfc and on the base fa0aafa:
+
+| Finding | Verified | Fix | Test (both store kinds; image too where the file has it) |
+|---------|----------|-----|------|
+| r1-b3-ma-plb (high) | yes: the MA and MC cases fail on the tip and the base; replay final store, read only: 187 positive WO/FB/J1/L6 entries ($37,280.09) naming a paid claim matched by company but not by product family (the review: 192, $38,663.65) | `_plb_taken` compares the PLB entry's payer and the payment's by company (detect.payer_company, LEDGER_COMPANIES) | test_precision_guard_counts_only_standing_money.py: the plan's takeback is netted (16, MC, CI); control: another company's PLB takes nothing |
+| r1-b3-repeat-order (medium) | yes: reversal_first fails on the tip, passes on fa0aafa (introduced by B3) | `later_payments` counts the repeats over the filtered rows first, then skips every repeat and as many reversals of the item's own amount, whatever the line order | same file: both orders with a real top-up; control: the same-amount reprocessing alone is no money |
+| r1-b3-double-take (medium) | yes: fails on the tip, passes on fa0aafa (introduced by B3) | `_plb_taken` applies the status 22 reversals to what is left of each payment first (same claim id, company, date of service, code, dated before the reversal), so a PLB entry takes only what the reversal left | same file; control: a PLB after a reversal still takes the payment the reversal left |
+| r1-b1-resend-before-first-seen (medium) | yes: read-late and evening cases fail on the tip and the base | `_sent_again`: a send of the same claim id counts when it is after the send the item is about (evidence `sent`), whenever it was read; for an item that names no send, on or after the practice's day it was first seen (runtime.practice_date) | test_vanished_posted_or_sent_again.py: the review's cases (NO_ANSWER and REJECTED_PRE_PAYER) and an item naming no send |
+| r1-b2-snb-past-limit-silent (medium) | yes: on the tip the share's $30.00 was on no page (left_record ok, Results' lost 0) | `selfcheck.panel` (the Data tab's "Running on its own", from meta ema:wiring, so the dashboard copy too) names the second payers' shares past their limit with their dollars every run (`second_payer_past_limit`); the route stays | test_left_record_retired_on_purpose.py: the share raised past its last day and retired is on the Data tab |
+| r1-b2-unseen-breadth (low) | yes (code reading: every reason set `retired`) | `Detector._count_unseen` retires only for UNSEEN_RETIRES (None, no_ema_reports); payer_remittances_stop is counted unseen but not retired | same file: the reasons that retire (file, compact) |
+| r1-facts-version (low) | yes: the first run after the bump compared no fingerprints | FACTS_VERSION back to 3; FACTS_PAYMENT_VERSION 1 (meta selfcheck:facts_payment_version) versions the payment part alone; `_stored_facts(conn, before)` leaves out only the payment items' fingerprints while it differs | test_vanished_posted_or_sent_again.py: the first run after the payment part came still compares the others |
+| r1-b5-order (low) | yes: the reverse order fails on the tip (link to the processed bill) | `_map`: each vote says whether its 835 claim was the payer's denial (status 4); a visit's link goes to that bill unless another link holds it (`pb_held`), else to its first vote's bill; MAP_RULE 2 -> 3 | test_link_map_same_visit_bills.py: the review's order; control: a denied bill another link holds is not taken |
+| r1-b5-results-lost (medium) | yes: fails on the tip, the base and replay-fix-2a's tip 8ed9355 | not here: results.py is replay-fix-2a's. Patch and test ready for the integrator, checked on 8ed9355 (`$U/r1/results_lost_done.patch`, `$U/r1/test_results_expired_then_done_is_not_lost.py`: `_lost` leaves out a row whose last state is done; a person's let-go after expiry stays lost; 195 results tests pass with it) | (routed) |
+
+Each fix was broken on purpose and its cases failed; each file restored exactly (sha1 in `$U/r1/*.sha`).
+
+Measured, read only (replay final store, the previous tip 8a1cdfc against this one, at its last day 2026-11-24):
+- B3: the guard names 1 item ($127.80, the duplicate denial the review traced, by design) before and after; the
+  verified seven cover nothing either way. 187 takebacks ($37,280.09) can now be netted against their payment.
+- B1: no kept item routes differently at the store's last day (the read-late case needs an 837's read time, which the
+  replay store does not keep; the tests carry it).
+- B5 order: the conflicts remapped by rule 2 and by rule 3, on the replay final store and on the world store: no link
+  changes. Without the held-bill guard one link would move onto a bill another patient's EMA claim holds.
+
 ## Done, by bug
 
 - B1 (selfcheck.py): `_no_route` has a route `posted_in_ema` (`_posted_in_ema`: EMA's checks of the item's trace,
@@ -179,19 +206,31 @@ this unit merged (gapfix, replay-fix) without its changes, after = this branch. 
 - B1 and B4: no item moves in this run (no payment EMA posted in full, no claim sent again under its claim id, no let-go
   line under a claim item that never listed it, between the world's last run and this one).
 - Work now after the run: 4,450 items, $1,816,938.95 before; 4,447 items, $1,816,476.09 after.
-- Once, at the first run after the release: FACTS_VERSION 3 -> 4 means that run compares no stored fingerprints, so an
-  item that leaves that run on new facts alone is kept and waits for Accept on the Data tab. In the measured run nothing
-  was read since the world's last run, so the facts route was unused before and after.
+- Once, at the first run after the release (fix round 1): FACTS_VERSION stays 3 and only the payment part has a new
+  version (selfcheck:facts_payment_version 1), so that run still compares every item's fingerprint but those of items
+  about a payment (REMIT_NOT_POSTED, TAKEBACK): only such an item that leaves on new facts alone is kept once and waits
+  for Accept on the Data tab. In the measured run nothing was read since the world's last run, so the facts route was
+  unused before and after.
+- Fix round 1, read only on the world store: the link map by rule 2 and by rule 3 is the same (no link changes). The
+  analysis run on the world (mem_run.py) was not repeated this round (the world store keeps no states of its own: the
+  guard needs a run of this code). The B3 changes move the guard only where a PLB took back a payment of a company's
+  other product (187 such takebacks in the replay store) or after a reversal, or where a same-amount reprocessing's
+  lines come in the other order.
 
 ## Open questions
 
-- B2: a second payer's share raised already past its last day (never Work now) and then retired has its dollars only in
-  meta ema:wiring (snb_past_limit, snb_past_limit_cents): no page shows that counter. Not changed here (pages are the UI
-  units'). On the replay, the 56 unlisted past-limit departures ($1,880.30, Measurements, B2) bound them from above.
+- B2: a second payer's share raised already past its last day (never Work now) and then retired: fix round 1 names the
+  shares past their limit, with their dollars, on the Data tab's "Running on its own" panel (selfcheck.panel, from meta
+  ema:wiring). Left for results.py's owner: count them on Results, by week and payer group, as lost to deadlines or
+  given up without a decision. Results is refreshed only when the Results page is opened on a server (api_results), never
+  by either cycle: an item that expires and is retired between two openings is never recorded lost by the registry.
 - Results keeps a loss it recorded: once an item went from Work now to expired, the registry's expired_on and lost_cents
   stay when the item later turns done (results.py `_lost` lists every row with expired_on). The B5 denial the release
   moves from expired to done ($50.33, paid before by the other payer) stays counted as lost to its deadline if Results
-  recorded it so. results.py is not this unit's file (replay-fix-2a edits it).
+  recorded it so. results.py is not this unit's file (replay-fix-2a edits it): the patch and its test are ready in
+  `$U/r1/results_lost_done.patch` and `$U/r1/test_results_expired_then_done_is_not_lost.py` (invented data, both store
+  kinds), checked on replay-fix-2a's tip 8ed9355 (the test fails there and passes with the patch; test_results.py
+  passes). The integrator applies them after merging replay-fix-2a.
 - B3: the replay's last guard offender ($127.80, DENIED_DUPLICATE_UNPAID, work_answered: another payer's later 835
   covers a duplicate denial a person worked) was not traced. The own-payer rule covers downcoding and underpayment items
   only, as the brief says; a denial still counts any payer's later money.
@@ -199,10 +238,17 @@ this unit merged (gapfix, replay-fix) without its changes, after = this branch. 
   listed as the claim's denial, and an item that already lists a let-go code keeps it (the review5 exclusion): the rule
   stops new duplicates, it does not take back one already listed.
 - The world's vanished check keeps 2 NO_ANSWER ($121.10) in both runs: no rule of this unit retires them.
-- FACTS_VERSION 3 -> 4: the first run after the release compares no stored fingerprints, so an item that leaves that run
-  on new facts alone is kept once and waits for Accept on the Data tab (docs/TROUBLESHOOTING.md says so).
-- B5 on Vercel: the map is redone (rule "2") at the first run that applies an EMA report or reads a new 835 (meta
+- Facts versions (fix round 1): only items about a payment are left out of the facts comparison at the first run after
+  the release (docs/TROUBLESHOOTING.md says so).
+- B5 on Vercel: the map is redone (rule "3") at the first run that applies an EMA report or reads a new 835 (meta
   ema:map_dirty); the server's cycle refreshes every cycle, so it redoes the map at its next cycle.
+- B5 order (fix round 1): a visit's other voted bill still reads no EMA claim (one bill per link). Letting every voted
+  bill read the link needs every reader of ema_link_map by bill (detect._ema_lines_for, ema_checks.line_outcomes and
+  others, results, the dashboard's copy, the archive's copies): a cross-module change left for the integrator. The
+  review measured 12 listed items on such bills in the replay, none whose state would change today.
+- r1-b2-unseen-breadth (fix round 1): a never-answered claim whose payer's remittances stop before its due day is no
+  longer retired: a listed one is kept on Work now by the vanished check (red until accepted) and an expired one is
+  counted by left_record, while the Data tab's payers-behind line and unseen figure show its dollars.
 - Measurement limits: detection was not re-run on the replay's month states (copying a state file needs more than 3 GB
   free; the disk had 2.5 to 3.6 GB then). The month counts come from the replay's snapshots; the in-run figures come
   from one run at the replay's last day and one at the world's day, each on a copy held in memory (sqlite backup of the
