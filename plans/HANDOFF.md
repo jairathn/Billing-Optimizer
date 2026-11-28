@@ -23,7 +23,26 @@ The owner alternates two Claude sessions as their usage limits run out. Either c
 - **Private data is never in git.** Rebuild it with `plans/tools/world/README.md` (the store image is
   `/RemitWatch-state/store.sqlite.gz` in Dropbox, the four EMA reports are in Dropbox too). It takes about 30 minutes.
 
-### Running now (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
+### Running now (updated 2026-11-28, session on `claude/ecstatic-fermi-orfcgo`)
+
+The owner asked (2026-11-28): accept the vanished items "in line with the new code"; look into the 33 closures with no
+payment named; keep the recovery cap and show money above it; replay the data month by month; route each request to the
+payer's accepted channel, easiest first, with the fields prefilled; and say whether the app is usable today.
+
+- ac18813 (pushed to both working branches, NOT yet on main): `selfcheck.RELEASE_ACCEPTANCES` accepts, on each host's first
+  run, the vanished items last written by a run that started before 2026-11-27 21:05 UTC (the owner's acceptance, in the
+  acceptance history); `Detector._paid_words` names the payment credited to another item of the same service (closure_proof
+  33 -> 0 on the private real-data run); Results shows money paid above the amount flagged. Suites: python3 4,313 passed,
+  newest libraries 4,340, 3.12 4,340, 3.11.1 only the 217 allowed serialize failures; node checks pass.
+- Private run of ac18813 (`$S/tk/final_world3`): 2,260 items accepted ($219,851), none kept; Work now 4,444 ($1.82M).
+- Held before main: 131 of the accepted never-answered/rejected items ($20,113) have no answer the new code can see (no EMA
+  answer, no 835 after the send) and the new run lists nothing for them. Also 1,557 sent claims ($629,759 billed, 1,237 of
+  them VA Community Care) whose answer no source shows are only counted (meta ema:unanswered_unseen), never listed.
+- Workflows running: wf_620ce5d4-0af (why the 131 are off the list; how to make the unseen claims workable),
+  wf_9cc2ebed-acb (January to November replay with simulated billers, private folder `$S/tk/replay`), wf_c3711a72-b66
+  (payer routes per request type with sources, verified). Next: fix what the first finds (failing test first), then main.
+
+### Before that (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
 
 The owner asked (2026-11-27) to stop fanning out agents, finish within the usage limit, and release: merge, fix, test,
 push to main, deploy, and prove the logic by hand on August 2026 claims. No unit workflows run any more.
