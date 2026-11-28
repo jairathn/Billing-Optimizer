@@ -1126,14 +1126,21 @@ class Detector:
         self.prev_claims: dict[str, dict] = {}
         manual_at = dict(store.conn.execute("""SELECT finding_id, MAX(at) FROM finding_events WHERE kind='manual' GROUP BY finding_id""").fetchall()) \
             if store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='finding_events'").fetchone() else {}
-        for fid, ck, st, notes, appealed, auto, before in store.conn.execute(
-                """SELECT finding_id, claim_key, status, notes, appealed_at, auto_note, prev_status FROM findings
+        for fid, ck, st, notes, appealed, auto, before, ev_raw in store.conn.execute(
+                """SELECT finding_id, claim_key, status, notes, appealed_at, auto_note, prev_status, evidence FROM findings
                    WHERE signal='CLAIM_DENIED_UNPAID' AND claim_key IS NOT NULL AND COALESCE(stale,0)=0"""):
             # worked: something a person did (an automatic closure is not, but what they did before it still is); changed:
-            # when they last changed its status
+            # when they last changed its status; codes: the codes its item listed (None when its evidence does not say)
             worked = bool(notes) or bool(appealed) or st in ("in_progress", "appealed", "lost", "dismissed") or (st == "resolved" and not auto) \
                 or (st == "resolved" and bool(auto) and before in ("in_progress", "appealed"))
-            self.prev_claims[ck] = {"worked": worked, "changed": manual_at.get(fid) or "", "status": st}
+            try:
+                ev0 = json.loads(ev_raw) if ev_raw else {}
+            except ValueError:
+                ev0 = {}
+            listed_codes = ({str(x) for x in ev0.get("codes") or []} | {str(p[0]) for p in ev0.get("unpaid") or []
+                                                                          if isinstance(p, (list, tuple)) and p}) \
+                if isinstance(ev0, dict) and ("codes" in ev0 or "unpaid" in ev0) else None
+            self.prev_claims[ck] = {"worked": worked, "changed": manual_at.get(fid) or "", "status": st, "codes": listed_codes}
         self.closed_lines: set[str] = {r[0] for r in store.conn.execute(
             "SELECT DISTINCT line_key FROM findings WHERE line_key IS NOT NULL AND status IN ('dismissed','lost')")}
         # a clinician's discount someone worked keeps every claim it had in its dollars (emit_provider_gaps)
@@ -5824,6 +5831,7 @@ class Detector:
         at = lambda o: o.get("payment_date") or o.get("txn_payment_date") or ""          # noqa: E731
         who = lambda o: o.get("payer_id") or o.get("payer_name")                          # noqa: E731
         listed_lines = {f["line_key"] for f in self.findings.values() if f.get("line_key")} - self.closed_lines
+        let_go_lines = {f["line_key"] for f in self.findings.values() if f.get("line_key")} & self.closed_lines
         billed_as: dict[tuple, str] = {}        # (bill, date, billed code) -> claim id of a finding saying that code was billed (a downcode)
         for f in self.findings.values():
             if f.get("line_key") and f.get("billed_code") and f["billed_code"] != f.get("procedure_code"):
@@ -5840,7 +5848,7 @@ class Detector:
                 paid_by_payer.add((l["patient_control_number"], who(l)))
 
         def settled(bill: str, code: str, dos: str | None, payer: str | None, when: str, pcn: str, dates: set,
-                    dup: bool = False) -> tuple | None:
+                    dup: bool = False, listed: bool = True) -> tuple | None:
             """How another claim of the bill settled this code and date other than by a payment still standing, if it did:
             - processed to the patient (copay, coinsurance, deductible) by the same payer after this denial (a corrected
               claim), on the same remittance under the same claim id (the payer processed the claim and denied a copy of
@@ -5851,7 +5859,11 @@ class Detector:
             - denied as a primary line that has its own finding, which no person dismissed or marked lost;
             - paid under another code (SVC06, or a finding saying this code was billed), its own downcode finding;
             - billed again under another date, for a code this claim has on one date only.
-            A processing its payer reversed since counts for nothing."""
+            A processing its payer reversed since counts for nothing. Where this claim's own item never listed the code
+            (`listed` False: the claim was never listed, or its item listed other codes), a line whose finding a person
+            dismissed or marked lost settles it too: the person decided that money on the line, and it must not come back
+            the next run as a claim to work. Where the claim's item listed the code, the rule above stands: the person
+            chose between two listings of the same money, and the claim keeps it."""
             for o in bill_lines.get(bill, []):
                 if o.get("service_date") != dos or o.get("claim_status_code") not in ("1", "19"):
                     continue
@@ -5863,9 +5875,10 @@ class Detector:
                                                           or (at(o) == when and o["patient_control_number"] == pcn))
                         if same_payer or (who(o) != payer and (pcn, who(o)) in paid_by_payer):
                             return ("processed to the patient", o["patient_control_number"])
-                    elif o["line_key"] in listed_lines:
+                    elif o["line_key"] in listed_lines or (not listed and o["line_key"] in let_go_lines):
                         return ("denied again as a line", o["patient_control_number"])
-                if o.get("original_procedure_code") == code and at(o) > when and o["line_key"] in listed_lines:
+                if o.get("original_procedure_code") == code and at(o) > when and (
+                        o["line_key"] in listed_lines or (not listed and o["line_key"] in let_go_lines)):
                     return ("paid under another code", o["patient_control_number"])
             if (bill, dos, code) in billed_as:
                 return ("paid under another code", billed_as[(bill, dos, code)])
@@ -5970,7 +5983,8 @@ class Detector:
                             continue
                         how = settled(bill, code, dos, payer, when, cl["patient_control_number"],
                                       {ln.get("service_date") for ln in lines if ln.get("procedure_code") == code},
-                                      dup=top in DUP_CARCS)
+                                      dup=top in DUP_CARCS,
+                                      listed=prev is not None and (prev.get("codes") is None or code in prev["codes"]))
                         if how and not (prev and prev["worked"]):
                             elsewhere[(code, dos)] = how
                             continue

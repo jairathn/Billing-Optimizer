@@ -19,7 +19,7 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
 | B1 | vanished check: routes for a payment EMA posted and a claim sent again under the same claim id | tests/test_vanished_posted_or_sent_again.py (21: 7 cases x 3 store kinds) | done: failed 9/9 on the base; passes; each of the 4 parts broken fails its cases; restored (sha1) |
 | B2 | detection hands the checks the ids it retires on purpose (left_record) | tests/test_left_record_retired_on_purpose.py (21) | done: failed 9/15 on the base; passes; 5 breaks each fail; restored (sha1) |
 | B3 | precision_guard: own payer only, PLB takebacks netted, own answer repeated skipped | tests/test_precision_guard_counts_only_standing_money.py (42) | done: failed 12/21 of the proposed cases on the base; passes; 7 breaks each fail; restored (sha1) |
-| B4 | a let-go line settles a never-listed whole-claim denial | | not started |
+| B4 | a let-go line settles a never-listed whole-claim denial | tests/test_let_go_line_not_back_as_claim_denial.py (10) | done: failed 2/4 of the proposed cases on the base; passes; 3 breaks each fail; restored (sha1) |
 | B5 | a same-visit vote split keeps its EMA link | | not started |
 
 ## Done, by bug
@@ -56,9 +56,18 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
   ledger_taken was not reused: the guard's tests build rows by hand (no detection run), so one direct netting serves
   both.
 
+- B4 (detect.py): `settled()` takes `listed`; a line whose finding a person dismissed or marked lost
+  (`let_go_lines`: this run's line findings in `closed_lines`) settles the code ("denied again as a line", "paid under
+  another code") when this claim's own item did not list that code: `listed = prev is not None and (prev["codes"] is
+  None or code in prev["codes"])`, `prev_claims[ck]["codes"]` read from the item's evidence (codes and unpaid). This is
+  a code-level reading of the brief's "never listed (no prev_claims entry)": with the literal rule, a claim item listed
+  for other codes (a 17000 the processed claim left out) took the let-go 99214 back as work the next run, overriding
+  the person's decision; the code-level rule keeps the review5 exclusion exactly where the claim's item listed the same
+  code (a test plants that older-release state). Codes nobody decided stay listed.
+
 ## Next command
 
-B4: port `$S/tk/replay/proposed_tests/test_let_go_line_back_as_claim_denial.py`, see it fail, fix detect settled().
+B5: port `$S/tk/replay/proposed_tests/test_link_conflict_same_visit.py`, see it fail, fix ema_ledger._map or the read.
 
 ## Measurements (replay data, read only)
 
