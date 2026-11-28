@@ -1043,14 +1043,18 @@ def test_the_story_marks_its_decisive_rows_escapes_text_and_shows_the_balance(pa
 
 def test_the_worklist_opens_on_work_now_and_older_links_keep_their_meaning(page):
     assert page["defaults"]["state"] == "todo" and page["defaults"]["status"] == "all" and page["defaults"]["sort"] == "value"
-    assert page["older_link"]["state"] == "" and page["older_link"]["sort"] == "deadline" and page["older_link"]["status"] == "appealed"
+    # an older link keeps its meaning (its status, no state); the follow-ups it opens are worked one payer at a time, so
+    # they come grouped by payer, most money first (unit ui-work, CRITIQUE_biller change 8: was "soonest first")
+    assert page["older_link"]["state"] == "" and page["older_link"]["sort"] == "payer_money" and page["older_link"]["status"] == "appealed"
     assert page["today_link"]["state"] == "todo" and page["today_link"]["deadline"] == ""
 
 
 def test_the_rows_say_when_a_waiting_item_comes_back_and_what_emas_rule_did(page):
-    assert "follow up Jun 10, 2026" in page["row_waiting"] and "Faxed on May 1" in page["row_waiting"]
+    # the Due cell carries its verb and the date in the house format (this year: "Jun 10"), why it waits on hover (unit
+    # ui-work moved this from "follow up Jun 10, 2026": same guarantee)
+    assert "Follow up Jun 10" in page["row_waiting"] and "Faxed on May 1" in page["row_waiting"]
     assert ">Done<" in page["row_done"]
-    assert "Auto write-off" in page["row_auto"] and "the payer&#39;s own limit is 2026-07-01" in page["row_auto"]
+    assert "Auto write-off" in page["row_auto"] and "the payer&#39;s own limit is Jul 1" in page["row_auto"]
 
 
 def test_the_panel_follows_a_persons_newer_status_and_offers_no_fax_the_server_would_hold(page):

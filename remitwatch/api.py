@@ -600,6 +600,19 @@ FOLLOW_UP_DAYS = 30         # an item sent this many days ago and still unpaid i
 DECIDE_DAYS = 120           # no filing date, paid in this many days to today: a person decides (insights.to_decide)
 
 
+def _last_day(today: str | None = None) -> str:
+    """The last day an item's money can still be asked for, as SQL: its own date (appeal_deadline, the safe target) until
+    that passes, then the payer's own limit where that is later and still ahead (legal_deadline). An item past our target
+    and inside the payer's limit is the most urgent money there is (CRITIQUE_biller change 3, "last chance"): it closes on
+    the limit, it counts in "Closes in 7 days" and Today's step 1, it sorts by that day, never as passed, and it is not
+    among the closed windows. One definition for the soon and the closed ranges and the sorts by date ("valid" alone
+    keeps our target date: _filters says why). `today` is the practice's day."""
+    day = today or _day(0)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)) or "legal_deadline" not in _columns():
+        return "appeal_deadline"
+    return f"(CASE WHEN appeal_deadline < '{day}' AND legal_deadline >= '{day}' THEN legal_deadline ELSE appeal_deadline END)"
+
+
 def _range(deadline: str) -> tuple[str, str | None]:
     days = DEADLINE_RANGES[deadline]
     if days is not None and days < 0:
@@ -934,18 +947,23 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
     if deadline == "due":
         # a routine-rate finding is due when any of its claims is (its row shows the last of their dates)
         ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and _day(0) <= d < _day(45)})
-        where.append("(appeal_deadline >= ? AND appeal_deadline < ?"
+        last = _last_day()
+        where.append(f"({last} >= ? AND {last} < ?"
                      + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
         params.extend([_day(0), _day(45)] + ids)
     elif deadline == "expired":
-        where.append("appeal_deadline < ?")
+        where.append(f"{_last_day()} < ?")
         params.append(_day(0))
     elif deadline in DEADLINE_RANGES:
         # a routine-rate finding is in range when one of its claims is, by that claim's own date
         lo, hi = _range(deadline)
         ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and d >= lo and (hi is None or d < hi)})
         # the same day range as the claims above: from lo up to (not including) hi, the practice's days
-        dated = "appeal_deadline >= ?" + ("" if hi is None else " AND appeal_deadline < ?")
+        # "valid" (the window still open) stays on our target date: Today's count of EMA's write-offs still appealable
+        # and bulk appeal go by it, and an item inside the payer's own limit alone is appealed one at a time (orchestrator
+        # decision 2). The soon and the closed ranges go by the last day the money can be asked for (_last_day)
+        last = "appeal_deadline" if deadline == "valid" else _last_day()
+        dated = f"{last} >= ?" + ("" if hi is None else f" AND {last} < ?")
         where.append(f"((COALESCE(signal,'') NOT IN {PATTERN_SQL} AND {dated})" + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
         params.extend([lo] + ([] if hi is None else [hi]) + ids)
     elif deadline == "none":
@@ -1110,17 +1128,20 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
              paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), ema: Optional[str] = Query(None, max_length=40),
              state: Optional[str] = Query(None, max_length=120), work_state: Optional[str] = Query(None, max_length=120),
              ema_outcome: Optional[str] = Query(None, max_length=200), source: Optional[str] = Query(None, max_length=20),
-             request: Request = None, _: str = Depends(require_auth)):
+             owner_last: int = Query(0, ge=0, le=1), request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
                          _extra(request), patient_of, kind, bool(live), paid, min, ema=ema, state=state or work_state, ema_outcome=ema_outcome,
                          source=source)
     delta, each = _pattern_cents(w, params, deadline)
-    due, due_params = "appeal_deadline", []
+    # the last day the money can be asked for (_last_day): an item past our target and inside the payer's own limit sorts
+    # by that limit, at the top of "Due soonest", never among the passed ones
+    last = _last_day()
+    due, due_params = last, []
     if each:
         # a routine-rate finding sorts by the first of its claims still in range, not by the last
         nxt = [(fid, d) for fid, (_c, d, _n) in each.items() if d]
         if nxt:
-            due = "COALESCE(CASE finding_id " + " ".join("WHEN ? THEN ?" for _ in nxt) + " END, appeal_deadline)"
+            due = "COALESCE(CASE finding_id " + " ".join("WHEN ? THEN ?" for _ in nxt) + f" END, {last})"
             due_params = [x for pair in nxt for x in pair]
     # by_due names `due` three times, the practice's day between the second and the third
     by_due = f"({due}) IS NULL, ({due}) < ?, {due} ASC"
@@ -1129,8 +1150,15 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
               "payer": f"payer_group, {by_due}, shortfall_cents DESC", "paid": "payment_date DESC, shortfall_cents DESC",
               "sent": "COALESCE(appealed_at, status_changed_at) ASC, shortfall_cents DESC",
               # what working it is worth (dollars x the payer's recovery rate for its pattern), then the date it must be done by
-              "value": f"({value}) IS NULL, {value} DESC, {by_due}"}
+              "value": f"({value}) IS NULL, {value} DESC, {by_due}",
+              # one payer in one sitting (CRITIQUE_biller change 8): the payers by the money the list holds for each, most
+              # first; inside a payer, soonest due first
+              "payer_money": f"SUM(COALESCE(shortfall_cents,0)) OVER (PARTITION BY COALESCE(payer_group,'')) DESC, COALESCE(payer_group,''), {by_due}, shortfall_cents DESC"}
     order = orders.get(sort, orders["shortfall"])
+    if owner_last:
+        # the owner's work (a rate pattern: many claims, one contract question) after a biller's, whatever the order: on
+        # the Worklist it is counted, listed and findable, never ranked among the claims a biller works (change 19)
+        order = f"(COALESCE(signal,'') IN {PATTERN_SQL}), " + order
     order_params = (due_params * 2 + [_day(0)] + due_params) if by_due in order else []
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
@@ -1139,7 +1167,16 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
         if r.get("finding_id") in each and deadline in DEADLINE_RANGES:
             r["window_cents"], r["next_deadline"], r["window_lines"] = each[r["finding_id"]]
     cents = (total["shortfall_cents"] or 0) + delta if total["n"] else total["shortfall_cents"]
-    return {"total": total["n"], "shortfall_cents": cents, "items": data}
+    out = {"total": total["n"], "shortfall_cents": cents, "items": data}
+    if sort == "payer_money":
+        # each payer's count and dollars in the whole list (not the rows shown), for the group's own line
+        out["groups"] = rows(f"SELECT COALESCE(payer_group,'') payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w} "
+                             "GROUP BY 1 ORDER BY 3 DESC, 1", tuple(params))
+    if owner_last:
+        got = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}{' AND' if w else ' WHERE'} "
+                  f"COALESCE(signal,'') IN {PATTERN_SQL}", tuple(params))
+        out["owner_work"] = {"n": got["n"] or 0, "cents": got["cents"] or 0}
+    return out
 
 
 def _csv_cell(v: Any) -> Any:

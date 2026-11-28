@@ -47,9 +47,21 @@ const BADGE_CAT = {denials:'denial', bundling:'bundling', downcoding:'downcoding
 const DESK_TILES = [
   ['todo',      'Work now',         {state:'todo', status:'all', deadline:''}],
   ['todo_week', 'Closes in 7 days', {state:'todo', status:'all', deadline:'week'}],
+  ['followup_due','Follow-ups due', {state:'followup_due', status:'all', deadline:''}],
   ['todo_decide','To decide',       {state:'todo', status:'all', deadline:'decide'}],
   ['waiting',   'Waiting',          {state:'waiting', status:'all', deadline:''}],
 ];
+const TILE_TIPS = {todo:'Needs a person: the work now and the follow-ups whose day has come', todo_week:'Closes within 7 days: our target, or the payer\'s own limit once our target passed',
+  followup_due:'Sent, and the day to follow up has come: grouped by payer, one call or portal session each', todo_decide:'No filing date: a person says what the item is',
+  waiting:'Sent and waiting on the payer until the follow-up day'};
+// the orders a list can take: the money ranking says what it ranks by (CRITIQUE_biller change 6)
+const ORDERS = [['value','Most likely money first'],['shortfall','Biggest amount'],['deadline','Due soonest'],['payer_money','By payer, most money first'],['payer','By payer name']];
+// the chance marks under an amount: the payer's recovery rate for the pattern below or above these moves the row
+const LOW_CHANCE = 0.35, HIGH_CHANCE = 0.75;
+// the owner's work: a rate pattern is a contract question, not a claim to work (detect.PATTERN_SIGNALS)
+const OWNER_SIGNALS = new Set(['SECOND_RATE', 'OLD_FEE_SCHEDULE']);
+// the views a biller works one payer at a time, on the payer's portal or the phone (CRITIQUE_biller change 8)
+function byPayerView(f){ return f.kind === 'chase' || f.signal === 'NO_ANSWER' || f.state === 'followup_due' || f.deadline === 'followup'; }
 const DESK_QUIET = [['done','Done','paid or settled, with proof'], ['accepted','Accepted','let go, lost or the owner\'s policy'],
   ['st_expired','Expired','past every window'], ['cant_check','Can\'t be checked','the money reaches no source we read']];
 const QUIET_STATE = {done:'done', accepted:'accepted', st_expired:'expired', cant_check:'cant_check'};
@@ -101,6 +113,7 @@ function deskFilter(key){
     f.state = TODO_LINK.has(f.status) && SOON_LINK.has(f.deadline || '') ? 'todo' : '';
     if(!('sort' in given)) f.sort = 'deadline';
   }
+  if(!('sort' in given) && byPayerView(f)) f.sort = 'payer_money';
   return f;
 }
 // one line while the payment feed is behind: an item on the list may already be paid. The day is how far the remittances
@@ -141,7 +154,8 @@ async function deskTab(v, key){
   let sent = ''; try { sent = encodeURIComponent(typed); } catch(e){ sent = encodeURIComponent(typed.replace(/[\uD800-\uDFFF]/g,'')); }
   const find = Object.assign({cache:'no-store'}, sent ? {headers:{'X-Search':sent}} : {});
   const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min, year:f.year, handling:f.handling, state:f.state, ema:f.ema};
-  const listUrl = n => '/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit:n, offset:0}));
+  // the Worklist lists the owner's rate patterns after a biller's claims, counted and findable (CRITIQUE_biller change 19)
+  const listUrl = n => '/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit:n, offset:0, owner_last: key === 'worklist' ? 1 : ''}));
   // the tiles count under the chosen kind of work and reason; the kinds of work under the chosen tile, payment window and search
   const [b, dk, res, why, payers] = await Promise.all([briefNow,
     api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal, year:f.year, handling:f.handling, state:f.state, ema:f.ema, tileset:'state'}), find),
@@ -165,20 +179,17 @@ async function deskTab(v, key){
   const tile = tileOf(f), onTile = k => tile && tile[0] === k && !f.paid;
   const closed = ['expired','missed'].includes(f.deadline) || ['done','accepted','expired','cant_check'].includes(f.state);
   const waiting = f.status === 'appealed' || f.state === 'waiting';
-  const tiles = DESK_TILES.filter(([k]) => ['todo','todo_week','waiting'].includes(k) || t(k).n || onTile(k)).map(([k, label]) => {
-    const x = t(k), cls = k==='todo_week' ? (x.n?'t-red':'t-ok') : k==='todo_decide' ? 't-amber' : k==='waiting' ? '' : '';
-    const sub = k==='todo' ? (t('followup_due').n ? `${num(t('followup_due').n)} follow-up${t('followup_due').n===1?'':'s'} due included` : 'needs a person this week')
-      : k==='todo_week' ? 'filing window closes soon'
-      : k==='todo_decide' ? 'no filing date: say what it is'
-      : (t('followup_due').n ? `<a href="#" class="see-followup due-now">${num(t('followup_due').n)} to follow up</a>` : 'the payer still has time');
-    return `<div class="tile ${cls} ${onTile(k)?'on':''}" role="button" tabindex="0" aria-pressed="${onTile(k)}" data-tile="${k}"><span class="t-l">${label}</span>
-      <span class="t-v">${k==='todo_week'&&!x.n ? 'None' : num(x.n)}<small>${x.n ? short$(x.cents) : ''}</small></span><span class="t-s">${sub}</span></div>`; }).join('');
-  // the items that need no work, by state: findable, never gone
+  // the segments: the page's one header row with the view's name (DESIGN P2; CRITIQUE_premium change 3). Each is a count
+  // that opens its own list (/api/desk counts through the list's own filter); red only on "Closes in 7 days", only when it
+  // holds something. Follow-ups due and To decide show when they hold something, or when they are the list shown
+  const segs = DESK_TILES.filter(([k]) => ['todo','todo_week','waiting'].includes(k) || t(k).n || onTile(k)).map(([k, label]) => {
+    const x = t(k), on = onTile(k), red = k === 'todo_week' && x.n;
+    return `<button class="seg ${on?'on':''} ${red?'is-red':''}" data-tile="${k}" aria-pressed="${on}" title="${esc(TILE_TIPS[k]||'')}">${esc(label)} <b>${k==='todo_week'&&!x.n ? 'None' : num(x.n)}</b>${x.n ? `<span class="wk-c">${short$(x.cents)}</span>` : ''}</button>`; }).join('');
+  // the items that need no work, by state: findable under the list, never gone ("Not on the list", DESIGN P2)
   const quiet = DESK_QUIET.filter(([k]) => t(k).n || f.state === QUIET_STATE[k]).map(([k, label, hint]) => `<a href="#" class="see-state ${f.state===QUIET_STATE[k]?'on':''}" data-state="${QUIET_STATE[k]}" title="${esc(hint)}">${esc(label)} ${num(t(k).n)}</a>`);
   const all = t('all');
   const allTip = 'Every item to do, whatever its state or filing window (open, started, sent).';
-  const only = [f.kind ? kindOf(b, f.kind).label : '', f.signal ? shortOf(b, f.signal) : ''].filter(Boolean).join(' · ');
-  // what to do, one row per kind of work under the chosen tile
+  // what to do, one row per kind of work under the chosen segment: under the list, in a fold
   const kinds = dk.scope.kinds, single = kinds.length === 1;
   const reasons = (why && why.signals || []).filter(x=>x.signal && x.n);
   const showAll = state.allReasons === key + '|' + f.kind;
@@ -189,19 +200,17 @@ async function deskTab(v, key){
     return `<div class="todo-row ${f.kind===k.key?'on':''}" data-kind="${k.key}" role="button" tabindex="0" aria-pressed="${f.kind===k.key}" aria-label="${esc(kindOf(b,k.key).label)}: ${esc(doText(k.key))} ${num(k.n)} items">${kindBadge(b, k.key)}<span class="tr-do ${closed||waiting?'muted':''}">${esc(doText(k.key))}</span>
       <span class="tr-n"><b>${num(k.n)}</b> · ${money(k.cents)}</span>
       <span class="tr-pile small muted">${!single && top && !f.payer ? `<a href="#" class="pile" data-kind="${k.key}" data-payer="${esc(top.payer)}">Most: ${esc(top.payer)} (${num(top.n)})</a>` : ''}</span></div>
-      ${f.kind===k.key ? reasonChips : ''}
       ${single && !f.payer ? pileRows(k) : ''}`; }).join('')
-    || '<div class="muted small" style="padding:6px 4px">Nothing here. Pick another box above.</div>';
+    || '<div class="muted small wk-none">Nothing here. Pick another count at the top.</div>';
   const fix = key === 'worklist' ? {} : fixOnce(key, b);
   const chip = (k, label) => `<span class="fchip">${label} <button data-clear="${k}" aria-label="Remove this filter">✕</button></span>`;
   const chips = [];
-  if(f.kind) chips.push(chip('kind', esc(kindOf(b, f.kind).label)));
   if(f.signal) chips.push(chip('signal', esc(shortOf(b, f.signal))));
-  if(f.payer) chips.push(chip('payer', esc(f.payer)));
   if(f.paid) chips.push(chip('paid', `Paid in the last ${esc(f.paid)} days`));
   if(f.year) chips.push(chip('year', `Services of ${esc(f.year)}`));
   if(f.handling === 'written_off') chips.push(chip('handling', 'Written off in EMA, still workable'));
   if(f.ema) chips.push(chip('ema', esc((WL_EMA.find(x=>x[0]===f.ema)||['',f.ema])[1])));
+  if(f.min) chips.push(chip('min', `Over $${esc(f.min)}`));
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
   // a reason this payer is known not to pay: one click takes it off the lists (and keeps new ones off)
   if(f.signal && f.payer && !closed && !waiting && !NEVER_HIDDEN.has(f.signal)) chips.push(`<button class="ghost small" id="hideRule" title="Its open items go to Let go with your note, and new ones will too. Undo it under Hidden.">Hide “${esc(shortOf(b, f.signal))}” for ${esc(f.payer)}</button>`);
@@ -214,48 +223,74 @@ async function deskTab(v, key){
   // the never-answered claims' page (the chase kind of work, or the reason): what is sent and not due yet, and the send
   // weeks whose claims went mostly unanswered (F3a's 837 pass, routed to F5)
   const naShown = f.kind === 'chase' || f.signal === 'NO_ANSWER';
-  const orders = [['value','Worth most first'],['deadline','Soonest first'],['shortfall','Largest first'],['payer','By payer']].concat(waiting?[['sent','Oldest sent first']]:[]);
-  const startLbl = closed || !res.items.length ? '' : f.sort === 'sent' ? 'Start with the oldest sent' : f.sort === 'shortfall' ? 'Start with the largest' : f.sort === 'deadline' ? 'Start with what closes first' : f.sort === 'value' ? 'Start with what is worth most' : 'Start with the first item';
+  // the money ranking says what it is (CRITIQUE_biller change 6): likely money first, the biggest amount, the date
+  const orders = ORDERS.concat(waiting?[['sent','Oldest sent first']]:[]);
+  const kopts = [['', 'Every kind of work'], ...kinds.map(k => [k.key, `${kindOf(b, k.key).label} · ${num(k.n)} · ${money(k.cents)}`])]
+    .concat(f.kind && !kinds.some(k => k.key === f.kind) ? [[f.kind, kindOf(b, f.kind).label]] : []);
   const moreOpen = !!(state.moreF && state.moreF[key]);
   const oneKind = !!f.kind || single;
   const bulkSet = closed ? ['dismissed','open'] : waiting ? ['open','dismissed'] : ['in_progress','appealed','dismissed','open'];
   // appeals faxed in bulk only where the site allows it (REMITWATCH_BULK_APPEAL): no button that can only say it is paused
   const bulk = typeof bulkOn === 'function' && bulkOn();
-  v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">${esc(D.title)}</h1> <span class="muted">${esc(D.intro)}</span></div>
-      ${startLbl || (bulk && !(closed || waiting)) ? `<div class="ph-go">${closed || waiting || !bulk ? '' : '<button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax">Appeal everything appealable</button>'}${startLbl ? `<button class="primary" id="startFirst">${startLbl}</button>` : ''}</div>` : ''}</div>
-    ${dataLine(b)}
+  // the late payers (misuse check CH-8, the Data tab's "No remittance from ... since"): their rows carry the can't-be-checked
+  // mark (CRITIQUE_biller change 13). Read from the brief's own check, so the page says what the Data tab says
+  const quietPayers = {};
+  ((b.health||[]).find(x => x.key === 'payer_stopped' && !x.ok) || {payers: []}).payers.forEach(p => { if(p && p.payer) quietPayers[p.payer] = p.since; });
+  const grouped = f.sort === 'payer_money', groups = {};
+  (res.groups || []).forEach(g => { groups[g.payer_group || ''] = g; });
+  const ownerWork = res.owner_work && res.owner_work.n ? res.owner_work : null;
+  const ncol = f.payer ? 5 : 6;
+  state.wkRows = {}; res.items.forEach(r => { state.wkRows[r.finding_id] = r; });
+  let prevPayer = null, ownerShown = false;
+  const body = res.items.map(r => {
+    let head = '';
+    if(ownerWork && !ownerShown && OWNER_SIGNALS.has(r.signal)){ ownerShown = true;
+      head = `<tr class="group-row wk-owner"><td colspan="${ncol}">For the owner: ${pl(ownerWork.n, 'rate pattern')} · ${money(ownerWork.cents)}. <span class="muted">One contract question each, for the owner under Contracts; counted here, never ranked among the claims.</span></td></tr>`; }
+    else if(grouped && !OWNER_SIGNALS.has(r.signal) && (r.payer_group || '') !== prevPayer){ const g = groups[r.payer_group || ''] || {n: 0, cents: 0};
+      head = `<tr class="group-row wk-group"><td colspan="${ncol}"><span class="wk-gname">${esc(r.payer_group || 'Payer not known')}</span> <span class="muted">${pl(g.n, 'claim')} · ${money(g.cents)}</span><button class="ghost small wk-copy" data-payer="${esc(r.payer_group || '')}" title="The claim number, date of service and billed amount of each ${showPhi() ? 'claim, with the patient' : 'claim'}, for one call or one portal session">Copy the list for the call</button></td></tr>`; }
+    prevPayer = r.payer_group || '';
+    return head + rowHtml(b, r, {oneKind, onePayer: !!f.payer, oneSignal: !!f.signal, sort: f.sort, quiet: quietPayers});
+  }).join('');
+  const startLbl = closed || !res.items.length ? '' : 'Start';
+  // the visit notes' batch, where the list is the appeals with a visit note: a button in the toolbar, its progress under it
+  const emaOn = (f.kind || (single && kinds[0] ? kinds[0].key : '')) === 'note' && state.meta && (state.meta.modmed || state.meta.uploads) && !closed;
+  const emaBtn = emaOn ? `<button class="ghost" id="emaBatch" title="${esc(state.meta.modmed ? "Reads each item's visit note from EMA and reviews it into a packet, about a minute each." : 'Reviews each visit note uploaded from EMA into a packet, about a minute each (Upload from EMA in the sidebar).')}">${state.meta.modmed ? 'Packets from EMA (next 10)' : 'Packets from uploaded notes (next 10)'}</button>` : '';
+  v.innerHTML = `${dataLine(b)}
+    <div class="wk-head"><h1 class="page-title wk-title">${esc(D.title)}</h1><div class="segs wk-segs" role="group" aria-label="Which items">${segs}</div>${emaBtn}</div>
     ${f.deadline === 'followup' && (b.follow_ups||{}).note ? `<div class="note sev-medium">${esc(b.follow_ups.note)}</div>` : ''}
-    <div class="tiles">${tiles}</div>
-    <div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}${quiet.length ? `Need no work: ${quiet.join(' · ')}. ` : ''}${key==='worklist' ? '' : `<a href="#" class="see-all" title="${esc(allTip)}">Everything to do, any window: ${num(all.n)} · ${money(all.cents)}</a>`}</div>
-    <div class="todo-chips" aria-label="What to do">${kinds.map(k=>`<button class="seg ${f.kind===k.key?'on':''}" data-kind="${k.key}"><span>${esc(kindOf(b,k.key).label)} <span class="cnt">${num(k.n)}</span></span><span class="seg-sub">${money(k.cents)}</span></button>`).join('')}</div>
-    ${f.kind || single ? `<div class="howline"><b>What to do:</b> ${esc(doText(f.kind || kinds[0].key))}</div>` : ''}
-    <div class="ph-what">${f.kind ? reasonChips : ''}${single && !f.payer ? pileRows(kinds[0]) : ''}</div>
-    <div class="desk-mid ${fix.side?'has-side':''}"><div class="todo-list"><div class="sec">What to do${tile && tile[0]!=='valid' ? ` <span class="muted small">(${esc(tile[1])})</span>` : !tile ? ` <span class="muted small">(${esc(viewName(f))})</span>` : ''}</div>${kindRows}</div>${fix.side||''}</div>
-    <div class="fix-top">${fix.line||''}</div>
-    ${(f.kind || (single && kinds[0] ? kinds[0].key : '')) === 'note' && state.meta && (state.meta.modmed || state.meta.uploads) && !closed
-      ? (state.meta.modmed
-        ? `<div class="ema-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><button id="emaBatch" class="primary">Build packets from EMA (next 10)</button><span id="emaBatchMsg" class="small muted">Reads each item's visit note from EMA and reviews it into a packet, about a minute each.</span></div>`
-        : `<div class="ema-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><button id="emaBatch" class="primary">Build packets from the uploaded notes (next 10)</button><span id="emaBatchMsg" class="small muted">Reviews each visit note uploaded from EMA into a packet, about a minute each. <a href="/upload">Upload notes</a>.</span></div>`) : ''}
-    <div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>${chips.join('')}<span id="hiddenLine" class="small muted"></span>
-      <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
-      <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
-    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('state','State',WL_STATES,f.state||'')}${sel('year','Service year',[['','Any service year'],...years.map(y=>[y,'Services of '+y])],f.year||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
-    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting || !bulk ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
-    <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item shown"></th><th>Closes</th><th>Patient</th>${f.payer?'':'<th>Payer</th>'}<th>What happened</th><th class="num">Amount</th></tr></thead>
-    <tbody>${res.items.map(r=>rowHtml(b, r, {oneKind, onePayer: !!f.payer, oneSignal: !!f.signal})).join('')}</tbody></table></div>
-    ${res.items.length ? '' : `<div class="empty">Nothing here. ${chips.length ? 'Remove a filter above, or pick' : 'Pick'} another box at the top.</div>`}
-    ${res.total > res.items.length ? `<button class="ghost" id="moreRows">Show ${Math.min(ROWS, res.total-res.items.length)} more</button>` : ''}
-    <div class="fix-after">${fix.line||''}</div>
-    ${naShown ? '<div id="naPanel" aria-live="polite"></div>' : ''}
-    ${key==='worklist' ? '' : `<details class="fold" id="fold" ${foldIsOpen(key)?'open':''}><summary>${esc(DETAILS_SUMMARY[key]||'Details')}</summary><div id="foldBody" class="muted small">Loading…</div></details>`}`;
+    <div class="list-head wk-bar" id="listHead" tabindex="-1">${tile ? '' : `<span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>`}
+      <span class="lh-tools">${sel('kind','Kind of work',kopts,f.kind||'')}${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('sort','Order',orders,f.sort)}
+      <input data-f="q" maxlength="200" aria-label="Search this list" placeholder="Search  /" title="${showPhi()?'Patient, claim number or code':'Claim number or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">Filters</button><button class="ghost" id="wlCsv">Export</button></span>
+      ${startLbl ? `<button class="primary wk-go" id="startFirst" title="Open the first item of this list; j and k move through it">${startLbl}</button>` : ''}</div>
+    <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('kind','Kind of work',kopts,f.kind||'')}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search this list" placeholder="Claim number or code" value="${esc(f.q)}"></span>${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('state','State',WL_STATES,f.state||'')}${sel('year','Service year',[['','Any service year'],...years.map(y=>[y,'Services of '+y])],f.year||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
+    ${chips.length || f.kind ? `<div class="wk-chips">${chips.join('')}${f.kind ? `<span class="wk-how"><b>What to do:</b> ${esc(doText(f.kind))}</span>` : ''}</div>` : ''}
+    ${f.kind ? reasonChips : ''}
+    ${emaOn ? '<div id="emaBatchMsg" class="small muted wk-ema-msg" role="status"></div>' : ''}
+    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting || !bulk ? '' : '<button id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
+    <div class="list-card wk-card"><table class="wl wk"><thead><tr><th class="c-sel"><input type="checkbox" id="selAll" aria-label="Select every item shown"></th><th class="c-day">Due</th><th class="c-who">Patient</th>${f.payer?'':'<th class="c-payer">Payer</th>'}<th class="c-what">What happened</th><th class="num c-num">Amount</th></tr></thead>
+    <tbody>${body}</tbody></table>
+    ${res.items.length ? '' : `<div class="empty">Nothing here. ${chips.length ? 'Remove a filter above, or pick' : 'Pick'} another count at the top. ${esc(D.intro)}</div>`}
+    ${res.total > res.items.length ? `<div class="show-more"><button class="ghost" id="moreRows">Show ${Math.min(ROWS, res.total-res.items.length)} more</button></div>` : ''}</div>
+    <div class="wk-below">
+      <div class="small muted wk-quiet">${quiet.length ? `Not on the list: ${quiet.join(' · ')}. ` : ''}${key==='worklist' ? '' : `<a href="#" class="see-all" title="${esc(allTip)}">Everything to do, any window: ${num(all.n)} · ${money(all.cents)}</a> `}<span id="hiddenLine" class="small muted"></span></div>
+      ${fix.line ? `<div class="wk-fix">${fix.line}</div>` : ''}${fix.side || ''}
+      <details class="fold wk-kinds"><summary>What to do, by kind of work${tile ? ` (${esc(tile[1])})` : ` (${esc(viewName(f))})`}</summary><div class="todo-list">${kindRows}</div>
+        ${closed || waiting || !bulk ? '' : '<div class="wk-all"><button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax. It asks first, with the count.">Appeal everything appealable</button></div>'}</details>
+      ${naShown ? '<div id="naPanel" aria-live="polite"></div>' : ''}
+      ${key==='worklist' ? '' : `<details class="fold" id="fold" ${foldIsOpen(key)?'open':''}><summary>${esc(DETAILS_SUMMARY[key]||'Details')}</summary><div id="foldBody" class="muted small">Loading…</div></details>`}
+    </div>`;
   // a change redraws the page; the control that made it gets the focus back (or the list head, for a click that opens a list)
-  const set = (patch, focus) => { state.filt[key] = Object.assign({}, f, patch); state.lim[key] = ROWS; state.refocus = focus || null; render(); };
+  const set = (patch, focus) => { const next = Object.assign({}, f, patch);
+    // the views a biller works one payer at a time (the claims to chase, the follow-ups) group by payer unless a person
+    // chose another order; leaving them goes back to the money ranking (CRITIQUE_biller change 8)
+    if(!('sort' in patch) && byPayerView(next) !== byPayerView(f)) next.sort = byPayerView(next) ? 'payer_money' : (f.sort === 'payer_money' ? 'value' : next.sort);
+    state.filt[key] = next; state.lim[key] = ROWS; state.refocus = focus || null; render(); };
   const keyed = (el, fn) => { el.onclick = fn; el.onkeydown = e => { if((e.key==='Enter'||e.key===' ') && e.target===el){ e.preventDefault(); fn(e); } }; };
   v.querySelectorAll('[data-tile]').forEach(el=>keyed(el, e=>{ if(e.target.closest && e.target.closest('a')) return;
     const k = el.dataset.tile, s = DESK_TILES.find(x=>x[0]===k)[2];
-    set(Object.assign({paid:'', q:''}, s, {sort: k==='todo_decide' ? 'shortfall' : (k==='todo_week' ? 'deadline' : 'value')}), `[data-tile="${k}"]`); }));
+    set(Object.assign({paid:'', q:''}, s, {sort: k==='todo_decide' ? 'shortfall' : k==='todo_week' ? 'deadline' : k==='followup_due' ? 'payer_money' : 'value'}), `[data-tile="${k}"]`); }));
   const link = (sel, patch, focus) => v.querySelectorAll(sel).forEach(a=>a.onclick=e=>{ e.preventDefault(); e.stopPropagation(); set(Object.assign({paid:'', q:''}, patch), focus); });
-  link('.see-followup', {state:'followup_due', status:'all', deadline:'', sort:'deadline'}, '#listHead');
+  link('.see-followup', {state:'followup_due', status:'all', deadline:'', sort:'payer_money'}, '#listHead');
   link('.see-all', {state:'', deadline:'', status:'open,in_progress', sort:'deadline'}, '#listHead');
   v.querySelectorAll('.see-state').forEach(a=>a.onclick=e=>{ e.preventDefault(); e.stopPropagation(); set({paid:'', q:'', state:a.dataset.state, status:'all', deadline:'', sort:'shortfall'}, '#listHead'); });
   v.querySelectorAll('.todo-row').forEach(r=>keyed(r, e=>{ if(e.target.closest && e.target.closest('a.pile')) return;
@@ -267,6 +302,7 @@ async function deskTab(v, key){
   v.querySelectorAll('.pile-row').forEach(r=>keyed(r, ()=>set({kind:r.dataset.kind, payer:r.dataset.payer, signal:''}, '#listHead')));
   v.querySelectorAll('select[data-f]').forEach(el=>el.onchange=()=>{
     const patch = {[el.dataset.f]: el.value};
+    if(el.dataset.f === 'kind') patch.signal = '';          // a reason belongs to its kind of work
     if(el.dataset.f === 'deadline'){            // these two lists are about one status each
       if(el.value === 'followup') patch.status = 'appealed';
       else if(el.value === 'missed') patch.status = 'open';
@@ -294,6 +330,7 @@ async function deskTab(v, key){
   const mr = v.querySelector('#moreRows'); if(mr) mr.onclick = () => { const y = window.scrollY; state.lim[key] = lim + ROWS; render().then(()=>window.scrollTo(0, y)); };
   bindRows(v);
   bindBulk(v);
+  bindCopies(v);
   v.querySelector('#wlCsv').onclick = () => exportCsv(Object.assign({}, scope, {kind:f.kind, view:'worklist'}), find, key);
   const fold = v.querySelector('#fold');
   if(fold){
@@ -342,7 +379,7 @@ const DETAILS_SUMMARY = {denials:'Details: by reason, by month, what each label 
   downcoding:'Details: by reason, plans, what gets cut, by clinician', contracts:'Details: rates against Medicare by code and payer, by reason'};
 
 function bindRows(v){
-  v.querySelectorAll('tr.row[data-id]').forEach(tr=>{ tr.onclick = e => { if(e.target.closest('input')) return; openDetail(tr.dataset.id); };
+  v.querySelectorAll('tr.row[data-id]').forEach(tr=>{ tr.onclick = e => { if(e.target.closest('input, button')) return; openDetail(tr.dataset.id); };
     tr.onkeydown = e => { if((e.key==='Enter'||e.key===' ') && e.target===tr){ e.preventDefault(); openDetail(tr.dataset.id); } }; });
 }
 function bindBulk(v){
@@ -405,41 +442,93 @@ async function exportCsv(params, find, key){      // fetched, not linked: the se
   if(!r.ok){ alert('The export did not come back ('+r.status+').'); return; }
   const url = URL.createObjectURL(await r.blob()), a = document.createElement('a'); a.href = url; a.download = `remitwatch-${key}.csv`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000);
 }
-// a tick box and five columns: no status column (a pill under the amount when the status is not To do), the date in a tooltip.
-// An item already sent, paid or let go shows that in grey instead of a filing date in red.
+// The row a biller scans (CRITIQUE_biller change 6; DESIGN 3.8): two lines in every cell, at a fixed height, so a row never
+// moves when the panel opens. Due: the verb, the date and the days left (the last day the money can be asked for: our
+// target, then the payer's own limit once the target passed, change 3). Patient: the name (never blank) over the claim
+// number (a click copies it) and the date of service. Payer: over the last thing a person did. What happened: the kind of
+// work and the reason over the code and the payer's reason code. Amount in whole dollars over the person's status, the
+// state, or the chance mark that says why the money ranking put the row there.
 // the words for an item's state (remitwatch.states), the same everywhere on the site
 const STATE_LABEL = {work_now:'Work now', waiting:'Waiting', done:'Done', accepted:'Accepted', expired:'Expired', cant_check:"Can't be checked"};
 const AUTO_WO = {auto_written_off:'Auto write-off', written_off_while_pending:'Written off while pending', lost_to_timely_filing:'Lost to late filing'};
+const DUE_VERB = {fix:'Resubmit by', auth:'Appeal by', note:'Appeal by', rule:'Appeal by', rate:'Ask by', chase:'File by', bill:'Bill by', check:'Decide by', post:'Post by'};
+// "Dec 15" this year, "Dec 15, 2027" another (DESIGN 3)
+function shortDay(d){
+  const s = String(d || '').slice(0, 10), x = new Date(s + 'T00:00:00Z');
+  if(isNaN(x)) return String(d || '');
+  return x.toLocaleDateString('en-US', Object.assign({month:'short', day:'numeric', timeZone:'UTC'}, s.slice(0, 4) === String(siteDay()).slice(0, 4) ? {} : {year:'numeric'}));
+}
+function dueOf(b, r){
+  const verb = DUE_VERB[kindFor(b, r)] || 'Due', own = r.next_deadline || r.appeal_deadline, legal = r.legal_deadline;
+  const est = /not confirmed/.test(r.deadline_basis || '') ? ' (an estimated rule: confirm it in the payer agreement)' : '';
+  const live = !r.status || r.status === 'open' || r.status === 'in_progress';
+  const left = n => n === 0 ? 'today' : n === 1 ? 'tomorrow' : `in ${n} days`;
+  if(r.work_state === 'waiting' && r.follow_up_on){ const n = daysUntil(r.follow_up_on);
+    return {l1: `Follow up ${shortDay(r.follow_up_on)}`, l2: n <= 0 ? 'due now' : left(n), cls: n <= 0 ? 'due-now' : '',
+            title: 'Waiting on the payer. Follow up on ' + shortDay(r.follow_up_on) + (r.state_basis ? ': ' + r.state_basis : '')}; }
+  if(!live) return {l1: r.status === 'appealed' && r.appealed_at ? `Sent ${shortDay(practiceDate(r.appealed_at))}` : String(STATUS_WORDS[r.status] || r.status), l2: '', cls: 'muted', title: ''};
+  if(!own) return {l1: 'No filing date', l2: '', cls: 'muted', title: 'No filing date: a person says what the item is'};
+  const n = daysUntil(own), limit = legal && legal > own ? `; the payer's own limit is ${shortDay(legal)}` : '';
+  if(n >= 0) return {l1: `${verb} ${shortDay(own)}`, l2: left(n), cls: n < 7 ? 'due-now' : '',
+    title: `${verb} ${shortDay(own)}${est}${r.next_deadline && r.next_deadline !== r.appeal_deadline ? ' (the first of its claims)' : ''}${limit}`};
+  if(legal && daysUntil(legal) >= 0){ const m = daysUntil(legal);
+    return {l1: `${verb} ${shortDay(legal)}`, l2: (m === 0 ? 'last day' : `${m} day${m === 1 ? '' : 's'} left`) + ', last chance', cls: m < 7 ? 'due-now' : 'due-soon', last: true,
+            title: `Last chance: our target ${shortDay(own)} passed; the payer's own limit is ${shortDay(legal)}${est}`}; }
+  const shut = legal && legal > own ? legal : own;
+  return {l1: `Window closed ${shortDay(shut)}`, l2: '', cls: 'muted', closed: true, title: `The last window closed on ${shortDay(shut)}${est}`};
+}
 function rowHtml(b, r, o){
   o = o || {};
-  const due = r.next_deadline || r.appeal_deadline, c = closesText(due), lb = labelOf(b, r.signal), est = /not confirmed/.test(r.deadline_basis||'');
-  const live = !r.status || r.status === 'open' || r.status === 'in_progress';
-  // the payer's own limit, where the date shown is a safer, earlier one (detection's legal_deadline)
-  const limit = r.legal_deadline && r.legal_deadline !== due ? `; the payer's own limit is ${r.legal_deadline}` : '';
-  const ws = r.work_state;
-  const when = ws === 'waiting' && r.follow_up_on ? `<span class="${daysUntil(r.follow_up_on) <= 0 ? 'due-now' : 'muted'}" title="${esc('Waiting on the payer. Follow up on ' + r.follow_up_on + (r.state_basis ? ': ' + r.state_basis : ''))}">follow up ${esc(longDate(r.follow_up_on))}</span>`
-    : live ? `<span class="${c.cls}" title="${esc(due ? 'File by '+due+(est?' (estimated rule: confirm it in the payer agreement)':'')+(r.next_deadline&&r.next_deadline!==r.appeal_deadline?'; the first of its claims':'')+limit : 'No filing date')}">${esc(c.text)}${est&&due?'<sup class="muted">*</sup>':''}</span>`
-    : `<span class="muted">${esc(r.status === 'appealed' && r.appealed_at ? 'sent ' + longDate(practiceDate(r.appealed_at)) : String(STATUS_WORDS[r.status]||r.status).toLowerCase())}</span>`;
-  const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${pl(r.window_lines, 'line')} in range</div>`
-    : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
-  // a person's status, or for an item that needs no work its state (done, accepted, expired, can't be checked)
+  const lb = labelOf(b, r.signal), ws = r.work_state, due = dueOf(b, r), live = !r.status || r.status === 'open' || r.status === 'in_progress';
+  const named = typeof showPhi === 'function' && showPhi();      // index.html's names switch (a page test may load desk.js alone)
+  // never a blank patient cell: the name; with names on and none on file, says so beside the member ID
+  const who = r.patient ? esc(r.patient) : named ? 'Name not on file' : (r.patient_control_number ? 'Claim ' + esc(r.patient_control_number) : 'Patient not shown');
+  const claim = r.patient_control_number ? `<button type="button" class="clm" data-copy="${esc(r.patient_control_number)}" title="Copy the claim number">${esc(r.patient_control_number)}</button>` : '';
+  const dos = r.service_date ? `seen ${shortDay(r.service_date)}` : '';
+  const member = !r.patient && named && r.member_id ? `member ${esc(r.member_id)}` : '';
+  // the last thing a person did, with who where a person did it (api._with_worked_by)
+  const by = r.worked_by ? ` <span class="by">by ${esc(r.worked_by)}</span>` : '';
+  const last = r.status === 'appealed' ? `Sent${r.appealed_at ? ' ' + shortDay(practiceDate(r.appealed_at)) : ''}${by}`
+    : r.status && r.status !== 'open' ? `${esc(STATUS_WORDS[r.status] || r.status)}${r.worked_by && r.worked_at ? ' ' + shortDay(practiceDate(r.worked_at)) : ''}${by}` : '';
+  // a payer whose remittances stopped (change 13): nothing on file can say whether this was paid since
+  const since = (o.quiet || {})[r.payer_group];
+  const blind = since ? `<span class="wk-blind" role="img" aria-label="Can't be checked" title="${esc(`Can't be checked: RemitWatch has not seen ${r.payer_group}'s payments since ${shortDay(since)}. Check the payer's portal first.`)}"></span>` : '';
+  const code = `${esc(r.original_procedure_code ? r.original_procedure_code + '→' : '')}${esc(r.procedure_code || '')}${r.modifiers ? '-' + esc(r.modifiers) : ''}`;
+  const carc = r.carc ? `<span title="${esc(r.carc_text || r.carc)}">${esc(r.carc)}</span>` : '';
+  const auto = AUTO_WO[r.ema_outcome] ? `<span title="${esc(r.ema_outcome === 'auto_written_off' ? "EMA's posting rule wrote off the denial the day the remittance posted; nobody worked this line" : r.ema_outcome === 'lost_to_timely_filing' ? 'Written off for late filing after an earlier denial nobody fixed' : 'Written off the day it posted while the payer still asked for something')}">${esc(AUTO_WO[r.ema_outcome])}</span>` : '';
+  const wo = r.written_off_cents ? `<span title="${esc(money2(r.written_off_cents))} of the money in dispute is written off (or moved to the patient) in EMA${r.written_off_on ? ', as of ' + esc(shortDay(r.written_off_on)) : ''}">written off in EMA</span>` : '';
+  const what2 = [code, carc, auto, wo].filter(Boolean).join(' · ');
+  const amt = r.window_cents != null ? `<b>${money(r.window_cents)}</b>` : (r.shortfall_cents ? `<b>${money(r.shortfall_cents)}</b>` : '<span class="muted" title="No usual rate to compare with">not known</span>');
+  // under the amount: a person's status, the state of an item that needs no work, else the chance mark when the chance
+  // moved the row in the money ranking ("low chance" or "high chance", its basis on hover)
   const quietState = ws && !['work_now','waiting'].includes(ws) ? STATE_LABEL[ws] || ws : '';
-  const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`
-    : quietState ? `<div><span class="st st-${esc(ws)}" title="${esc(r.state_basis||'')}">${esc(quietState)}</span></div>` : '';
-  // EMA closed the line with no person working it (amendment 8): said on the row
-  const auto = AUTO_WO[r.ema_outcome] ? `<span class="chip hint" title="${esc(r.ema_outcome === 'auto_written_off' ? "EMA's posting rule wrote off the denial the day the remittance posted; nobody worked this line" : r.ema_outcome === 'lost_to_timely_filing' ? 'Written off for late filing after an earlier denial nobody fixed' : 'Written off the day it posted while the payer still asked for something')}">${esc(AUTO_WO[r.ema_outcome])}</span>` : '';
-  // the biller wrote it off in EMA: money given up, though the window may still be open
-  const wo = r.written_off_cents ? `<div class="small"><span class="chip hint" title="${esc(money2(r.written_off_cents))} of the money in dispute is written off (or moved to the patient) in EMA${r.written_off_on ? ', as of ' + esc(r.written_off_on) : ''}">written off in EMA</span></div>` : '';
-  const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
-  const shut = live && due && daysUntil(due) < 0;
-  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-status="${esc(r.status||'open')}" data-kind="${esc(kindFor(b, r))}" data-signal="${esc(r.signal)}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
-    <td class="day">${when}</td>
-    <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
-    ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}
-    <td class="what" title="${esc(lb.label)}">${o.oneSignal ? '' : `${o.oneKind ? '' : kindBadge(b, kindFor(b, r))+' '}${esc(shortOf(b, r.signal))}`}<div class="small muted">${code}</div>${r.hint || auto ? `<div class="small">${auto}${r.hint?`<span class="chip hint">${esc(r.hint)}</span>`:''}</div>`:''}</td>
-    <td class="num" title="${esc(amountBasis(r))}">${amt}${pill}${wo}</td></tr>`;
+  const rate = r.recovery_rate == null ? null : Number(r.recovery_rate);
+  const chance = live && o.sort === 'value' && rate != null && (rate <= LOW_CHANCE || rate >= HIGH_CHANCE)
+    ? `<span class="chance" title="${esc((r.recovery_basis ? r.recovery_basis + '. ' : '') + (r.expected_value_cents != null ? `Worth about ${money(r.expected_value_cents)} of ${money(r.shortfall_cents)}.` : ''))}">${rate <= LOW_CHANCE ? 'low chance' : 'high chance'}</span>` : '';
+  const under = r.window_cents != null ? `${pl(r.window_lines, 'line')} in range`
+    : r.status && r.status !== 'open' ? `<span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span>`
+    : quietState ? `<span class="st st-${esc(ws)}" title="${esc(r.state_basis||'')}">${esc(quietState)}</span>` : chance;
+  const owner = OWNER_SIGNALS.has(r.signal);
+  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-status="${esc(r.status||'open')}" data-kind="${esc(kindFor(b, r))}" data-signal="${esc(r.signal)}" ${due.closed && live ? 'data-closed="1"' : ''}${owner ? ' data-owner="1"' : ''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
+    <td class="day" title="${esc(due.title)}"><span class="l1 ${due.cls}">${esc(due.l1)}</span><span class="l2">${esc(due.l2)}</span></td>
+    <td class="who"><span class="l1">${who}</span><span class="l2">${[claim, dos, member].filter(Boolean).join(' · ')}</span></td>
+    ${o.onePayer ? '' : `<td class="payer"><span class="l1">${esc(r.payer_group)}${blind}</span><span class="l2">${last}</span></td>`}
+    <td class="what" title="${esc(lb.label + (r.hint ? '. ' + r.hint : ''))}"><span class="l1">${o.oneSignal ? esc(lb.label) : `${o.oneKind ? '' : kindBadge(b, kindFor(b, r))+' '}${esc(shortOf(b, r.signal))}`}</span><span class="l2">${what2}</span></td>
+    <td class="num" title="${esc(amountBasis(r))}"><span class="l1">${amt}</span><span class="l2">${under}</span></td></tr>`;
 }
-
+// a click on a claim number copies it; "Copy the list for the call" copies one payer's claims shown (claim number, date of
+// service, billed amount; the patient only with names on). Nothing goes to the server: the clipboard is the person's
+function bindCopies(v){
+  const said = (bt, ok) => { const was = bt.dataset.was || bt.textContent; bt.dataset.was = was; bt.textContent = ok ? 'Copied' : 'Not copied: select it by hand';
+    setTimeout(() => { bt.textContent = was; }, 1800); };
+  const put = async (bt, text) => { try { await navigator.clipboard.writeText(text); said(bt, true); } catch(e){ said(bt, false); } };
+  v.querySelectorAll('button.clm').forEach(bt => bt.onclick = e => { e.stopPropagation(); put(bt, bt.dataset.copy || ''); });
+  v.querySelectorAll('.wk-copy').forEach(bt => bt.onclick = e => { e.stopPropagation();
+    const rows = Object.values(state.wkRows || {}).filter(r => (r.payer_group || '') === bt.dataset.payer && !OWNER_SIGNALS.has(r.signal));
+    const lines = rows.map(r => [r.patient_control_number ? 'Claim ' + r.patient_control_number : '', r.service_date ? 'seen ' + shortDay(r.service_date) : '',
+      r.charge_cents != null ? 'billed ' + money2(r.charge_cents) : '', showPhi() && r.patient ? r.patient : ''].filter(Boolean).join(', '));
+    put(bt, `${bt.dataset.payer || 'Payer not known'}, ${pl(rows.length, 'claim')}\n` + lines.join('\n')); });
+}
 // where an amount comes from, on hover (every dollar figure says its basis; an estimate says so)
 function amountBasis(r){
   const from = r.source === 'ema' ? "From EMA's postings (no remittance carries it)" : "From the payer's remittance (835)";
@@ -564,24 +653,25 @@ async function feesDesk(v){
   const fh = fp.history || {cents12: fp.cents12, payers12: fp.payers12, cents: fp.cents, since: fp.since};       // what vendors took, asked or not
   const older = fp.payers.length - fp.payers12;
   const startLbl = onFees ? (fp.payers.length ? 'Start with the biggest payer' : '') : (on90 && tbl.items.length ? 'Start with the newest takeback' : '');
-  v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">Fees & takebacks</h1> <span class="muted">Money taken out of payments: vendor fees to stop once, and takebacks to check against the payer's letter.</span></div>
-      ${startLbl ? `<div class="ph-go"><button class="primary" id="startFirst">${startLbl}</button></div>` : ''}</div>
-    ${dataLine(b)}
-    <div class="tiles">
-      <div class="tile ${onFees?'on':''}" role="button" tabindex="0" data-l="fees"><span class="t-l">Payment fees, last 12 months</span><span class="t-v">${money(fh.cents12)}</span>
-        <span class="t-s">${fp.from ? `${esc(rwMonth(fp.from))} to ${esc(rwMonth(fp.to))}, ${pl(fh.payers12, 'payer')}` : ''}${fh.since ? `; ${money(fh.cents)} since ${esc(rwMonth(fh.since))}` : ''}</span></div>
-      <div class="tile ${tb90.total?'t-amber':'t-ok'} ${on90?'on':''}" role="button" tabindex="0" data-l="takebacks" data-paid="90"><span class="t-l">Taken back, last 90 days</span><span class="t-v">${tb90.total ? num(tb90.total) : 'None'}<small>${tb90.total ? short$(tb90.shortfall_cents) : ''}</small></span><span class="t-s">check each one</span></div>
-      <div class="tile t-grey ${onAll?'on':''}" role="button" tabindex="0" data-l="takebacks" data-paid=""><span class="t-l">All takebacks</span><span class="t-v">${num(tbAll.total)}<small>${tbAll.total ? short$(tbAll.shortfall_cents) : ''}</small></span><span class="t-s">${since ? 'since '+esc(rwMonth(since.slice(0,7)))+' · ' : ''}${num(tbBig.total)} of $5,000 or more</span></div></div>
-    <div class="todo-list"><div class="sec">What to do</div>
-      <div class="todo-row ${onFees?'on':''}" role="button" tabindex="0" data-l="fees"><span class="fo-tag">Fix once</span><span class="tr-do">Ask each payer or its vendor for direct deposit with no fee.</span><span class="tr-n"><b>${pl(fp.payers12, 'payer')}</b> to ask · ${money(fp.cents12)} in 12 months</span><span class="tr-pile small muted">${fp.payers[0] ? 'Most: '+esc(fp.payers[0].payer_name) : ''}</span></div>
-      <div class="todo-row ${on90?'on':''}" role="button" tabindex="0" data-l="takebacks" data-paid="90"><span class="kind k-check">Check first</span><span class="tr-do">${tb90.total ? "Match each takeback to the payer's letter; dispute any not owed." : 'No takebacks in the last 90 days.'}</span><span class="tr-n"><b>${num(tb90.total)}</b> · ${money(tb90.shortfall_cents||0)}</span><span class="tr-pile small muted">${top ? `Most: ${esc(top.payer)} (${num(top.n)})` : ''}</span></div></div>
-    ${onFees ? feeListHtml(fp, older) : `<div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(tbl.total, 'takeback')}</b> · <b>${money(tbl.shortfall_cents)}</b>${on90 ? ' in the last 90 days' : ', every one in the files'}</span></div>
+  // one header row, as on the other Work views (DESIGN P11): the three lists as segments, their detail on hover; what to
+  // do with each lives under the list
+  const plain = h => String(h).replace(/<[^>]+>/g, '');
+  v.innerHTML = `${dataLine(b)}
+    <div class="wk-head"><h1 class="page-title wk-title">Fees & takebacks</h1><div class="segs wk-segs" role="group" aria-label="Which list">
+      <button class="seg ${onFees?'on':''}" data-l="fees" aria-pressed="${onFees}" title="${esc(plain(`${fp.from ? `${esc(rwMonth(fp.from))} to ${esc(rwMonth(fp.to))}, ${pl(fh.payers12, 'payer')}` : ''}${fh.since ? `; ${money(fh.cents)} since ${esc(rwMonth(fh.since))}` : ''}`))}">Payment fees, 12 months <span class="wk-c">${money(fh.cents12)}</span></button>
+      <button class="seg ${on90?'on':''}" data-l="takebacks" data-paid="90" aria-pressed="${on90}" title="${esc(plain(`check each one`))}">Taken back, 90 days <b>${tb90.total ? num(tb90.total) : 'None'}</b>${tb90.total ? `<span class="wk-c">${short$(tb90.shortfall_cents)}</span>` : ''}</button>
+      <button class="seg ${onAll?'on':''}" data-l="takebacks" data-paid="" aria-pressed="${onAll}" title="${esc(plain(`${since ? 'since '+esc(rwMonth(since.slice(0,7)))+' · ' : ''}${tbBig.total ? `${num(tbBig.total)} at $5,000 or more` : 'None at $5,000 or more'}`))}">All takebacks <b>${num(tbAll.total)}</b>${tbAll.total ? `<span class="wk-c">${short$(tbAll.shortfall_cents)}</span>` : ''}</button></div>
+      ${startLbl ? `<button class="primary wk-go" id="startFirst">${startLbl}</button>` : ''}</div>
+    ${onFees ? feeListHtml(fp, older) : `<div class="list-head wk-bar" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(tbl.total, 'takeback')}</b> · <b>${money(tbl.shortfall_cents)}</b>${on90 ? ' in the last 90 days' : ', every one in the files'}</span></div>
         <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${['in_progress','appealed','dismissed','open'].map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}</div>
-        <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every takeback shown"></th><th>Taken</th><th>Dispute by</th><th>Payer</th><th class="num">Taken back</th></tr></thead>
+        <div class="scroll"><table class="wl wk"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every takeback shown"></th><th>Taken</th><th>Dispute by</th><th>Payer</th><th class="num">Taken back</th></tr></thead>
         <tbody>${tbl.items.map(r=>{ const c = closesText(r.appeal_deadline), live = ['open','in_progress'].includes(r.status);
           return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-status="${esc(r.status||'open')}" ${live && r.appeal_deadline && daysUntil(r.appeal_deadline) < 0 ? 'data-closed="1"' : ''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this takeback"></td><td>${esc(rwMonth((r.payment_date||'').slice(0,7)))}</td><td class="day">${r.appeal_deadline ? `<span class="${live?c.cls:'muted'}" title="${esc(r.deadline_basis||'')}">${esc(c.text)}</span>` : '<span class="muted">no date</span>'}</td><td class="payer">${esc(r.payer_group)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b>${r.status!=='open'?`<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`:''}</td></tr>`; }).join('')}</tbody></table></div>
-        ${tbl.items.length ? '' : `<div class="empty">${on90 ? 'No takebacks in the last 90 days. All takebacks are in the grey box above.' : 'No takebacks.'}</div>`}
+        ${tbl.items.length ? '' : `<div class="empty">${on90 ? 'No takebacks in the last 90 days. Every takeback is under All takebacks above.' : 'No takebacks.'}</div>`}
         ${tbl.total > tbl.items.length ? `<button class="ghost" id="moreRows">Show ${Math.min(ROWS, tbl.total-tbl.items.length)} more</button>` : ''}`}
+    <div class="wk-below">    <div class="todo-list"><div class="sec">What to do</div>
+      <div class="todo-row ${onFees?'on':''}" role="button" tabindex="0" data-l="fees"><span class="fo-tag">Fix once</span><span class="tr-do">Ask each payer or its vendor for direct deposit with no fee.</span><span class="tr-n"><b>${pl(fp.payers12, 'payer')}</b> to ask · ${money(fp.cents12)} in 12 months</span><span class="tr-pile small muted">${fp.payers[0] ? 'Most: '+esc(fp.payers[0].payer_name) : ''}</span></div>
+      <div class="todo-row ${on90?'on':''}" role="button" tabindex="0" data-l="takebacks" data-paid="90"><span class="kind k-check">Check first</span><span class="tr-do">${tb90.total ? "Match each takeback to the payer's letter; dispute any not owed." : 'No takebacks in the last 90 days.'}</span><span class="tr-n"><b>${num(tb90.total)}</b> · ${money(tb90.shortfall_cents||0)}</span><span class="tr-pile small muted">${top ? `Most: ${esc(top.payer)} (${num(top.n)})` : ''}</span></div></div></div>
     <details class="fold" id="fold" ${foldIsOpen('fees')?'open':''}><summary>Details: money held back by month, MIPS and the 2% reduction</summary><div id="foldBody" class="muted small">Loading…</div></details>`;
   const go = (l, paid) => { state.filt.feesDesk = {list: l, paid: paid || ''}; state.lim.feesDesk = ROWS; render(); };
   v.querySelectorAll('[data-l]').forEach(el=>{ const fn = () => go(el.dataset.l, el.dataset.paid != null ? el.dataset.paid : f.paid);

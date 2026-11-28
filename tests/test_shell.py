@@ -130,7 +130,8 @@ def test_the_guide_and_the_analysis_page_name_the_places_as_the_sidebar_does():
     named = re.findall(r"<b>([^<]+)</b>", guide)
     assert len(named) >= 7 and not [n for n in named if n not in labels], [n for n in named if n not in labels]
     first = re.search(r"sort:'(\w+)'", desk.split("const DESK_DEFAULTS", 1)[1]).group(1)
-    orders = dict(re.findall(r"\['(\w+)','([^']+)'\]", desk.split("const orders = ", 1)[1].split(";", 1)[0]))
+    # the order menu's words live in desk.js ORDERS (unit ui-work moved them there from deskTab's `orders`)
+    orders = dict(re.findall(r"\['(\w+)','([^']+)'\]", desk.split("const ORDERS = ", 1)[1].split(";", 1)[0]))
     assert orders[first].lower() in guide.lower(), (first, orders[first])
     more = today.split("async function moreTab(v){", 1)[1]
     assert re.search(r'<h1 class="page-title">([^<]+)</h1>', more).group(1) == names["more"] == "Analysis"
