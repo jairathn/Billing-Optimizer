@@ -38,9 +38,20 @@ payer's accepted channel, easiest first, with the fields prefilled; and say whet
 - Held before main: 131 of the accepted never-answered/rejected items ($20,113) have no answer the new code can see (no EMA
   answer, no 835 after the send) and the new run lists nothing for them. Also 1,557 sent claims ($629,759 billed, 1,237 of
   them VA Community Care) whose answer no source shows are only counted (meta ema:unanswered_unseen), never listed.
-- Workflows running: wf_620ce5d4-0af (why the 131 are off the list; how to make the unseen claims workable),
-  wf_9cc2ebed-acb (January to November replay with simulated billers, private folder `$S/tk/replay`), wf_c3711a72-b66
-  (payer routes per request type with sources, verified). Next: fix what the first finds (failing test first), then main.
+- Done since: the gap investigation (wf_620ce5d4-0af, private notes `$S/tk/gap/q1.md`, `q2.md`): 129 of the 131 are
+  right to be off the list (EMA shows the payer's answer, or inside the payer's answer time on the waiting view, or billed
+  at $0); 2 VA print-batch claims ($260) are on no list (G1). Of the 1,557 unseen, 1,542 are 2023-2024 visits no EMA
+  report in the store reaches; the Data tab shows none of it in dollars, the stated reason is wrong, and the archive would
+  drop them silently (G2, G3). The payer routes research is done (wf_c3711a72-b66; private `$S/tk/routes/research_raw.json`,
+  public facts only). The replay ran all 11 months before a container restart; its analysis is being finished.
+- Running (2026-11-28): wf_1b05bad9-f47 builds two units, each reviewed twice then fixed: `wip/gapfix`
+  (plans/briefs/2026-11-28_gapfix.md: G8 one claim one item, G3 archive holds unseen claims, G2 the unseen count in
+  dollars with reasons, G1 print batch, G4 ERA start, G5 A/R open line, G7 waiting view) and `wip/routes`
+  (plans/briefs/2026-11-28_routes.md: payer_routes.json, routes.py, the drawer's route card). wf_0ffb49e5-5fe finishes
+  the replay (private `$S/tk/replay/REPORT.md`). wf_8fa00f6b-f21 writes the design system (private `$S/tk/ui/`: AUDIT.md,
+  DESIGN.md, styleguide.html, two critiques) for the owner's ask of a premium, clean product.
+- Next: merge wip/gapfix then wip/routes into the integration worktree, four-env suites, a private real-data run, push
+  main, check /api/health on both sites; then the design pass on every page (its own unit), suites, deploy.
 
 ### Before that (updated 2026-11-27, session on `claude/ecstatic-fermi-orfcgo`)
 
