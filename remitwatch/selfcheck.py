@@ -1793,9 +1793,12 @@ def _stored_results(conn: sqlite3.Connection) -> list[dict]:
 
 
 def _baseline(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """The offenders each check already had, with their cents (_new_keys compares a run's offenders with them). Accepting
+    posted money moved the cell's mark to what the ledger held (accept_findings), so its gap starts again from 0 there: a
+    later fall in that cell is new money gone, whatever was accepted (the accepted cents stay in the table, on record)."""
     out: dict[str, dict[str, int]] = defaultdict(dict)
-    for cid, key, cents in conn.execute("SELECT check_id, key, cents FROM selfcheck_baseline"):
-        out[cid][key] = int(cents or 0)
+    for cid, key, cents, by in conn.execute("SELECT check_id, key, cents, accepted_by FROM selfcheck_baseline"):
+        out[cid][key] = 0 if cid == "posted_money" and by is not None else int(cents or 0)
     return out
 
 
@@ -2973,8 +2976,10 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
     has a Production file waiting to be read again. A payer name that changes group (the name rules of now: an alias
     learned or dropped, the owner's aliases, a release's rules) takes its money with it, which is no money leaving: each
     name's money is compared under the group the marks were made with (meta selfcheck:posted_groups), and the marks move
-    to the groups of now once nothing is missing. Cheap (one grouped pass); called by check_ledger and, on a serverless
-    host, right after each Production file is applied. Saved in meta selfcheck:posted, which after_detection counts."""
+    to the groups of now once nothing is missing, each moved cell keeping the fall it already had. Marks an earlier
+    version made, with no such record, are judged month by month once (_posted_by_month), and the groups are recorded
+    then. Cheap (one grouped pass); called by check_ledger and, on a serverless host, right after each Production file is
+    applied. Saved in meta selfcheck:posted, which after_detection counts."""
     ensure_tables(conn)
     lc = ledger.conn if hasattr(ledger, "conn") else ledger
     at = now_of()
@@ -3021,6 +3026,9 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
     then_cells: dict[tuple, int] = defaultdict(int)
     payers: set = set()
     moved: set = set()
+    # marks an earlier version made keep no record of each name's group: for the one check that moves them to the groups
+    # of now (_posted_by_month), each name's money of each (service month, posted month, measure), with its group of now
+    by_name: dict[tuple, list] = defaultdict(list)
     for svc_m, post_m, payer, ins, pat, adj, padj in lc.execute(
             """SELECT substr(svc, 1, 7), substr(posted, 1, 7), payer, SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)),
                       SUM(COALESCE(contractual, 0) + COALESCE(noncontractual, 0)), SUM(COALESCE(pat_adj, 0))
@@ -3033,6 +3041,8 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
                 payers.add(payer)
                 if g != g_then:
                     moved.add(payer)
+                if kept is None:
+                    by_name[(svc_m, post_m, measure)].append((payer, g, int(v)))
     marks = {(s, p, g, m): h for s, p, g, m, h in conn.execute(
         "SELECT svc_month, posted_month, payer_group, measure, high_cents FROM selfcheck_posted")}
 
@@ -3053,33 +3063,38 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
     regrouped: dict = {}
     if kept is None and marks and offs:
         # marks an earlier version made, with no record of each name's group: a name that changed group since shows as a
-        # fall in one group and a rise in another in the same months. Each month's money is summed across every group: a
-        # month whose total did not fall lost nothing, and its marks move to the groups of now; one whose total fell keeps
-        # its marks, and its fall is caught
-        offs, rows, slices = _posted_by_month(offs, rows, marks, now_cells, inside, at)
+        # fall in one group and a rise in another in the same months. A month whose total did not fall, and whose falls
+        # whole payer names can have made by changing group, lost nothing: its marks move to the groups of now. Any other
+        # month keeps its marks, and its fall is caught. Once: the groups are recorded below
+        offs, rows, slices, cents = _posted_by_month(offs, rows, marks, now_cells, by_name, inside, at)
         if slices:
-            regrouped = {"slices": slices}
+            regrouped = {"slices": slices, "cents": cents}
     elif moved and not offs:
         # nothing is missing under the groups the marks were made with: the marks move to the groups of now. A cell the
-        # move changed starts again from what it holds now; every other cell keeps its mark
+        # move changed starts again from what it holds now, keeping the fall it already had (at most $1), so a leak of
+        # less than $1 a time is still caught when a name's group changes back and forth; every other cell keeps its mark
         changed = {k for k in set(now_cells) | set(then_cells) if inside(k) and now_cells.get(k, 0) != then_cells.get(k, 0)}
         rows = []
         for k in sorted(set(now_cells) | set(marks)):
             if inside(k):
                 now_c, high = int(now_cells.get(k, 0)), marks.get(k)
-                rows.append((*k, now_c if k in changed or high is None else max(high, now_c), now_c, at))
+                if k in changed:
+                    short = max(0, int(high) - int(then_cells.get(k, 0))) if high is not None else 0
+                    rows.append((*k, now_c + short, now_c, at))
+                else:
+                    rows.append((*k, now_c if high is None else max(high, now_c), now_c, at))
         regrouped = {"names": len(moved), "cells": len(changed)}
     elif moved:
         regrouped = {"names": len(moved), "waiting": True}     # moved once nothing is missing (read again, or accepted)
     conn.execute("DELETE FROM selfcheck_posted WHERE svc_month < ? OR posted_month >= ?", (floor_m, open_month))
     conn.executemany("""INSERT OR REPLACE INTO selfcheck_posted (svc_month, posted_month, payer_group, measure, high_cents, last_cents, at)
                         VALUES (?,?,?,?,?,?,?)""", rows)
-    # the groups the marks stand in now: those of now once nothing is missing; else the ones they were made with (a name
-    # met for the first time takes its group of now). An earlier version's marks with a month that fell record them once
-    # nothing is missing
-    if not offs:
+    # the groups the marks stand in now: those of now once nothing is missing, and after the one check that moved an
+    # earlier version's marks (its months that fell keep their marks, compared from then on under the groups of now);
+    # else the ones they were made with (a name met for the first time takes its group of now)
+    if not offs or kept is None:
         meta_set(conn, K_POSTED_GROUPS, {names[p]: group(p) for p in payers if names.get(p)})
-    elif kept is not None:
+    else:
         meta_set(conn, K_POSTED_GROUPS, {**kept, **{names[p]: group_then(p) for p in payers if names.get(p) and names[p] not in kept}})
     drop = sum(c for _k, c in offs)
     info = {"cells": len(rows), "closed_before": open_month, "service_from": floor_m, "first": not marks,
@@ -3094,8 +3109,7 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
             text += (f". {_n(k, 'payer name')} also changed group: the check counts {'its' if k == 1 else 'their'} money "
                      "under the group the marks were made with until nothing is missing, then moves the marks")
         elif regrouped.get("slices"):
-            text += (f". In {_n(regrouped['slices'], 'other month cell')} money only moved between payer groups (a payer name "
-                     "changed group): none left there")
+            text += f". In {_n(regrouped['slices'], 'other month cell')} {_moved_text(regrouped['cents'])}"
     else:
         text = f"{_n(len(rows), 'closed month cell')} checked: the money EMA posted stayed in the posting ledger"
         if regrouped.get("names"):
@@ -3103,8 +3117,7 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
             text += (f"; {_n(k, 'payer name')} changed group, and the check moved {'its' if k == 1 else 'their'} marks with "
                      f"{'it' if k == 1 else 'them'}")
         elif regrouped.get("slices"):
-            text += (f"; in {_n(regrouped['slices'], 'month cell')} money moved between payer groups (a payer name changed "
-                     "group) and none left")
+            text += f"; in {_n(regrouped['slices'], 'month cell')} {_moved_text(regrouped['cents'])}"
     seq = None
     try:
         seq = int(ledger.seq()) if hasattr(ledger, "seq") else None
@@ -3114,30 +3127,63 @@ def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) ->
                 ledger_seq=seq)
 
 
-def _posted_by_month(offs: list[tuple], rows: list[tuple], marks: dict, now_cells: dict, inside: Callable[[tuple], bool],
-                     at: str) -> tuple[list[tuple], list[tuple], int]:
-    """check_posted on marks that kept no record of each payer name's group (an earlier version's): each (service month,
-    posted month, measure) with a falling cell is summed across every payer group, marks against now. One whose total did
-    not fall by more than $1 lost nothing (a name changed group: its money moved from one group to another), so its cells
-    start again from what they hold now under the groups of now; one whose total fell keeps its marks and offenders.
-    Returns (offenders, rows, how many months started again)."""
+def _moved_text(cents: int) -> str:
+    return (f"{usd0(cents)} moved with whole payer names from one group to another and those months' totals did not fall (a "
+            "payer name that changed group does this; if none did, compare the newest Production export of those dates "
+            "with the one before)")
+
+
+def _posted_by_month(offs: list[tuple], rows: list[tuple], marks: dict, now_cells: dict, by_name: dict[tuple, list],
+                     inside: Callable[[tuple], bool], at: str) -> tuple[list[tuple], list[tuple], int, int]:
+    """check_posted on marks that kept no record of each payer name's group (an earlier version's), once: the check records
+    the groups after it. A name that changed group since took all its money with it: in every (service month, posted
+    month, measure) where it has money, its old group's cell fell and its group of now changed by at least that money,
+    the same way (a takeback, negative money, lowers it). So a name can have moved only when that holds in each of its
+    months (by_name: each name's money there and its group of now; months whose total fell are left out). A month whose
+    total did not fall by more than $1, and whose falls the money of such names in their groups of now covers (up to what
+    each group changed), lost nothing: its cells start again from what they hold under the groups of now (a fall of at
+    most $1 there is let go once). Any other month keeps its marks and offenders: a loss that another group's gain
+    offsets is caught unless the gain is all the money a name has in the window (that one check cannot tell it from a
+    name that moved; its text gives the dollars), and so are two names that swapped groups (a person accepts that).
+    Returns (offenders, rows, how many months started again, the cents their falling cells lost)."""
     def month(k: tuple) -> tuple:
         return (k[0], k[1], k[3])
-    had: dict[tuple, int] = defaultdict(int)
-    holds: dict[tuple, int] = defaultdict(int)
+    lost: dict[tuple, int] = defaultdict(int)
+    for k, c in offs:
+        lost[month(k)] += int(c)
+    change: dict[tuple, dict] = defaultdict(lambda: defaultdict(int))      # month -> payer group -> now less its mark
     for k, h in marks.items():
         if inside(k):
-            had[month(k)] += int(h or 0)
+            change[month(k)][k[2]] -= int(h or 0)
     for k, v in now_cells.items():
         if inside(k):
-            holds[month(k)] += int(v)
-    calm = {month(k) for k, _c in offs if had[month(k)] - holds[month(k)] <= 100}
+            change[month(k)][k[2]] += int(v)
+    fell = {m for m, ch in change.items() if -sum(ch.values()) > 100}       # the month's total fell: money left the ledger
+    stayed = set()                      # names whose groups did not change by their money in one of their months
+    for m, entries in by_name.items():
+        if m not in fell:
+            for payer, g, v in entries:
+                d = change[m].get(g, 0)
+                if abs(v) > 100 and not (v * d > 0 and abs(v) <= abs(d) + 100):
+                    stayed.add(payer)
+    calm = set()
+    for m, f in lost.items():
+        if m in fell:
+            continue
+        ch = change[m]
+        can: dict[str, int] = defaultdict(int)
+        for payer, g, v in by_name.get(m, ()):
+            if payer not in stayed and v * ch.get(g, 0) > 0:
+                can[g] += abs(v)
+        if f <= sum(min(abs(ch[g]), c) for g, c in can.items()) + 100:
+            calm.add(m)
     if not calm:
-        return offs, rows, 0
+        return offs, rows, 0, 0
     rows = [r for r in rows if (r[0], r[1], r[3]) not in calm] + [
         (*k, int(now_cells.get(k, 0)), int(now_cells.get(k, 0)), at) for k in sorted(set(now_cells) | set(marks))
         if inside(k) and month(k) in calm]
-    return [(k, c) for k, c in offs if month(k) not in calm], rows, len(calm)
+    return ([(k, c) for k, c in offs if month(k) not in calm], rows, len(calm),
+            sum(c for k, c in offs if month(k) in calm))
 
 
 def check_serving(conn: sqlite3.Connection, serving: sqlite3.Connection) -> dict:

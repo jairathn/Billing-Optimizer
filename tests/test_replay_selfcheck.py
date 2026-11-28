@@ -109,6 +109,57 @@ def _weekly(payer_id: str, tag: str, n: int = 25) -> list[dict]:
              "payer": MOVED, "payer_id": payer_id} for i in range(n)]
 
 
+OTHER_A = "Optum Test Choice"       # Optum (UHC) by the code's name rules, whatever is learned for the moved name
+VA = P["va"]                        # "VA CCN Test": VA Community Care
+VA_TWO = "VA Test Second Network"   # VA Community Care too, with no money before the newer export
+BCBS = P["bcbs"]
+
+
+def _pay(n: int, payer: str, paid: float, contr: float, posted, *, svc=D(2026, 3, 2), cpt: str = "99213",
+         patient: int = 0) -> list[dict]:
+    """Invented claim n: its charge and its payment (with its contractual write-down)."""
+    return [F.production_row(posted=D(2026, 3, 1) if posted.month == 3 else posted, svc=svc, cpt=cpt, link=F.link_no(n),
+                             charges=paid + contr, payer=payer, patient=patient),
+            F.production_row(posted=posted, svc=svc, cpt=cpt, link=F.link_no(n), ins_paid=paid, contractual=contr,
+                             reason="CO-45", check=F.check_no(n), payer=payer, patient=patient)]
+
+
+def _wide() -> list[dict]:
+    """March service and March postings (a closed month once an April posting exists): two claims of the moved name, one
+    of another name of its group, one VA claim, one Blue Cross claim, and a February service Blue Cross paid in March."""
+    rows = (_pay(1, MOVED, 90.0, 40.0, D(2026, 3, 20)) + _pay(2, MOVED, 120.0, 80.0, D(2026, 3, 23), cpt="99214", patient=1)
+            + _pay(5, OTHER_A, 70.0, 30.0, D(2026, 3, 21), cpt="99212", patient=2)
+            + _pay(6, VA, 100.0, 50.0, D(2026, 3, 22), cpt="99212", patient=3)
+            + _pay(3, BCBS, 50.0, 30.0, D(2026, 3, 24), cpt="99212")
+            + _pay(8, BCBS, 60.0, 20.0, D(2026, 3, 18), svc=D(2026, 2, 10), patient=1))
+    return rows + [F.production_row(posted=D(2026, 4, 10), svc=D(2026, 4, 6), cpt="99212", link=F.link_no(4), charges=80.0,
+                                    payer=BCBS, patient=3)]
+
+
+def _drop(rows: list[dict], payer: str, paid: float) -> list[dict]:
+    """The rows without that payer's payment of that amount (and the contractual on its row)."""
+    out = [r for r in rows if not (r.get("Payer") == payer and r.get("Insurance Payments") == paid)]
+    assert len(out) == len(rows) - 1, (payer, paid)
+    return out
+
+
+def _after(rows: list[dict], day) -> list[dict]:
+    """A newer export of the same dates: a patient adjustment posted later, so it reaches past the one before."""
+    return rows + [F.production_row(posted=day, svc=D(2026, 3, 9), cpt="99212", link=None, pat_adj=5.0, payer="Patient",
+                                    patient=1)]
+
+
+def _offset(rows: list[dict], gainer: str) -> list[dict]:
+    """The other Optum name's $70 payment and its $30 contractual are gone, and a new $70 payment and $30 contractual of
+    `gainer` (a VA name) are there, in the same service and posting month: the month's total does not move."""
+    return _drop(rows, OTHER_A, 70.0) + _pay(7, gainer, 70.0, 30.0, D(2026, 3, 26), cpt="99212", patient=2)
+
+
+def _shave(rows: list[dict], payer: str, paid: float, by: float) -> list[dict]:
+    return [dict(r, **{"Insurance Payments": round(r["Insurance Payments"] - by, 2), "Payments": round(r["Payments"] - by, 2)})
+            if (r.get("Payer") == payer and r.get("Insurance Payments") == paid) else r for r in rows]
+
+
 def _change(how: str, store: Store, monkeypatch) -> None:
     """The name rules change; the posting ledger does not."""
     if how == "learned_alias":
@@ -150,6 +201,7 @@ class World:
         self.tmp = tmp_path
         self.lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
         self.files = 0
+        self.weeks = 0
 
     @property
     def store(self) -> Store:
@@ -200,6 +252,36 @@ class World:
         assert self.marks(_before(how)) == {("ins_paid", "2026-03"): (21000, 21000), ("adjustments", "2026-03"): (12000, 12000)}
         assert not self.run("r1")["held"]
         return rows
+
+    def start_wide(self, rows: list[dict] | None = None) -> list[dict]:
+        """As start, with more payer names (_wide): the first file, its check and a first run."""
+        rows = rows or _wide()
+        self.read(rows)
+        self.refresh()
+        add_item(self.conn, "F-1")
+        assert _posted(self.check())["status"] == "ok"
+        assert not self.run("r1")["held"]
+        return rows
+
+    def learn(self) -> None:
+        """This week's exports (the earlier weeks pruned): every row of the moved name carries the VA network's payer id,
+        so the next refresh learns the alias."""
+        self.weeks += 1
+        self.conn.execute("DELETE FROM ema_rows")
+        self.store.ingest_ema_rows(_weekly("VACCN", f"va{self.weeks}"))
+        er._GROUPERS.clear()
+
+    def unlearn(self) -> None:
+        """This week's exports: every row of the moved name carries the administrator's own payer id (the alias goes)."""
+        self.weeks += 1
+        self.conn.execute("DELETE FROM ema_rows")
+        self.store.ingest_ema_rows(_weekly("87726", f"uhc{self.weeks}"))
+        er._GROUPERS.clear()
+
+    def forget_groups(self) -> None:
+        """The store as a version before 2026-11-28 left it: marks with no record of each payer name's group."""
+        self.conn.execute("DELETE FROM meta WHERE key = ?", (sc.K_POSTED_GROUPS,))
+        self.conn.commit()
 
     def close(self) -> None:
         self.lg.close()
@@ -299,31 +381,244 @@ def test_a_real_loss_read_with_a_regroup_is_caught_with_its_own_dollars(tmp_path
 def test_marks_made_before_the_groups_were_recorded_follow_a_regroup_by_each_months_total(tmp_path, kind, monkeypatch):
     """A store whose marks an earlier version made has no record of the group each name had (meta selfcheck:posted_groups).
     If the name rules change before the first check of this version, the check sums each (service month, posted month,
-    measure) across every payer group: one whose total did not fall lost nothing, and its marks move to the groups of now.
-    A month whose total fell keeps its marks and is caught; once nothing is missing, the groups are recorded."""
+    measure) across every payer group: one whose total did not fall, and whose fall a whole payer name's money explains,
+    lost nothing; its marks move to the groups of now and the check's text says how much moved. A month whose total fell
+    keeps its marks and is caught. The groups are recorded at that first check either way, so it happens once."""
     w = World(kind, tmp_path)
     try:
         rows = w.start("none")
-        w.conn.execute("DELETE FROM meta WHERE key = ?", (sc.K_POSTED_GROUPS,))     # as an earlier version left the store
-        w.conn.commit()
+        w.forget_groups()
         _change("learned_alias", w.store, monkeypatch)
         w.refresh()
         pm = _posted(w.check())
         assert pm["status"] == "ok", _show(pm)
-        assert pm["info"]["regrouped"] == {"slices": 2}, _show(pm)
+        assert pm["info"]["regrouped"] == {"slices": 2, "cents": 33000}, _show(pm)
+        assert "$330 moved with whole payer names" in pm["text"], pm["text"]
         assert w.marks("Optum (UHC)") == {}
         assert w.marks("VA Community Care") == {("ins_paid", "2026-03"): (21000, 21000), ("adjustments", "2026-03"): (12000, 12000)}
         assert sc.meta_get(w.conn, sc.K_POSTED_GROUPS)                     # recorded from now on
         assert not w.run("r2")["held"]
 
-        w.conn.execute("DELETE FROM meta WHERE key = ?", (sc.K_POSTED_GROUPS,))
-        w.conn.commit()
+        w.forget_groups()
         w.read(_without(rows, 90.0, D(2026, 4, 12)))                       # a real loss, with no regroup: caught as before
         w.refresh()
         pm = _posted(w.check())
         assert pm["status"] == "fail" and pm["cents"] == 13000 and _groups(pm) == {"VA Community Care"}, _show(pm)
-        assert sc.meta_get(w.conn, sc.K_POSTED_GROUPS) is None             # recorded once nothing is missing
+        assert "regrouped" not in pm["info"], _show(pm)
+        # recorded at this check too, with the fall outstanding: the month totals stand in for one check only
+        assert sc.meta_get(w.conn, sc.K_POSTED_GROUPS) == {MOVED: "VA Community Care", P["bcbs"]: "Anthem / BCBS"}
         assert w.run("r3")["held"]
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_first_check_after_the_release_catches_a_loss_another_groups_gain_offsets(tmp_path, kind):
+    """Review rf-r1-1. The marks were made before the groups were recorded. A newer export of the same dates lacks the
+    other Optum name's $70 payment and $30 contractual, and carries a new VA payment of $70 and $30 in the same month. The
+    month's total did not fall, but no payer name changed group: the VA name's own money there ($170, $80) is more than
+    its group rose. Caught with its $100 and the run held, as the check did before the release; the groups are recorded."""
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        w.forget_groups()
+        w.read(_after(_offset(rows, VA), D(2026, 4, 12)))
+        w.refresh()
+        out = w.check()
+        pm = _posted(out)
+        assert pm["status"] == "fail" and pm["cents"] == 10000, _show(pm)
+        assert _groups(pm) == {"Optum (UHC)"} and "regrouped" not in pm["info"], _show(pm)
+        assert out["gaps"]["posted_drop_cents"] == 10000, out["gaps"]
+        assert sc.meta_get(w.conn, sc.K_POSTED_GROUPS)
+        held = w.run("r2")
+        assert held["held"] and held["hold_checks"] == ["posted_money"], held
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_first_check_after_the_release_catches_an_offset_by_a_name_that_did_not_move(tmp_path, kind):
+    """Review rf-r1-1. As above, but the gain is all a VA name has in that month: the name also has money in a February
+    service, where its group did not change. A name that changed group takes all its money with it, in every month, so
+    this one did not move: the March loss is caught with its $100 and the run held."""
+    rows = _wide() + _pay(11, VA_TWO, 40.0, 10.0, D(2026, 3, 19), svc=D(2026, 2, 12), cpt="99212", patient=1)
+    w = World(kind, tmp_path)
+    try:
+        w.start_wide(rows)
+        w.forget_groups()
+        w.read(_after(_offset(rows, VA_TWO), D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 10000, _show(pm)
+        assert _groups(pm) == {"Optum (UHC)"} and "regrouped" not in pm["info"], _show(pm)
+        assert w.run("r2")["held"]
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_month_totals_stand_in_for_one_check_only(tmp_path, kind):
+    """Review rf-r1-1. The first check after the release finds a real loss (a February service's $60 and $20 at Blue
+    Cross) that nobody accepts. The groups are recorded at that check all the same, so every later check compares each
+    name under its group. Two runs later a newer export loses the other Optum name's $70 and $30 and carries a new VA
+    name's $70 and $30 in the same March month (a whole name's money, as a name that changed group would): caught, since
+    no name changed group, $80 + $100."""
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        w.forget_groups()
+        rows2 = _drop(rows, BCBS, 60.0)
+        w.read(_after(rows2, D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 8000, _show(pm)
+        assert sc.meta_get(w.conn, sc.K_POSTED_GROUPS)
+        assert w.run("r2")["held"]
+        assert _posted(w.check())["cents"] == 8000
+        assert w.run("r3")["held"]
+        w.read(_after(_offset(rows2, VA_TWO), D(2026, 4, 14)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 8000 + 10000, _show(pm)
+        assert "regrouped" not in pm["info"], _show(pm)
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_at_the_first_check_after_the_release_a_whole_names_offset_shows_its_dollars(tmp_path, kind):
+    """What the one check after the release cannot tell apart: a loss in one group that a payer name met for the first
+    time offsets in another group, with all of its money in that month, looks like that name having changed group. That
+    check lets the month start again, and says so with the dollars (in the check's text and info), and what to compare if
+    no name changed group. The groups are recorded then, so from the next check on such a loss is caught (the test above)."""
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        w.forget_groups()
+        w.read(_after(_offset(rows, VA_TWO), D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "ok" and pm["info"]["regrouped"] == {"slices": 2, "cents": 10000}, _show(pm)
+        assert "$100 moved with whole payer names" in pm["text"] and "if none did, compare the newest Production export" in pm["text"], pm["text"]
+        assert sc.meta_get(w.conn, sc.K_POSTED_GROUPS)
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_the_first_check_after_the_release_follows_a_name_that_moved_with_a_takeback(tmp_path, kind, monkeypatch):
+    """The moved name's money in one month is negative (a $20 takeback posted in April for a March visit) and the VA group
+    already had money there ($50). When the name's group changes before the first check of this version, the VA cell of
+    that month falls by the takeback and the name's old group's cell rises by it. The month's total did not move and the
+    name's own (negative) money covers the fall: it moved with the name and nothing left."""
+    rows = _rows() + _pay(6, VA, 50.0, 0.0, D(2026, 4, 9), svc=D(2026, 3, 3), cpt="99212", patient=3) + [
+        F.production_row(posted=D(2026, 4, 8), svc=D(2026, 3, 2), link=F.link_no(1), ins_paid=-20.0, reason="WO",
+                         check=F.check_no(9), payer=MOVED),
+        F.production_row(posted=D(2026, 5, 11), svc=D(2026, 5, 4), cpt="99212", link=F.link_no(10), charges=80.0,
+                         payer=BCBS, patient=2)]
+    w = World(kind, tmp_path)
+    try:
+        w.start_wide(rows)
+        assert {(g, m, p): h for g, m, p, h in w.conn.execute(
+            "SELECT payer_group, measure, posted_month, high_cents FROM selfcheck_posted WHERE posted_month = '2026-04'")} == {
+            ("Optum (UHC)", "ins_paid", "2026-04"): -2000, ("VA Community Care", "ins_paid", "2026-04"): 5000}
+        w.forget_groups()
+        _change("learned_alias", w.store, monkeypatch)
+        w.refresh()
+        assert er.payer_group_of(w.conn, MOVED)[0] == "VA Community Care"
+        out = w.check()
+        pm = _posted(out)
+        assert pm["status"] == "ok", _show(pm)
+        assert pm["info"]["regrouped"] == {"slices": 3, "cents": 21000 + 12000 + 2000}, _show(pm)
+        assert out["gaps"]["posted_drop_cents"] == 0
+        assert not w.run("r2")["held"]
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("flap", [False, True])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_slow_leak_is_caught_while_an_alias_comes_and_goes(tmp_path, kind, flap):
+    """Review rf-r1-2. 60 cents of the moved name's $120 payment go at each newer export, under the $1 a cell may fall
+    each time. Without a change of group, the mark catches the leak once it passes $1 (the second export). With the alias
+    learned and dropped at each export, the marks move with the name each time; a cell they move keeps the fall it already
+    had, so the leak is caught by the third export, with its $1.20."""
+    w = World(kind, tmp_path)
+    try:
+        cur = w.start_wide()
+        caught = None
+        for i in range(1, 5):
+            cur = _shave(cur, MOVED, round(120.0 - 0.6 * (i - 1), 2), 0.6)
+            if flap:
+                (w.learn if i % 2 == 1 else w.unlearn)()
+            w.read(_after(cur, D(2026, 4, 10 + i)))
+            w.refresh()
+            pm = _posted(w.check())
+            if pm["status"] == "fail":
+                caught = (i, pm["cents"])
+                break
+            assert not w.run(f"rl{i}")["held"]
+        assert caught == ((3, 120) if flap else (2, 120)), (flap, caught)
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_alias_that_comes_and_goes_wipes_no_marks(tmp_path, kind):
+    """The alias learned and dropped four times with nothing missing: each check passes, no run is held, the marks keep
+    the full money after every move, and a real loss after the loop is caught with exactly its dollars."""
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        full = sum(h for (h,) in w.conn.execute("SELECT high_cents FROM selfcheck_posted WHERE measure = 'ins_paid'"))
+        for i in range(4):
+            (w.learn if i % 2 == 0 else w.unlearn)()
+            w.refresh()
+            assert er.payer_group_of(w.conn, MOVED)[0] == ("VA Community Care" if i % 2 == 0 else "Optum (UHC)")
+            pm = _posted(w.check())
+            assert pm["status"] == "ok", _show(pm)
+            assert not w.run(f"rf{i}")["held"]
+            assert sum(h for (h,) in w.conn.execute(
+                "SELECT high_cents FROM selfcheck_posted WHERE measure = 'ins_paid'")) == full
+        w.read(_after(_drop(rows, MOVED, 120.0), D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 20000, _show(pm)
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_new_loss_in_a_cell_a_person_accepted_holds_the_run(tmp_path, kind):
+    """Review rf-r1-3. A person accepts a fall at Blue Cross ($50 and $30): accepting moves the cell's mark to what the
+    ledger holds, so its gap starts again from 0. Later another payment of the same cell goes ($40 and $10): that is new
+    money gone, and it holds the run like any new gap, whatever was accepted in that cell before."""
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide() + _pay(9, BCBS, 40.0, 10.0, D(2026, 3, 25), cpt="99213", patient=2)
+        w.read(_after(rows, D(2026, 4, 11)))
+        w.refresh()
+        assert _posted(w.check())["status"] == "ok"
+        assert not w.run("r1b")["held"]
+        rows2 = _drop(rows, BCBS, 50.0)
+        w.read(_after(rows2, D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 8000, _show(pm)
+        assert w.run("r2")["held"]
+        sc.accept_findings(w.conn, "owner@example.test", ["posted_money"])
+        assert _posted(w.check())["status"] == "ok"
+        assert not w.run("r3")["held"]
+        # the accepted dollars stay on record with who accepted them
+        assert sorted(tuple(r) for r in w.conn.execute(
+            "SELECT cents, accepted_by FROM selfcheck_baseline WHERE check_id = 'posted_money'")) == [
+            (3000, "owner@example.test"), (5000, "owner@example.test")]
+        w.read(_after(_drop(rows2, BCBS, 40.0), D(2026, 4, 13)))          # a different payment of the same cell goes
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 5000, _show(pm)
+        out = w.run("r4")
+        assert out["held"] and out["hold_checks"] == ["posted_money"] and out["new"]["posted_money"] == 2, out
     finally:
         w.close()
 
