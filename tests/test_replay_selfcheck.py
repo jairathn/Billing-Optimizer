@@ -607,6 +607,7 @@ def test_a_new_loss_in_a_cell_a_person_accepted_holds_the_run(tmp_path, kind):
         assert pm["status"] == "fail" and pm["cents"] == 8000, _show(pm)
         assert w.run("r2")["held"]
         sc.accept_findings(w.conn, "owner@example.test", ["posted_money"])
+        assert [o["accepted"] for o in sc.offenders(w.conn, "posted_money")] == [True, True]     # what run r2 found
         assert _posted(w.check())["status"] == "ok"
         assert not w.run("r3")["held"]
         # the accepted dollars stay on record with who accepted them
@@ -619,6 +620,100 @@ def test_a_new_loss_in_a_cell_a_person_accepted_holds_the_run(tmp_path, kind):
         assert pm["status"] == "fail" and pm["cents"] == 5000, _show(pm)
         out = w.run("r4")
         assert out["held"] and out["hold_checks"] == ["posted_money"] and out["new"]["posted_money"] == 2, out
+        # the Data tab's list does not call the new fall accepted: nobody accepted what run r4 found
+        assert [(o["cents"], o["accepted"]) for o in sc.offenders(w.conn, "posted_money")] == [(4000, False), (1000, False)]
+    finally:
+        w.close()
+
+
+# The review's checks of the groups the marks record, kept as tests: a real loss read in the same check as a regroup,
+# whoever lost it, shows with exactly its own dollars under the groups the marks were made with, and holds the run
+@pytest.mark.parametrize("lose, cents, groups", [
+    ([(OTHER_A, 70.0)], 10000, {"Optum (UHC)"}),                            # another name of the moved name's old group
+    ([(VA, 100.0)], 15000, {"VA Community Care"}),                          # a name of its new group
+    ([(OTHER_A, 70.0), (VA, 100.0)], 25000, {"Optum (UHC)", "VA Community Care"})])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_loss_read_with_a_regroup_is_caught_with_its_own_dollars_whoever_lost_it(tmp_path, kind, lose, cents, groups):
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        w.learn()
+        for payer, paid in lose:
+            rows = _drop(rows, payer, paid)
+        w.read(_after(rows, D(2026, 4, 12)))
+        w.refresh()
+        assert er.payer_group_of(w.conn, MOVED)[0] == "VA Community Care"
+        out = w.check()
+        pm = _posted(out)
+        assert pm["status"] == "fail" and pm["cents"] == cents and _groups(pm) == groups, _show(pm)
+        assert out["gaps"]["posted_drop_cents"] == cents
+        assert w.run("r2")["held"]
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("regroup", [False, True])
+@pytest.mark.parametrize("kind", KINDS)
+def test_with_the_groups_recorded_a_loss_another_groups_gain_offsets_is_caught(tmp_path, kind, regroup):
+    """Each name's money is compared under its own group: the other Optum name's $70 and $30 that a new VA payment
+    offsets in the same month are caught, with or without the alias learned in the same check."""
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        if regroup:
+            w.learn()
+        w.read(_after(_offset(rows, VA), D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 10000 and _groups(pm) == {"Optum (UHC)"}, _show(pm)
+        assert w.run("r2")["held"]
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_check_after_a_regroup_catches_a_loss_split_across_the_old_and_new_group(tmp_path, kind):
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        w.learn()
+        w.refresh()
+        assert _posted(w.check())["status"] == "ok"
+        assert not w.run("r2")["held"]
+        w.read(_after(_drop(_drop(rows, MOVED, 90.0), OTHER_A, 70.0), D(2026, 4, 12)))   # the moved name and the other
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 13000 + 10000, _show(pm)
+        assert _groups(pm) == {"VA Community Care", "Optum (UHC)"}, _show(pm)
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_name_rules_that_move_no_name_reset_no_mark(tmp_path, kind, monkeypatch):
+    """An owner alias for a name the ledger does not hold and a release rule that matches no name move nothing: no mark
+    changes and the check says nothing moved. A 50-cent fall kept before stays counted: 60 cents more fail at $1.10."""
+    w = World(kind, tmp_path)
+    try:
+        rows = w.start_wide()
+        def highs():
+            return {tuple(r[:4]): r[4] for r in w.conn.execute(
+                "SELECT svc_month, posted_month, payer_group, measure, high_cents FROM selfcheck_posted")}
+        w.read(_after(_shave(rows, OTHER_A, 70.0, 0.5), D(2026, 4, 11)))
+        w.refresh()
+        assert _posted(w.check())["status"] == "ok"
+        before = highs()
+        monkeypatch.setenv("REMITWATCH_EMA_PAYER_ALIASES", json.dumps({"Some Other Test Payer": "VA Community Care"}))
+        monkeypatch.setattr(codes, "PAYER_RULES", [(r"NOBODY TEST PAYER", "Nobody Health", "commercial")] + list(codes.PAYER_RULES))
+        er._GROUPERS.clear()
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "ok" and "regrouped" not in pm["info"], _show(pm)
+        assert highs() == before
+        w.read(_after(_shave(rows, OTHER_A, 70.0, 1.1), D(2026, 4, 12)))
+        w.refresh()
+        pm = _posted(w.check())
+        assert pm["status"] == "fail" and pm["cents"] == 110, _show(pm)
     finally:
         w.close()
 
@@ -814,3 +909,165 @@ def test_a_new_item_a_held_run_lists_keeps_the_facts_it_was_found_on(kind):
     van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
     assert van["examples"] == ["F-new-same"] and out["kept"] == 1, van
     assert van["info"]["routes"].get("facts_changed") == 1, van
+
+
+# The review's checks of a held run, kept as tests: a held run leaves every piece of state the next good run reads as the
+# last good run saved it, and the good run after a hold lets an item go by the new facts on its own claim whenever the
+# answer came (during the first held run, a second one, or the good run itself, by an 835 or by EMA alone)
+def _deny(c, n: int) -> None:
+    remit(c, "2026-03-20", f"ZZ00T000{n}C001", [("99213", 150, 0, [("CO", "197", 150)])])
+
+
+def _pay_claim(c, n: int, day: str = "2026-08-20") -> None:
+    remit(c, day, f"ZZ00T000{n}C002", [("99213", 150, 90, [("CO", "45", 60)])])
+
+
+def _held_save(*fids_dropped: str, rid: str):
+    def go(cn):
+        if fids_dropped:
+            cn.execute(f"DELETE FROM findings WHERE finding_id IN ({','.join('?' * len(fids_dropped))})", fids_dropped)
+        _close_without_proof(cn, rid)
+    return go
+
+
+def _five(c) -> None:
+    """Five denied claims, each with its item, and the item a held run will close with no proof."""
+    for i in range(1, 6):
+        _deny(c, i)
+        add_item(c, f"F-{i}", line_key=f"L{i}", patient_control_number=f"ZZ00T000{i}C001")
+    add_item(c, "F-bad-close", line_key="Lbad", patient_control_number="ZZ00T0009C001")
+
+
+def _state(c) -> dict:
+    """Everything the next good run reads from the last good one."""
+    out = {"facts": dict(c.execute("SELECT finding_id, fp FROM selfcheck_facts")),
+           "baseline": sorted(tuple(r) for r in c.execute("SELECT check_id, key, cents, accepted_by FROM selfcheck_baseline")),
+           "posted": sorted(tuple(r) for r in c.execute("SELECT * FROM selfcheck_posted")),
+           "track": sorted(repr(tuple(r)) for r in c.execute("SELECT * FROM selfcheck_track"))}
+    for k in (sc.K_FACTS_INPUT, sc.K_FACTS_VERSION, sc.K_TRACK, sc.K_ANSWER):
+        out[k] = sc.meta_get(c, k)
+    return out
+
+
+def test_a_held_run_leaves_the_state_the_next_good_run_reads(kind):
+    """Two good runs (a track record with a before), then a held run that reads an answer, ends a wait (an item paid and
+    closed) and drops another item: the facts, their input position and version, the baseline, the posted marks, the
+    track record and the answer times stay exactly as the last good run saved them."""
+    c = kind.conn
+    _five(c)
+    c.execute("UPDATE findings SET status = 'appealed', work_state = 'waiting' WHERE finding_id IN ('F-4', 'F-5')")
+    c.commit()
+    assert not run(c, None, "r1")["held"]
+    assert not run(c, None, "r1b")["held"]
+    s1 = _state(c)
+    assert s1["track"] and s1[sc.K_FACTS_INPUT] and len(s1["facts"]) == 6, s1
+    kind.reopen()
+    c = kind.conn
+    _pay_claim(c, 1)
+
+    def held(cn):
+        cn.execute("UPDATE findings SET status = 'resolved', work_state = 'done', auto_note = 'Paid' WHERE finding_id = 'F-4'")
+        _held_save("F-1", rid="r2")(cn)
+    assert run(c, held, "r2")["held"]
+    kind.reopen()
+    s2 = _state(kind.conn)
+    assert s2 == s1, {k: (s1[k], s2[k]) for k in s1 if s1[k] != s2[k]}
+
+
+@pytest.mark.parametrize("read_more", [True, False])
+@pytest.mark.parametrize("when", ["first_held", "second_held", "good_run"])
+def test_an_answer_read_during_a_hold_lets_its_item_go_on_the_next_good_run(kind, when, read_more):
+    """r1 good; r2 and r3 held; r4 good. F-1's claim is paid, read by r2, by r3 or by r4 itself. r4 lets F-1 go by its new
+    facts and keeps F-2, whose claim shows nothing new since r1. read_more: r4 also reads an unrelated 835."""
+    c = kind.conn
+    _five(c)
+    assert not run(c, None, "r1")["held"]
+    paid = False
+    for rid, w in (("r2", "first_held"), ("r3", "second_held")):
+        kind.reopen()
+        c = kind.conn
+        if when == w:
+            _pay_claim(c, 1)
+            paid = True
+        assert run(c, _held_save(*(("F-1",) if paid else ()), rid=rid), rid)["held"]
+    kind.reopen()
+    c = kind.conn
+    if when == "good_run":
+        _pay_claim(c, 1)
+    if read_more:
+        remit(c, "2026-09-15", "ZZ00T0008C001", [("99214", 200, 120, [("CO", "45", 80)])])
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id IN ('F-1', 'F-2')"), "r4")
+    assert not out["held"], out
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert van["examples"] == ["F-2"] and out["kept"] == 1, (when, read_more, van["examples"], van["info"].get("routes"))
+    assert "F-1" not in _listed(c)
+
+
+def test_a_new_item_of_one_held_run_paid_during_the_next_leaves_on_the_good_run(kind):
+    c = kind.conn
+    _five(c)
+    assert not run(c, None, "r1")["held"]
+    kind.reopen()
+    c = kind.conn
+    _deny(c, 7)
+
+    def held(cn):
+        add_item(cn, "F-new", line_key="Lnew", patient_control_number="ZZ00T0007C001", run_id="r2")
+        _close_without_proof(cn, "r2")
+    assert run(c, held, "r2")["held"] and "F-new" in _listed(c)
+    kind.reopen()
+    c = kind.conn
+    _pay_claim(c, 7, "2026-08-28")
+    assert run(c, _held_save(rid="r3"), "r3")["held"]
+    kind.reopen()
+    c = kind.conn
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id IN ('F-new', 'F-2')"), "r4")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert not out["held"] and van["examples"] == ["F-2"], (van["examples"], van["info"].get("routes"))
+
+
+def test_the_good_run_after_a_hold_saves_its_own_facts_and_input(kind):
+    c = kind.conn
+    _five(c)
+    assert not run(c, None, "r1")["held"]
+    kind.reopen()
+    c = kind.conn
+    _pay_claim(c, 1)
+    assert run(c, _held_save(rid="r2"), "r2")["held"]
+    kind.reopen()
+    c = kind.conn
+    assert not run(c, None, "r3")["held"]
+    assert sc.meta_get(c, sc.K_FACTS_INPUT) == sc._input_position(c)
+    fp = dict(c.execute("SELECT finding_id, fp FROM selfcheck_facts"))
+    assert fp["F-1"] == sc._facts_of(c, [{"finding_id": "F-1", "patient_control_number": "ZZ00T0001C001"}])["F-1"]
+
+
+@pytest.mark.parametrize("source", ["ema_lines", "ema_ar"])
+def test_an_answer_only_emas_reports_bring_during_a_hold_lets_its_item_go(kind, source):
+    """The settling answer comes only through EMA (its lines, or the A/R), with the report file that brought it, and the
+    held run reads it: the next good run lets the item go by its new facts and keeps the control, whose EMA claim shows
+    nothing new."""
+    from tests.test_selfcheck import ema_line
+    c = kind.conn
+    for n, link in ((1, 91000001), (2, 91000002)):
+        ema_line(c, link, bill=f"ZZ00T000{n}", balance=15000, status_class="pending")
+        add_item(c, f"F-e{n}", line_key=f"Le{n}", patient_control_number=f"ZZ00T000{n}C001", ema_link=link)
+    add_item(c, "F-bad-close", line_key="Lbad", patient_control_number="ZZ00T0009C001")
+    assert not run(c, None, "r1")["held"]
+    kind.reopen()
+    c = kind.conn
+    er.ensure_schema(c)
+    c.execute("INSERT INTO ema_report_files (file_id, report, status, applied_at) VALUES (?, ?, 'current', ?)",
+              ("invented-file-1", "ar" if source == "ema_ar" else "production", "2026-08-31T10:00:00+00:00"))
+    if source == "ema_lines":
+        ema_line(c, 91000001, bill="ZZ00T0001", ins_paid=9000, contractual=6000, balance=0, status_class="paid")
+    else:
+        c.execute("INSERT INTO ema_ar (link, as_of, claim_status, balance_cents) VALUES (?, ?, ?, ?)",
+                  (91000001, "2026-08-31", "Resolved/Paid", 0))
+    c.commit()
+    assert run(c, _held_save("F-e1", rid="r2"), "r2")["held"]
+    kind.reopen()
+    c = kind.conn
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id IN ('F-e1', 'F-e2')"), "r3")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert not out["held"] and van["examples"] == ["F-e2"], (source, van["examples"], van["info"].get("routes"))
