@@ -94,6 +94,11 @@ META_KEEP_RULE = "ema:keep_rule"            # the keep rule the store's summarie
 META_MAP_COVERAGE = "ema:map_coverage"
 META_RETAIN_HELD = "ema:retain_held"        # retention that waits for a person (the Data tab shows it)
 META_NAME_RULES = "ema:name_rules"          # the payer-name rules the stored payer groups were made by (_name_rules_hash)
+META_MAP_RULE = "ema:map_rule"              # the map rule the stored link map was made by (MAP_RULE)
+# the claim-link map's own rule (_map): a store mapped by another one maps its links with no bill or a conflict again at
+# the next refresh, without waiting for a new report. 2: one visit's bills (one patient, one date of service) are no
+# conflict
+MAP_RULE = "2"
 
 # the work database refresh() attaches to the store connection (and the ledger's alias there)
 _W = "emaw"
@@ -1743,7 +1748,13 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
     """The claim-link map (spec 7.2 as amended by E7 and G2) into the work database's pb_map: 'ar' from the A/R's claim
     ids, then 'payment' votes from every insurance row ($0 answers too) whose check is an 835 trace, then 'patient_day'
     for 835 bills still without a link. Facility links (the ASC's claims) are never a candidate. `full` rebuilds every
-    link (after Part A); otherwise only links with no bill (or a conflict) are mapped again and the rest are kept."""
+    link (after Part A); otherwise only links with no bill (or a conflict) are mapped again and the rest are kept.
+    A link whose payment votes split with no bill at 2/3 is a conflict (no bill), unless the split is one visit's: every
+    vote chose its bill by the patient's name (the 835 claim names the link's own patient) and every vote is for one
+    date of service (any of the visit's codes). Those are one patient's bills of one visit (billed to a payer twice,
+    say first as primary in error and then as secondary): the link keeps the bill its first vote named, the bill it was
+    mapped to before the visit's other bill was answered, so that bill's items keep their EMA claim. Each item reads
+    only its own date and codes on the link. A split between two patients, or over two dates, stays a conflict."""
     x = conn.execute
     W = _W
     now = _now()
@@ -1791,12 +1802,15 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
         JOIN {W}.pb_k835 k ON k.ckey = ck.ckey AND k.svc = y.svc AND k.code = y.cpt
         WHERE y.in_835 = 1 AND y.link IN (SELECT link FROM {W}.pb_need)
           AND y.link NOT IN (SELECT link FROM {W}.pb_ar WHERE fac = 1)"""
-    # each payment votes for the bill of the first narrowing (name and amount, name, amount, any) that leaves exactly one
+    # each payment votes for the bill of the first narrowing (name and amount, name, amount, any) that leaves exactly one;
+    # `named`: the vote chose its bill by the patient's name (the first two narrowings), with its date and posting
     x(f"""CREATE TABLE {W}.pb_votes AS
         SELECT CAST(link AS INTEGER) AS link,
                CAST(CASE WHEN n1 = 1 THEN b1 WHEN n2 = 1 THEN b2 WHEN n3 = 1 THEN b3 WHEN n4 = 1 THEN b4 END AS TEXT) AS bill,
-               CASE WHEN n1 = 1 THEN p1 WHEN n2 = 1 THEN p2 WHEN n3 = 1 THEN p3 WHEN n4 = 1 THEN p4 END AS pcn
-        FROM (SELECT link,
+               CASE WHEN n1 = 1 THEN p1 WHEN n2 = 1 THEN p2 WHEN n3 = 1 THEN p3 WHEN n4 = 1 THEN p4 END AS pcn,
+               CASE WHEN n1 = 1 OR n2 = 1 THEN 1 ELSE 0 END AS named, CAST(svc AS TEXT) AS svc,
+               CAST(posted AS TEXT) AS posted
+        FROM (SELECT link, svc, cpt, posted,
                 COUNT(DISTINCT CASE WHEN sn AND sa THEN bill END) AS n1, MIN(CASE WHEN sn AND sa THEN bill END) AS b1,
                 MAX(CASE WHEN sn AND sa THEN pcn END) AS p1,
                 COUNT(DISTINCT CASE WHEN sn THEN bill END) AS n2, MIN(CASE WHEN sn THEN bill END) AS b2,
@@ -1811,6 +1825,16 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
               FROM (SELECT link, bill, COUNT(*) AS n, MAX(pcn) AS pcn FROM {W}.pb_votes WHERE bill IS NOT NULL GROUP BY link, bill))
           WHERE rk = 1""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_pay ON pb_pay(link)")
+    # one visit's split: every vote named the link's own patient, for one date of service. The bill of its first vote
+    # (by the day EMA posted it), with that bill's votes
+    x(f"""CREATE TABLE {W}.pb_visit AS
+        SELECT v.link AS link, f.bill AS bill, f.pcn AS pcn,
+               (SELECT COUNT(*) FROM {W}.pb_votes c WHERE c.link = v.link AND c.bill = f.bill) AS votes
+        FROM (SELECT link FROM {W}.pb_votes WHERE bill IS NOT NULL GROUP BY link
+              HAVING MIN(named) = 1 AND COUNT(DISTINCT svc) = 1 AND COUNT(DISTINCT bill) > 1) v
+        JOIN (SELECT link, bill, pcn, ROW_NUMBER() OVER (PARTITION BY link ORDER BY COALESCE(posted, ''), bill) AS rk
+              FROM {W}.pb_votes WHERE bill IS NOT NULL) f ON f.link = v.link AND f.rk = 1""")
+    x(f"CREATE UNIQUE INDEX {W}.ix_pb_visit ON pb_visit(link)")
     _drop(conn, "pb_votes", "pb_k835", "pb_tx", "pb_ck")
     # the map
     x(f"CREATE TABLE {W}.pb_map AS SELECT * FROM main.ema_link_map WHERE 0")
@@ -1824,9 +1848,14 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
         SELECT r.link, r.bill, r.claim_id, 'ar', COALESCE(p.votes, 0), COALESCE(p.total, 0),
                CASE WHEN p.bill IS NOT NULL AND p.votes * {b} >= p.total * {a} AND p.bill <> r.bill THEN 1 ELSE 0 END, ?, r.fac
         FROM {W}.pb_ar r LEFT JOIN {W}.pb_pay p ON p.link = r.link""", (now,))
+    won = f"p.votes * {b} >= p.total * {a}"
     x(f"""INSERT OR IGNORE INTO {W}.pb_map ({cols})
-        SELECT p.link, p.bill, p.pcn, 'payment', p.votes, p.total, CASE WHEN p.votes * {b} >= p.total * {a} THEN 0 ELSE 1 END, ?, 0
-        FROM {W}.pb_pay p WHERE p.link NOT IN (SELECT link FROM {W}.pb_ar)""", (now,))
+        SELECT p.link, CASE WHEN {won} OR v.link IS NULL THEN p.bill ELSE v.bill END,
+               CASE WHEN {won} OR v.link IS NULL THEN p.pcn ELSE v.pcn END, 'payment',
+               CASE WHEN {won} OR v.link IS NULL THEN p.votes ELSE v.votes END, p.total,
+               CASE WHEN {won} OR v.link IS NOT NULL THEN 0 ELSE 1 END, ?, 0
+        FROM {W}.pb_pay p LEFT JOIN {W}.pb_visit v ON v.link = p.link
+        WHERE p.link NOT IN (SELECT link FROM {W}.pb_ar)""", (now,))
     fac1 = _facility(conn, full=full, now=now)
     pd = _patient_day(conn, boxes, now)
     fac2 = _facility(conn, full=full, now=now)
@@ -2116,14 +2145,15 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     parts: 'auto' runs Part A when a ledger is given and it changed since the store last read it (its seq, or the state
     folder revision on a serverless host, differs from meta ema:ledger_seq / ema:ledger_rev; retention deleted rows;
     meta ema:keep_dirty is set; or the store was summarized by another keep rule, meta ema:keep_rule), and Part B after
-    Part A or when meta ema:map_dirty is set. 'A', 'B' and 'AB' run those parts. Part A needs the ledger; Part B reads
-    only the store. With a ledger, retention runs first and the catalog is brought in line with the ledger
-    (sync_catalog). The store changes in one transaction at the end. Nothing here reads the store's items: the same data
-    gives the same summaries, whatever the last detection run listed. The payer names' groups follow the name rules of
-    now: the aliases learned from the weekly exports' payer ids are brought up to date first (learn_payer_aliases: the VA
-    network EMA names after its administrator), and when the rules differ from the ones the stored rows were made by
-    (meta ema:name_rules), Part B runs to re-group the lines, payments and checks, and the A/R's rows are re-grouped with
-    it, without waiting for a new report (the brief's F8 needs).
+    Part A, when meta ema:map_dirty is set, or when the link map was made by another map rule (meta ema:map_rule). 'A',
+    'B' and 'AB' run those parts. Part A needs the ledger; Part B reads only the store. With a ledger, retention runs
+    first and the catalog is brought in line with the ledger (sync_catalog). The store changes in one transaction at the
+    end. Nothing here reads the store's items: the same data gives the same summaries, whatever the last detection run
+    listed. The payer names' groups follow the name rules of now: the aliases learned from the weekly exports' payer ids
+    are brought up to date first (learn_payer_aliases: the VA network EMA names after its administrator), and when the
+    rules differ from the ones the stored rows were made by (meta ema:name_rules), Part B runs to re-group the lines,
+    payments and checks, and the A/R's rows are re-grouped with it, without waiting for a new report (the brief's F8
+    needs).
 
     `release` (serverless): called with no argument as soon as the ledger is no longer needed (after Part A, before Part
     B), to save the scratch ledger to the state folder and delete it, so the temporary folder never holds the ledger and
@@ -2172,7 +2202,13 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     want_a = parts in ("A", "AB") or (parts == "auto" and ledger is not None and _ledger_changed(conn, ledger))
     if want_a and ledger is None:
         raise ValueError("Part A needs the posting ledger.")
-    want_b = parts in ("B", "AB") or (parts == "auto" and (want_a or regroup or _meta_get(conn, META_MAP_DIRTY) is not None))
+    remap = _meta_get(conn, META_MAP_RULE) != MAP_RULE
+    if remap and not conn.execute("SELECT 1 FROM ema_link_map LIMIT 1").fetchone():
+        _meta_set(conn, META_MAP_RULE, MAP_RULE)    # no map yet: the first one is made by this rule
+        conn.commit()
+        remap = False
+    want_b = parts in ("B", "AB") or (parts == "auto" and (want_a or regroup or remap
+                                                          or _meta_get(conn, META_MAP_DIRTY) is not None))
     if not (want_a or want_b):
         return out
     boxes = ledger.boxes() if ledger is not None else _catalog_boxes(conn)
@@ -2213,6 +2249,7 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
             if regroup:
                 out["ar_regrouped"] = _regroup_ar(conn)
             meta[META_NAME_RULES] = rules
+            meta[META_MAP_RULE] = MAP_RULE
         out["published"] = _publish(conn, part_a=want_a, meta=meta, cutoff=cutoff)
     out["seconds"] = round(time.time() - t0, 1)
     pb = out.get("part_b") or {}

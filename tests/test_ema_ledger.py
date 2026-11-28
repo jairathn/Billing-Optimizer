@@ -476,7 +476,10 @@ def map_world(store, ledger, tmp_path):
     """Links and remittances for the map tests (every bill in Production's dates):
        1  paid $80 under 835 trace 1 (bill 1)                              -> payment
        2  a $0 answer under 835 trace 2 (bill 2)                           -> payment, from the $0 row
-       3  two payments under traces 3 and 4 that name bills 3 and 30       -> conflict
+       3  two payments under traces 3 and 4 that name bills 3 and 30, two patients' (the second 835 claim names
+          another patient)                                                 -> conflict
+       9  one patient's visit billed twice: payments under traces 9 and 10 name bills 99 and 9, the same patient,
+          date and code; the first posting votes for bill 99              -> payment, its first vote's bill
        4  paid under check '000880000005', the trace is '880000005'        -> payment (leading zeros)
        5  no payment; 835 bill 5 has no link and the same patient, day, code and charge -> patient_day
        6, 7  one patient, day and code, the same charge; 835 bill 6 unlinked -> a tie, left unmapped
@@ -489,7 +492,9 @@ def map_world(store, ledger, tmp_path):
              charge(F.link_no(4)), payment(F.link_no(4), "000880000005", 55),
              charge(F.link_no(5), cpt="11102", patient=1),
              charge(F.link_no(6), cpt="17000", patient=2), charge(F.link_no(7), cpt="17000", patient=2),
-             charge(F.link_no(8), patient=3), payment(F.link_no(8), "ACH-0099", 12, patient=3)]
+             charge(F.link_no(8), patient=3), payment(F.link_no(8), "ACH-0099", 12, patient=3),
+             charge(F.link_no(9)), payment(F.link_no(9), F.check_no(9), 0, posted=D(2026, 4, 1)),
+             payment(F.link_no(9), F.check_no(10), 0, posted=D(2026, 6, 1))]
     apply(store, ledger, prod_file(tmp_path, rows_))
     assert p0[0].startswith("Testpatient")
     add_remit(store, trace=F.check_no(1), paid_on="2026-03-28",
@@ -497,7 +502,11 @@ def map_world(store, ledger, tmp_path):
     add_remit(store, trace=F.check_no(2), paid_on="2026-03-28",
               claims=[{"pcn": F.claim_id(2), "lines": [(S, "99213", 150, 0)]}])
     add_remit(store, trace=F.check_no(3), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(3), "lines": [(S, "99213", 150, 20)]}])
-    add_remit(store, trace=F.check_no(4), paid_on="2026-03-29", claims=[{"pcn": F.claim_id(30), "lines": [(S, "99213", 150, 20)]}])
+    add_remit(store, trace=F.check_no(4), paid_on="2026-03-29",
+              claims=[{"pcn": F.claim_id(30), "last": "OTHERPATIENT", "first": "ZULU", "lines": [(S, "99213", 150, 20)]}])
+    # (the first bill answered sorts after the second: the link keeps its first vote's bill, never the lowest bill id)
+    add_remit(store, trace=F.check_no(9), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(99), "lines": [(S, "99213", 150, 0)]}])
+    add_remit(store, trace=F.check_no(10), paid_on="2026-05-20", claims=[{"pcn": F.claim_id(9), "lines": [(S, "99213", 150, 0)]}])
     add_remit(store, trace="880000005", paid_on="2026-03-28", claims=[{"pcn": F.claim_id(4), "lines": [(S, "99213", 150, 55)]}])
     add_remit(store, trace="ZZDENIAL5", paid_on="2026-03-28",
               claims=[{"pcn": F.claim_id(5), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "11102", 150, 0)]}])
@@ -514,13 +523,14 @@ def test_the_map_by_ar_payment_votes_and_patient_day(store, ledger, tmp_path):
     m = {r[0] - 90_000_000: r[1:] for r in rows(store.conn, "SELECT link, bill, method, conflict, votes, total FROM ema_link_map")}
     assert m[1] == (F.bill_id(1), "payment", 0, 1, 1)
     assert m[2] == (F.bill_id(2), "payment", 0, 1, 1)                 # a $0 answer votes
-    assert m[3][1:4] == ("payment", 1, 1) and m[3][4] == 2            # one vote each for two bills: a conflict
+    assert m[3][1:4] == ("payment", 1, 1) and m[3][4] == 2            # one vote each for two patients' bills: a conflict
     assert m[4] == (F.bill_id(4), "payment", 0, 1, 1)                 # the check's leading zeros
     assert m[5][:3] == (F.bill_id(5), "patient_day", 0)
     assert 6 not in m and 7 not in m                                  # a tie stays unmapped
     assert m[8][:3] == (F.bill_id(8), "ar", 0)
+    assert m[9] == (F.bill_id(99), "payment", 0, 1, 2)                # one patient's visit billed twice: no conflict
     cov = json.loads(one(store.conn, "SELECT value FROM meta WHERE key='ema:map_coverage'")[0])
-    assert (cov["bills"], cov["mapped"], cov["by_method"]) == (8, 5, {"ar": 1, "payment": 3, "patient_day": 1})
+    assert (cov["bills"], cov["mapped"], cov["by_method"]) == (10, 6, {"ar": 1, "payment": 4, "patient_day": 1})
     assert out["part_b"]["map"]["patient_day"]["ties"] == 1
     # the checks: exact (with and without leading zeros), loose, none
     ck = dict(rows(store.conn, "SELECT check_no, match FROM ema_checks"))

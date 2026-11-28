@@ -20,7 +20,7 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
 | B2 | detection hands the checks the ids it retires on purpose (left_record) | tests/test_left_record_retired_on_purpose.py (21) | done: failed 9/15 on the base; passes; 5 breaks each fail; restored (sha1) |
 | B3 | precision_guard: own payer only, PLB takebacks netted, own answer repeated skipped | tests/test_precision_guard_counts_only_standing_money.py (42) | done: failed 12/21 of the proposed cases on the base; passes; 7 breaks each fail; restored (sha1) |
 | B4 | a let-go line settles a never-listed whole-claim denial | tests/test_let_go_line_not_back_as_claim_denial.py (10) | done: failed 2/4 of the proposed cases on the base; passes; 3 breaks each fail; restored (sha1) |
-| B5 | a same-visit vote split keeps its EMA link | | not started |
+| B5 | a same-visit vote split keeps its EMA link | tests/test_link_map_same_visit_bills.py (14: 7 cases x 2 store kinds), test_ema_ledger.py map_world cases 3 and 9 | done: failed on the base; passes; 6 breaks each fail their cases; restored (sha1) |
 
 ## Done, by bug
 
@@ -65,13 +65,32 @@ selfcheck._automatic_open, check_past_window, states.py, results.py and run_seco
   the person's decision; the code-level rule keeps the review5 exclusion exactly where the claim's item listed the same
   code (a test plants that older-release state). Codes nobody decided stay listed.
 
+- B5 (ema_ledger.py): `_map` keeps a link whose payment votes split with no bill at 2/3 when the split is one visit's:
+  every vote chose its bill by the patient's name (`named`: the name-and-amount or the name narrowing) and every vote is
+  for one date of service (any of the visit's codes). The link keeps the bill of its first vote (by EMA's posting day,
+  then bill), with that bill's votes and the total, conflict 0 (`pb_visit`). A split between two patients (a vote that
+  did not choose by name) or over two dates stays a conflict. No schema change; `MAP_RULE` "2" in meta ema:map_rule:
+  a store mapped by another rule runs Part B once at the next refresh (no new report needed; links kept are not
+  re-voted, only conflicts and links with no bill). map_world case 3 now says it is two patients' bills; case 9 is one
+  visit billed twice. The verdict's fix sketch said "same date and code"; the replay's 41 payment conflicts are all one
+  date, 15 with one code and 24 with two to five codes, so the rule takes one date, any codes (39 resolve, the
+  verdict's count); a one-code rule would have left 24 of the 39 same-visit splits as conflicts (measured below).
+
 ## Next command
 
-B5: port `$S/tk/replay/proposed_tests/test_link_conflict_same_visit.py`, see it fail, fix ema_ledger._map or the read.
+Replay before/after for B1-B4 (read only), release effect on final_world3 (read only), docs, merges, four envs.
 
 ## Measurements (replay data, read only)
 
-None yet.
+- B5, the replay's final store (final.sqlite, mode=ro, work database in memory, private script b5_measure.py): the map
+  by the old rule equals the stored map (92,670 links, 42 conflicts: 41 payment, 1 ar). By the new rule 39 links change,
+  each from a conflict to a bill (no link loses or changes a bill; patient_day unchanged); 3 conflicts remain (the ar one
+  and two payment splits whose votes name another patient). Of the 39: every voted bill names the link's patient, no
+  bill is held by another link: 0 links join two patients. Items of the bills involved: 13 (8 listed). f798f02d:
+  expired (not_found) -> done, paid_before_other_payer, $80.33 paid before by the other payer ($50.33 shortfall).
+  Outcome only, state kept: 1 EM_BUNDLED done/auto_closed, 1 SNB done/second_payer_paid, 3 SNB work_now/follow_up_due.
+  2 SNB work_now/follow_up_due -> work_now/person_billed_paid (the rule replay-fix-2a's A4 changes).
+  The one-code variant changes 15 links and 2 items (f798f02d the same).
 
 ## Open questions
 
