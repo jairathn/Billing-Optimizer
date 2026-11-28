@@ -11,10 +11,10 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
 | G8 one claim, one item | done, tests green, break and restore done | detect.py: `_item_links`, `save()` (same_link heir), `_note_waiting(cd=)`, `_waiting_ema_claims`, `_note_waiting_report`, `run_ema_report_claims` (waiting skip); tests/test_gap_one_claim.py |
 | G3 archive holds unseen bills | done, tests green, break and restore done | archive.py `_held_bills` (HELD_UNSEEN, reads meta ema:unanswered_unseen 'claims'); tests/test_gap_unseen.py::test_the_archive_keeps_* |
 | G2 unseen count by reason, dollars, Data tab | done, tests green, break and restore done | detect.py `_count_unseen`, `_finish_unseen`, `_ema_reports_from`, `_unseen_ema_lines`, `_save_ema_wiring`, no-ERA `*_cents`; ema_checks.claim_answers 'candidates'; insights `UNSEEN_WORDS`, `unseen_summary`, `_unseen_837`, `_feeds_837` (NO_ERA_LINES + `no_era_837_more`); api_ema `/api/ema/data` 'unseen', `/api/ema/unseen`, `/api/ema/unseen.csv`; static/data.js `dtUnseenHtml`, `dtUnseenRows` |
-| G1 print-batch hand-off (fixed_b + never early) | to do | detect.py `_ema_check_open_claims`, `run_ema_report_claims` |
+| G1 print-batch hand-off (fixed_b + never early) | done, tests green, break and restore done | detect.py `_ema_check_open_claims` and `_837_ema_answers` (hand-off saved), `run_ema_report_claims` (listed set, `_left_unsent`, waiting view rebuilt), `_left_unsent`, `self._export_day`; tests/test_gap_print_batch.py |
 | G4 ERA start/stop window | to do | detect.py `_run_837` no_era_ids |
 | G5 A/R held-open line | to do | detect.py `_837_ema_answers` (or ema_checks) |
-| G7 waiting view names all or the remainder in dollars | to do | detect.py `_finish_waiting`, insights `_waiting_837` |
+| G7 waiting view names all or the remainder in dollars | done, tests green, break and restore done | detect.py `_finish_waiting` ('unnamed', 'ema_reports' from the notes); insights `_waiting_837` (remainder and notes in the detail); tests/test_gap_print_batch.py::test_the_waiting_view_counts_* |
 | G6 second-payer bridge | only if safe | ema_checks.claim_answers |
 
 ## G8: what was built
@@ -56,6 +56,20 @@ S = /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22
   meta's claim rows carry their codes (the Vercel copy has 837 rows only for the items' bills).
 - No-ERA lines: every payer, the first NO_ERA_LINES (10) one by one and the rest on one line ('N more payers send no ERA:
   X claims, $Y billed'); each part of each line gives its billed dollars (listed, answered in EMA, unchecked).
+
+## G1/G7: what was built
+
+- A claim the exports' pass hands to ema_checks.not_sent (a newer A/R or Production status calls it never sent) is kept
+  (`_left_to_not_sent`, as fixed_b); after not_sent's items are emitted, `_left_unsent` deals with each one not_sent did not
+  list: an exports' claim whose first charge posting (else its bill date) is fewer than NOT_SENT_DAYS (INVALID_DAYS for
+  Invalid) before the newest sign it is unsent (max of the report's as_of and the day EMA's exports reach) waits on the
+  waiting view, due charge + days, with a note {"check": "print_batch", "since", "status", "as_of", "ema_link"}; else it
+  is listed by `_emit_open_claim` as never sent. The 837 pass's own hand-off (`837_ema_not_sent`) is kept the same way and
+  listed as the 837 pass lists a due claim, with the report's status as context. Counts: export_not_sent_waiting,
+  export_not_sent_listed, 837_not_sent_listed.
+- The waiting view is rebuilt at the end of run_ema_report_claims (the notes and the hand-off's rows in it); `_finish_waiting`
+  counts the notes by check ('ema_reports') and the claims past WAITING_LIST_MAX ('unnamed': n, dollars, due days), and the
+  Data tab's waiting line says both.
 
 ## Next command
 

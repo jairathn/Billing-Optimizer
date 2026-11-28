@@ -229,7 +229,9 @@ SEND_WEEK_MIN = 5
 # Claims sent that no payer has answered yet and that are not due yet (the 837 pass lists them only at their due day): on no
 # list meanwhile, so the Data tab shows them with their due days (blindness is loud). {"n", "billed_cents", "first_due",
 # "last_due", "by_group": {group: {"n", "billed_cents", "first_due"}}, "by_due_week": {week: {"n", "billed_cents"}},
-# "claims": [[claim id, group, sent, due, billed cents]] (the first WAITING_LIST_MAX by due day), "sent_by_week": {week:
+# "claims": [[claim id, group, sent, due, billed cents, and a note when EMA's reports say more: {"check", "ema_link", "status",
+# "as_of", "since"}]] (the first WAITING_LIST_MAX by due day), "unnamed": {"n", "billed_cents", "first_due", "last_due"} for the
+# rest when there are more, "ema_reports": {check: {"n", "billed_cents"}} (the notes counted), "sent_by_week": {week:
 # claims sent}, "at"}. sent_by_week is every claim the 837s show sent in the window, what the never-answered claims of a
 # week are measured against (insights.unanswered_weeks: a batch that never reached the payers stands out).
 WAITING_837_META = "feed:waiting_837"
@@ -6851,6 +6853,7 @@ class Detector:
         # the day EMA's exports reach (the newest one pulled, never after today): what a claim still in the print batch is
         # dated against (trace finding T-N11)
         export_day = min(max((str(v[0])[:10] for v in src_at.values() if v[0]), default="") or self.today, self.today)
+        self._export_day = export_day       # the newest evidence a claim still in the print batch is unsent (_left_unsent)
         votes: dict[str, Counter] = defaultdict(Counter)
         voted: set[str] = set()
         # each visit (patient, date, code) a payment still stands on, and under which bill, by the part of the service the
@@ -8115,12 +8118,7 @@ class Detector:
                 "as_of": str(ev.get("status_as_of") or ev.get("production_as_of") or "")[:10] or None}
         if len(row) > 5:
             return                          # one note per claim: the first check that would list it
-        row.append(note)
-        w = getattr(self, "waiting_837", None)
-        if isinstance(w, dict):
-            got = w.setdefault("ema_reports", {}).setdefault(what, {"n": 0, "billed_cents": 0})
-            got["n"] += 1
-            got["billed_cents"] += int(row[4] or 0)
+        row.append(note)                    # (_finish_waiting counts the notes by check, with their dollars)
 
     def _finish_waiting(self, since: str) -> None:
         """WAITING_837_META from the claims noted waiting, with every claim the 837s show sent since `since` by week (the
@@ -8129,7 +8127,22 @@ class Detector:
         out: dict = {"n": len(rows), "billed_cents": sum(r[4] for r in rows), "first_due": min((r[3] for r in rows if r[3]), default=None),
                      "last_due": max((r[3] for r in rows if r[3]), default=None), "by_group": {}, "by_due_week": {},
                      "claims": rows[:WAITING_LIST_MAX], "at": self.now}
-        for pcn, grp, sent, due, billed in rows:
+        if len(rows) > WAITING_LIST_MAX:
+            # the view names the first WAITING_LIST_MAX by due day; the rest are counted with their dollars and due days, never
+            # left out in silence (gapfix G7)
+            rest = rows[WAITING_LIST_MAX:]
+            out["unnamed"] = {"n": len(rest), "billed_cents": sum(r[4] for r in rest),
+                              "first_due": min((r[3] for r in rest if r[3]), default=None),
+                              "last_due": max((r[3] for r in rest if r[3]), default=None)}
+        for row in rows:
+            pcn, grp, sent, due, billed = row[:5]
+            note = row[5] if len(row) > 5 and isinstance(row[5], dict) else None
+            if note:
+                # what EMA's reports say of a waiting claim (a report check left it to its pass), or why a claim never sent
+                # waits (the print batch's clock): counted by kind with the dollars
+                got = out.setdefault("ema_reports", {}).setdefault(note.get("check") or "other", {"n": 0, "billed_cents": 0})
+                got["n"] += 1
+                got["billed_cents"] += int(billed or 0)
             g = out["by_group"].setdefault(grp, {"n": 0, "billed_cents": 0, "first_due": due})
             g["n"] += 1
             g["billed_cents"] += billed
@@ -9492,6 +9505,13 @@ class Detector:
                 if cls == "not_sent":
                     self.ema_counts["837_ema_not_sent"] += 1
                     self._837_claims.discard(cd["pcn"])     # EMA's own check (ema_checks.not_sent) lists it
+                    # ... and when it does not (its clock runs from the charge to the report's date), the claim is listed
+                    # as this pass lists it, with the report's status as context (_left_unsent): never on no list
+                    self.__dict__.setdefault("_left_to_not_sent", []).append(
+                        (dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"), ema_twins=a.get("twins"), not_sent_status=st,
+                              status_context=(f"EMA's {'A/R' if st.get('source') == 'ar' else 'Production'} report calls the claim "
+                                              f"{st.get('status') or cls} ({str(st.get('as_of') or '')[:10]})"),
+                              status_class=cls), cd["items"], newest))
                     continue
                 if cls == "rejected":
                     cd = dict(cd, rejected=True, status=st.get("status"))
@@ -10090,8 +10110,15 @@ class Detector:
                                                   f"claim {st.get('status') or cls} ({str(st.get('as_of') or '')[:10]})"),
                               status_class=cls)
                 elif cls == "not_sent":
+                    # never left EMA after all: ema_checks.not_sent lists it. Its own clock (14 days from the first charge
+                    # posting to the report's own date) may not list it yet: run_ema_report_claims then puts it on the
+                    # waiting view with its due day, or lists it itself (_left_unsent), so a claim this pass found due is
+                    # never on no list (the never-answered gap's print-batch claims)
                     self.ema_counts["export_not_sent"] += 1
-                    continue                    # never left EMA after all: listed by ema_checks.not_sent
+                    self.__dict__.setdefault("_left_to_not_sent", []).append(
+                        (dict(cd, unsent=True, rejected=False, status=st.get("status") or cd["status"], ema_bridge=a.get("bridge"),
+                              ema_link=a.get("link"), not_sent_status=st), items, newest))
+                    continue
                 elif cls == "rejected" and not cd["rejected"]:
                     cd = dict(cd, rejected=True, status=st.get("status") or cd["status"])
                 elif cls == "gave_up":
@@ -10617,6 +10644,7 @@ class Detector:
         # before, Production listed a waiting claim's EMA claim with its own clock, new work beside the claim's own)
         waiting_ids = set(self.__dict__.get("_waiting_cds") or {})
         waiting_links = (self._ema_step("waiting_ema_claims", self._waiting_ema_claims) or {}) if waiting_ids else {}
+        listed: set = set()                 # the claim ids and EMA claims not_sent listed (_left_unsent)
         for name, fn in (("not_sent", ec.not_sent), ("rejected_claims", ec.rejected_claims), ("unanswered_claims", ec.unanswered_claims)):
             if name == "unanswered_claims":
                 skip |= self._837_claims    # a claim the 837s show sent is judged from its send there, not from its charge
@@ -10653,8 +10681,68 @@ class Detector:
                     continue
                 if self._emit_proto(p):
                     cid = (p.get("claim") or {}).get("patient_control_number")
+                    if name == "not_sent":
+                        listed |= links | {cid}
                     if cid:
                         skip.add(cid)
+            if name == "not_sent" and self.__dict__.get("_left_to_not_sent"):
+                # the claims the never-answered passes left to not_sent that it did not list: on the waiting view until
+                # their due day, or listed by their own pass (never early, never on no list)
+                self._ema_step("left_unsent", self._left_unsent, listed, skip)
+        # the waiting view again, with what the report checks and the hand-off added to it
+        self._finish_waiting(self.__dict__.get("_wait_since") or "")
+
+    def _left_unsent(self, listed: set, skip: set) -> None:
+        """The claims the exports' or the 837 pass left to ema_checks.not_sent (a report newer than the pass's own data
+        calls them never sent) that not_sent did not list: its clock runs NOT_SENT_DAYS (INVALID_DAYS for Invalid) from the
+        first charge posting to the report's own date, so a bill made late is on no list of its own. Each is dealt with
+        here, once: an exports' claim whose first charge posting (else its bill date) is fewer than those days before the
+        newest evidence that it is still unsent (the newer report's date, or the day EMA's exports reach, the later) waits
+        on the waiting view, due that many days after the charge, with the reason (never make work early); otherwise it is
+        listed as never sent (REJECTED_PRE_PAYER, 'In EMA's print batch'). A claim the 837s show sent is listed as the 837
+        pass lists it, with the report's status as context (it was due by its send)."""
+        from . import ema_checks as ec
+        handed = self.__dict__.pop("_left_to_not_sent", [])
+        links = sorted({cd["ema_link"] for cd, _i, _n in handed if cd.get("ema_link") is not None})
+        first: dict[int, str] = {}
+        for i in range(0, len(links), 500):
+            part = links[i:i + 500]
+            for lk, fc in self.conn.execute(f"""SELECT link, MIN(first_charge_posted) FROM ema_lines
+                                                WHERE link IN ({','.join('?' * len(part))}) GROUP BY link""", part):
+                if fc:
+                    first[lk] = str(fc)[:10]
+        for cd, items, newest in handed:
+            pcn, lk = cd["pcn"], cd.get("ema_link")
+            if {pcn, lk} & listed or _fid(cd.get("id_signal") or "EMA_OPEN_CLAIM", pcn) in self.findings:
+                continue                    # not_sent listed it (or its own pass did, under another id)
+            if cd.get("source") == "837":
+                if self._emit_open_claim(cd, items, newest):
+                    self.ema_counts["837_not_sent_listed"] += 1
+                    self._export_links.update(cd.get("ema_twins") or ())
+                    if lk is not None:
+                        self._export_links.add(lk)
+                continue
+            st = cd.get("not_sent_status") or {}
+            word = str(st.get("status") or cd.get("status") or "").strip()
+            need = ec.INVALID_DAYS if word.lower() == "invalid" else ec.NOT_SENT_DAYS
+            clock = first.get(lk) if lk is not None else None
+            clock = clock or str(cd["k"].get("created") or "")[:10] or None
+            seen = max(str(st.get("as_of") or "")[:10], str(getattr(self, "_export_day", "") or "")[:10])
+            due = _add_days(clock, need) if clock else None
+            if due and seen and due > seen:
+                # charged fewer than `need` days before the newest sign it is still unsent: not late yet. On the waiting
+                # view with its due day and the reason; listed then if it is still in the print batch
+                self.ema_counts["export_not_sent_waiting"] += 1
+                self._note_waiting(pcn, cd.get("grp"), None, due, sum(x[2] or 0 for x in items))
+                (self.__dict__.get("_waiting") or {})[pcn].append(
+                    {"check": "print_batch", "ema_link": lk, "status": word or None, "as_of": str(st.get("as_of") or "")[:10] or None,
+                     "since": clock})
+                continue
+            if self._emit_open_claim(cd, items, newest):
+                self.ema_counts["export_not_sent_listed"] += 1
+                skip.add(pcn)
+                if lk is not None:
+                    self._export_links.add(lk)
 
     def run_ema_denials(self) -> None:
         """Step 6 (C5): denials only EMA saw, where no remittance and no item from one covers the line."""

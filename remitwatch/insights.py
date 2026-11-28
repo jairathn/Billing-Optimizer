@@ -680,12 +680,26 @@ def _waiting_837(conn: sqlite3.Connection) -> list[dict]:
                     key=lambda gv: (-int(gv[1].get("billed_cents") or 0), gv[0]))
     by = "; ".join(f"{g}: {int(v.get('n') or 0)} (${int(v.get('billed_cents') or 0) / 100:,.2f}, the first due {v.get('first_due')})"
                    for g, v in groups[:5]) + ("; and more" if len(groups) > 5 else "")
+    # the claims past the named list (WAITING_LIST_MAX) are counted with their dollars (gapfix G7), and what EMA's reports
+    # say of some waiting claims (a report check left them to their pass, or they never left EMA's print batch)
+    un = w.get("unnamed") if isinstance(w.get("unnamed"), dict) else {}
+    named = len(w.get("claims") or [])
+    more = (f" The list names the first {named:,} by due day; {int(un.get('n') or 0):,} more "
+            f"(${int(un.get('billed_cents') or 0) / 100:,.2f}, due from {un.get('first_due')} to {un.get('last_due')}) are counted "
+            "here, not named.") if un.get("n") else ""
+    reps = w.get("ema_reports") if isinstance(w.get("ema_reports"), dict) else {}
+    said = {"rejected": "EMA's reports call rejected", "no_answer": "Production shows no answer to yet",
+            "not_sent": "EMA's reports call never sent", "print_batch": "never left EMA's print batch and are not late yet"}
+    rep = "; ".join(f"{int(v.get('n') or 0):,} (${int(v.get('billed_cents') or 0) / 100:,.2f}) {said.get(k, k)}"
+                    for k, v in sorted(reps.items()) if isinstance(v, dict) and v.get("n"))
     return [{"key": "waiting_837", "ok": True, "n": n, "cents": cents, "first_due": w.get("first_due"), "last_due": w.get("last_due"),
-             "by_group": dict(groups), "by_due_week": w.get("by_due_week") or {},
+             "by_group": dict(groups), "by_due_week": w.get("by_due_week") or {}, "unnamed": un or None, "ema_reports": reps or None,
              "title": f"{n} {'claim' if n == 1 else 'claims'} sent {'is' if n == 1 else 'are'} waiting for the payer's answer "
                       f"(${cents / 100:,.2f} billed)",
              "detail": (f"{'It is' if n == 1 else 'They are'} not on any list until {'it comes' if n == 1 else 'they come'} due, "
-                        f"from {w.get('first_due')} to {w.get('last_due')}" + (f". By payer: {by}" if by else "") + "."),
+                        f"from {w.get('first_due')} to {w.get('last_due')}" + (f". By payer: {by}" if by else "") + "."
+                        + (f" Of these, {rep}: each waits for its own due day here, listed once if still unanswered then." if rep else "")
+                        + more),
              "who": "Nobody yet: a claim still unanswered on its due day is listed under Chase the payer that day."}]
 
 
