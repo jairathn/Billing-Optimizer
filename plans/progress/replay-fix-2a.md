@@ -12,7 +12,13 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
 
 ## The bugs, in order
 
-- A1 routine-rate reviews and clinician rate gaps outlive their windows (states._decide CONTRACT branch): not started
+- A1 routine-rate reviews and clinician rate gaps outlive their windows: DONE (commit b7d1d44). states.WINDOWED_CONTRACT
+  expire past_all in the CONTRACT branch; selfcheck._automatic_open/check_past_window guard owner_decision with an
+  appeal_deadline; results registers PROVIDER_RATE_GAP (REGISTER_SIGNALS) and counts an expired review's or gap's lost
+  dollars claim by claim (_windowed_lines, _lost_of: claims whose window closed on or after the first flag, each line once,
+  flag_info lost_lines / lost_elsewhere, _lost skips lost_elsewhere); story._claim_windows_words on the contract route.
+  tests/test_archive.py's two premises: a person marks the pattern Started. Test file
+  tests/test_rate_reviews_expire_past_every_window.py (39). Break-and-restore done for each part.
 - A2 an inherited Started decides the state over the rules: not started
 - A3 a stale change after a person's action is missing from the decision log: not started
 - A4 a second payer a person billed, once it answers, is never shown again or closed: not started
@@ -20,10 +26,11 @@ check_past_window only), tests/test_archive.py (two premises), and the tests add
 ## State
 
 - [x] worktree, merges of gapfix and replay-fix (no conflict)
+- [x] A1 fixed, tests green in python3 (780 related tests pass)
 
 ## Next command
 
-Port tests/test_contract_pattern_past_window.py (A1) and run it on the base.
+A2: port test_inherited_started_state.py, see it fail, fix states._decide's in_progress branch.
 
 ## Measured
 
